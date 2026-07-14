@@ -14,8 +14,8 @@ import (
 	"github.com/ningw42/copilotd/internal/config"
 )
 
-func textCfg(level string) config.Config {
-	return config.Config{LogLevel: level, LogFormat: "text"}
+func textCfg(level string) config.ServeConfig {
+	return config.ServeConfig{LogLevel: level, LogFormat: "text"}
 }
 
 func TestNewLoggerRespectsLevel(t *testing.T) {
@@ -39,7 +39,7 @@ func TestNewLoggerRespectsLevel(t *testing.T) {
 func TestNewLoggerFormatSelection(t *testing.T) {
 	t.Run("json", func(t *testing.T) {
 		var buf bytes.Buffer
-		logger, err := NewWithWriter(&buf, config.Config{LogLevel: "info", LogFormat: "json"})
+		logger, err := NewWithWriter(&buf, config.ServeConfig{LogLevel: "info", LogFormat: "json"})
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -13,16 +13,43 @@ import (
 	"time"
 
 	"github.com/ningw42/copilotd/internal/config"
+	"github.com/ningw42/copilotd/internal/forward"
+	"github.com/ningw42/copilotd/internal/identity"
 	"github.com/ningw42/copilotd/internal/logging"
 )
 
-func testConfig() config.Config {
-	return config.Config{
+const testAPIKey = "test-api-key"
+
+func testConfig() config.ServeConfig {
+	return config.ServeConfig{
 		Addr:            "127.0.0.1:0",
 		LogLevel:        "info",
 		LogFormat:       "text",
 		ShutdownTimeout: 2 * time.Second,
+		APIKey:          testAPIKey,
+		OutboundTimeout: 5 * time.Second,
+		MaxRequestBytes: 1 << 20,
 	}
+}
+
+// readyStub returns a ready Static provider carrying baseURL (empty for the
+// health/middleware tests that never reach the forwarder).
+func readyStub(baseURL string) *identity.Static {
+	return identity.NewStatic(identity.Credential{
+		BaseURL: baseURL,
+		Token:   "copilot-token",
+		Headers: http.Header{"Copilot-Integration-Id": {"vscode-chat"}},
+	}, true)
+}
+
+// testHandler builds the assembled handler with a ready stub provider and a
+// forwarder, for the health/correlation/access-log tests that never exercise a
+// provider route.
+func testHandler(t *testing.T, logger *slog.Logger) http.Handler {
+	t.Helper()
+	prov := readyStub("")
+	fwd := forward.New(prov, forward.NewClient(), time.Second, 1<<20)
+	return newHandler(testAPIKey, prov, fwd, logger)
 }
 
 // bufferLogger returns a logger writing to an in-memory buffer at the given
@@ -30,7 +57,7 @@ func testConfig() config.Config {
 func bufferLogger(t *testing.T, level string) (*slog.Logger, *bytes.Buffer) {
 	t.Helper()
 	var buf bytes.Buffer
-	logger, err := logging.NewWithWriter(&buf, config.Config{LogLevel: level, LogFormat: "text"})
+	logger, err := logging.NewWithWriter(&buf, config.ServeConfig{LogLevel: level, LogFormat: "text"})
 	if err != nil {
 		t.Fatalf("build logger: %v", err)
 	}
@@ -39,7 +66,7 @@ func bufferLogger(t *testing.T, level string) (*slog.Logger, *bytes.Buffer) {
 
 func discardLogger(t *testing.T) *slog.Logger {
 	t.Helper()
-	logger, err := logging.NewWithWriter(io.Discard, config.Config{LogLevel: "info", LogFormat: "text"})
+	logger, err := logging.NewWithWriter(io.Discard, config.ServeConfig{LogLevel: "info", LogFormat: "text"})
 	if err != nil {
 		t.Fatalf("build logger: %v", err)
 	}
@@ -47,7 +74,7 @@ func discardLogger(t *testing.T) *slog.Logger {
 }
 
 func TestHealthGET(t *testing.T) {
-	h := newHandler(discardLogger(t))
+	h := testHandler(t, discardLogger(t))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 
@@ -67,7 +94,7 @@ func TestHealthGET(t *testing.T) {
 }
 
 func TestHealthHEAD(t *testing.T) {
-	h := newHandler(discardLogger(t))
+	h := testHandler(t, discardLogger(t))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodHead, "/healthz", nil))
 
@@ -83,7 +110,7 @@ func TestHealthHEAD(t *testing.T) {
 }
 
 func TestRequestIDGeneratedAndEchoed(t *testing.T) {
-	h := newHandler(discardLogger(t))
+	h := testHandler(t, discardLogger(t))
 
 	t.Run("generated when absent", func(t *testing.T) {
 		rec := httptest.NewRecorder()
@@ -125,7 +152,7 @@ func TestRequestIDGeneratedAndEchoed(t *testing.T) {
 func TestAccessLogHealthzAtDebug(t *testing.T) {
 	t.Run("emitted once at debug with route template and fields", func(t *testing.T) {
 		logger, buf := bufferLogger(t, "debug")
-		h := newHandler(logger)
+		h := testHandler(t, logger)
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 		req.Header.Set("X-Request-Id", "rid-access")
@@ -152,7 +179,7 @@ func TestAccessLogHealthzAtDebug(t *testing.T) {
 
 	t.Run("silent at info so health polling does not flood logs", func(t *testing.T) {
 		logger, buf := bufferLogger(t, "info")
-		h := newHandler(logger)
+		h := testHandler(t, logger)
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 		if strings.Contains(buf.String(), "msg=access") {
@@ -163,7 +190,7 @@ func TestAccessLogHealthzAtDebug(t *testing.T) {
 
 func TestAccessLogUnmatchedRoute(t *testing.T) {
 	logger, buf := bufferLogger(t, "info")
-	h := newHandler(logger)
+	h := testHandler(t, logger)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/nope", nil))
 
@@ -227,7 +254,7 @@ func TestLifecycleSmoke(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	srv := New(testConfig(), discardLogger(t))
+	srv := New(testConfig(), discardLogger(t), readyStub(""), forward.New(readyStub(""), forward.NewClient(), time.Second, 1<<20))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	runErr := make(chan error, 1)

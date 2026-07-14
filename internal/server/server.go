@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/ningw42/copilotd/internal/config"
+	"github.com/ningw42/copilotd/internal/forward"
+	"github.com/ningw42/copilotd/internal/identity"
 )
 
 // Inbound HTTP timeouts (client <-> copilotd), distinct from the Phase-1
@@ -32,19 +34,22 @@ const (
 
 // Server owns the configured http.Server and drives its lifecycle.
 type Server struct {
-	cfg    config.Config
+	cfg    config.ServeConfig
 	logger *slog.Logger
 	http   *http.Server
 }
 
-// New builds the server from cfg and logger. The listener is supplied later to
-// Run, so main owns bind and the server owns serve/shutdown.
-func New(cfg config.Config, logger *slog.Logger) *Server {
+// New builds the server from cfg and logger. The identity Provider supplies the
+// outbound Copilot credential (and readiness) and fwd is the forwarder driving
+// the provider routes; both are injected so the whole HTTP boundary can be driven
+// end to end in tests against a stubbed upstream. The listener is supplied later
+// to Run, so main owns bind and the server owns serve/shutdown.
+func New(cfg config.ServeConfig, logger *slog.Logger, provider identity.Provider, fwd *forward.Forwarder) *Server {
 	return &Server{
 		cfg:    cfg,
 		logger: logger,
 		http: &http.Server{
-			Handler:           newHandler(logger),
+			Handler:           newHandler(cfg.APIKey, provider, fwd, logger),
 			ReadHeaderTimeout: readHeaderTimeout,
 			ReadTimeout:       readTimeout,
 			WriteTimeout:      writeTimeout,

@@ -31,7 +31,7 @@ var requestIDPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,` + fmt.Sprint(maxR
 // New builds the shared logger from cfg, writing to the configured log file or
 // stderr. The returned io.Closer closes the log file (a no-op for stderr) and
 // should be closed by the caller on shutdown.
-func New(cfg config.Config) (*slog.Logger, io.Closer, error) {
+func New(cfg config.ServeConfig) (*slog.Logger, io.Closer, error) {
 	w, closer, err := openSink(cfg.LogFile)
 	if err != nil {
 		return nil, nil, err
@@ -59,7 +59,7 @@ func openSink(logFile string) (io.Writer, io.Closer, error) {
 // NewWithWriter constructs a logger writing to w. It is the testing seam:
 // emitted bytes are asserted against an injected buffer, and other packages'
 // tests reuse it to capture structured output. New delegates to it.
-func NewWithWriter(w io.Writer, cfg config.Config) (*slog.Logger, error) {
+func NewWithWriter(w io.Writer, cfg config.ServeConfig) (*slog.Logger, error) {
 	level, err := parseLevel(cfg.LogLevel)
 	if err != nil {
 		return nil, err
