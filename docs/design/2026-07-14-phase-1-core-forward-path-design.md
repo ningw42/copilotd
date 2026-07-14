@@ -1,6 +1,6 @@
 # Phase 1 — Core forward path, both surfaces (non-streaming) — Design
 
-Status: approved design (refined via brainstorming session), pending implementation plan
+Status: approved design (refined via brainstorming + grilling sessions), pending implementation plan
 Date: 2026-07-14
 Roadmap reference: `ROADMAP.md` §7 "Phase 1 — Core forward path, both surfaces (non-streaming)"
 Builds on: `docs/design/2026-07-13-phase-0-foundations-design.md`
@@ -15,11 +15,12 @@ produces a real call alone.
 **Outcome:** non-streaming JSON requests round-trip end to end against GitHub
 Copilot on **both** surfaces — `POST /anthropic/v1/messages` (+ `count_tokens`)
 and `POST /openai/v1/responses` — authenticated by a required API key, forwarded
-with an impersonated GitHub Copilot credential that is minted and refreshed
-automatically.
+with an impersonated GitHub Copilot credential that is minted on demand (plus one
+warm-up mint at startup).
 
-Streaming is explicitly **not** in Phase 1 (Phase 2 owns the SSE engine); a
-`stream:true` request is cleanly rejected, not half-supported.
+Phase 1 is **synchronous-only** (Phase 2 owns the SSE engine); a `stream:true`
+request — and OpenAI's `background:true` async mode — is cleanly rejected, not
+half-supported.
 
 ### 1.1 The onion, this phase
 
@@ -41,13 +42,14 @@ by the identity manager. They are opposite ends of the onion and never conflated
 - **Inbound auth** — a single required API key, constant-time validated, accepted
   as `Authorization: Bearer` or `x-api-key`, gating the provider routes only.
 - **GitHub↔Copilot identity** — OAuth device-flow login (`copilotd login`) **or**
-  an injected token; the `copilot_internal/v2/token` exchange; scheduled
-  single-flight refresh with a strict single-in-flight invariant; owner-only
+  an injected token; the `copilot_internal/v2/token` exchange; on-demand minting
+  (plus one startup mint) with a strict single-in-flight invariant; owner-only
   OAuth-token file; the impersonation header set.
 - **Raw forwarder** — hand-rolled dumb passthrough on the three provider routes,
   with header impersonation, denylist header policy, per-request body bounding,
   and verbatim upstream response/error passthrough.
-- **Non-streaming boundary** — `stream:true` rejected with a provider-shaped error.
+- **Synchronous-only boundary** — `stream:true` (both surfaces) and
+  `background:true` (OpenAI) rejected with a provider-shaped error.
 - **Provider-shaped error bodies** (`internal/apierror`) for proxy-originated
   errors, Anthropic-shaped on `/anthropic`, OpenAI-shaped on `/openai`.
 - **Readiness split** — `GET /readyz` reflecting identity health; `/healthz`
@@ -62,14 +64,15 @@ unsupported-param/beta stripping, model-name mapping, stable Responses item-ids
 management sub-paths (`GET/DELETE /responses/{id}`, cancel, input_items);
 multi-account pooling; cross-compilation and service install (Phase 6).
 
-### 2.1 Scope boundary: identity refresh vs. self-heal retry
+### 2.1 Scope boundary: on-demand minting vs. self-heal retry
 
-Two token-refresh behaviors sound similar and must not be conflated:
+Two re-minting behaviors sound similar and must not be conflated:
 
-- **Proactive scheduled refresh** (Phase 1, this design): the identity manager
-  re-mints the Copilot token *before* it expires, on a timer.
+- **On-demand minting** (Phase 1, this design): the identity manager mints a fresh
+  Copilot token when it finds *its own* cache missing or stale — transparently,
+  before building the outbound request. Driven by real traffic, not a timer.
 - **Reactive self-heal retry** (Phase 4 shim): re-minting *in response to* a `401`
-  from the upstream inference call and replaying the request.
+  from the upstream inference call and *replaying* the request.
 
 Phase 1 builds only the former. The forwarder stays dumb: an upstream `401`
 passes straight back to the client, exactly like any other upstream status.
@@ -85,8 +88,9 @@ passes straight back to the client, exactly like any other upstream status.
 | API key requirement | Always required (fail-fast) | copilotd forwards every accepted request with the operator's real Copilot credential. A bare, unauthenticated endpoint is never allowed, even on loopback (loopback does not isolate local users). |
 | API-key compare | SHA-256 both sides → `subtle.ConstantTimeCompare` | Fixed-length constant-time compare with no length leak. |
 | OAuth token persistence | Only the long-lived GitHub OAuth token, raw, in an owner-only file | Minimizes secrets at rest ("single owner-only credential file"). The short-lived Copilot token lives in memory only and is cheap to re-mint. |
-| Identity startup posture | Hybrid: fail-fast on no credential, else degrade | Distinguishes "nothing to try" (misconfig → exit) from "GitHub is flaky right now" (transient → serve degraded, `/readyz` not-ready, background retry). Robust long-running-daemon behavior. |
-| Refresh concurrency | One `singleflight` key for background *and* on-demand refresh | Guarantees **at most one exchange in flight globally**; a request burst that finds an expired cache collapses to a single exchange. |
+| Identity startup posture | Hybrid: fail-fast on no credential, else degrade | Distinguishes "nothing to try" (missing OAuth token → exit) from "GitHub is flaky right now" (transient → serve degraded, `/readyz` not-ready, bounded startup-mint retry). Robust long-running-daemon behavior. |
+| Copilot-token minting | On demand (traffic-driven) + one startup mint; **no** scheduled refresh loop | A fixed ~25-min exchange heartbeat is a bot signature (ROADMAP §8); tying mints to real traffic mimics an editor session and drops the timer. See ADR-0001. |
+| Mint concurrency | One `singleflight` key across the startup mint *and* every on-demand mint | Guarantees **at most one exchange in flight globally**; a request burst that finds a stale cache collapses to a single exchange. |
 | CLI shape | Subcommand tree via `ff/v4` `ff.Command` + `ffhelp` | `serve`/`login` need genuinely different flags; a git-style tree with `help <sub>` is the modern, discoverable interface and reuses the dependency Phase 0 already pulls in. |
 | Outbound timeout | Per-request context deadline (default `600s`), no `http.Client.Timeout` | A blunt client timeout would kill a legitimately slow completion; the context deadline also gives client-cancel propagation for free. |
 | New dependency | `golang.org/x/sync/singleflight` only | The Go team's own module; everything else stays stdlib. |
@@ -103,7 +107,7 @@ copilotd/
     ├── logging/             # unchanged, reused
     ├── build/               # unchanged, reused
     ├── apierror/    [NEW]    # provider-shaped error bodies (Anthropic + OpenAI), one leaf
-    ├── identity/    [NEW]    # device flow · exchange · single-flight refresh · token file · headers
+    ├── identity/    [NEW]    # device flow · exchange · on-demand mint · token file · headers
     ├── forward/     [NEW]    # the dumb forwarder: path map · header build · body bound · Do · copy-back
     └── server/              # + auth middleware · readiness gate · provider routes · /readyz
 ```
@@ -117,11 +121,11 @@ Each new unit — *what it does · how it is used · what it depends on*:
 
 - **`internal/identity`** — owns all Copilot-credential concerns. Exposes a
   `Credential` snapshot (base URL + token + impersonation headers), a `Ready()`
-  predicate, a background `Run(ctx)` refresh loop, and a `login` entry point.
-  Used by `forward` (per-request `Current`), `server` (readiness), and `main`
-  (`login`, `Run`). Depends on `net/http`, `encoding/json`, `crypto`,
-  `golang.org/x/sync/singleflight`, `config`, `logging`. Knows nothing about the
-  inbound HTTP surface.
+  predicate, a `StartupMint(ctx)` async warm-up, and a `login` entry point.
+  Used by `forward` (per-request `Current`, which mints on demand), `server`
+  (readiness), and `main` (`login`, `StartupMint`). Depends on `net/http`,
+  `encoding/json`, `crypto`, `golang.org/x/sync/singleflight`, `config`,
+  `logging`. Knows nothing about the inbound HTTP surface.
 
 - **`internal/forward`** — the dumb upstream client. Given a route's upstream
   path + provider tag and an `identity` handle, it bounds/reads the body, peeks
@@ -181,14 +185,16 @@ type Credential struct {
     Headers http.Header // static impersonation set (integration-id, editor-version, ...)
 }
 
-func (m *Manager) Current(ctx context.Context) (Credential, error) // fast path: cached token; single-flight refresh if missing/expired
-func (m *Manager) Ready() bool                                     // for /readyz and the provider readiness gate
-func (m *Manager) Run(ctx context.Context)                         // background single-flight refresh loop
+func (m *Manager) Current(ctx context.Context) (Credential, error) // cached token, or mint on demand if missing/stale (single-flight)
+func (m *Manager) Ready() bool                                     // last mint outcome; for /readyz and the provider readiness gate
+func (m *Manager) StartupMint(ctx context.Context)                 // async warm-up mint at boot, bounded retries (run in a goroutine)
 ```
 
 `forward` builds `outURL = cred.BaseURL + upstreamPath`, sets `Authorization:
 Bearer <cred.Token>`, and copies `cred.Headers`. No Copilot knowledge leaks into
-`forward`.
+`forward`. The snapshot is **read-only**: `forward` copies `cred.Headers` onto a
+fresh outbound header map and never mutates the shared one (`Token`/`BaseURL` are
+immutable strings), so a snapshot taken during a concurrent mint is race-free.
 
 ### 6.2 Token exchange
 
@@ -200,36 +206,56 @@ parsed into an internal `copilotToken{raw, expiresAt, refreshIn, baseURL}`:
 - `token` → `raw` (treated as **opaque**; passed verbatim, never parsed for auth
   logic).
 - `expires_at` → `expiresAt` (hard expiry).
-- `refresh_in` → `refreshIn` (intended re-mint interval, shorter than expiry).
+- `refresh_in` → `refreshIn` (GitHub's intended re-mint horizon; used as the
+  staleness threshold, not as a timer — see §6.4).
 - `endpoints.api` → `baseURL` (per-account host; the `--upstream-base` override,
   if set, wins).
 
 ### 6.3 Failure classification
 
-Exchange failures are classified so the daemon's degraded state is legible:
+Exchange failures are classified so the daemon's degraded state is legible and so
+minting knows whether retrying is worthwhile:
 
 - **Auth-class** (`401`/`403`/`404`): the OAuth token is invalid/revoked or the
-  account is not entitled to Copilot. **Permanent** — not fixable by retrying.
-  Logged at `error` with a distinct "not transient — check the Copilot
-  subscription" message plus the status and response body. The daemon still
-  degrades rather than exits (consistent with the hybrid posture: we had a token
-  to try), but the operator is not left guessing.
-- **Transient** (`429`/`5xx`/network/timeout): retried with capped backoff.
+  account is not entitled to Copilot. **Permanent** — not fixable by retrying, so
+  it **short-circuits** the startup-mint retries immediately. Logged at `error`
+  with a distinct "not transient — check the Copilot subscription" message plus
+  the status and response body. The daemon still degrades rather than exits
+  (consistent with the hybrid posture: we had a token to try), but the operator is
+  not left guessing.
+- **Transient** (`429`/`5xx`/network/timeout): the startup mint retries with
+  capped backoff up to `--startup-mint-retries`; an on-demand mint does **not**
+  retry (it is a single attempt in the request path — see §6.4).
 
-### 6.4 Refresh & the single-in-flight invariant
+### 6.4 Minting & the single-in-flight invariant
 
-A single background goroutine (`Run`) sleeps until `refreshIn` elapses (minus a
-small jitter), re-exchanges, and reschedules from the new `refreshIn`. On failure
-it keeps the current token and retries with capped backoff until `expiresAt`;
-once past hard expiry with no fresh token, `Ready()` returns false
-(serve-stale-until-hard-expiry).
+There is **no** scheduled refresh loop (see ADR-0001). The Copilot token is minted
+in exactly two situations:
 
-**Invariant: at most one exchange is in flight globally, at any moment.** Both the
-background loop and any request-triggered emergency refresh (a request arriving
-with an expired cache before the background loop caught up — e.g. just after
-startup or a long idle) route through **one** `singleflight.Group.Do("refresh",
-…)` key. They therefore cannot both fire, and a burst of requests collapses to a
-single exchange whose result all callers share.
+- **Startup mint** — `StartupMint(ctx)` runs once at boot in a goroutine, so the
+  daemon serves immediately and `/readyz` warms without blocking. A **transient**
+  failure retries with capped backoff up to `--startup-mint-retries` (default 3 →
+  4 attempts total); an **auth-class** failure short-circuits (§6.3). On
+  exhaustion the daemon stays degraded — still recoverable, because the next real
+  request can mint on demand.
+- **On-demand mint** — `Current(ctx)` returns the cached token when it is fresh,
+  and otherwise mints synchronously in the caller's (request) path, then returns
+  the new token. A token is treated as **stale** a safety margin before
+  `expiresAt` (so a request near the boundary re-mints rather than handing
+  upstream a token that would die mid-call). An on-demand mint is a **single
+  attempt**: on failure the triggering request errors and the *next* request
+  re-attempts.
+
+**Invariant: at most one exchange is in flight globally, at any moment.** The
+startup mint and every on-demand mint route through **one** `singleflight` key
+(`"mint"`), so they can never both fire and a burst of requests that all find a
+stale cache collapses to a single exchange whose result every caller shares. The
+exchange itself runs on a **background-scoped context** bounded by an internal
+**exchange timeout (~30s)** — deliberately *not* the triggering request's context,
+and independent of the 600s `--outbound-timeout` — so a client that disconnects
+mid-mint cannot cancel the exchange other waiters depend on. Callers wait via
+`singleflight.Group.DoChan` and `select` on their own request context, so a
+disconnecting caller returns promptly without poisoning the shared mint.
 
 ### 6.5 OAuth-token file & source precedence
 
@@ -243,10 +269,12 @@ single exchange whose result all callers share.
   enforcement there is best-effort via the per-user profile directory, with a
   documented caveat (mirrors Phase 0's Darwin static-binary caveat).
 - **Source precedence:** inline `--github-oauth-token` / `COPILOTD_GITHUB_OAUTH_TOKEN`
-  / config-file `github-oauth-token` **>** the token file. If *neither* yields a
-  token, the daemon **fails fast** with a "run `copilotd login`" message. Once any
-  OAuth token is present, the daemon starts and degrades-on-exchange-failure —
-  fail-fast fires **only** when there is nothing to try.
+  / config-file `github-oauth-token` **>** the token file. A present-but-empty
+  (whitespace-only) inline value or token file counts as **absent**. If *neither*
+  yields a token, the daemon **fails fast** with a "run `copilotd login`" message.
+  Once any OAuth token is present, the daemon starts and
+  degrades-on-exchange-failure — fail-fast fires **only** when there is nothing to
+  try.
 - Auto-reading VS Code's `~/.config/github-copilot/apps.json` is deliberately
   **not** done (explicit secret sources only); noted as a possible later
   convenience.
@@ -266,7 +294,10 @@ exchange (entitlement failures surface at first `serve` exchange, classified per
    `expired_token`, and `access_denied`.
 4. On success, fetch `GET https://api.github.com/user` and print the
    authenticated login as confirmation (not persisted), then write the raw token
-   to the OAuth-token file (`0600`, atomic) and print its path.
+   to the OAuth-token file (`0600`, atomic) and print its path. If a token file
+   already exists it is **overwritten**, with a one-line notice ("replacing
+   existing token at `<path>`") — no prompt or `--force` gate, since completing
+   the device flow is already deliberate.
 
 ### 6.7 Impersonation header set
 
@@ -284,10 +315,11 @@ and every inference request.
 
 ### 6.8 Observability
 
-Structured logs for: each login step; each refresh (outcome, next-refresh
-interval); degraded↔ready transitions. The OAuth and Copilot tokens are **never**
-logged (Phase 0's redaction discipline). Metric seam: token-refresh events and
-outcomes (the roadmap's named signal).
+Structured logs for: each login step; each mint (`startup`|`on-demand`, outcome,
+and — for a startup retry — the attempt number); degraded↔ready transitions. The
+OAuth and Copilot tokens are **never** logged (Phase 0's redaction discipline).
+Metric seam: mint events + outcomes by trigger (the roadmap's token-refresh
+signal).
 
 ## 7. Forward path (`internal/forward`)
 
@@ -305,19 +337,26 @@ Each route is a thin handler closure carrying its upstream path + provider tag;
 the provider tag selects the error shape for any proxy-originated error. The
 upstream host comes from `Credential.BaseURL`.
 
-### 7.2 Body bounding & the `stream` peek
+### 7.2 Body bounding & the synchronous-only peek
 
 Wrap `r.Body` in `http.MaxBytesReader(w, r.Body, maxRequestBytes)` (default
 32 MiB — a safety rail against pathological bodies, generous enough for
 multi-image base64). Read the bounded body **fully into memory**, then
-`json.Unmarshal` into `struct{ Stream *bool }` — reading *only* the `stream`
-field — and forward the **original bytes** (`bytes.NewReader(body)`), never a
-re-serialized version.
+`json.Unmarshal` into a peek struct — reading *only* the async-mode fields — and
+forward the **original bytes** (`bytes.NewReader(body)`), never a re-serialized
+version. The peek enforces Phase 1's **synchronous-only** boundary:
 
-- `stream:true` → reject with a provider-shaped error (`StreamUnsupported`).
-- `stream:false`, absent, or a non-JSON body → treat as non-streaming and forward
-  (we are not a JSON validator; malformed bodies get Copilot's own `400`).
-- `count_tokens` never streams, so the peek is a harmless no-op there.
+- **Anthropic** peeks `struct{ Stream *bool }`; `stream:true` → reject
+  (`StreamUnsupported`).
+- **OpenAI** peeks `struct{ Stream *bool; Background *bool }`; `stream:true` →
+  reject (`StreamUnsupported`), and `background:true` → reject
+  (`BackgroundUnsupported`) — background mode returns a `queued` object that can
+  only be retrieved via the Responses management sub-paths, which Phase 1 does not
+  mount, so it would otherwise be a dead end.
+- `stream`/`background` false, absent, or a non-JSON body → treat as synchronous
+  and forward (we are not a JSON validator; malformed bodies get Copilot's own
+  `400`).
+- `count_tokens` is synchronous-only, so its peek is a harmless no-op.
 - Exceeding `maxRequestBytes` → `413` (`PayloadTooLarge`).
 
 ### 7.3 Inbound → outbound header policy (denylist / passthrough)
@@ -330,7 +369,9 @@ Forward **every** inbound header except an explicit strip-set; then set ours.
   `Proxy-Authenticate`, `Proxy-Authorization`, plus any header named in the
   inbound `Connection` header).
 - **Set (ours, replacing any client value):** `Authorization: Bearer
-  <cred.Token>` and the impersonation set from `identity`.
+  <cred.Token>`, the impersonation set from `identity`, and a per-request
+  `X-Request-Id` carrying copilotd's resolved request-id (cross-log correlation;
+  real clients send one too).
 - **Pass through:** everything else (`Content-Type`, `Accept`,
   `anthropic-version`, `anthropic-beta`, …). Header *stripping/normalization* is a
   Phase 4 shim; Phase 1 forwards faithfully and lets any resulting upstream `400`
@@ -356,9 +397,9 @@ timeout profile) with a tuned `Transport`: connection pooling
   body downstream — **verbatim**. Copilot's error bodies are already correctly
   Anthropic-/OpenAI-shaped.
 - **Proxy-originated error (around the call):** synthesized via `apierror` with
-  the route's provider tag — `stream:true` reject, body-too-large (`413`),
-  dial/unreachable (`502` `BadGateway`), outbound timeout (`504`
-  `GatewayTimeout`).
+  the route's provider tag — `stream:true`/`background:true` reject,
+  body-too-large (`413`), dial/unreachable (`502` `BadGateway`), outbound timeout
+  (`504` `GatewayTimeout`).
 
 ## 8. Inbound auth, readiness & error shapes (`internal/server`)
 
@@ -374,11 +415,17 @@ endpoint is ever served).
 
 ### 8.2 Readiness gate & endpoints
 
-- A readiness gate wraps the same provider subtrees, **after** auth — so an
+- **`identity.Ready()` tracks the last mint *outcome*, not token expiry.** It is
+  false until the first successful mint, then **stays true across idle periods
+  even after the cached token expires** (the next request will transparently
+  re-mint); it flips to false only when a mint *fails* (an exhausted startup mint,
+  or a failed on-demand mint), and back to true on the next success. This avoids
+  an idle-but-healthy daemon flapping not-ready every ~25 min.
+- A readiness gate wraps the provider subtrees, **after** auth — so an
   unauthenticated caller gets `401`, never a `503` that would leak readiness
-  state. When `identity.Ready()` is false → provider-shaped `503` (`NotReady`).
-- **`GET /readyz`** (unauthenticated): `200 {"status":"ready"}` when
-  `identity.Ready()`, else `503 {"status":"not ready"}`.
+  state. When `Ready()` is false → provider-shaped `503` (`NotReady`).
+- **`GET /readyz`** (unauthenticated): `200 {"status":"ready"}` when `Ready()`,
+  else `503 {"status":"not ready"}`.
 - **`GET /healthz`** stays pure liveness (Phase 0, unchanged): `200` while the
   process is up.
 
@@ -395,8 +442,9 @@ One leaf defines both shapes so nothing else hand-rolls them:
 
 API: `apierror.Write(w, provider, kind, msg)` over a small `Kind` set —
 `Unauthorized` (`401`), `NotReady` (`503`), `StreamUnsupported` (`400`),
-`PayloadTooLarge` (`413`), `BadGateway` (`502`), `GatewayTimeout` (`504`) — each
-mapped to its HTTP status and the provider's error `type`.
+`BackgroundUnsupported` (`400`, OpenAI only), `PayloadTooLarge` (`413`),
+`BadGateway` (`502`), `GatewayTimeout` (`504`) — each mapped to its HTTP status
+and the provider's error `type`.
 
 ## 9. Configuration
 
@@ -432,6 +480,7 @@ in log output.
 | Upstream base override | `upstream-base` | `--upstream-base` | `COPILOTD_UPSTREAM_BASE` | *(empty)* | Empty ⇒ use exchange response's `endpoints.api` |
 | Outbound timeout | `outbound-timeout` | `--outbound-timeout` | `COPILOTD_OUTBOUND_TIMEOUT` | `600s` | Per-request ctx deadline (not a blunt client timeout) |
 | Max request bytes | `max-request-bytes` | `--max-request-bytes` | `COPILOTD_MAX_REQUEST_BYTES` | `33554432` (32 MiB) | Safety rail; over-limit ⇒ `413` |
+| Startup mint retries | `startup-mint-retries` | `--startup-mint-retries` | `COPILOTD_STARTUP_MINT_RETRIES` | `3` | Transient startup-mint retries (total attempts = 1 + N); auth-class failures short-circuit |
 | Integration id | `copilot-integration-id` | `--copilot-integration-id` | `COPILOTD_COPILOT_INTEGRATION_ID` | `vscode-chat` | Impersonation; essential value |
 | Editor version | `editor-version` | `--editor-version` | `COPILOTD_EDITOR_VERSION` | `vscode/1.104.1` | Impersonation; presence-checked |
 | Editor plugin version | `editor-plugin-version` | `--editor-plugin-version` | `COPILOTD_EDITOR_PLUGIN_VERSION` | `copilot-chat/0.26.7` | Impersonation |
@@ -451,10 +500,10 @@ logging/config flags.)*
 ### 9.4 Validation
 
 `serve`: `addr` a valid `host:port` (Phase 0); `apikey` non-empty (fail-fast);
-`outbound-timeout` > 0; `max-request-bytes` > 0; log level/format in-set (Phase
-0). `login`: `github-client-id` and `github-scope` non-empty. Invalid config
-yields a clear error and a non-zero exit **before** binding the listener or
-starting a device flow.
+`outbound-timeout` > 0; `max-request-bytes` > 0; `startup-mint-retries` ≥ 0; log
+level/format in-set (Phase 0). `login`: `github-client-id` and `github-scope`
+non-empty. Invalid config yields a clear error and a non-zero exit **before**
+binding the listener or starting a device flow.
 
 ## 10. Observability
 
@@ -465,7 +514,7 @@ forward and now cover the provider routes. Additions:
   never bodies or secrets); auth failures at `info`/`warn` without the presented
   key; identity events per §6.8.
 - **Metric seams** (named, not necessarily built — Phase 0 posture): upstream
-  outcome (status class) by route template; token-refresh events + outcomes;
+  outcome (status class) by route template; mint events + outcomes (by trigger);
   degraded↔ready transitions; request counts/latency by route (already seeded).
 - **Redaction discipline** (Phase 0) inherited wholesale: no full header/body
   dumps; secrets never logged; config logged through `LogValue`.
@@ -473,24 +522,29 @@ forward and now cover the provider routes. Additions:
 ## 11. Testing strategy
 
 TDD throughout (red → green → refactor), `-race`, stdlib `testing` +
-`net/http/httptest`. GitHub and Copilot are stubbed with `httptest`; refresh uses
-an injected clock. Every unit is testable because dependencies are injected.
+`net/http/httptest`. GitHub and Copilot are stubbed with `httptest`; minting and
+the staleness threshold use an injected clock. Every unit is testable because
+dependencies are injected.
 
 - **`identity`** — exchange response parsing (`token`/`expires_at`/`refresh_in`/
   `endpoints.api`); auth-vs-transient failure classification; the
   **single-in-flight invariant** (concurrent `Current` calls trigger exactly one
-  exchange, asserted by counting upstream hits); serve-stale-until-hard-expiry and
-  reschedule-from-`refresh_in`; token-file round-trip, `0600` enforcement,
-  refuse-on-too-open (Unix), atomic write; device-flow polling
-  (`authorization_pending`/`slow_down`/`expired_token`/`access_denied`); source
-  precedence (inline > file) and fail-fast on no source; impersonation headers
-  present on the exchange request.
-- **`forward`** — path map incl. the `/v1` asymmetry; the `stream` peek (reject
-  vs forward vs non-JSON); header denylist (API key stripped, impersonation set,
-  hop-by-hop stripped, other client headers passed through); `413` on over-limit;
-  **verbatim upstream error passthrough** (upstream `400`/`429`/`500` body copied
-  unchanged); proxy-origin `502`/`504`; client-cancel propagation. Driven with a
-  stubbed upstream + a fake `Credential`.
+  exchange, asserted by counting upstream hits); on-demand mint on a stale/missing
+  cache and the safety-margin staleness threshold (injected clock); on-demand mint
+  is a single attempt (no retry); startup mint retries transient failures up to
+  `--startup-mint-retries` and short-circuits on auth-class; `Ready()` tracks the
+  last mint outcome (stays ready across expiry, flips on mint failure); token-file
+  round-trip, `0600` enforcement, refuse-on-too-open (Unix), atomic write;
+  device-flow polling (`authorization_pending`/`slow_down`/`expired_token`/
+  `access_denied`); source precedence (inline > file) and fail-fast on no source;
+  impersonation headers present on the exchange request.
+- **`forward`** — path map incl. the `/v1` asymmetry; the synchronous-only peek
+  (Anthropic `stream:true` reject; OpenAI `stream:true` + `background:true`
+  reject; false/absent/non-JSON forwarded); header denylist (API key stripped,
+  impersonation set, hop-by-hop stripped, other client headers passed through);
+  `413` on over-limit; **verbatim upstream error passthrough** (upstream
+  `400`/`429`/`500` body copied unchanged); proxy-origin `502`/`504`;
+  client-cancel propagation. Driven with a stubbed upstream + a fake `Credential`.
 - **`server`** — auth (valid Bearer and valid `x-api-key` pass; missing/wrong ⇒
   per-surface `401`; key never logged); readiness gate + **auth-before-readiness**
   ordering (unauthenticated caller gets `401` even when not ready); `/readyz`
@@ -522,6 +576,11 @@ an injected clock. Every unit is testable because dependencies are injected.
 
 - **New dependency (Phase 1):** `golang.org/x/sync/singleflight`. Everything else
   is stdlib beyond the Phase 0 set (`ff/v4`, `google/uuid`, TOML parser).
+- **Key decision record:** on-demand Copilot-token minting (no scheduled refresh)
+  is recorded in `docs/adr/0001-on-demand-copilot-token-minting.md`.
+- **Vocabulary:** the four credential-like things (API key, GitHub OAuth token,
+  Copilot token) and the identity lifecycle (exchange/mint/on-demand mint) are
+  defined in the root `CONTEXT.md`; this spec uses those terms canonically.
 - **Facts to confirm at implementation (not design forks):**
   1. Exact `ff/v4` `ff.Command`/`ffhelp` API and the ~15-line `help <sub>` verb.
   2. The current upstream paths remain `/v1/messages`, `/v1/messages/count_tokens`
