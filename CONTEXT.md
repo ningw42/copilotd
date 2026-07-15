@@ -83,6 +83,29 @@ A composable middleware layer that closes one specific parity gap (Phase 3+). No
 present in Phase 1.
 _Avoid_: plugin, filter
 
+### Streaming
+
+**Terminal event**:
+The event that legitimately ends an SSE stream — Anthropic `message_stop`; OpenAI
+`response.completed` / `response.failed` / `response.incomplete` (an upstream
+`error` event also ends it). copilotd detects it to tell a clean end from a
+truncated one.
+_Avoid_: end event, stop event, final event
+
+**copilotd-originated signal**:
+Any response copilotd itself produces rather than forwards from Copilot — the
+auth/readiness/limit errors and the synthesized stream terminals. The proxy's only
+divergence from a genuine first-party endpoint; enumerated exhaustively (the
+"divergence ledger") and identified off-band (request-id, logs), never by a field
+on the wire.
+_Avoid_: proxy error, internal error
+
+**Synthesized terminal**:
+A terminal error event copilotd originates when an upstream stream dies without
+one, so a client's SSE parser never hangs. A copilotd-originated signal — never
+conflated with a forwarded upstream terminal.
+_Avoid_: fake terminal, injected error (unqualified)
+
 ### Runtime state
 
 **Ready / Not-ready**:
