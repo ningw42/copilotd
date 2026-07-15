@@ -2,7 +2,7 @@
 // a git-style subcommand tree — serve, login, help, version — wiring the internal
 // packages together; it holds no business logic. `serve` runs the HTTP daemon
 // (config load → logger → bind → signal-aware graceful shutdown); the other verbs
-// provide discovery (help), build info (version), and a login placeholder.
+// provide discovery (help), build info (version), and GitHub OAuth device login.
 package main
 
 import (
@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/ningw42/copilotd/internal/build"
@@ -40,16 +41,9 @@ var errServeFailed = errors.New("serve failed")
 // exit code. Args, env, and the output streams are injected so dispatch and the
 // version/validation paths can be tested without touching process globals.
 //
-// Exit codes: --version/version -> 0; bare/help -> 0; config error -> 1; bind or
+// Exit codes: version -> 0; bare/help -> 0; config error -> 1; bind or
 // serve error -> 1; unknown subcommand -> 1.
 func run(args []string, lookupEnv func(string) (string, bool), stdout, stderr io.Writer) int {
-	// --version short-circuits before the tree is built or parsed, so it works
-	// even when the rest of the configuration would fail to load.
-	if config.VersionRequested(args) {
-		fmt.Fprintln(stdout, build.String())
-		return 0
-	}
-
 	root := buildCommand(lookupEnv, stdout, stderr)
 	switch err := root.ParseAndRun(context.Background(), args); {
 	case err == nil:
@@ -58,25 +52,78 @@ func run(args []string, lookupEnv func(string) (string, bool), stdout, stderr io
 		// Already reported via the structured logger; just carry the exit code.
 		return 1
 	case errors.Is(err, ff.ErrHelp):
+		if err := validateHelpRequest(args); err != nil {
+			writeCLIError(root, stderr, err)
+			return 1
+		}
 		// -h/--help on any command: render its help to stdout and exit clean.
 		fmt.Fprintln(stdout, ffhelp.Command(root))
 		return 0
 	default:
-		fmt.Fprintln(stderr, "copilotd: "+err.Error())
+		writeCLIError(root, stderr, err)
 		return 1
 	}
 }
 
-// buildCommand assembles the subcommand tree: a root carrying the inherited flags
-// (whose Exec prints general help / rejects unknown verbs) plus the serve, login,
-// version, and help verbs. Root flags are declared once via config.RegisterServe
-// and inherited by every subcommand through SetParent.
+func writeCLIError(root *ff.Command, stderr io.Writer, err error) {
+	message := err.Error()
+	if strings.HasPrefix(message, root.Name+":") {
+		fmt.Fprintln(stderr, message)
+	} else {
+		fmt.Fprintln(stderr, root.Name+": "+message)
+	}
+}
+
+// validateHelpRequest re-parses syntax on a fresh command tree after removing
+// parser-native help flags. ff stops parsing at -h/--help, so this second pass is
+// necessary to reject trailing unknown flags and operands without resolving
+// configuration or executing a command.
+func validateHelpRequest(args []string) error {
+	syntaxArgs := append([]string(nil), args...)
+	for {
+		root := buildCommand(func(string) (string, bool) { return "", false }, io.Discard, io.Discard)
+		err := root.Parse(syntaxArgs)
+		if errors.Is(err, ff.ErrHelp) {
+			selected := root.GetSelected()
+			if selected == nil || selected.Flags == nil {
+				return err
+			}
+			remaining := selected.Flags.GetArgs()
+			helpIndex := len(syntaxArgs) - len(remaining)
+			if len(remaining) == 0 || helpIndex < 0 || helpIndex >= len(syntaxArgs) {
+				return err
+			}
+			syntaxArgs = append(syntaxArgs[:helpIndex:helpIndex], syntaxArgs[helpIndex+1:]...)
+			continue
+		}
+		if err != nil {
+			return err
+		}
+
+		selected := root.GetSelected()
+		if selected == nil || selected.Flags == nil {
+			return nil
+		}
+		operands := selected.Flags.GetArgs()
+		if selected == root && len(operands) > 0 {
+			return fmt.Errorf("unknown subcommand %q (run 'copilotd help')", operands[0])
+		}
+		allowed := 0
+		if selected.Name == "help" {
+			allowed = 1
+		}
+		return rejectSurplusOperands(selected.Name, operands, allowed)
+	}
+}
+
+// buildCommand assembles the subcommand tree. Root and informational commands
+// have no operational flags; serve and login each own an independent flag set.
 func buildCommand(lookupEnv func(string) (string, bool), stdout, stderr io.Writer) *ff.Command {
 	rootFlags := ff.NewFlagSet("copilotd")
-	serveFlags := ff.NewFlagSet("serve").SetParent(rootFlags)
-	serveCfg := config.RegisterServe(rootFlags, serveFlags)
-	loginFlags := ff.NewFlagSet("login").SetParent(rootFlags)
-	loginCfg := config.RegisterLogin(rootFlags, loginFlags)
+	serveFlags := ff.NewFlagSet("serve")
+	serveCfg := config.RegisterServe(serveFlags)
+	loginFlags := ff.NewFlagSet("login")
+	loginCfg := config.RegisterLogin(loginFlags)
 
 	// root is assigned below and captured by the help/root closures so they can
 	// render the tree's help; ParseAndRun invokes those Execs after assignment.
@@ -87,21 +134,27 @@ func buildCommand(lookupEnv func(string) (string, bool), stdout, stderr io.Write
 		Usage:     "copilotd serve [FLAGS]",
 		ShortHelp: "run the proxy daemon",
 		Flags:     serveFlags,
-		Exec: func(ctx context.Context, _ []string) error {
+		Exec: func(ctx context.Context, args []string) error {
+			if err := rejectSurplusOperands("serve", args, 0); err != nil {
+				return err
+			}
 			return runServe(ctx, serveCfg, lookupEnv)
 		},
 	}
 
-	// login runs the GitHub OAuth device flow and writes the token file (#13).
-	// Its flags (github-client-id, github-scope) live on loginFlags; the write
-	// target --github-oauth-token-file and the logging flags are inherited root
-	// flags. `copilotd help login` renders this command's usage + flags.
+	// login runs the GitHub OAuth device flow and writes the GitHub OAuth token
+	// file (#13).
+	// Its command-local flags include the shared logging/config/write-target
+	// settings followed by github-client-id and github-scope.
 	loginCmd := &ff.Command{
 		Name:      "login",
 		Usage:     "copilotd login [FLAGS]",
 		ShortHelp: "obtain a GitHub OAuth token via device flow",
 		Flags:     loginFlags,
-		Exec: func(ctx context.Context, _ []string) error {
+		Exec: func(ctx context.Context, args []string) error {
+			if err := rejectSurplusOperands("login", args, 0); err != nil {
+				return err
+			}
 			return runLogin(ctx, loginCfg, lookupEnv, stdout)
 		},
 	}
@@ -110,8 +163,11 @@ func buildCommand(lookupEnv func(string) (string, bool), stdout, stderr io.Write
 		Name:      "version",
 		Usage:     "copilotd version",
 		ShortHelp: "print build version and exit",
-		Flags:     ff.NewFlagSet("version").SetParent(rootFlags),
-		Exec: func(context.Context, []string) error {
+		Flags:     ff.NewFlagSet("version"),
+		Exec: func(_ context.Context, args []string) error {
+			if err := rejectSurplusOperands("version", args, 0); err != nil {
+				return err
+			}
 			fmt.Fprintln(stdout, build.String())
 			return nil
 		},
@@ -121,7 +177,7 @@ func buildCommand(lookupEnv func(string) (string, bool), stdout, stderr io.Write
 		Name:      "help",
 		Usage:     "copilotd help [SUBCOMMAND]",
 		ShortHelp: "show help for copilotd or a subcommand",
-		Flags:     ff.NewFlagSet("help").SetParent(rootFlags),
+		Flags:     ff.NewFlagSet("help"),
 		Exec: func(_ context.Context, args []string) error {
 			return runHelp(root, args, stdout)
 		},
@@ -129,7 +185,7 @@ func buildCommand(lookupEnv func(string) (string, bool), stdout, stderr io.Write
 
 	root = &ff.Command{
 		Name:      "copilotd",
-		Usage:     "copilotd [FLAGS] <SUBCOMMAND> ...",
+		Usage:     "copilotd <SUBCOMMAND>",
 		ShortHelp: "an Anthropic/OpenAI proxy over a GitHub Copilot subscription",
 		Flags:     rootFlags,
 		Exec: func(_ context.Context, args []string) error {
@@ -142,12 +198,12 @@ func buildCommand(lookupEnv func(string) (string, bool), stdout, stderr io.Write
 			return nil
 		},
 	}
-	root.Subcommands = []*ff.Command{serveCmd, loginCmd, versionCmd, helpCmd}
+	root.Subcommands = []*ff.Command{versionCmd, helpCmd, serveCmd, loginCmd}
 	return root
 }
 
-// generalHelp renders the root's own help — usage, the subcommand list, and the
-// inherited flags — independent of which command the parse phase selected. It is
+// generalHelp renders the root's own help — usage and the subcommand list —
+// independent of which command the parse phase selected. It is
 // the counterpart to ffhelp.Command, which follows GetSelected and would instead
 // render the terminal verb (e.g. `help` itself) when called from a verb's Exec.
 func generalHelp(root *ff.Command) ffhelp.Help {
@@ -169,18 +225,28 @@ func generalHelp(root *ff.Command) ffhelp.Help {
 // runHelp implements the `help [SUBCOMMAND]` verb: no argument prints the root
 // help; a name renders that subcommand's help, or errors if it is unknown.
 func runHelp(root *ff.Command, args []string, stdout io.Writer) error {
+	if err := rejectSurplusOperands("help", args, 1); err != nil {
+		return err
+	}
 	if len(args) == 0 {
 		fmt.Fprintln(stdout, generalHelp(root))
 		return nil
 	}
 	name := args[0]
 	for _, sub := range root.Subcommands {
-		if sub.Name == name {
+		if strings.EqualFold(sub.Name, name) {
 			fmt.Fprintln(stdout, ffhelp.Command(sub))
 			return nil
 		}
 	}
 	return fmt.Errorf("unknown subcommand %q (run 'copilotd help')", name)
+}
+
+func rejectSurplusOperands(command string, args []string, allowed int) error {
+	if len(args) > allowed {
+		return fmt.Errorf("%s: unexpected operand %q", command, args[allowed])
+	}
+	return nil
 }
 
 // runServe is the serve lifecycle: resolve config, build the logger and set it as

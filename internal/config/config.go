@@ -1,12 +1,10 @@
 // Package config loads and validates copilotd's runtime configuration.
 //
-// Configuration is split by subcommand: a set of root-inherited flags (logging,
-// the config-file path, and the OAuth-token-file path) shared by every verb, and
-// serve-specific flags layered on top. RegisterServe declares both groups onto
-// ff flag sets so the command tree in main can bind them; ServeFlags.Resolve then
-// layers env and TOML over the parsed flags and validates. Env lookup is injected
-// so precedence and validation stay pure and table-testable. Precedence is
-// flags > env > TOML file > default.
+// Configuration is split by operational subcommand. Serve and login each own an
+// independent flag set containing the same five common operational flags plus
+// their command-specific flags. Env lookup is injected so precedence and
+// validation stay pure and table-testable. Precedence is flags > env > TOML file
+// > default.
 package config
 
 import (
@@ -70,8 +68,8 @@ var (
 )
 
 // ServeConfig is the resolved, validated configuration for `copilotd serve`. It
-// carries the root-inherited fields (logging, OAuth-token-file path) plus the
-// serve-specific bind address and shutdown timeout.
+// carries the common operational fields (logging, config-selected values, and
+// the GitHub OAuth token file path) plus serve-specific settings.
 type ServeConfig struct {
 	Addr            string
 	LogLevel        string
@@ -100,8 +98,9 @@ type ServeConfig struct {
 	MaxRequestBytes int64
 
 	// GithubOAuthToken is the inline GitHub OAuth token; when present it takes
-	// precedence over the token file (resolution lands in #12). It is a secret —
-	// omitted from LogValue (redaction by construction). This phase only stores it.
+	// precedence over the GitHub OAuth token file (resolution lands in #12). It is
+	// a secret — omitted from LogValue (redaction by construction). This phase only
+	// stores it.
 	GithubOAuthToken string
 
 	// StartupMintRetries bounds the transient-failure retries of the startup mint
@@ -141,19 +140,51 @@ func (c ServeConfig) LogValue() slog.Value {
 	)
 }
 
-// ServeFlags bundles the parsed flag pointers for `copilotd serve` together with
-// the flag sets they live on, so Resolve can inspect which flags were explicitly
-// set. It is an opaque handle produced by RegisterServe and consumed by Resolve.
-type ServeFlags struct {
-	rootFS  *ff.FlagSet
-	serveFS *ff.FlagSet
+// commonFlags is a command-local registration of the five operational settings
+// shared by serve and login. Each call creates fresh flag instances, preventing
+// parse/reset state from leaking between commands.
+type commonFlags struct {
+	logLevel             *string
+	logFormat            *string
+	logFile              *string
+	configPath           *string
+	githubOAuthTokenFile *string
+}
 
-	// root-inherited
-	logLevel       *string
-	logFormat      *string
-	logFile        *string
-	configPath     *string
-	oauthTokenFile *string
+func registerCommon(fs *ff.FlagSet) commonFlags {
+	return commonFlags{
+		logLevel:             fs.StringLong("log-level", defaultLogLevel, "log level: debug|info|warn|error"),
+		logFormat:            fs.StringLong("log-format", defaultLogFormat, "log format: text|json"),
+		logFile:              fs.StringLong("log-file", "", "log file path (empty = stderr)"),
+		configPath:           fs.StringLong("config", "", "path to an optional TOML config file"),
+		githubOAuthTokenFile: fs.StringLong("github-oauth-token-file", defaultOAuthTokenFile(), "path to the raw GitHub OAuth token file"),
+	}
+}
+
+func (f commonFlags) resolvedConfigPath(set map[string]bool, lookupEnv func(string) (string, bool)) string {
+	return resolveConfigPath(set, *f.configPath, lookupEnv)
+}
+
+func (f commonFlags) applyFlagValues(set map[string]bool, logLevel, logFormat, logFile, githubOAuthTokenFile *string) {
+	if set["log-level"] {
+		*logLevel = *f.logLevel
+	}
+	if set["log-format"] {
+		*logFormat = *f.logFormat
+	}
+	if set["log-file"] {
+		*logFile = *f.logFile
+	}
+	if set["github-oauth-token-file"] {
+		*githubOAuthTokenFile = *f.githubOAuthTokenFile
+	}
+}
+
+// ServeFlags bundles the parsed flag pointers for `copilotd serve`. It is an
+// opaque handle produced by RegisterServe and consumed by Resolve.
+type ServeFlags struct {
+	common commonFlags
+	fs     *ff.FlagSet
 
 	// serve-specific
 	addr            *string
@@ -172,39 +203,26 @@ type ServeFlags struct {
 	githubAPIVersion     *string
 }
 
-// RegisterServe declares the root-inherited flags on root and the serve-specific
-// flags on serve (which is expected to have root as its parent, so serve inherits
-// them). It returns a handle whose Resolve method produces the ServeConfig after
-// the command tree parses. The same root flag set is inherited by the other verbs
-// (login/help/version); only serve resolves a full config in this phase.
-func RegisterServe(root, serve *ff.FlagSet) *ServeFlags {
-	f := &ServeFlags{rootFS: root, serveFS: serve}
-
-	// Root-inherited flags, shared by every subcommand (§9.1).
-	f.logLevel = root.StringLong("log-level", defaultLogLevel, "log level: debug|info|warn|error")
-	f.logFormat = root.StringLong("log-format", defaultLogFormat, "log format: text|json")
-	f.logFile = root.StringLong("log-file", "", "log file path (empty = stderr)")
-	f.configPath = root.StringLong("config", "", "path to an optional TOML config file")
-	f.oauthTokenFile = root.StringLong("github-oauth-token-file", defaultOAuthTokenFile(), "path to the raw GitHub OAuth token file")
-	// Defined so `--help` lists it and parsing never rejects it; the actual
-	// short-circuit happens in main via VersionRequested, before the tree parses.
-	_ = root.BoolLong("version", "print build version and exit")
+// RegisterServe declares the common operational flags first, followed by the
+// serve-specific flags, on a single command-local flag set.
+func RegisterServe(fs *ff.FlagSet) *ServeFlags {
+	f := &ServeFlags{common: registerCommon(fs), fs: fs}
 
 	// Serve-specific flags (§9.2).
-	f.addr = serve.StringLong("addr", defaultAddr, "bind address (host:port)")
-	f.shutdownTimeout = serve.DurationLong("shutdown-timeout", defaultShutdownTimeout, "graceful shutdown grace period")
-	f.apikey = serve.StringLong("apikey", "", "required inbound API key clients must present (secret)")
-	f.upstreamBase = serve.StringLong("upstream-base", "", "override the upstream base URL (empty = resolved from the token exchange)")
-	f.outboundTimeout = serve.DurationLong("outbound-timeout", defaultOutboundTimeout, "per-request upstream timeout")
-	f.maxRequestBytes = serve.Int64Long("max-request-bytes", defaultMaxRequestBytes, "maximum inbound request body size in bytes")
+	f.addr = fs.StringLong("addr", defaultAddr, "bind address (host:port)")
+	f.shutdownTimeout = fs.DurationLong("shutdown-timeout", defaultShutdownTimeout, "graceful shutdown grace period")
+	f.apikey = fs.StringLong("apikey", "", "required inbound API key clients must present (secret)")
+	f.upstreamBase = fs.StringLong("upstream-base", "", "override the upstream base URL (empty = resolved from the token exchange)")
+	f.outboundTimeout = fs.DurationLong("outbound-timeout", defaultOutboundTimeout, "per-request upstream timeout")
+	f.maxRequestBytes = fs.Int64Long("max-request-bytes", defaultMaxRequestBytes, "maximum inbound request body size in bytes")
 
-	f.githubOAuthToken = serve.StringLong("github-oauth-token", "", "inline GitHub OAuth token (secret; precedence over the token file)")
-	f.startupMintRetries = serve.IntLong("startup-mint-retries", defaultStartupMintRetries, "transient startup-mint retries (total attempts = 1 + N)")
-	f.copilotIntegrationID = serve.StringLong("copilot-integration-id", defaultCopilotIntegrationID, "impersonation: Copilot-Integration-Id header value")
-	f.editorVersion = serve.StringLong("editor-version", defaultEditorVersion, "impersonation: Editor-Version header value")
-	f.editorPluginVersion = serve.StringLong("editor-plugin-version", defaultEditorPluginVersion, "impersonation: Editor-Plugin-Version header value")
-	f.copilotUserAgent = serve.StringLong("copilot-user-agent", defaultCopilotUserAgent, "impersonation: User-Agent header value")
-	f.githubAPIVersion = serve.StringLong("github-api-version", defaultGithubAPIVersion, "impersonation: X-GitHub-Api-Version header value")
+	f.githubOAuthToken = fs.StringLong("github-oauth-token", "", "inline GitHub OAuth token (secret; precedence over the GitHub OAuth token file)")
+	f.startupMintRetries = fs.IntLong("startup-mint-retries", defaultStartupMintRetries, "transient startup-mint retries (total attempts = 1 + N)")
+	f.copilotIntegrationID = fs.StringLong("copilot-integration-id", defaultCopilotIntegrationID, "impersonation: Copilot-Integration-Id header value")
+	f.editorVersion = fs.StringLong("editor-version", defaultEditorVersion, "impersonation: Editor-Version header value")
+	f.editorPluginVersion = fs.StringLong("editor-plugin-version", defaultEditorPluginVersion, "impersonation: Editor-Plugin-Version header value")
+	f.copilotUserAgent = fs.StringLong("copilot-user-agent", defaultCopilotUserAgent, "impersonation: User-Agent header value")
+	f.githubAPIVersion = fs.StringLong("github-api-version", defaultGithubAPIVersion, "impersonation: X-GitHub-Api-Version header value")
 
 	return f
 }
@@ -218,10 +236,7 @@ func RegisterServe(root, serve *ff.FlagSet) *ServeFlags {
 // because ff reads the OS environment directly; injecting lookupEnv keeps Resolve
 // pure and testable.
 func (f *ServeFlags) Resolve(lookupEnv func(string) (string, bool)) (ServeConfig, error) {
-	set := setFlags(f.rootFS)
-	for name := range setFlags(f.serveFS) {
-		set[name] = true
-	}
+	set := setFlags(f.fs)
 
 	cfg := ServeConfig{
 		Addr:                 defaultAddr,
@@ -241,7 +256,7 @@ func (f *ServeFlags) Resolve(lookupEnv func(string) (string, bool)) (ServeConfig
 	}
 
 	// file layer (lowest precedence above defaults)
-	if path := resolveConfigPath(set, *f.configPath, lookupEnv); path != "" {
+	if path := f.common.resolvedConfigPath(set, lookupEnv); path != "" {
 		if err := applyFile(&cfg, path); err != nil {
 			return ServeConfig{}, err
 		}
@@ -254,20 +269,9 @@ func (f *ServeFlags) Resolve(lookupEnv func(string) (string, bool)) (ServeConfig
 	if set["addr"] {
 		cfg.Addr = *f.addr
 	}
-	if set["log-level"] {
-		cfg.LogLevel = *f.logLevel
-	}
-	if set["log-format"] {
-		cfg.LogFormat = *f.logFormat
-	}
-	if set["log-file"] {
-		cfg.LogFile = *f.logFile
-	}
+	f.common.applyFlagValues(set, &cfg.LogLevel, &cfg.LogFormat, &cfg.LogFile, &cfg.GithubOAuthTokenFile)
 	if set["shutdown-timeout"] {
 		cfg.ShutdownTimeout = *f.shutdownTimeout
-	}
-	if set["github-oauth-token-file"] {
-		cfg.GithubOAuthTokenFile = *f.oauthTokenFile
 	}
 	if set["apikey"] {
 		cfg.APIKey = *f.apikey
@@ -307,21 +311,6 @@ func (f *ServeFlags) Resolve(lookupEnv func(string) (string, bool)) (ServeConfig
 		return ServeConfig{}, err
 	}
 	return cfg, nil
-}
-
-// VersionRequested reports whether --version appears in args. It is a cheap
-// pre-scan so main can print build info and exit even when the rest of the
-// configuration would fail to load.
-func VersionRequested(args []string) bool {
-	for _, a := range args {
-		if a == "--" {
-			break // end of flags
-		}
-		if a == "--version" || a == "-version" {
-			return true
-		}
-	}
-	return false
 }
 
 // defaultOAuthTokenFile is the default path to the GitHub OAuth token file:
@@ -510,8 +499,8 @@ func validateAddr(addr string) error {
 }
 
 // LoginConfig is the resolved, validated configuration for `copilotd login`. It
-// carries the root-inherited logging fields and the OAuth-token-file write
-// target, plus the two device-flow knobs. None of its fields is a secret, so
+// carries the common operational logging fields and the GitHub OAuth token file
+// write target, plus the two device-flow knobs. None of its fields is a secret, so
 // LogValue enumerates them all.
 type LoginConfig struct {
 	LogLevel  string
@@ -519,7 +508,7 @@ type LoginConfig struct {
 	LogFile   string // empty = stderr
 
 	// GithubOAuthTokenFile is the path login writes the raw GitHub OAuth token to
-	// (the same root-inherited path serve reads). It is a path, not the secret.
+	// (the same command-local setting serve reads). It is a path, not the secret.
 	GithubOAuthTokenFile string
 
 	// GithubClientID is the device-flow OAuth app client id; GithubScope is the
@@ -541,37 +530,28 @@ func (c LoginConfig) LogValue() slog.Value {
 	)
 }
 
-// LoginFlags bundles the parsed flag sets for `copilotd login`. The two
-// login-specific flags are held as typed pointers; the root-inherited flags
-// (logging, config path, OAuth-token-file) are declared by RegisterServe on the
-// shared root set and read by name from loginFS, which walks to its parent.
+// LoginFlags bundles the parsed flag pointers for `copilotd login`.
 type LoginFlags struct {
-	rootFS  *ff.FlagSet
-	loginFS *ff.FlagSet
+	common commonFlags
+	fs     *ff.FlagSet
 
 	githubClientID *string
 	githubScope    *string
 }
 
-// RegisterLogin declares the login-specific flags (github-client-id,
-// github-scope) on login. The root-inherited flags (log-*, config,
-// github-oauth-token-file) are declared once by RegisterServe on root, which
-// login inherits via SetParent; RegisterLogin does not re-declare them. It
-// mirrors RegisterServe: the returned handle's Resolve layers env and TOML over
-// the parsed flags and validates.
-func RegisterLogin(root, login *ff.FlagSet) *LoginFlags {
-	f := &LoginFlags{rootFS: root, loginFS: login}
-	f.githubClientID = login.StringLong("github-client-id", defaultGithubClientID, "device-flow OAuth app client id (override for GitHub Enterprise Server)")
-	f.githubScope = login.StringLong("github-scope", defaultGithubScope, "device-flow OAuth scope")
+// RegisterLogin declares the common operational flags first, followed by the
+// login-specific flags, on a single command-local flag set.
+func RegisterLogin(fs *ff.FlagSet) *LoginFlags {
+	f := &LoginFlags{common: registerCommon(fs), fs: fs}
+	f.githubClientID = fs.StringLong("github-client-id", defaultGithubClientID, "device-flow OAuth app client id (override for GitHub Enterprise Server)")
+	f.githubScope = fs.StringLong("github-scope", defaultGithubScope, "device-flow OAuth scope")
 	return f
 }
 
 // Resolve layers env and TOML over the parsed flags (precedence
 // flags > env > file > default) and validates, returning the LoginConfig.
 func (f *LoginFlags) Resolve(lookupEnv func(string) (string, bool)) (LoginConfig, error) {
-	// setFlags on loginFS walks to the parent root set, so a root-inherited flag
-	// set on the command line (e.g. --github-oauth-token-file) is detected too.
-	set := setFlags(f.loginFS)
+	set := setFlags(f.fs)
 
 	cfg := LoginConfig{
 		LogLevel:             defaultLogLevel,
@@ -583,7 +563,7 @@ func (f *LoginFlags) Resolve(lookupEnv func(string) (string, bool)) (LoginConfig
 	}
 
 	// file layer (lowest precedence above defaults)
-	if path := resolveConfigPath(set, flagString(f.loginFS, "config"), lookupEnv); path != "" {
+	if path := f.common.resolvedConfigPath(set, lookupEnv); path != "" {
 		if err := applyFileLogin(&cfg, path); err != nil {
 			return LoginConfig{}, err
 		}
@@ -591,18 +571,7 @@ func (f *LoginFlags) Resolve(lookupEnv func(string) (string, bool)) (LoginConfig
 	// env layer
 	applyEnvLogin(&cfg, lookupEnv)
 	// flag layer (highest precedence)
-	if set["log-level"] {
-		cfg.LogLevel = flagString(f.loginFS, "log-level")
-	}
-	if set["log-format"] {
-		cfg.LogFormat = flagString(f.loginFS, "log-format")
-	}
-	if set["log-file"] {
-		cfg.LogFile = flagString(f.loginFS, "log-file")
-	}
-	if set["github-oauth-token-file"] {
-		cfg.GithubOAuthTokenFile = flagString(f.loginFS, "github-oauth-token-file")
-	}
+	f.common.applyFlagValues(set, &cfg.LogLevel, &cfg.LogFormat, &cfg.LogFile, &cfg.GithubOAuthTokenFile)
 	if set["github-client-id"] {
 		cfg.GithubClientID = *f.githubClientID
 	}
@@ -682,14 +651,4 @@ func applyEnvLogin(cfg *LoginConfig, lookupEnv func(string) (string, bool)) {
 	overlayLogin(cfg, func(key string) (string, bool) {
 		return lookupEnv(envVarName(key))
 	})
-}
-
-// flagString returns the current string value of the named flag (its parsed
-// value, or its default if unset), reading through parent flag sets. It returns
-// "" for an unknown name.
-func flagString(fs *ff.FlagSet, name string) string {
-	if fl, ok := fs.GetFlag(name); ok {
-		return fl.GetValue()
-	}
-	return ""
 }

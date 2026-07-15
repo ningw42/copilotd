@@ -44,7 +44,7 @@ by the identity manager. They are opposite ends of the onion and never conflated
 - **GitHub↔Copilot identity** — OAuth device-flow login (`copilotd login`) **or**
   an injected token; the `copilot_internal/v2/token` exchange; on-demand minting
   (plus one startup mint) with a strict single-in-flight invariant; owner-only
-  OAuth-token file; the impersonation header set.
+  GitHub OAuth token file; the impersonation header set.
 - **Raw forwarder** — hand-rolled dumb passthrough on the three provider routes,
   with header impersonation, denylist header policy, per-request body bounding,
   and verbatim upstream response/error passthrough.
@@ -107,7 +107,7 @@ copilotd/
     ├── logging/             # unchanged, reused
     ├── build/               # unchanged, reused
     ├── apierror/    [NEW]    # provider-shaped error bodies (Anthropic + OpenAI), one leaf
-    ├── identity/    [NEW]    # device flow · exchange · on-demand mint · token file · headers
+    ├── identity/    [NEW]    # device flow · exchange · on-demand mint · GitHub OAuth token file · headers
     ├── forward/     [NEW]    # the dumb forwarder: path map · header build · body bound · Do · copy-back
     └── server/              # + auth middleware · readiness gate · provider routes · /readyz
 ```
@@ -150,22 +150,35 @@ The entrypoint becomes a git-style subcommand tree, assembled with `ff/v4`'s
 ```
 copilotd                    → prints general help (identical to `copilotd help`)
 copilotd help               → general help (root usage + subcommand list)
-copilotd help serve         → serve's help
-copilotd help login         → login's help
+copilotd help <subcommand>  → the named subcommand's help
 copilotd serve  [flags]     → run the HTTP daemon (the forward path)
-copilotd login  [flags]     → device flow → write the OAuth-token file
-copilotd version            → build info (`--version` retained as an alias)
+copilotd login  [flags]     → device flow → write the GitHub OAuth token file
+copilotd version            → build info
 ```
 
-- **Root** carries the inherited flags — `--log-level`, `--log-format`,
-  `--log-file`, `--config`, `--github-oauth-token-file` — so both `serve` and
-  `login` share logging, the config file, and the token-file path. Root's `Exec`
-  prints help.
-- **`help`** is a small hand-rolled subcommand: with no argument it prints root
-  usage; `help <name>` looks the subcommand up in the tree and renders its
-  `ffhelp`. (ff's built-in help is the `-h`/`--help` flag; the `help <sub>` verb
-  is the ~15-line piece we add — an implementation detail to confirm, not a
-  design fork.)
+- **Root and informational commands have no operational flags.** The shared
+  operational settings — `--log-level`, `--log-format`, `--log-file`,
+  `--config`, and `--github-oauth-token-file` — are registered independently on
+  `serve` and `login`, after the subcommand name. Their precedence remains flag
+  > environment > TOML file > default; the TOML document remains global and
+  each command consumes only its relevant subset.
+- **`version` is the sole version interface.** It prints exactly one
+  newline-terminated `VERSION (COMMIT, DATE)` line. The removed `--version` and
+  `-version` spellings are ordinary parser errors.
+- **`help` accepts zero or one operand.** With no operand it prints general help;
+  with one it renders that command's generated help. Subcommand lookup is
+  case-insensitive. Parser-native `-h` and `--help` remain available on root and
+  every subcommand but are intentionally not listed in generated help.
+- Bare `copilotd`, `help`, `version`, and built-in help flags do not load or
+  validate runtime configuration and ignore every `COPILOTD_*` setting.
+- `serve`, `login`, and `version` reject every operand; `help` rejects more than
+  one. Syntax errors are validated before configuration resolution or side
+  effects, are concise, and do not dump help. Root parser errors have one
+  `copilotd:` prefix; subcommand errors retain `copilotd: <subcommand>:`.
+- General usage is `copilotd <SUBCOMMAND>` and lists `version`, `help`, `serve`,
+  then `login`. The command usages are `copilotd version`,
+  `copilotd help [SUBCOMMAND]`, `copilotd serve [FLAGS]`, and
+  `copilotd login [FLAGS]`.
 - The testable `run(args, env, stdout, stderr) int` entrypoint from Phase 0 is
   preserved; it now drives `rootCmd.ParseAndRun` and returns the exit code.
 - `serve` reuses the **entire** Phase 0 lifecycle unchanged (config load → build
@@ -257,7 +270,7 @@ mid-mint cannot cancel the exchange other waiters depend on. Callers wait via
 `singleflight.Group.DoChan` and `select` on their own request context, so a
 disconnecting caller returns promptly without poisoning the shared mint.
 
-### 6.5 OAuth-token file & source precedence
+### 6.5 GitHub OAuth token file & source precedence
 
 - **File:** the raw GitHub OAuth token, stored at
   `<os.UserConfigDir()>/copilotd/github-oauth-token` by default
@@ -269,9 +282,10 @@ disconnecting caller returns promptly without poisoning the shared mint.
   enforcement there is best-effort via the per-user profile directory, with a
   documented caveat (mirrors Phase 0's Darwin static-binary caveat).
 - **Source precedence:** inline `--github-oauth-token` / `COPILOTD_GITHUB_OAUTH_TOKEN`
-  / config-file `github-oauth-token` **>** the token file. A present-but-empty
-  (whitespace-only) inline value or token file counts as **absent**. If *neither*
-  yields a token, the daemon **fails fast** with a "run `copilotd login`" message.
+  / config-file `github-oauth-token` **>** the GitHub OAuth token file. A
+  present-but-empty (whitespace-only) inline value or GitHub OAuth token file
+  counts as **absent**. If *neither* yields a GitHub OAuth token, the daemon
+  **fails fast** with a "run `copilotd login`" message.
   Once any OAuth token is present, the daemon starts and
   degrades-on-exchange-failure — fail-fast fires **only** when there is nothing to
   try.
@@ -294,10 +308,10 @@ exchange (entitlement failures surface at first `serve` exchange, classified per
    `expired_token`, and `access_denied`.
 4. On success, fetch `GET https://api.github.com/user` and print the
    authenticated login as confirmation (not persisted), then write the raw token
-   to the OAuth-token file (`0600`, atomic) and print its path. If a token file
-   already exists it is **overwritten**, with a one-line notice ("replacing
-   existing token at `<path>`") — no prompt or `--force` gate, since completing
-   the device flow is already deliberate.
+   to the GitHub OAuth token file (`0600`, atomic) and print its path. If the
+   GitHub OAuth token file already exists it is **overwritten**, with a one-line
+   replacement notice containing its path — no prompt or `--force` gate, since
+   completing the device flow is already deliberate.
 
 ### 6.7 Impersonation header set
 
@@ -459,7 +473,7 @@ the appropriate typed config.
 pattern). The Phase 0 `LogValue` test is extended to assert neither ever appears
 in log output.
 
-### 9.1 Global (root — inherited by `serve` and `login`)
+### 9.1 Shared operational settings (`serve` and `login`)
 
 | Setting | TOML | Flag | Env | Default | Remarks |
 | --- | --- | --- | --- | --- | --- |
@@ -467,7 +481,7 @@ in log output.
 | Log format | `log-format` | `--log-format` | `COPILOTD_LOG_FORMAT` | `text` | `text`\|`json` |
 | Log file | `log-file` | `--log-file` | `COPILOTD_LOG_FILE` | *(empty)* | Empty = stderr |
 | Config file | — | `--config` | `COPILOTD_CONFIG` | *(empty)* | Path to this TOML file |
-| OAuth token file | `github-oauth-token-file` | `--github-oauth-token-file` | `COPILOTD_GITHUB_OAUTH_TOKEN_FILE` | `<UserConfigDir>/copilotd/github-oauth-token` | Owner-only `0600`, atomic; `login` writes, `serve` reads; holds the raw token |
+| GitHub OAuth token file | `github-oauth-token-file` | `--github-oauth-token-file` | `COPILOTD_GITHUB_OAUTH_TOKEN_FILE` | `<UserConfigDir>/copilotd/github-oauth-token` | Owner-only `0600`, atomic; `login` writes, `serve` reads; holds the raw GitHub OAuth token |
 
 ### 9.2 `copilotd serve`
 
@@ -476,7 +490,7 @@ in log output.
 | Bind address | `addr` | `--addr` | `COPILOTD_ADDR` | `127.0.0.1:8080` | Loopback default |
 | Shutdown timeout | `shutdown-timeout` | `--shutdown-timeout` | `COPILOTD_SHUTDOWN_TIMEOUT` | `10s` | Graceful-shutdown grace |
 | **API key** | `apikey` | `--apikey` | `COPILOTD_APIKEY` | *(required)* | **Secret**, redacted; fail-fast if unset; client presents via `Authorization: Bearer` or `x-api-key`. Flag form is `ps`-visible (documented caveat) |
-| **Injected OAuth token** | `github-oauth-token` | `--github-oauth-token` | `COPILOTD_GITHUB_OAUTH_TOKEN` | *(empty)* | **Secret**; inline value; precedence over the token file |
+| **Injected GitHub OAuth token** | `github-oauth-token` | `--github-oauth-token` | `COPILOTD_GITHUB_OAUTH_TOKEN` | *(empty)* | **Secret**; inline value; precedence over the GitHub OAuth token file |
 | Upstream base override | `upstream-base` | `--upstream-base` | `COPILOTD_UPSTREAM_BASE` | *(empty)* | Empty ⇒ use exchange response's `endpoints.api` |
 | Outbound timeout | `outbound-timeout` | `--outbound-timeout` | `COPILOTD_OUTBOUND_TIMEOUT` | `600s` | Per-request ctx deadline (not a blunt client timeout) |
 | Max request bytes | `max-request-bytes` | `--max-request-bytes` | `COPILOTD_MAX_REQUEST_BYTES` | `33554432` (32 MiB) | Safety rail; over-limit ⇒ `413` |
@@ -494,8 +508,8 @@ in log output.
 | GitHub client id | `github-client-id` | `--github-client-id` | `COPILOTD_GITHUB_CLIENT_ID` | `Iv1.b507a08c87ecfe98` | Device-flow OAuth app; override for GHES |
 | GitHub scope | `github-scope` | `--github-scope` | `COPILOTD_GITHUB_SCOPE` | `read:user` | Device-flow scope |
 
-*(plus the inherited `--github-oauth-token-file` write target and the global
-logging/config flags.)*
+*(plus the five shared operational settings from §9.1, including the
+`--github-oauth-token-file` write target.)*
 
 ### 9.4 Validation
 
@@ -533,8 +547,8 @@ dependencies are injected.
   cache and the safety-margin staleness threshold (injected clock); on-demand mint
   is a single attempt (no retry); startup mint retries transient failures up to
   `--startup-mint-retries` and short-circuits on auth-class; `Ready()` tracks the
-  last mint outcome (stays ready across expiry, flips on mint failure); token-file
-  round-trip, `0600` enforcement, refuse-on-too-open (Unix), atomic write;
+  last mint outcome (stays ready across expiry, flips on mint failure); GitHub
+  OAuth token file round-trip, `0600` enforcement, refuse-on-too-open (Unix), atomic write;
   device-flow polling (`authorization_pending`/`slow_down`/`expired_token`/
   `access_denied`); source precedence (inline > file) and fail-fast on no source;
   impersonation headers present on the exchange request.
@@ -552,8 +566,10 @@ dependencies are injected.
 - **`apierror`** — each `(provider, kind)` emits the correct status + JSON shape.
 - **`config`** — new-field precedence + validation; `LogValue` **omits** `apikey`
   and `github-oauth-token` (extends the Phase 0 redaction test).
-- **CLI (`run`)** — dispatch: bare `copilotd` ⇒ help; `help serve`/`help login`;
-  `version`/`--version`; unknown subcommand ⇒ error + non-zero exit.
+- **CLI (`run`)** — strict dispatch and arity; informational paths ignore broken
+  configuration; `version` is the sole build-info interface; parser-native help
+  aliases; command-local operational flags and generated-help ordering; concise,
+  correctly qualified parser/operand errors; unknown subcommand guidance.
 - **End-to-end smoke** (Phase 1's outcome as an automated test) — server + API
   key + a **stubbed identity** (static `Credential` → an `httptest` "Copilot") →
   `POST /anthropic/v1/messages` with a valid key → `200` + verbatim body
@@ -591,7 +607,7 @@ dependencies are injected.
      `X-GitHub-Api-Version` value (version-sensitive; treated as knobs).
   4. Device-flow scope (`read:user` vs alternatives) against a live login;
      entitlement, not scope, gates Copilot access.
-  5. Windows owner-only file semantics for the OAuth-token file (best-effort;
+  5. Windows owner-only semantics for the GitHub OAuth token file (best-effort;
      documented caveat).
 - **Drift sensitivity (ROADMAP §8):** the impersonation headers, the token
   exchange, and the upstream paths are the drift-exposed surfaces. Keeping them

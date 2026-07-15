@@ -29,13 +29,13 @@ func noEnv() func(string) (string, bool) { return envFunc(nil) }
 // key itself, so Resolve passes its fail-fast validation.
 const testAPIKey = "test-api-key"
 
-// loadServe builds the serve flag set the way the command tree does (root and
-// serve flags on one set for the pure loader), parses args, and resolves. It is
+// loadServe builds the serve flag set the way the command tree does, parses
+// args, and resolves. It is
 // the test seam that keeps the Phase 0 precedence/validation tests intact after
 // the split into RegisterServe + Resolve.
 func loadServe(args []string, lookupEnv func(string) (string, bool)) (ServeConfig, error) {
 	fs := ff.NewFlagSet("copilotd")
-	f := RegisterServe(fs, fs)
+	f := RegisterServe(fs)
 	if err := ff.Parse(fs, args); err != nil {
 		return ServeConfig{}, fmt.Errorf("parse flags: %w", err)
 	}
@@ -188,7 +188,7 @@ func TestLoadPrecedence(t *testing.T) {
 	}
 }
 
-// TestLoadOAuthTokenFile covers the new root-inherited --github-oauth-token-file
+// TestLoadOAuthTokenFile covers the shared --github-oauth-token-file
 // flag: default path, flag override, env override, and flag > env precedence.
 // This phase only parses and stores the path; it is never read here.
 func TestLoadOAuthTokenFile(t *testing.T) {
@@ -396,37 +396,12 @@ func TestLoadServeIdentityFields(t *testing.T) {
 	})
 }
 
-func TestVersionRequested(t *testing.T) {
-	tests := []struct {
-		name string
-		args []string
-		want bool
-	}{
-		{"no version", []string{"--addr", ":8080"}, false},
-		{"long version", []string{"--version"}, true},
-		{"version among others", []string{"--addr", ":8080", "--version"}, true},
-		{"nil args", nil, false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := VersionRequested(tc.args); got != tc.want {
-				t.Errorf("VersionRequested(%v) = %v, want %v", tc.args, got, tc.want)
-			}
-		})
-	}
-}
-
-// loadLogin builds the login flag tree the way the command tree does: root flags
-// (declared by RegisterServe) shared with a login flag set that carries the two
-// login-specific flags, then parses args (against login, which inherits root) and
-// resolves. It mirrors production wiring so the precedence/validation tests
+// loadLogin builds the login flag set the way the command tree does, parses args,
+// and resolves. It mirrors production wiring so the precedence/validation tests
 // exercise the same code path.
 func loadLogin(args []string, lookupEnv func(string) (string, bool)) (LoginConfig, error) {
-	root := ff.NewFlagSet("copilotd")
-	serve := ff.NewFlagSet("serve").SetParent(root)
-	_ = RegisterServe(root, serve) // declares the shared root-inherited flags
-	login := ff.NewFlagSet("login").SetParent(root)
-	lf := RegisterLogin(root, login)
+	login := ff.NewFlagSet("login")
+	lf := RegisterLogin(login)
 	if err := ff.Parse(login, args); err != nil {
 		return LoginConfig{}, fmt.Errorf("parse flags: %w", err)
 	}
@@ -448,6 +423,88 @@ func TestLoadLoginDefaults(t *testing.T) {
 	}
 	if got != want {
 		t.Errorf("loadLogin() = %+v, want %+v", got, want)
+	}
+}
+
+func TestServeAndLoginResolveIndependentCommonFlags(t *testing.T) {
+	serveConfig := filepath.Join(t.TempDir(), "serve.toml")
+	if err := os.WriteFile(serveConfig, []byte("unknown-key = \"ignored\"\n"), 0o600); err != nil {
+		t.Fatalf("write serve config: %v", err)
+	}
+	serveFS := ff.NewFlagSet("serve")
+	serveFlags := RegisterServe(serveFS)
+	if err := ff.Parse(serveFS, []string{
+		"--apikey", testAPIKey,
+		"--log-level", "debug",
+		"--log-format", "json",
+		"--log-file", "/tmp/serve.log",
+		"--config", serveConfig,
+		"--github-oauth-token-file", "/tmp/serve-token",
+	}); err != nil {
+		t.Fatalf("parse serve flags: %v", err)
+	}
+
+	loginConfig := filepath.Join(t.TempDir(), "login.toml")
+	if err := os.WriteFile(loginConfig, []byte("other-unknown-key = \"ignored\"\n"), 0o600); err != nil {
+		t.Fatalf("write login config: %v", err)
+	}
+	loginFS := ff.NewFlagSet("login")
+	loginFlags := RegisterLogin(loginFS)
+	if err := ff.Parse(loginFS, []string{
+		"--log-level", "error",
+		"--log-format", "json",
+		"--log-file", "/tmp/login.log",
+		"--config", loginConfig,
+		"--github-oauth-token-file", "/tmp/login-token",
+	}); err != nil {
+		t.Fatalf("parse login flags: %v", err)
+	}
+
+	serve, err := serveFlags.Resolve(noEnv())
+	if err != nil {
+		t.Fatalf("resolve serve flags: %v", err)
+	}
+	login, err := loginFlags.Resolve(noEnv())
+	if err != nil {
+		t.Fatalf("resolve login flags: %v", err)
+	}
+
+	if serve.LogLevel != "debug" || serve.LogFormat != "json" || serve.LogFile != "/tmp/serve.log" || serve.GithubOAuthTokenFile != "/tmp/serve-token" {
+		t.Errorf("serve common flags = %q/%q/%q/%q, want debug/json//tmp/serve.log//tmp/serve-token", serve.LogLevel, serve.LogFormat, serve.LogFile, serve.GithubOAuthTokenFile)
+	}
+	if login.LogLevel != "error" || login.LogFormat != "json" || login.LogFile != "/tmp/login.log" || login.GithubOAuthTokenFile != "/tmp/login-token" {
+		t.Errorf("login common flags = %q/%q/%q/%q, want error/json//tmp/login.log//tmp/login-token", login.LogLevel, login.LogFormat, login.LogFile, login.GithubOAuthTokenFile)
+	}
+}
+
+func TestGlobalTOMLProjectsOntoOperationalCommands(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "copilotd.toml")
+	document := strings.Join([]string{
+		`log-level = "warn"`,
+		`addr = "127.0.0.1:9191"`,
+		`apikey = "from-global-document"`,
+		`github-client-id = "client-from-global-document"`,
+		`github-scope = "scope:from-global-document"`,
+		`unknown-key = "ignored"`,
+	}, "\n")
+	if err := os.WriteFile(path, []byte(document), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	serve, err := loadServe([]string{"--config", path}, noEnv())
+	if err != nil {
+		t.Fatalf("load serve from global document: %v", err)
+	}
+	if serve.LogLevel != "warn" || serve.Addr != "127.0.0.1:9191" || serve.APIKey != "from-global-document" {
+		t.Errorf("serve projection = %+v, want shared and serve keys from global document", serve)
+	}
+
+	login, err := loadLogin([]string{"--config", path}, noEnv())
+	if err != nil {
+		t.Fatalf("load login from global document: %v", err)
+	}
+	if login.LogLevel != "warn" || login.GithubClientID != "client-from-global-document" || login.GithubScope != "scope:from-global-document" {
+		t.Errorf("login projection = %+v, want shared and login keys from global document", login)
 	}
 }
 
@@ -488,7 +545,7 @@ func TestLoadLoginPrecedence(t *testing.T) {
 		}
 	})
 
-	t.Run("inherited --github-oauth-token-file flag over env", func(t *testing.T) {
+	t.Run("shared --github-oauth-token-file flag over env", func(t *testing.T) {
 		got, err := loadLogin(
 			[]string{"--github-oauth-token-file", "/tmp/flag.tok"},
 			envFunc(map[string]string{"COPILOTD_GITHUB_OAUTH_TOKEN_FILE": "/tmp/env.tok"}),
