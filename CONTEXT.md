@@ -18,8 +18,13 @@ _Avoid_: managed token, token (unqualified)
 **GitHub OAuth token**:
 The long-lived GitHub user-to-server token obtained via login (or injected).
 Durable — no timed expiry; dies only on revocation. Stored raw in the owner-only
-token file; the sole input to the exchange.
+GitHub OAuth token file; the sole input to the exchange.
 _Avoid_: credential, oauth, gho token
+
+**GitHub OAuth token file**:
+The owner-only durable file that stores the raw GitHub OAuth token. Login writes
+it atomically; serve reads it as a token source.
+_Avoid_: token file, credential file
 
 **Copilot token**:
 The short-lived (~25 min) bearer token the exchange mints from the GitHub OAuth
@@ -48,12 +53,13 @@ is no scheduled refresh.
 _Avoid_: refresh, scheduled refresh, background refresh
 
 **Resolve**:
-Reading the GitHub OAuth token from its source (inline value, then token file) at
-startup. A local read, not a network call.
+Reading the GitHub OAuth token from its source (inline value, then GitHub OAuth
+token file) at startup. A local read, not a network call.
 
 **Login**:
 The `copilotd login` device flow that obtains a GitHub OAuth token and writes it
-to the token file. Obtains the OAuth token only; performs no exchange.
+to the GitHub OAuth token file. Obtains the OAuth token only; performs no
+exchange.
 
 ### Surfaces & forwarding
 
