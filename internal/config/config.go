@@ -30,12 +30,16 @@ const (
 	defaultLogFormat       = "text"
 	defaultShutdownTimeout = 10 * time.Second
 
-	// defaultOutboundTimeout bounds each upstream call via a per-request context
-	// deadline (not a blunt client timeout); generous so a slow completion is not
-	// killed. defaultMaxRequestBytes (32 MiB) is a safety rail against pathological
-	// bodies, generous enough for multi-image base64.
-	defaultOutboundTimeout = 600 * time.Second
-	defaultMaxRequestBytes = 33554432
+	// The timeout defaults separately bound buffered response completion, stream
+	// silence, individual downstream writes, and time-to-first-byte. The
+	// request-body cap (32 MiB) is generous enough for multi-image base64 while
+	// guarding against pathological bodies.
+	defaultOutboundTimeout         = 600 * time.Second
+	defaultStreamIdleTimeout       = 90 * time.Second
+	defaultStreamKeepaliveInterval = 15 * time.Second
+	defaultWriteTimeout            = 90 * time.Second
+	defaultResponseHeaderTimeout   = 600 * time.Second
+	defaultMaxRequestBytes         = 33554432
 
 	// defaultStartupMintRetries bounds the transient-failure retries of the boot
 	// warm-up mint (total attempts = 1 + N); auth-class failures short-circuit.
@@ -91,8 +95,20 @@ type ServeConfig struct {
 	// it from the token exchange's endpoints.api (a later slice); it is stored now.
 	UpstreamBase string
 
-	// OutboundTimeout bounds each upstream call via a per-request context deadline.
+	// OutboundTimeout is the total backstop for a buffered upstream response.
 	OutboundTimeout time.Duration
+
+	// StreamIdleTimeout bounds genuine upstream silence on a streaming response.
+	StreamIdleTimeout time.Duration
+
+	// StreamKeepaliveInterval bounds an idle gap before an OpenAI keepalive.
+	StreamKeepaliveInterval time.Duration
+
+	// WriteTimeout bounds each individual downstream write.
+	WriteTimeout time.Duration
+
+	// ResponseHeaderTimeout bounds the wait for upstream response headers.
+	ResponseHeaderTimeout time.Duration
 
 	// MaxRequestBytes caps an inbound request body; an over-limit body yields 413.
 	MaxRequestBytes int64
@@ -130,6 +146,10 @@ func (c ServeConfig) LogValue() slog.Value {
 		slog.String("github-oauth-token-file", c.GithubOAuthTokenFile),
 		slog.String("upstream-base", c.UpstreamBase),
 		slog.Duration("outbound-timeout", c.OutboundTimeout),
+		slog.Duration("stream-idle-timeout", c.StreamIdleTimeout),
+		slog.Duration("stream-keepalive-interval", c.StreamKeepaliveInterval),
+		slog.Duration("write-timeout", c.WriteTimeout),
+		slog.Duration("response-header-timeout", c.ResponseHeaderTimeout),
 		slog.Int64("max-request-bytes", c.MaxRequestBytes),
 		slog.Int("startup-mint-retries", c.StartupMintRetries),
 		slog.String("copilot-integration-id", c.CopilotIntegrationID),
@@ -187,12 +207,16 @@ type ServeFlags struct {
 	fs     *ff.FlagSet
 
 	// serve-specific
-	addr            *string
-	shutdownTimeout *time.Duration
-	apikey          *string
-	upstreamBase    *string
-	outboundTimeout *time.Duration
-	maxRequestBytes *int64
+	addr                    *string
+	shutdownTimeout         *time.Duration
+	apikey                  *string
+	upstreamBase            *string
+	outboundTimeout         *time.Duration
+	streamIdleTimeout       *time.Duration
+	streamKeepaliveInterval *time.Duration
+	writeTimeout            *time.Duration
+	responseHeaderTimeout   *time.Duration
+	maxRequestBytes         *int64
 
 	githubOAuthToken     *string
 	startupMintRetries   *int
@@ -213,7 +237,11 @@ func RegisterServe(fs *ff.FlagSet) *ServeFlags {
 	f.shutdownTimeout = fs.DurationLong("shutdown-timeout", defaultShutdownTimeout, "graceful shutdown grace period")
 	f.apikey = fs.StringLong("apikey", "", "required inbound API key clients must present (secret)")
 	f.upstreamBase = fs.StringLong("upstream-base", "", "override the upstream base URL (empty = resolved from the token exchange)")
-	f.outboundTimeout = fs.DurationLong("outbound-timeout", defaultOutboundTimeout, "per-request upstream timeout")
+	f.outboundTimeout = fs.DurationLong("outbound-timeout", defaultOutboundTimeout, "buffered upstream response timeout")
+	f.streamIdleTimeout = fs.DurationLong("stream-idle-timeout", defaultStreamIdleTimeout, "upstream stream idle timeout")
+	f.streamKeepaliveInterval = fs.DurationLong("stream-keepalive-interval", defaultStreamKeepaliveInterval, "OpenAI stream keepalive interval")
+	f.writeTimeout = fs.DurationLong("write-timeout", defaultWriteTimeout, "per-write downstream timeout")
+	f.responseHeaderTimeout = fs.DurationLong("response-header-timeout", defaultResponseHeaderTimeout, "upstream response-header timeout")
 	f.maxRequestBytes = fs.Int64Long("max-request-bytes", defaultMaxRequestBytes, "maximum inbound request body size in bytes")
 
 	f.githubOAuthToken = fs.StringLong("github-oauth-token", "", "inline GitHub OAuth token (secret; precedence over the GitHub OAuth token file)")
@@ -239,20 +267,24 @@ func (f *ServeFlags) Resolve(lookupEnv func(string) (string, bool)) (ServeConfig
 	set := setFlags(f.fs)
 
 	cfg := ServeConfig{
-		Addr:                 defaultAddr,
-		LogLevel:             defaultLogLevel,
-		LogFormat:            defaultLogFormat,
-		LogFile:              "",
-		ShutdownTimeout:      defaultShutdownTimeout,
-		GithubOAuthTokenFile: defaultOAuthTokenFile(),
-		OutboundTimeout:      defaultOutboundTimeout,
-		MaxRequestBytes:      defaultMaxRequestBytes,
-		StartupMintRetries:   defaultStartupMintRetries,
-		CopilotIntegrationID: defaultCopilotIntegrationID,
-		EditorVersion:        defaultEditorVersion,
-		EditorPluginVersion:  defaultEditorPluginVersion,
-		CopilotUserAgent:     defaultCopilotUserAgent,
-		GithubAPIVersion:     defaultGithubAPIVersion,
+		Addr:                    defaultAddr,
+		LogLevel:                defaultLogLevel,
+		LogFormat:               defaultLogFormat,
+		LogFile:                 "",
+		ShutdownTimeout:         defaultShutdownTimeout,
+		GithubOAuthTokenFile:    defaultOAuthTokenFile(),
+		OutboundTimeout:         defaultOutboundTimeout,
+		StreamIdleTimeout:       defaultStreamIdleTimeout,
+		StreamKeepaliveInterval: defaultStreamKeepaliveInterval,
+		WriteTimeout:            defaultWriteTimeout,
+		ResponseHeaderTimeout:   defaultResponseHeaderTimeout,
+		MaxRequestBytes:         defaultMaxRequestBytes,
+		StartupMintRetries:      defaultStartupMintRetries,
+		CopilotIntegrationID:    defaultCopilotIntegrationID,
+		EditorVersion:           defaultEditorVersion,
+		EditorPluginVersion:     defaultEditorPluginVersion,
+		CopilotUserAgent:        defaultCopilotUserAgent,
+		GithubAPIVersion:        defaultGithubAPIVersion,
 	}
 
 	// file layer (lowest precedence above defaults)
@@ -281,6 +313,18 @@ func (f *ServeFlags) Resolve(lookupEnv func(string) (string, bool)) (ServeConfig
 	}
 	if set["outbound-timeout"] {
 		cfg.OutboundTimeout = *f.outboundTimeout
+	}
+	if set["stream-idle-timeout"] {
+		cfg.StreamIdleTimeout = *f.streamIdleTimeout
+	}
+	if set["stream-keepalive-interval"] {
+		cfg.StreamKeepaliveInterval = *f.streamKeepaliveInterval
+	}
+	if set["write-timeout"] {
+		cfg.WriteTimeout = *f.writeTimeout
+	}
+	if set["response-header-timeout"] {
+		cfg.ResponseHeaderTimeout = *f.responseHeaderTimeout
 	}
 	if set["max-request-bytes"] {
 		cfg.MaxRequestBytes = *f.maxRequestBytes
@@ -406,6 +450,34 @@ func overlay(cfg *ServeConfig, source string, get func(key string) (string, bool
 		}
 		cfg.OutboundTimeout = d
 	}
+	if v, ok := get("stream-idle-timeout"); ok {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return fmt.Errorf("invalid stream-idle-timeout %q from %s: %w", v, source, err)
+		}
+		cfg.StreamIdleTimeout = d
+	}
+	if v, ok := get("stream-keepalive-interval"); ok {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return fmt.Errorf("invalid stream-keepalive-interval %q from %s: %w", v, source, err)
+		}
+		cfg.StreamKeepaliveInterval = d
+	}
+	if v, ok := get("write-timeout"); ok {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return fmt.Errorf("invalid write-timeout %q from %s: %w", v, source, err)
+		}
+		cfg.WriteTimeout = d
+	}
+	if v, ok := get("response-header-timeout"); ok {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return fmt.Errorf("invalid response-header-timeout %q from %s: %w", v, source, err)
+		}
+		cfg.ResponseHeaderTimeout = d
+	}
 	if v, ok := get("max-request-bytes"); ok {
 		n, err := strconv.ParseInt(v, 10, 64)
 		if err != nil {
@@ -476,6 +548,18 @@ func (c ServeConfig) validate() error {
 	}
 	if c.OutboundTimeout <= 0 {
 		return fmt.Errorf("invalid outbound-timeout %v: must be positive", c.OutboundTimeout)
+	}
+	if c.StreamIdleTimeout <= 0 {
+		return fmt.Errorf("invalid stream-idle-timeout %v: must be positive", c.StreamIdleTimeout)
+	}
+	if c.StreamKeepaliveInterval <= 0 {
+		return fmt.Errorf("invalid stream-keepalive-interval %v: must be positive", c.StreamKeepaliveInterval)
+	}
+	if c.WriteTimeout <= 0 {
+		return fmt.Errorf("invalid write-timeout %v: must be positive", c.WriteTimeout)
+	}
+	if c.ResponseHeaderTimeout <= 0 {
+		return fmt.Errorf("invalid response-header-timeout %v: must be positive", c.ResponseHeaderTimeout)
 	}
 	if c.MaxRequestBytes <= 0 {
 		return fmt.Errorf("invalid max-request-bytes %d: must be positive", c.MaxRequestBytes)

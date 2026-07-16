@@ -44,21 +44,25 @@ func loadServe(args []string, lookupEnv func(string) (string, bool)) (ServeConfi
 
 func defaultConfig() ServeConfig {
 	return ServeConfig{
-		Addr:                 "127.0.0.1:8080",
-		LogLevel:             "info",
-		LogFormat:            "text",
-		LogFile:              "",
-		ShutdownTimeout:      10 * time.Second,
-		GithubOAuthTokenFile: defaultOAuthTokenFile(),
-		APIKey:               testAPIKey,
-		OutboundTimeout:      600 * time.Second,
-		MaxRequestBytes:      33554432,
-		StartupMintRetries:   3,
-		CopilotIntegrationID: "vscode-chat",
-		EditorVersion:        "vscode/1.104.1",
-		EditorPluginVersion:  "copilot-chat/0.26.7",
-		CopilotUserAgent:     "GitHubCopilotChat/0.26.7",
-		GithubAPIVersion:     "2025-04-01",
+		Addr:                    "127.0.0.1:8080",
+		LogLevel:                "info",
+		LogFormat:               "text",
+		LogFile:                 "",
+		ShutdownTimeout:         10 * time.Second,
+		GithubOAuthTokenFile:    defaultOAuthTokenFile(),
+		APIKey:                  testAPIKey,
+		OutboundTimeout:         600 * time.Second,
+		StreamIdleTimeout:       90 * time.Second,
+		StreamKeepaliveInterval: 15 * time.Second,
+		WriteTimeout:            90 * time.Second,
+		ResponseHeaderTimeout:   600 * time.Second,
+		MaxRequestBytes:         33554432,
+		StartupMintRetries:      3,
+		CopilotIntegrationID:    "vscode-chat",
+		EditorVersion:           "vscode/1.104.1",
+		EditorPluginVersion:     "copilot-chat/0.26.7",
+		CopilotUserAgent:        "GitHubCopilotChat/0.26.7",
+		GithubAPIVersion:        "2025-04-01",
 	}
 }
 
@@ -72,6 +76,157 @@ func TestLoadDefaults(t *testing.T) {
 	}
 }
 
+func TestTimeoutConfigPrecedence(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "copilotd.toml")
+	if err := os.WriteFile(path, []byte("write-timeout = \"11s\"\nresponse-header-timeout = \"12s\"\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	tests := []struct {
+		name         string
+		args         []string
+		env          map[string]string
+		wantWrite    time.Duration
+		wantResponse time.Duration
+	}{
+		{
+			name:         "TOML overrides defaults",
+			args:         []string{"--config", path},
+			wantWrite:    11 * time.Second,
+			wantResponse: 12 * time.Second,
+		},
+		{
+			name: "env overrides TOML",
+			args: []string{"--config", path},
+			env: map[string]string{
+				"COPILOTD_WRITE_TIMEOUT":           "21s",
+				"COPILOTD_RESPONSE_HEADER_TIMEOUT": "22s",
+			},
+			wantWrite:    21 * time.Second,
+			wantResponse: 22 * time.Second,
+		},
+		{
+			name: "flags override env",
+			args: []string{"--config", path, "--write-timeout", "31s", "--response-header-timeout", "32s"},
+			env: map[string]string{
+				"COPILOTD_WRITE_TIMEOUT":           "21s",
+				"COPILOTD_RESPONSE_HEADER_TIMEOUT": "22s",
+			},
+			wantWrite:    31 * time.Second,
+			wantResponse: 32 * time.Second,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			env := map[string]string{"COPILOTD_APIKEY": testAPIKey}
+			for key, value := range tc.env {
+				env[key] = value
+			}
+			got, err := loadServe(tc.args, envFunc(env))
+			if err != nil {
+				t.Fatalf("loadServe() error = %v", err)
+			}
+			if got.WriteTimeout != tc.wantWrite {
+				t.Errorf("WriteTimeout = %v, want %v", got.WriteTimeout, tc.wantWrite)
+			}
+			if got.ResponseHeaderTimeout != tc.wantResponse {
+				t.Errorf("ResponseHeaderTimeout = %v, want %v", got.ResponseHeaderTimeout, tc.wantResponse)
+			}
+		})
+	}
+}
+
+func TestStreamIdleTimeoutConfigPrecedence(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "copilotd.toml")
+	if err := os.WriteFile(path, []byte("stream-idle-timeout = \"11s\"\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	tests := []struct {
+		name string
+		args []string
+		env  map[string]string
+		want time.Duration
+	}{
+		{name: "default", want: 90 * time.Second},
+		{name: "TOML overrides default", args: []string{"--config", path}, want: 11 * time.Second},
+		{
+			name: "env overrides TOML",
+			args: []string{"--config", path},
+			env:  map[string]string{"COPILOTD_STREAM_IDLE_TIMEOUT": "21s"},
+			want: 21 * time.Second,
+		},
+		{
+			name: "flag overrides env",
+			args: []string{"--config", path, "--stream-idle-timeout", "31s"},
+			env:  map[string]string{"COPILOTD_STREAM_IDLE_TIMEOUT": "21s"},
+			want: 31 * time.Second,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			env := map[string]string{"COPILOTD_APIKEY": testAPIKey}
+			for key, value := range tc.env {
+				env[key] = value
+			}
+			got, err := loadServe(tc.args, envFunc(env))
+			if err != nil {
+				t.Fatalf("loadServe() error = %v", err)
+			}
+			if got.StreamIdleTimeout != tc.want {
+				t.Errorf("StreamIdleTimeout = %v, want %v", got.StreamIdleTimeout, tc.want)
+			}
+		})
+	}
+}
+
+func TestStreamKeepaliveIntervalConfigPrecedence(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "copilotd.toml")
+	if err := os.WriteFile(path, []byte("stream-keepalive-interval = \"11s\"\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	tests := []struct {
+		name string
+		args []string
+		env  map[string]string
+		want time.Duration
+	}{
+		{name: "default", want: 15 * time.Second},
+		{name: "TOML overrides default", args: []string{"--config", path}, want: 11 * time.Second},
+		{
+			name: "env overrides TOML",
+			args: []string{"--config", path},
+			env:  map[string]string{"COPILOTD_STREAM_KEEPALIVE_INTERVAL": "21s"},
+			want: 21 * time.Second,
+		},
+		{
+			name: "flag overrides env",
+			args: []string{"--config", path, "--stream-keepalive-interval", "31s"},
+			env:  map[string]string{"COPILOTD_STREAM_KEEPALIVE_INTERVAL": "21s"},
+			want: 31 * time.Second,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			env := map[string]string{"COPILOTD_APIKEY": testAPIKey}
+			for key, value := range tc.env {
+				env[key] = value
+			}
+			got, err := loadServe(tc.args, envFunc(env))
+			if err != nil {
+				t.Fatalf("loadServe() error = %v", err)
+			}
+			if got.StreamKeepaliveInterval != tc.want {
+				t.Errorf("StreamKeepaliveInterval = %v, want %v", got.StreamKeepaliveInterval, tc.want)
+			}
+		})
+	}
+}
+
 func TestLoadPrecedence(t *testing.T) {
 	tokenFile := defaultOAuthTokenFile()
 
@@ -79,6 +234,10 @@ func TestLoadPrecedence(t *testing.T) {
 	// retry default) into a precedence want, since Resolve now populates them; the
 	// precedence cases only exercise addr/log/file fields.
 	withDefaults := func(c ServeConfig) ServeConfig {
+		c.StreamIdleTimeout = 90 * time.Second
+		c.StreamKeepaliveInterval = 15 * time.Second
+		c.WriteTimeout = 90 * time.Second
+		c.ResponseHeaderTimeout = 600 * time.Second
 		c.StartupMintRetries = 3
 		c.CopilotIntegrationID = "vscode-chat"
 		c.EditorVersion = "vscode/1.104.1"
@@ -241,6 +400,10 @@ func TestLoadValidationErrors(t *testing.T) {
 		{"missing apikey", nil, "apikey"},
 		// outbound-timeout / max-request-bytes are validated after apikey passes.
 		{"non-positive outbound timeout", []string{"--apikey", testAPIKey, "--outbound-timeout", "0s"}, "outbound-timeout"},
+		{"non-positive stream idle timeout", []string{"--apikey", testAPIKey, "--stream-idle-timeout", "0s"}, "stream-idle-timeout"},
+		{"non-positive stream keepalive interval", []string{"--apikey", testAPIKey, "--stream-keepalive-interval", "0s"}, "stream-keepalive-interval"},
+		{"non-positive write timeout", []string{"--apikey", testAPIKey, "--write-timeout", "0s"}, "write-timeout"},
+		{"non-positive response header timeout", []string{"--apikey", testAPIKey, "--response-header-timeout", "0s"}, "response-header-timeout"},
 		{"non-positive max request bytes", []string{"--apikey", testAPIKey, "--max-request-bytes", "0"}, "max-request-bytes"},
 		{"negative startup mint retries", []string{"--apikey", testAPIKey, "--startup-mint-retries", "-1"}, "startup-mint-retries"},
 	}
@@ -259,23 +422,27 @@ func TestLoadValidationErrors(t *testing.T) {
 
 func TestConfigLogValueEmitsOnlyNonSecretFields(t *testing.T) {
 	cfg := ServeConfig{
-		Addr:                 "127.0.0.1:8080",
-		LogLevel:             "info",
-		LogFormat:            "text",
-		LogFile:              "/var/log/copilotd.log",
-		ShutdownTimeout:      10 * time.Second,
-		GithubOAuthTokenFile: "/home/op/.config/copilotd/github-oauth-token",
-		APIKey:               "super-secret-apikey-value",
-		UpstreamBase:         "https://upstream.example.invalid",
-		OutboundTimeout:      600 * time.Second,
-		MaxRequestBytes:      33554432,
-		GithubOAuthToken:     "gho-super-secret-oauth-value",
-		StartupMintRetries:   3,
-		CopilotIntegrationID: "vscode-chat",
-		EditorVersion:        "vscode/1.104.1",
-		EditorPluginVersion:  "copilot-chat/0.26.7",
-		CopilotUserAgent:     "GitHubCopilotChat/0.26.7",
-		GithubAPIVersion:     "2025-04-01",
+		Addr:                    "127.0.0.1:8080",
+		LogLevel:                "info",
+		LogFormat:               "text",
+		LogFile:                 "/var/log/copilotd.log",
+		ShutdownTimeout:         10 * time.Second,
+		GithubOAuthTokenFile:    "/home/op/.config/copilotd/github-oauth-token",
+		APIKey:                  "super-secret-apikey-value",
+		UpstreamBase:            "https://upstream.example.invalid",
+		OutboundTimeout:         600 * time.Second,
+		StreamIdleTimeout:       90 * time.Second,
+		StreamKeepaliveInterval: 15 * time.Second,
+		WriteTimeout:            90 * time.Second,
+		ResponseHeaderTimeout:   600 * time.Second,
+		MaxRequestBytes:         33554432,
+		GithubOAuthToken:        "gho-super-secret-oauth-value",
+		StartupMintRetries:      3,
+		CopilotIntegrationID:    "vscode-chat",
+		EditorVersion:           "vscode/1.104.1",
+		EditorPluginVersion:     "copilot-chat/0.26.7",
+		CopilotUserAgent:        "GitHubCopilotChat/0.26.7",
+		GithubAPIVersion:        "2025-04-01",
 	}
 
 	var buf bytes.Buffer
@@ -292,6 +459,10 @@ func TestConfigLogValueEmitsOnlyNonSecretFields(t *testing.T) {
 		"config.github-oauth-token-file=/home/op/.config/copilotd/github-oauth-token",
 		"config.upstream-base=https://upstream.example.invalid",
 		"config.outbound-timeout=10m0s",
+		"config.stream-idle-timeout=1m30s",
+		"config.stream-keepalive-interval=15s",
+		"config.write-timeout=1m30s",
+		"config.response-header-timeout=10m0s",
 		"config.max-request-bytes=33554432",
 		"config.startup-mint-retries=3",
 		"config.copilot-integration-id=vscode-chat",

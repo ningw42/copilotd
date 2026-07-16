@@ -6,7 +6,9 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/ningw42/copilotd/internal/forward"
 	"github.com/ningw42/copilotd/internal/logging"
+	"github.com/ningw42/copilotd/internal/sse"
 )
 
 const requestIDHeader = "X-Request-Id"
@@ -25,18 +27,21 @@ func requestID(next http.Handler) http.Handler {
 }
 
 // accessLog emits exactly one structured line per request. It labels by route
-// template (r.Pattern) to keep the label low-cardinality and reusable for
-// future metrics, with an "unmatched" fallback on 404. The quiet health route
-// logs at debug so constant polling does not flood info. The request_id
-// attribute is injected by the logging context handler.
-func accessLog(logger *slog.Logger, next http.Handler) http.Handler {
+// template (r.Pattern) to keep the label low-cardinality, with an "unmatched"
+// fallback on 404. For streamed responses it adds the pump summary and observes
+// the terminal-outcome metric. The quiet health route logs at debug so constant
+// polling does not flood info. The request_id attribute is injected by the
+// logging context handler.
+func accessLog(logger *slog.Logger, streamOutcomes StreamOutcomeObserver, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
 
-		next.ServeHTTP(sw, r)
+		ctx := forward.WithStreamResultHolder(r.Context())
+		requestWithHolder := r.WithContext(ctx)
+		next.ServeHTTP(sw, requestWithHolder)
 
-		route := r.Pattern
+		route := requestWithHolder.Pattern
 		if route == "" {
 			route = "unmatched"
 		}
@@ -44,13 +49,25 @@ func accessLog(logger *slog.Logger, next http.Handler) http.Handler {
 		if r.URL.Path == healthPath {
 			level = slog.LevelDebug
 		}
-		logger.LogAttrs(r.Context(), level, "access",
+		attrs := []slog.Attr{
 			slog.String("method", r.Method),
 			slog.String("route", route),
 			slog.Int("status", sw.status),
 			slog.Int64("bytes", sw.bytes),
 			slog.Duration("duration", time.Since(start)),
-		)
+		}
+		if result, ok := forward.StreamResultFromContext(ctx); ok {
+			streamOutcomes.ObserveStreamOutcome(result.Surface, result.Outcome)
+			switch result.Outcome {
+			case sse.OutcomeSynthesized, sse.OutcomeStall, sse.OutcomeUpstreamError:
+				level = slog.LevelWarn
+			}
+			attrs = append(attrs,
+				slog.String("outcome", string(result.Outcome)),
+				slog.Int("frames", result.Frames),
+			)
+		}
+		logger.LogAttrs(r.Context(), level, "access", attrs...)
 	})
 }
 

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/ningw42/copilotd/internal/forward"
 	"github.com/ningw42/copilotd/internal/identity"
 	"github.com/ningw42/copilotd/internal/logging"
+	"github.com/ningw42/copilotd/internal/sse"
 )
 
 const testAPIKey = "test-api-key"
@@ -48,8 +50,8 @@ func readyStub(baseURL string) *identity.Static {
 func testHandler(t *testing.T, logger *slog.Logger) http.Handler {
 	t.Helper()
 	prov := readyStub("")
-	fwd := forward.New(prov, forward.NewClient(), time.Second, 1<<20)
-	return newHandler(testAPIKey, prov, fwd, logger)
+	fwd := forward.New(prov, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20)
+	return newHandler(testAPIKey, prov, fwd, logger, NewStreamOutcomeCounter())
 }
 
 // bufferLogger returns a logger writing to an in-memory buffer at the given
@@ -207,6 +209,161 @@ func TestAccessLogUnmatchedRoute(t *testing.T) {
 	if !strings.Contains(out, "status=404") {
 		t.Errorf("access line missing status=404:\n%s", out)
 	}
+	for _, streamOnly := range []string{"outcome=", "frames="} {
+		if strings.Contains(out, streamOnly) {
+			t.Errorf("non-stream Phase 1 access line unexpectedly contains %q:\n%s", streamOnly, out)
+		}
+	}
+}
+
+func TestAccessLogEnrichesStreamSummary(t *testing.T) {
+	logger, buf := bufferLogger(t, "info")
+	metrics := NewStreamOutcomeCounter()
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		forward.StoreStreamResult(r.Context(), forward.StreamResult{
+			Surface: "anthropic",
+			Outcome: sse.OutcomeClean,
+			Frames:  2,
+		})
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = io.WriteString(w, "stream bytes")
+	})
+	h := accessLog(logger, metrics, inner)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", nil))
+
+	out := buf.String()
+	if n := strings.Count(out, "msg=access"); n != 1 {
+		t.Fatalf("want exactly one access line, got %d:\n%s", n, out)
+	}
+	for _, want := range []string{
+		"level=INFO",
+		"status=202",
+		"bytes=12",
+		"duration=",
+		"outcome=clean",
+		"frames=2",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("stream access line missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestAccessLogObservesEveryStreamOutcomeBySurface(t *testing.T) {
+	metrics := NewStreamOutcomeCounter()
+	outcomes := []sse.Outcome{
+		sse.OutcomeClean,
+		sse.OutcomeSynthesized,
+		sse.OutcomeStall,
+		sse.OutcomeClientCancel,
+		sse.OutcomeUpstreamError,
+	}
+	for _, surface := range []string{"anthropic", "openai"} {
+		for _, outcome := range outcomes {
+			inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				forward.StoreStreamResult(r.Context(), forward.StreamResult{
+					Surface: surface,
+					Outcome: outcome,
+				})
+			})
+			h := accessLog(discardLogger(t), metrics, inner)
+			h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/stream", nil))
+		}
+	}
+
+	for _, surface := range []string{"anthropic", "openai"} {
+		for _, outcome := range outcomes {
+			if got := metrics.Count(surface, outcome); got != 1 {
+				t.Errorf("metric count for surface=%q outcome=%q = %d, want 1", surface, outcome, got)
+			}
+		}
+	}
+}
+
+func TestStreamOutcomeCounterIsBoundedAndConcurrent(t *testing.T) {
+	metrics := NewStreamOutcomeCounter()
+	metrics.ObserveStreamOutcome("provider-github", sse.OutcomeClean)
+	metrics.ObserveStreamOutcome("anthropic", sse.Outcome("user-derived"))
+
+	const workers = 64
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			metrics.ObserveStreamOutcome("openai", sse.OutcomeStall)
+			_ = metrics.Count("openai", sse.OutcomeStall)
+		}()
+	}
+	wg.Wait()
+
+	if got := metrics.Count("openai", sse.OutcomeStall); got != workers {
+		t.Errorf("concurrent metric count = %d, want %d", got, workers)
+	}
+	if got := metrics.Count("anthropic", sse.OutcomeClean); got != 0 {
+		t.Errorf("unknown surface changed canonical count to %d, want 0", got)
+	}
+	if got := metrics.Count("openai", sse.OutcomeClean); got != 0 {
+		t.Errorf("unknown surface changed canonical count to %d, want 0", got)
+	}
+}
+
+func TestAccessLogUsesOutcomeSeverity(t *testing.T) {
+	tests := []struct {
+		outcome sse.Outcome
+		level   string
+	}{
+		{outcome: sse.OutcomeClean, level: "INFO"},
+		{outcome: sse.OutcomeClientCancel, level: "INFO"},
+		{outcome: sse.OutcomeSynthesized, level: "WARN"},
+		{outcome: sse.OutcomeStall, level: "WARN"},
+		{outcome: sse.OutcomeUpstreamError, level: "WARN"},
+	}
+	for _, tt := range tests {
+		t.Run(string(tt.outcome), func(t *testing.T) {
+			logger, buf := bufferLogger(t, "info")
+			inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				forward.StoreStreamResult(r.Context(), forward.StreamResult{
+					Surface: "anthropic",
+					Outcome: tt.outcome,
+				})
+			})
+			h := accessLog(logger, NewStreamOutcomeCounter(), inner)
+			h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/stream", nil))
+
+			out := buf.String()
+			if !strings.Contains(out, "level="+tt.level) {
+				t.Errorf("access level for outcome %q = unexpected:\n%s", tt.outcome, out)
+			}
+			if !strings.Contains(out, "outcome="+string(tt.outcome)) {
+				t.Errorf("access line missing exact outcome %q:\n%s", tt.outcome, out)
+			}
+		})
+	}
+}
+
+func TestAccessLogDoesNotLogStreamBodiesOrSecrets(t *testing.T) {
+	logger, buf := bufferLogger(t, "info")
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		forward.StoreStreamResult(r.Context(), forward.StreamResult{
+			Surface: "anthropic",
+			Outcome: sse.OutcomeClean,
+			Frames:  1,
+		})
+		_, _ = io.WriteString(w, "private-frame-body")
+	})
+	h := accessLog(logger, NewStreamOutcomeCounter(), inner)
+	req := httptest.NewRequest(http.MethodPost, "/stream", strings.NewReader("private-request-body"))
+	req.Header.Set("Authorization", "Bearer private-api-key")
+	h.ServeHTTP(httptest.NewRecorder(), req)
+
+	out := buf.String()
+	for _, forbidden := range []string{"private-frame-body", "private-request-body", "private-api-key"} {
+		if strings.Contains(out, forbidden) {
+			t.Errorf("access line leaked %q:\n%s", forbidden, out)
+		}
+	}
 }
 
 // A panicking handler must yield a generic 500 with no stack leak, the panic
@@ -217,7 +374,7 @@ func TestPanicRecoveryAndMiddlewareOrder(t *testing.T) {
 	panicky := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		panic("boom secret internals")
 	})
-	h := requestID(accessLog(logger, recoverMW(logger, panicky)))
+	h := requestID(accessLog(logger, NewStreamOutcomeCounter(), recoverMW(logger, panicky)))
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/explode", nil)
@@ -254,7 +411,7 @@ func TestLifecycleSmoke(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	srv := New(testConfig(), discardLogger(t), readyStub(""), forward.New(readyStub(""), forward.NewClient(), time.Second, 1<<20))
+	srv := New(testConfig(), discardLogger(t), readyStub(""), forward.New(readyStub(""), forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20), NewStreamOutcomeCounter())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	runErr := make(chan error, 1)

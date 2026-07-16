@@ -357,7 +357,7 @@ func TestRunGeneratedHelpMatchesCommandTree(t *testing.T) {
 			lastShared = index
 		}
 		for _, absent := range []string{"--help", "-h"} {
-			if strings.Contains(help, absent) {
+			if strings.Contains(help, "  "+absent+" ") || strings.Contains(help, "  "+absent+"\n") {
 				t.Errorf("%s help unexpectedly lists parser-native help flag %q:\n%s", command, absent, help)
 			}
 		}

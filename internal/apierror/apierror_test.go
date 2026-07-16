@@ -18,7 +18,6 @@ func TestWriteShapesAndStatus(t *testing.T) {
 	}{
 		{Unauthorized, 401, "authentication_error", "invalid_request_error", "invalid_api_key"},
 		{NotReady, 503, "api_error", "api_error", ""},
-		{StreamUnsupported, 400, "invalid_request_error", "invalid_request_error", ""},
 		{BackgroundUnsupported, 400, "invalid_request_error", "invalid_request_error", ""},
 		{PayloadTooLarge, 413, "invalid_request_error", "invalid_request_error", ""},
 		{BadGateway, 502, "api_error", "api_error", ""},
@@ -90,6 +89,89 @@ func TestWriteShapesAndStatus(t *testing.T) {
 				t.Errorf("kind %d: error.code = %q, want null", tc.kind, *errObj.Code)
 			case tc.openaiCode != "" && (errObj.Code == nil || *errObj.Code != tc.openaiCode):
 				t.Errorf("kind %d: error.code = %v, want %q", tc.kind, errObj.Code, tc.openaiCode)
+			}
+		})
+	}
+}
+
+func TestWriteStreamErrorAnthropicEnded(t *testing.T) {
+	rec := httptest.NewRecorder()
+
+	WriteStreamError(rec, Anthropic, StreamEnded)
+
+	const want = "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"copilotd: upstream stream ended before a terminal event\"}}\n\n"
+	if got := rec.Body.String(); got != want {
+		t.Errorf("body = %q, want %q", got, want)
+	}
+	if !rec.Flushed {
+		t.Error("stream error was not flushed")
+	}
+}
+
+func TestWriteStreamErrorAnthropicFailed(t *testing.T) {
+	rec := httptest.NewRecorder()
+
+	WriteStreamError(rec, Anthropic, StreamFailed)
+
+	const want = "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"copilotd: upstream stream failed\"}}\n\n"
+	if got := rec.Body.String(); got != want {
+		t.Errorf("body = %q, want %q", got, want)
+	}
+	if !rec.Flushed {
+		t.Error("stream error was not flushed")
+	}
+}
+
+func TestWriteStreamErrorAnthropicStalled(t *testing.T) {
+	rec := httptest.NewRecorder()
+
+	if err := WriteStreamError(rec, Anthropic, StreamStalled); err != nil {
+		t.Fatalf("WriteStreamError() error = %v", err)
+	}
+
+	const want = "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"copilotd: upstream stream stalled\"}}\n\n"
+	if got := rec.Body.String(); got != want {
+		t.Errorf("body = %q, want %q", got, want)
+	}
+	if !rec.Flushed {
+		t.Error("stream error was not flushed")
+	}
+}
+
+func TestWriteStreamErrorOpenAIUsesBareNativeShape(t *testing.T) {
+	tests := []struct {
+		name   string
+		reason StreamReason
+		want   string
+	}{
+		{
+			name:   "ended",
+			reason: StreamEnded,
+			want:   "event: error\ndata: {\"type\":\"error\",\"code\":null,\"message\":\"copilotd: upstream stream ended before a terminal event\",\"param\":null}\n\n",
+		},
+		{
+			name:   "stalled",
+			reason: StreamStalled,
+			want:   "event: error\ndata: {\"type\":\"error\",\"code\":null,\"message\":\"copilotd: upstream stream stalled\",\"param\":null}\n\n",
+		},
+		{
+			name:   "failed",
+			reason: StreamFailed,
+			want:   "event: error\ndata: {\"type\":\"error\",\"code\":null,\"message\":\"copilotd: upstream stream failed\",\"param\":null}\n\n",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			if err := WriteStreamError(rec, OpenAI, tc.reason); err != nil {
+				t.Fatalf("WriteStreamError() error = %v", err)
+			}
+			if got := rec.Body.String(); got != tc.want {
+				t.Errorf("body = %q, want %q", got, tc.want)
+			}
+			if !rec.Flushed {
+				t.Error("stream error was not flushed")
 			}
 		})
 	}

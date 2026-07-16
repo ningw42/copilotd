@@ -40,16 +40,16 @@ type Server struct {
 }
 
 // New builds the server from cfg and logger. The identity Provider supplies the
-// outbound Copilot credential (and readiness) and fwd is the forwarder driving
-// the provider routes; both are injected so the whole HTTP boundary can be driven
-// end to end in tests against a stubbed upstream. The listener is supplied later
-// to Run, so main owns bind and the server owns serve/shutdown.
-func New(cfg config.ServeConfig, logger *slog.Logger, provider identity.Provider, fwd *forward.Forwarder) *Server {
+// outbound Copilot credential (and readiness), fwd drives the provider routes,
+// and streamOutcomes receives the bounded stream terminal-outcome metric. The
+// listener is supplied later to Run, so main owns bind and the server owns
+// serve/shutdown.
+func New(cfg config.ServeConfig, logger *slog.Logger, provider identity.Provider, fwd *forward.Forwarder, streamOutcomes StreamOutcomeObserver) *Server {
 	return &Server{
 		cfg:    cfg,
 		logger: logger,
 		http: &http.Server{
-			Handler:           newHandler(cfg.APIKey, provider, fwd, logger),
+			Handler:           newHandler(cfg.APIKey, provider, fwd, logger, streamOutcomes),
 			ReadHeaderTimeout: readHeaderTimeout,
 			ReadTimeout:       readTimeout,
 			WriteTimeout:      writeTimeout,

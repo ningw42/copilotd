@@ -1,10 +1,11 @@
-// Package apierror renders proxy-originated error responses in the inbound
+// Package apierror renders copilotd-originated signals in the inbound
 // surface's own dialect — Anthropic-shaped on the Anthropic surface, OpenAI-shaped
 // on the OpenAI surface — from a single table, so no other package hand-rolls an
 // error body. Upstream (Copilot) error responses are passed through verbatim by
 // the forwarder and never routed through here; apierror covers only the errors
-// copilotd itself originates: auth (401), readiness (503), the synchronous-only
-// rejects (400), body bounding (413), and the proxy-origin 502/504.
+// copilotd itself originates: auth (401), readiness (503), the unsupported
+// background-mode reject (400), body bounding (413), copilotd-originated 502/504, and
+// native terminal SSE errors after a streaming response is committed.
 package apierror
 
 import (
@@ -23,14 +24,29 @@ const (
 	OpenAI
 )
 
-// Kind enumerates every proxy-originated error condition, each mapped by the
+// StreamReason identifies why copilotd must originate a terminal SSE error
+// after the HTTP response has already been committed.
+type StreamReason int
+
+const (
+	StreamEnded StreamReason = iota
+	StreamFailed
+	StreamStalled
+)
+
+var streamMessages = map[StreamReason]string{
+	StreamEnded:   "copilotd: upstream stream ended before a terminal event",
+	StreamFailed:  "copilotd: upstream stream failed",
+	StreamStalled: "copilotd: upstream stream stalled",
+}
+
+// Kind enumerates every copilotd-originated error condition, each mapped by the
 // table below to an HTTP status and the per-surface error type.
 type Kind int
 
 const (
 	Unauthorized          Kind = iota // 401 — missing or invalid API key
 	NotReady                          // 503 — identity has no working credential yet
-	StreamUnsupported                 // 400 — stream:true (Phase 1 is synchronous only)
 	BackgroundUnsupported             // 400 — background:true (OpenAI surface only)
 	PayloadTooLarge                   // 413 — inbound body over the cap
 	BadGateway                        // 502 — could not reach the upstream
@@ -54,7 +70,6 @@ type entry struct {
 var table = map[Kind]entry{
 	Unauthorized:          {http.StatusUnauthorized, "authentication_error", "invalid_request_error", "invalid_api_key"},
 	NotReady:              {http.StatusServiceUnavailable, "api_error", "api_error", ""},
-	StreamUnsupported:     {http.StatusBadRequest, "invalid_request_error", "invalid_request_error", ""},
 	BackgroundUnsupported: {http.StatusBadRequest, "invalid_request_error", "invalid_request_error", ""},
 	PayloadTooLarge:       {http.StatusRequestEntityTooLarge, "invalid_request_error", "invalid_request_error", ""},
 	BadGateway:            {http.StatusBadGateway, "api_error", "api_error", ""},
@@ -68,6 +83,32 @@ func Write(w http.ResponseWriter, surface Surface, kind Kind, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(e.status)
 	_, _ = w.Write(body(surface, e, msg))
+}
+
+// WriteStreamError writes and flushes one native-shaped terminal SSE error.
+func WriteStreamError(w http.ResponseWriter, surface Surface, reason StreamReason) error {
+	var payload []byte
+	if surface == OpenAI {
+		var b openaiStreamError
+		b.Type = "error"
+		b.Message = streamMessages[reason]
+		payload, _ = json.Marshal(b)
+	} else {
+		payload = body(Anthropic, entry{anthropicType: "api_error"}, streamMessages[reason])
+	}
+	if _, err := w.Write(append(append([]byte("event: error\ndata: "), payload...), '\n', '\n')); err != nil {
+		return err
+	}
+	return http.NewResponseController(w).Flush()
+}
+
+// openaiStreamError is the Responses API's bare terminal error event. Code and
+// Param stay nil so the native nullable fields serialize as JSON null.
+type openaiStreamError struct {
+	Type    string  `json:"type"`
+	Code    *string `json:"code"`
+	Message string  `json:"message"`
+	Param   *string `json:"param"`
 }
 
 func body(surface Surface, e entry, msg string) []byte {

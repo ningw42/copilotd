@@ -312,9 +312,10 @@ func runServe(ctx context.Context, flags *config.ServeFlags, lookupEnv func(stri
 	// mints on demand.
 	go mgr.StartupMint(serveCtx)
 
-	fwd := forward.New(mgr, forward.NewClient(), cfg.OutboundTimeout, cfg.MaxRequestBytes)
+	fwd := forward.New(mgr, forward.NewClient(cfg.ResponseHeaderTimeout), cfg.OutboundTimeout, cfg.WriteTimeout, cfg.StreamIdleTimeout, cfg.StreamKeepaliveInterval, cfg.MaxRequestBytes)
+	streamOutcomes := server.NewStreamOutcomeCounter()
 
-	if err := server.New(cfg, logger, mgr, fwd).Run(serveCtx, ln); err != nil {
+	if err := server.New(cfg, logger, mgr, fwd, streamOutcomes).Run(serveCtx, ln); err != nil {
 		logger.Error("server error", slog.Any("error", err))
 		return errServeFailed
 	}

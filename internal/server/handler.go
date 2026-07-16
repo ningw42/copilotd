@@ -25,7 +25,7 @@ const (
 // order on a provider route is therefore requestID -> accessLog -> recover ->
 // auth -> readiness -> forward. /healthz and /readyz are never gated by auth or
 // readiness.
-func newHandler(apikey string, provider identity.Provider, fwd *forward.Forwarder, logger *slog.Logger) http.Handler {
+func newHandler(apikey string, provider identity.Provider, fwd *forward.Forwarder, logger *slog.Logger, streamOutcomes StreamOutcomeObserver) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET "+healthPath, handleHealth)
 	mux.HandleFunc("GET "+readyPath, handleReady(provider))
@@ -38,8 +38,8 @@ func newHandler(apikey string, provider identity.Provider, fwd *forward.Forwarde
 
 	// Surface routes: the explicit inbound->upstream map (not a blind prefix
 	// strip — note the /v1 asymmetry: Anthropic keeps /v1 upstream, OpenAI drops
-	// it). The forwarder's peek rejects stream:true on both surfaces and
-	// additionally background:true on the OpenAI surface (tag == apierror.OpenAI).
+	// it). Anthropic requests are not peeked; the OpenAI peek rejects only
+	// background:true (tag == apierror.OpenAI).
 	mux.Handle("POST /anthropic/v1/messages",
 		guard(apierror.Anthropic, fwd.Handler("/v1/messages", apierror.Anthropic)))
 	mux.Handle("POST /anthropic/v1/messages/count_tokens",
@@ -47,7 +47,7 @@ func newHandler(apikey string, provider identity.Provider, fwd *forward.Forwarde
 	mux.Handle("POST /openai/v1/responses",
 		guard(apierror.OpenAI, fwd.Handler("/responses", apierror.OpenAI)))
 
-	return requestID(accessLog(logger, recoverMW(logger, mux)))
+	return requestID(accessLog(logger, streamOutcomes, recoverMW(logger, mux)))
 }
 
 // handleHealth reports liveness only: 200 with {"status":"ok"}. It deliberately
