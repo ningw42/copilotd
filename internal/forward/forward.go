@@ -151,6 +151,8 @@ func (f *Forwarder) forward(w http.ResponseWriter, r *http.Request, body []byte,
 		apierror.Write(w, tag, apierror.BadGateway, "could not build the upstream request")
 		return
 	}
+	outReq.URL.RawQuery = r.URL.RawQuery
+	outReq.URL.ForceQuery = r.URL.ForceQuery
 	outReq.Header = outboundHeaders(r, cred)
 
 	resp, err := f.client.Do(outReq)
@@ -171,14 +173,26 @@ func (f *Forwarder) forward(w http.ResponseWriter, r *http.Request, body []byte,
 
 	// A synchronous completion keeps the existing total-duration backstop. SSE
 	// responses deliberately do not have a total-duration cap.
+	eventStream := isEventStream(resp.Header.Get("Content-Type"))
 	var outboundTimer *time.Timer
-	if !isEventStream(resp.Header.Get("Content-Type")) {
+	if !eventStream {
 		outboundTimer = time.AfterFunc(f.outboundTimeout, cancel)
 		defer outboundTimer.Stop()
 	}
 
+	if eventStream {
+		encodings := resp.Header.Values("Content-Encoding")
+		switch {
+		case len(encodings) == 0:
+		case len(encodings) == 1 && strings.EqualFold(strings.TrimSpace(encodings[0]), "identity"):
+			resp.Header.Del("Content-Encoding")
+		default:
+			apierror.Write(w, tag, apierror.BadGateway, "upstream returned unsupported Content-Encoding for an event stream")
+			return
+		}
+	}
 	copyResponseHeaders(w.Header(), resp.Header)
-	if isEventStream(resp.Header.Get("Content-Type")) {
+	if eventStream {
 		w.Header().Del("Content-Length")
 		w.WriteHeader(resp.StatusCode)
 		result := sse.Pump(ctx, cancel, resp.Body, w, streamPolicy(tag, f.writeTimeout, f.streamIdleTimeout, f.streamKeepaliveInterval, f.clock, f.fallbacks.Increment))
@@ -265,9 +279,9 @@ func withExtra(base map[string]bool, extra ...string) map[string]bool {
 // outboundHeaders builds the upstream request headers by the denylist/passthrough
 // policy (§7.3): copy every inbound header except the strip-set (and any header
 // named in the inbound Connection header), then set ours — Authorization from the
-// credential, the impersonation set, and the resolved correlation id — each
-// replacing any client value. cred.Headers is copied onto a fresh map and never
-// mutated.
+// credential, the impersonation set, identity response encoding, and the
+// resolved correlation id — each replacing any client value. cred.Headers is
+// copied onto a fresh map and never mutated.
 func outboundHeaders(r *http.Request, cred identity.Credential) http.Header {
 	out := make(http.Header, len(r.Header))
 	conn := connectionTokens(r.Header)
@@ -282,6 +296,7 @@ func outboundHeaders(r *http.Request, cred identity.Credential) http.Header {
 	for name, vals := range cred.Headers {
 		out[http.CanonicalHeaderKey(name)] = append([]string(nil), vals...)
 	}
+	out.Set("Accept-Encoding", "identity")
 	if id, ok := logging.RequestIDFrom(r.Context()); ok {
 		out.Set(requestIDHeader, id)
 	}

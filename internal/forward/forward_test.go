@@ -1,6 +1,8 @@
 package forward
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"io"
@@ -87,6 +89,22 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
+type observedReadCloser struct {
+	reader io.Reader
+	reads  int
+	closed bool
+}
+
+func (r *observedReadCloser) Read(p []byte) (int, error) {
+	r.reads++
+	return r.reader.Read(p)
+}
+
+func (r *observedReadCloser) Close() error {
+	r.closed = true
+	return nil
+}
+
 func TestForwardParameterizedEventStreamUsesPump(t *testing.T) {
 	const upstreamFrame = "event: content_block_delta\ndata: {\"type\":\"content_block_delta\"}\n\n"
 	const synthesized = "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"copilotd: upstream stream ended before a terminal event\"}}\n\n"
@@ -138,6 +156,170 @@ func TestForwardParameterizedEventStreamUsesPump(t *testing.T) {
 	}
 	if got := string(body); got != upstreamFrame+synthesized {
 		t.Errorf("body = %q, want upstream frame followed by native synthesized terminal %q", got, upstreamFrame+synthesized)
+	}
+}
+
+func TestForwardRemovesExplicitIdentityEncodingFromEventStream(t *testing.T) {
+	const terminal = "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusAccepted,
+			Header: http.Header{
+				"Content-Type":     {"text/event-stream"},
+				"Content-Encoding": {"  IdEnTiTy\t"},
+			},
+			Body:    io.NopCloser(strings.NewReader(terminal)),
+			Request: r,
+		}, nil
+	})}
+	f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20)
+	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{"stream":true}`))
+	rec := newDeadlineRecorder()
+
+	f.Handler("/v1/messages", apierror.Anthropic)(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Errorf("status = %d, want upstream 202", rec.Code)
+	}
+	if got := rec.Header().Values("Content-Encoding"); len(got) != 0 {
+		t.Errorf("downstream Content-Encoding values = %q, want absent for explicit identity", got)
+	}
+	if got := rec.Body.String(); got != terminal {
+		t.Errorf("body = %q, want terminal frame verbatim %q", got, terminal)
+	}
+}
+
+func TestForwardRejectsUnsupportedEventStreamEncodingBeforeCommit(t *testing.T) {
+	const message = "upstream returned unsupported Content-Encoding for an event stream"
+	const anthropicError = `{"type":"error","error":{"type":"api_error","message":"` + message + `"}}`
+	const openAIError = `{"error":{"message":"` + message + `","type":"api_error","code":null,"param":null}}`
+	tests := []struct {
+		name      string
+		surface   apierror.Surface
+		encodings []string
+		wantBody  string
+	}{
+		{
+			name:      "Anthropic rejects gzip",
+			surface:   apierror.Anthropic,
+			encodings: []string{"gzip"},
+			wantBody:  anthropicError,
+		},
+		{
+			name:      "OpenAI rejects another coding in its native envelope",
+			surface:   apierror.OpenAI,
+			encodings: []string{"br"},
+			wantBody:  openAIError,
+		},
+		{
+			name:      "rejects comma-separated coding chain",
+			surface:   apierror.Anthropic,
+			encodings: []string{"identity, gzip"},
+			wantBody:  anthropicError,
+		},
+		{
+			name:      "rejects explicit empty value",
+			surface:   apierror.Anthropic,
+			encodings: []string{""},
+			wantBody:  anthropicError,
+		},
+		{
+			name:      "rejects repeated identity fields",
+			surface:   apierror.Anthropic,
+			encodings: []string{"identity", "identity"},
+			wantBody:  anthropicError,
+		},
+		{
+			name:      "rejects repeated different fields",
+			surface:   apierror.Anthropic,
+			encodings: []string{"identity", "gzip"},
+			wantBody:  anthropicError,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			upstreamBody := &observedReadCloser{reader: strings.NewReader("upstream-secret-body")}
+			client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusTeapot,
+					Header: http.Header{
+						"Content-Type":      {"text/event-stream"},
+						"Content-Encoding":  append([]string(nil), tc.encodings...),
+						"X-Upstream-Secret": {"must-not-leak"},
+					},
+					Body:    upstreamBody,
+					Request: r,
+				}, nil
+			})}
+			f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20)
+			req := httptest.NewRequest(http.MethodPost, "/provider/route", strings.NewReader(`{"stream":true}`))
+			rec := newDeadlineRecorder()
+
+			f.Handler("/upstream", tc.surface)(rec, req)
+
+			if rec.Code != http.StatusBadGateway {
+				t.Errorf("status = %d, want copilotd-originated 502", rec.Code)
+			}
+			if got := rec.Header().Get("Content-Type"); got != "application/json" {
+				t.Errorf("Content-Type = %q, want application/json", got)
+			}
+			if got := rec.Header().Values("Content-Encoding"); len(got) != 0 {
+				t.Errorf("rejected upstream Content-Encoding leaked downstream: %q", got)
+			}
+			if got := rec.Header().Get("X-Upstream-Secret"); got != "" {
+				t.Errorf("rejected upstream header leaked downstream: %q", got)
+			}
+			if got := rec.Body.String(); got != tc.wantBody {
+				t.Errorf("body = %q, want native error %q", got, tc.wantBody)
+			}
+			if upstreamBody.reads != 0 {
+				t.Errorf("upstream body reads = %d, want zero before rejection", upstreamBody.reads)
+			}
+			if !upstreamBody.closed {
+				t.Error("upstream body was not closed after rejection")
+			}
+		})
+	}
+}
+
+func TestForwardKeepsCompressedBufferedResponseOpaque(t *testing.T) {
+	var compressed bytes.Buffer
+	zw := gzip.NewWriter(&compressed)
+	if _, err := zw.Write([]byte(`{"opaque":true}`)); err != nil {
+		t.Fatalf("compress fixture: %v", err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("finish compressed fixture: %v", err)
+	}
+	wantBody := append([]byte(nil), compressed.Bytes()...)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Encoding", "gzip")
+		w.Header().Set("X-Upstream-Marker", "present")
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write(wantBody)
+	}))
+	defer upstream.Close()
+
+	f := New(readyStub(upstream.URL), NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20)
+	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{}`))
+	rec := newDeadlineRecorder()
+
+	f.Handler("/v1/messages", apierror.Anthropic)(rec, req)
+
+	if rec.Code != http.StatusPartialContent {
+		t.Errorf("status = %d, want upstream 206", rec.Code)
+	}
+	if got := rec.Header().Get("Content-Encoding"); got != "gzip" {
+		t.Errorf("Content-Encoding = %q, want gzip", got)
+	}
+	if got := rec.Header().Get("X-Upstream-Marker"); got != "present" {
+		t.Errorf("X-Upstream-Marker = %q, want present", got)
+	}
+	if got := rec.Body.Bytes(); !bytes.Equal(got, wantBody) {
+		t.Errorf("body = %x, want compressed upstream bytes %x", got, wantBody)
 	}
 }
 
@@ -313,6 +495,161 @@ func readyStub(baseURL string) *identity.Static {
 			"Editor-Version":         {"vscode/1.104.1"},
 		},
 	}, true)
+}
+
+func TestForwardPreservesRawQueryOnCurrentRoutes(t *testing.T) {
+	var gotRequestURI string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotRequestURI = r.RequestURI
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+
+	f := New(readyStub(upstream.URL), NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20)
+	tests := []struct {
+		name           string
+		inboundTarget  string
+		upstreamPath   string
+		surface        apierror.Surface
+		fragment       string
+		wantRequestURI string
+	}{
+		{
+			name:           "Anthropic messages",
+			inboundTarget:  "/anthropic/v1/messages?beta=true",
+			upstreamPath:   "/v1/messages",
+			surface:        apierror.Anthropic,
+			wantRequestURI: "/v1/messages?beta=true",
+		},
+		{
+			name:           "Anthropic token counting keeps order duplicates escapes and value forms",
+			inboundTarget:  "/anthropic/v1/messages/count_tokens?tag=first&tag=second&escaped=%2f%2F&flag&empty=",
+			upstreamPath:   "/v1/messages/count_tokens",
+			surface:        apierror.Anthropic,
+			wantRequestURI: "/v1/messages/count_tokens?tag=first&tag=second&escaped=%2f%2F&flag&empty=",
+		},
+		{
+			name:           "OpenAI Responses",
+			inboundTarget:  "/openai/v1/responses?include=output%2ftext&include=usage",
+			upstreamPath:   "/responses",
+			surface:        apierror.OpenAI,
+			wantRequestURI: "/responses?include=output%2ftext&include=usage",
+		},
+		{
+			name:           "no query stays absent and fragment is omitted",
+			inboundTarget:  "/openai/v1/responses",
+			upstreamPath:   "/responses",
+			surface:        apierror.OpenAI,
+			fragment:       "client-only",
+			wantRequestURI: "/responses",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gotRequestURI = ""
+			req := httptest.NewRequest(http.MethodPost, tc.inboundTarget, strings.NewReader(`{}`))
+			req.URL.Fragment = tc.fragment
+			rec := newDeadlineRecorder()
+
+			f.Handler(tc.upstreamPath, tc.surface)(rec, req)
+
+			if rec.Code != http.StatusNoContent {
+				t.Fatalf("status = %d, want upstream 204", rec.Code)
+			}
+			if gotRequestURI != tc.wantRequestURI {
+				t.Errorf("upstream RequestURI = %q, want %q", gotRequestURI, tc.wantRequestURI)
+			}
+		})
+	}
+}
+
+func TestForwardPreservesBareQueryMarker(t *testing.T) {
+	var gotRequestURI string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotRequestURI = r.RequestURI
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+
+	f := New(readyStub(upstream.URL), NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20)
+	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages?", strings.NewReader(`{}`))
+	rec := newDeadlineRecorder()
+
+	f.Handler("/v1/messages", apierror.Anthropic)(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want upstream 204", rec.Code)
+	}
+	if gotRequestURI != "/v1/messages?" {
+		t.Errorf("upstream RequestURI = %q, want %q", gotRequestURI, "/v1/messages?")
+	}
+}
+
+func TestForwardRequestsIdentityEncodingOnCurrentRoutes(t *testing.T) {
+	var gotAcceptEncoding []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAcceptEncoding = append([]string(nil), r.Header.Values("Accept-Encoding")...)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+
+	f := New(readyStub(upstream.URL), NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20)
+	tests := []struct {
+		name          string
+		inboundTarget string
+		upstreamPath  string
+		surface       apierror.Surface
+		clientValues  []string
+	}{
+		{
+			name:          "Anthropic messages replaces a mixed client value",
+			inboundTarget: "/anthropic/v1/messages",
+			upstreamPath:  "/v1/messages",
+			surface:       apierror.Anthropic,
+			clientValues:  []string{"gzip, br"},
+		},
+		{
+			name:          "Anthropic token counting replaces repeated client values",
+			inboundTarget: "/anthropic/v1/messages/count_tokens",
+			upstreamPath:  "/v1/messages/count_tokens",
+			surface:       apierror.Anthropic,
+			clientValues:  []string{"gzip", "identity"},
+		},
+		{
+			name:          "OpenAI Responses sets identity when client value is absent",
+			inboundTarget: "/openai/v1/responses",
+			upstreamPath:  "/responses",
+			surface:       apierror.OpenAI,
+		},
+		{
+			name:          "client value is not parsed or rejected",
+			inboundTarget: "/openai/v1/responses",
+			upstreamPath:  "/responses",
+			surface:       apierror.OpenAI,
+			clientValues:  []string{"definitely-not-a-content-coding"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gotAcceptEncoding = nil
+			req := httptest.NewRequest(http.MethodPost, tc.inboundTarget, strings.NewReader(`{}`))
+			if tc.clientValues != nil {
+				req.Header["Accept-Encoding"] = append([]string(nil), tc.clientValues...)
+			}
+			rec := newDeadlineRecorder()
+
+			f.Handler(tc.upstreamPath, tc.surface)(rec, req)
+
+			if rec.Code != http.StatusNoContent {
+				t.Fatalf("status = %d, want upstream 204", rec.Code)
+			}
+			if len(gotAcceptEncoding) != 1 || gotAcceptEncoding[0] != "identity" {
+				t.Errorf("upstream Accept-Encoding values = %q, want exactly [identity]", gotAcceptEncoding)
+			}
+		})
+	}
 }
 
 // TestForwardVerbatimAndHeaderPolicy is the round-trip proof: the original body
