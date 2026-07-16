@@ -65,6 +65,7 @@ func accessLog(logger *slog.Logger, streamOutcomes StreamOutcomeObserver, next h
 			attrs = append(attrs,
 				slog.String("outcome", string(result.Outcome)),
 				slog.Int("frames", result.Frames),
+				slog.Int("fallbacks", result.Fallbacks),
 			)
 		}
 		logger.LogAttrs(r.Context(), level, "access", attrs...)

@@ -11,9 +11,10 @@ import (
 // StreamResult is the request-level summary of one streamed response. Surface
 // is the canonical low-cardinality inbound surface name.
 type StreamResult struct {
-	Surface string
-	Outcome sse.Outcome
-	Frames  int
+	Surface   string
+	Outcome   sse.Outcome
+	Frames    int
+	Fallbacks int
 }
 
 // streamResultHolder carries a stream result across the forward/access-log

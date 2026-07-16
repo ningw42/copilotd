@@ -221,9 +221,10 @@ func TestAccessLogEnrichesStreamSummary(t *testing.T) {
 	metrics := NewStreamOutcomeCounter()
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		forward.StoreStreamResult(r.Context(), forward.StreamResult{
-			Surface: "anthropic",
-			Outcome: sse.OutcomeClean,
-			Frames:  2,
+			Surface:   "anthropic",
+			Outcome:   sse.OutcomeClean,
+			Frames:    2,
+			Fallbacks: 1,
 		})
 		w.WriteHeader(http.StatusAccepted)
 		_, _ = io.WriteString(w, "stream bytes")
@@ -243,6 +244,7 @@ func TestAccessLogEnrichesStreamSummary(t *testing.T) {
 		"duration=",
 		"outcome=clean",
 		"frames=2",
+		"fallbacks=1",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("stream access line missing %q:\n%s", want, out)

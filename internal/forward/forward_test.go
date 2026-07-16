@@ -169,7 +169,7 @@ func TestForwardStoresStreamResultOnRequestHolder(t *testing.T) {
 	}
 }
 
-func TestForwardCountsDataTypeFallbacks(t *testing.T) {
+func TestForwardReportsDataTypeFallbacks(t *testing.T) {
 	const terminal = "data: {\"type\":\"message_stop\"}\n\n"
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		return &http.Response{
@@ -181,11 +181,20 @@ func TestForwardCountsDataTypeFallbacks(t *testing.T) {
 	})}
 	f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20)
 	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{"stream":true}`))
+	ctx := WithStreamResultHolder(req.Context())
+	req = req.WithContext(ctx)
 
 	f.Handler("/v1/messages", apierror.Anthropic)(newDeadlineRecorder(), req)
 
 	if got := f.fallbacks.Count(); got != 1 {
 		t.Errorf("fallback count = %d, want 1 for data-only frame", got)
+	}
+	result, ok := StreamResultFromContext(ctx)
+	if !ok {
+		t.Fatal("stream result holder is unset")
+	}
+	if result.Fallbacks != 1 {
+		t.Errorf("stream fallback count = %d, want 1 for data-only frame", result.Fallbacks)
 	}
 }
 

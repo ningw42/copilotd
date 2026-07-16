@@ -20,10 +20,12 @@ const (
 
 // Result is the request-level summary returned by Pump. Frames counts
 // successfully forwarded upstream frames; synthesized frames are not upstream
-// frames and are therefore not included.
+// frames and are therefore not included. Fallbacks counts frames classified via
+// data.type because their event line was absent or empty.
 type Result struct {
-	Outcome Outcome
-	Frames  int
+	Outcome   Outcome
+	Frames    int
+	Fallbacks int
 }
 
 // Policy supplies the surface-specific decisions while Pump owns only stream
@@ -75,7 +77,13 @@ func Pump(ctx context.Context, cancel context.CancelFunc, body io.ReadCloser, ds
 
 	reads := make(chan readResult)
 	readerExited := make(chan struct{})
-	reader := NewReader(body, policy.OnFallback)
+	fallbacks := 0
+	reader := NewReader(body, func() {
+		fallbacks++
+		if policy.OnFallback != nil {
+			policy.OnFallback()
+		}
+	})
 	go func() {
 		defer close(readerExited)
 		defer close(reads)
@@ -95,6 +103,7 @@ func Pump(ctx context.Context, cancel context.CancelFunc, body io.ReadCloser, ds
 		cancel()
 		_ = body.Close()
 		<-readerExited
+		result.Fallbacks = fallbacks
 	}()
 
 	sawTerminal := false

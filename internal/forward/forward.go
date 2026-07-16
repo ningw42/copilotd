@@ -183,9 +183,10 @@ func (f *Forwarder) forward(w http.ResponseWriter, r *http.Request, body []byte,
 		w.WriteHeader(resp.StatusCode)
 		result := sse.Pump(ctx, cancel, resp.Body, w, streamPolicy(tag, f.writeTimeout, f.streamIdleTimeout, f.streamKeepaliveInterval, f.clock, f.fallbacks.Increment))
 		StoreStreamResult(r.Context(), StreamResult{
-			Surface: streamSurface(tag),
-			Outcome: result.Outcome,
-			Frames:  result.Frames,
+			Surface:   streamSurface(tag),
+			Outcome:   result.Outcome,
+			Frames:    result.Frames,
+			Fallbacks: result.Fallbacks,
 		})
 		return
 	}

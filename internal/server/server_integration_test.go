@@ -42,6 +42,44 @@ func newControllerRecorder() *controllerRecorder {
 
 func (r *controllerRecorder) SetWriteDeadline(time.Time) error { return nil }
 
+func readFullWithin(body io.ReadCloser, dst []byte, timeout time.Duration) error {
+	done := make(chan error, 1)
+	go func() {
+		_, err := io.ReadFull(body, dst)
+		done <- err
+	}()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		return err
+	case <-timer.C:
+		_ = body.Close()
+		return context.DeadlineExceeded
+	}
+}
+
+func readAllWithin(body io.ReadCloser, timeout time.Duration) ([]byte, error) {
+	type result struct {
+		body []byte
+		err  error
+	}
+	done := make(chan result, 1)
+	go func() {
+		body, err := io.ReadAll(body)
+		done <- result{body: body, err: err}
+	}()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case result := <-done:
+		return result.body, result.err
+	case <-timer.C:
+		_ = body.Close()
+		return nil, context.DeadlineExceeded
+	}
+}
+
 func TestResponseControllerThroughMiddlewareChain(t *testing.T) {
 	release := make(chan struct{})
 	handlerErrors := make(chan error, 3)
@@ -83,7 +121,7 @@ func TestResponseControllerThroughMiddlewareChain(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 
 	first := make([]byte, len("first\n"))
-	if _, err := io.ReadFull(resp.Body, first); err != nil {
+	if err := readFullWithin(resp.Body, first, time.Second); err != nil {
 		close(release)
 		t.Fatalf("read flushed first chunk: %v", err)
 	}
@@ -93,7 +131,7 @@ func TestResponseControllerThroughMiddlewareChain(t *testing.T) {
 	}
 	close(release)
 
-	rest, err := io.ReadAll(resp.Body)
+	rest, err := readAllWithin(resp.Body, time.Second)
 	if err != nil {
 		t.Fatalf("read second chunk: %v", err)
 	}
@@ -677,7 +715,7 @@ func TestAnthropicStreamingEndToEnd(t *testing.T) {
 		}
 
 		close(releaseTerminal)
-		rest, err := io.ReadAll(resp.Body)
+		rest, err := readAllWithin(resp.Body, time.Second)
 		if err != nil {
 			t.Fatalf("read terminal: %v", err)
 		}
@@ -697,7 +735,7 @@ func TestAnthropicStreamingEndToEnd(t *testing.T) {
 
 		resp := request(t, serveAgainst(t, upstream.URL))
 		defer func() { _ = resp.Body.Close() }()
-		body, err := io.ReadAll(resp.Body)
+		body, err := readAllWithin(resp.Body, time.Second)
 		if err != nil {
 			t.Fatalf("read truncated response: %v", err)
 		}
@@ -765,7 +803,7 @@ func TestOpenAIStreamingEndToEnd(t *testing.T) {
 		}))
 		defer upstream.Close()
 
-		base, outcomes := serveAgainst(t, upstream.URL, time.Second)
+		base, outcomes := serveAgainst(t, upstream.URL, 30*time.Second)
 		resp := request(t, base)
 		defer func() { _ = resp.Body.Close() }()
 		gotFirst := make([]byte, len(first))
@@ -790,7 +828,7 @@ func TestOpenAIStreamingEndToEnd(t *testing.T) {
 		}
 
 		close(releaseTerminal)
-		rest, err := io.ReadAll(resp.Body)
+		rest, err := readAllWithin(resp.Body, time.Second)
 		if err != nil {
 			t.Fatalf("read terminal: %v", err)
 		}
@@ -811,7 +849,7 @@ func TestOpenAIStreamingEndToEnd(t *testing.T) {
 		base, outcomes := serveAgainst(t, upstream.URL, time.Second)
 		resp := request(t, base)
 		defer func() { _ = resp.Body.Close() }()
-		body, err := io.ReadAll(resp.Body)
+		body, err := readAllWithin(resp.Body, time.Second)
 		if err != nil {
 			t.Fatalf("read truncated response: %v", err)
 		}
@@ -837,7 +875,7 @@ func TestOpenAIStreamingEndToEnd(t *testing.T) {
 		resp := request(t, base)
 		defer func() { _ = resp.Body.Close() }()
 		comment := make([]byte, len(":\n\n"))
-		if _, err := io.ReadFull(resp.Body, comment); err != nil {
+		if err := readFullWithin(resp.Body, comment, time.Second); err != nil {
 			close(releaseTerminal)
 			t.Fatalf("read keepalive: %v", err)
 		}
@@ -846,7 +884,7 @@ func TestOpenAIStreamingEndToEnd(t *testing.T) {
 			t.Fatalf("keepalive = %q, want SSE comment", got)
 		}
 		close(releaseTerminal)
-		rest, err := io.ReadAll(resp.Body)
+		rest, err := readAllWithin(resp.Body, time.Second)
 		if err != nil {
 			t.Fatalf("read terminal after keepalive: %v", err)
 		}
@@ -879,7 +917,8 @@ func TestStreamingClientHangupCancelsCopilotEndToEnd(t *testing.T) {
 		Headers: http.Header{"Copilot-Integration-Id": {"vscode-chat"}},
 	}, true)
 	fwd := forward.New(prov, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20)
-	base := startServer(t, New(testConfig(), discardLogger(t), prov, fwd, NewStreamOutcomeCounter()))
+	outcomes := NewStreamOutcomeCounter()
+	base := startServer(t, New(testConfig(), discardLogger(t), prov, fwd, outcomes))
 	req, err := http.NewRequest(http.MethodPost, base+"/anthropic/v1/messages", strings.NewReader(`{"stream":true}`))
 	if err != nil {
 		t.Fatalf("build stream request: %v", err)
@@ -891,7 +930,7 @@ func TestStreamingClientHangupCancelsCopilotEndToEnd(t *testing.T) {
 		t.Fatalf("stream request: %v", err)
 	}
 	got := make([]byte, len(first))
-	if _, err := io.ReadFull(resp.Body, got); err != nil {
+	if err := readFullWithin(resp.Body, got, time.Second); err != nil {
 		_ = resp.Body.Close()
 		t.Fatalf("read first flushed frame: %v", err)
 	}
@@ -907,6 +946,13 @@ func TestStreamingClientHangupCancelsCopilotEndToEnd(t *testing.T) {
 	case <-upstreamCancelled:
 	case <-time.After(time.Second):
 		t.Fatal("stub Copilot did not promptly observe cancellation after the streaming client hung up")
+	}
+	deadline := time.Now().Add(time.Second)
+	for outcomes.Count("anthropic", sse.OutcomeClientCancel) != 1 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := outcomes.Count("anthropic", sse.OutcomeClientCancel); got != 1 {
+		t.Errorf("Anthropic client_cancel outcome count = %d, want 1", got)
 	}
 }
 
