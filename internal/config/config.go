@@ -91,10 +91,6 @@ type ServeConfig struct {
 	// construction) and validated non-empty so serve fails fast before binding.
 	APIKey string
 
-	// UpstreamBase overrides the Copilot base URL. Empty means identity resolves
-	// it from the token exchange's endpoints.api (a later slice); it is stored now.
-	UpstreamBase string
-
 	// OutboundTimeout is the total backstop for a buffered upstream response.
 	OutboundTimeout time.Duration
 
@@ -144,7 +140,6 @@ func (c ServeConfig) LogValue() slog.Value {
 		slog.String("log-file", c.LogFile),
 		slog.Duration("shutdown-timeout", c.ShutdownTimeout),
 		slog.String("github-oauth-token-file", c.GithubOAuthTokenFile),
-		slog.String("upstream-base", c.UpstreamBase),
 		slog.Duration("outbound-timeout", c.OutboundTimeout),
 		slog.Duration("stream-idle-timeout", c.StreamIdleTimeout),
 		slog.Duration("stream-keepalive-interval", c.StreamKeepaliveInterval),
@@ -210,7 +205,6 @@ type ServeFlags struct {
 	addr                    *string
 	shutdownTimeout         *time.Duration
 	apikey                  *string
-	upstreamBase            *string
 	outboundTimeout         *time.Duration
 	streamIdleTimeout       *time.Duration
 	streamKeepaliveInterval *time.Duration
@@ -236,7 +230,6 @@ func RegisterServe(fs *ff.FlagSet) *ServeFlags {
 	f.addr = fs.StringLong("addr", defaultAddr, "bind address (host:port)")
 	f.shutdownTimeout = fs.DurationLong("shutdown-timeout", defaultShutdownTimeout, "graceful shutdown grace period")
 	f.apikey = fs.StringLong("apikey", "", "required inbound API key clients must present (secret)")
-	f.upstreamBase = fs.StringLong("upstream-base", "", "override the upstream base URL (empty = resolved from the token exchange)")
 	f.outboundTimeout = fs.DurationLong("outbound-timeout", defaultOutboundTimeout, "buffered upstream response timeout")
 	f.streamIdleTimeout = fs.DurationLong("stream-idle-timeout", defaultStreamIdleTimeout, "upstream stream idle timeout")
 	f.streamKeepaliveInterval = fs.DurationLong("stream-keepalive-interval", defaultStreamKeepaliveInterval, "OpenAI stream keepalive interval")
@@ -307,9 +300,6 @@ func (f *ServeFlags) Resolve(lookupEnv func(string) (string, bool)) (ServeConfig
 	}
 	if set["apikey"] {
 		cfg.APIKey = *f.apikey
-	}
-	if set["upstream-base"] {
-		cfg.UpstreamBase = *f.upstreamBase
 	}
 	if set["outbound-timeout"] {
 		cfg.OutboundTimeout = *f.outboundTimeout
@@ -414,9 +404,6 @@ func overlay(cfg *ServeConfig, source string, get func(key string) (string, bool
 	}
 	if v, ok := get("apikey"); ok {
 		cfg.APIKey = v
-	}
-	if v, ok := get("upstream-base"); ok {
-		cfg.UpstreamBase = v
 	}
 	if v, ok := get("github-oauth-token"); ok {
 		cfg.GithubOAuthToken = v

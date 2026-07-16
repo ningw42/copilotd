@@ -47,6 +47,27 @@ func TestRunRejectsRemovedVersionFlags(t *testing.T) {
 	}
 }
 
+func TestRunRejectsRemovedUpstreamBaseFlag(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"serve", "--upstream-base", "https://redirect.example.invalid"}, noEnv(), &stdout, &stderr)
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1", code)
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want empty", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "unknown flag") || !strings.Contains(stderr.String(), "upstream-base") {
+		t.Errorf("stderr = %q, want parser unknown-flag error for --upstream-base", stderr.String())
+	}
+}
+
+func TestRunServeHelpOmitsRemovedUpstreamBaseFlag(t *testing.T) {
+	help := runSuccessfully(t, "help", "serve")
+	if strings.Contains(help, "upstream-base") {
+		t.Errorf("serve help unexpectedly lists the removed --upstream-base flag:\n%s", help)
+	}
+}
+
 func TestRunVersionSubcommand(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"version"}, noEnv(), &stdout, &stderr)

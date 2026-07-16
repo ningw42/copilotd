@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -24,8 +25,8 @@ const defaultGitHubBaseURL = "https://api.github.com"
 // short-lived Copilot token.
 const exchangePath = "/copilot_internal/v2/token"
 
-// defaultUpstreamBase is the Copilot inference host used when the exchange
-// response omits endpoints.api and no --upstream-base override is set.
+// defaultUpstreamBase is the Copilot inference origin used only when the
+// exchange response omits endpoints.api.
 const defaultUpstreamBase = "https://api.githubcopilot.com"
 
 // mintKey is the single singleflight key shared by the startup mint and every
@@ -82,6 +83,9 @@ func (e *exchangeError) Error() string {
 		if e.body != "" {
 			return fmt.Sprintf("copilot token exchange: status %d: %s", e.status, e.body)
 		}
+		if e.err != nil {
+			return fmt.Sprintf("copilot token exchange: status %d: %v", e.status, e.err)
+		}
 		return fmt.Sprintf("copilot token exchange: status %d", e.status)
 	}
 	return fmt.Sprintf("copilot token exchange: %v", e.err)
@@ -115,9 +119,6 @@ type ManagerConfig struct {
 	// Impersonation is the header set applied to the exchange request and carried
 	// on Credential.Headers for inference requests. Cloned on construction.
 	Impersonation http.Header
-	// UpstreamBase overrides the resolved Copilot base URL; empty means use the
-	// exchange response's endpoints.api.
-	UpstreamBase string
 	// StartupMintRetries bounds transient-failure retries of the startup mint
 	// (total attempts = 1 + N). Auth-class failures short-circuit regardless.
 	StartupMintRetries int
@@ -146,7 +147,6 @@ type Manager struct {
 	githubBaseURL   string
 	httpClient      *http.Client
 	impersonation   http.Header
-	upstreamBase    string
 	startupRetries  int
 	exchangeTimeout time.Duration
 	safetyMargin    time.Duration
@@ -176,7 +176,6 @@ func NewManager(cfg ManagerConfig) *Manager {
 		githubBaseURL:   cfg.GitHubBaseURL,
 		httpClient:      cfg.HTTPClient,
 		impersonation:   cfg.Impersonation.Clone(),
-		upstreamBase:    cfg.UpstreamBase,
 		startupRetries:  cfg.StartupMintRetries,
 		exchangeTimeout: cfg.ExchangeTimeout,
 		safetyMargin:    cfg.SafetyMargin,
@@ -297,8 +296,8 @@ func (m *Manager) mint(ctx context.Context, trigger string) (Credential, error) 
 // Authorization: token <oauth> plus the impersonation headers, which the token
 // endpoint's client/user-agent allowlist requires even for the exchange itself.
 func (m *Manager) exchange(ctx context.Context) (copilotToken, error) {
-	url := strings.TrimRight(m.githubBaseURL, "/") + exchangePath
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	exchangeURL := strings.TrimRight(m.githubBaseURL, "/") + exchangePath
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, exchangeURL, nil)
 	if err != nil {
 		return copilotToken{}, &exchangeError{transient: false, err: err}
 	}
@@ -327,11 +326,15 @@ func (m *Manager) exchange(ctx context.Context) (copilotToken, error) {
 		if strings.TrimSpace(parsed.Token) == "" {
 			return copilotToken{}, &exchangeError{transient: true, status: resp.StatusCode, err: errors.New("empty token in exchange response")}
 		}
+		baseURL, err := normalizeCopilotOrigin(parsed.Endpoints.API)
+		if err != nil {
+			return copilotToken{}, &exchangeError{transient: true, status: resp.StatusCode, err: err}
+		}
 		return copilotToken{
 			raw:       parsed.Token,
 			expiresAt: time.Unix(parsed.ExpiresAt, 0),
 			refreshIn: time.Duration(parsed.RefreshIn) * time.Second,
-			baseURL:   parsed.Endpoints.API,
+			baseURL:   baseURL,
 		}, nil
 	case resp.StatusCode == http.StatusUnauthorized,
 		resp.StatusCode == http.StatusForbidden,
@@ -343,6 +346,43 @@ func (m *Manager) exchange(ctx context.Context) (copilotToken, error) {
 		// Any other status (e.g. an unexpected 4xx): retrying will not help.
 		return copilotToken{}, &exchangeError{transient: false, status: resp.StatusCode, body: string(body)}
 	}
+}
+
+// normalizeCopilotOrigin validates an exchange-provided endpoints.api value and
+// returns its canonical origin. An empty value is preserved so credentialFrom
+// can apply the built-in missing-value fallback. A single trailing slash is
+// accepted but removed; paths, queries, fragments, userinfo, and non-HTTP(S)
+// schemes are not origins and must never reach a published Credential.
+func normalizeCopilotOrigin(raw string) (string, error) {
+	if raw == "" {
+		return "", nil
+	}
+
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("invalid endpoints.api origin: %w", err)
+	}
+	scheme := strings.ToLower(parsed.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return "", fmt.Errorf("invalid endpoints.api origin: scheme must be http or https")
+	}
+	if parsed.Host == "" || parsed.Hostname() == "" {
+		return "", fmt.Errorf("invalid endpoints.api origin: host is required")
+	}
+	if parsed.User != nil {
+		return "", fmt.Errorf("invalid endpoints.api origin: userinfo is not allowed")
+	}
+	if path := parsed.EscapedPath(); path != "" && path != "/" {
+		return "", fmt.Errorf("invalid endpoints.api origin: path is not allowed")
+	}
+	if parsed.RawQuery != "" || parsed.ForceQuery {
+		return "", fmt.Errorf("invalid endpoints.api origin: query is not allowed")
+	}
+	if parsed.Fragment != "" || parsed.RawFragment != "" || strings.Contains(raw, "#") {
+		return "", fmt.Errorf("invalid endpoints.api origin: fragment is not allowed")
+	}
+
+	return scheme + "://" + parsed.Host, nil
 }
 
 // logMint records the single mint outcome, with a distinct auth-class message so
@@ -390,15 +430,12 @@ func (m *Manager) store(tok copilotToken) {
 	m.mu.Unlock()
 }
 
-// credentialFrom builds the immutable Credential snapshot. The --upstream-base
-// override wins over the exchange's endpoints.api; a final fallback keeps the
-// base URL non-empty. Headers is the shared impersonation set (the forwarder
+// credentialFrom builds the immutable Credential snapshot. The validated
+// exchange origin wins whenever present; the built-in origin is only its
+// missing-value fallback. Headers is the shared impersonation set (the forwarder
 // copies it onto a fresh map, so sharing is race-free).
 func (m *Manager) credentialFrom(tok copilotToken) Credential {
 	base := tok.baseURL
-	if m.upstreamBase != "" {
-		base = m.upstreamBase
-	}
 	if base == "" {
 		base = defaultUpstreamBase
 	}

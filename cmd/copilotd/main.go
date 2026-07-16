@@ -342,7 +342,6 @@ func buildServeProvider(cfg config.ServeConfig, logger *slog.Logger, githubBaseU
 		GitHubBaseURL:      githubBaseURL,
 		HTTPClient:         httpClient,
 		Impersonation:      impersonationHeader(cfg),
-		UpstreamBase:       cfg.UpstreamBase,
 		StartupMintRetries: cfg.StartupMintRetries,
 		Logger:             logger,
 	}), nil

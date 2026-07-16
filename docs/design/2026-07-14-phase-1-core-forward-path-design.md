@@ -193,7 +193,7 @@ copilotd version            → build info
 ```go
 // Credential is an immutable snapshot the forwarder applies to an outbound request.
 type Credential struct {
-    BaseURL string      // from the exchange response's endpoints.api (fallback: api.githubcopilot.com)
+    BaseURL string      // validated exchange endpoints.api origin (fallback: api.githubcopilot.com)
     Token   string      // short-lived Copilot bearer token (secret)
     Headers http.Header // static impersonation set (integration-id, editor-version, ...)
 }
@@ -221,8 +221,9 @@ parsed into an internal `copilotToken{raw, expiresAt, refreshIn, baseURL}`:
 - `expires_at` → `expiresAt` (hard expiry).
 - `refresh_in` → `refreshIn` (GitHub's intended re-mint horizon; used as the
   staleness threshold, not as a timer — see §6.4).
-- `endpoints.api` → `baseURL` (per-account host; the `--upstream-base` override,
-  if set, wins).
+- `endpoints.api` → `baseURL` (validated HTTP(S) origin for the account). A
+  missing value falls back to `https://api.githubcopilot.com`; operators cannot
+  override or redirect it through configuration.
 
 ### 6.3 Failure classification
 
@@ -491,7 +492,6 @@ in log output.
 | Shutdown timeout | `shutdown-timeout` | `--shutdown-timeout` | `COPILOTD_SHUTDOWN_TIMEOUT` | `10s` | Graceful-shutdown grace |
 | **API key** | `apikey` | `--apikey` | `COPILOTD_APIKEY` | *(required)* | **Secret**, redacted; fail-fast if unset; client presents via `Authorization: Bearer` or `x-api-key`. Flag form is `ps`-visible (documented caveat) |
 | **Injected GitHub OAuth token** | `github-oauth-token` | `--github-oauth-token` | `COPILOTD_GITHUB_OAUTH_TOKEN` | *(empty)* | **Secret**; inline value; precedence over the GitHub OAuth token file |
-| Upstream base override | `upstream-base` | `--upstream-base` | `COPILOTD_UPSTREAM_BASE` | *(empty)* | Empty ⇒ use exchange response's `endpoints.api` |
 | Outbound timeout | `outbound-timeout` | `--outbound-timeout` | `COPILOTD_OUTBOUND_TIMEOUT` | `600s` | Per-request ctx deadline (not a blunt client timeout) |
 | Max request bytes | `max-request-bytes` | `--max-request-bytes` | `COPILOTD_MAX_REQUEST_BYTES` | `33554432` (32 MiB) | Safety rail; over-limit ⇒ `413` |
 | Startup mint retries | `startup-mint-retries` | `--startup-mint-retries` | `COPILOTD_STARTUP_MINT_RETRIES` | `3` | Transient startup-mint retries (total attempts = 1 + N); auth-class failures short-circuit |
@@ -541,7 +541,8 @@ the staleness threshold use an injected clock. Every unit is testable because
 dependencies are injected.
 
 - **`identity`** — exchange response parsing (`token`/`expires_at`/`refresh_in`/
-  `endpoints.api`); auth-vs-transient failure classification; the
+  `endpoints.api`), origin validation and missing-value fallback;
+  auth-vs-transient failure classification; the
   **single-in-flight invariant** (concurrent `Current` calls trigger exactly one
   exchange, asserted by counting upstream hits); on-demand mint on a stale/missing
   cache and the safety-margin staleness threshold (injected clock); on-demand mint
@@ -610,7 +611,8 @@ dependencies are injected.
   5. Windows owner-only semantics for the GitHub OAuth token file (best-effort;
      documented caveat).
 - **Drift sensitivity (ROADMAP §8):** the impersonation headers, the token
-  exchange, and the upstream paths are the drift-exposed surfaces. Keeping them
-  configurable (headers, base override) and the forwarder dumb limits blast
-  radius; the identity layer is where upstream change will most likely bite.
+  exchange, and the upstream paths are the drift-exposed surfaces. Keeping the
+  headers configurable, deriving the origin from each exchange, and keeping the
+  forwarder dumb limits blast radius; the identity layer is where upstream
+  change will most likely bite.
 ```

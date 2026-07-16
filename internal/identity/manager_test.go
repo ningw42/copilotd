@@ -110,7 +110,7 @@ func TestManagerCurrentMintsCredential(t *testing.T) {
 		writeToken(w, copilot, time.Now().Add(25*time.Minute), 1500, endpoint)
 	}
 
-	t.Run("endpoints.api used when no override", func(t *testing.T) {
+	t.Run("endpoints.api becomes the credential origin", func(t *testing.T) {
 		m := NewManager(ManagerConfig{
 			OAuthToken:    oauth,
 			GitHubBaseURL: s.server.URL,
@@ -148,24 +148,93 @@ func TestManagerCurrentMintsCredential(t *testing.T) {
 		}
 	})
 
-	t.Run("upstream-base override wins over endpoints.api", func(t *testing.T) {
-		const override = "https://override.example.invalid"
-		m := NewManager(ManagerConfig{
-			OAuthToken:    oauth,
-			GitHubBaseURL: s.server.URL,
-			HTTPClient:    s.server.Client(),
-			Impersonation: testImpersonation(),
-			UpstreamBase:  override,
-			Logger:        slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
-		})
-		cred, err := m.Current(context.Background())
-		if err != nil {
-			t.Fatalf("Current() error = %v", err)
-		}
-		if cred.BaseURL != override {
-			t.Errorf("BaseURL = %q, want override %q", cred.BaseURL, override)
-		}
+}
+
+func TestManagerUsesBuiltInOriginWhenExchangeOmitsIt(t *testing.T) {
+	s := newStub(t)
+	s.handler = func(w http.ResponseWriter, r *http.Request) {
+		writeToken(w, "copilot-token", time.Now().Add(25*time.Minute), 1500, "")
+	}
+	m := NewManager(ManagerConfig{
+		OAuthToken:    "gho",
+		GitHubBaseURL: s.server.URL,
+		HTTPClient:    s.server.Client(),
+		Impersonation: testImpersonation(),
+		Logger:        slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
 	})
+
+	cred, err := m.Current(context.Background())
+	if err != nil {
+		t.Fatalf("Current() error = %v", err)
+	}
+	if cred.BaseURL != "https://api.githubcopilot.com" {
+		t.Errorf("BaseURL = %q, want the built-in missing-value fallback", cred.BaseURL)
+	}
+}
+
+func TestManagerCanonicalizesExchangeOrigin(t *testing.T) {
+	s := newStub(t)
+	s.handler = func(w http.ResponseWriter, r *http.Request) {
+		writeToken(w, "copilot-token", time.Now().Add(25*time.Minute), 1500, "https://api.individual.githubcopilot.com/")
+	}
+	m := NewManager(ManagerConfig{
+		OAuthToken:    "gho",
+		GitHubBaseURL: s.server.URL,
+		HTTPClient:    s.server.Client(),
+		Impersonation: testImpersonation(),
+		Logger:        slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+	})
+
+	cred, err := m.Current(context.Background())
+	if err != nil {
+		t.Fatalf("Current() error = %v", err)
+	}
+	if cred.BaseURL != "https://api.individual.githubcopilot.com" {
+		t.Errorf("BaseURL = %q, want a canonical origin without a trailing slash", cred.BaseURL)
+	}
+}
+
+func TestManagerRejectsInvalidExchangeOriginsBeforePublishingCredential(t *testing.T) {
+	tests := []struct {
+		name   string
+		origin string
+	}{
+		{name: "relative URL", origin: "api.githubcopilot.com"},
+		{name: "unsupported scheme", origin: "ftp://api.githubcopilot.com"},
+		{name: "userinfo", origin: "https://operator@api.githubcopilot.com"},
+		{name: "path", origin: "https://api.githubcopilot.com/v1"},
+		{name: "query", origin: "https://api.githubcopilot.com?region=us"},
+		{name: "fragment", origin: "https://api.githubcopilot.com#redirect"},
+		{name: "missing host", origin: "https://"},
+		{name: "whitespace", origin: "   "},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newStub(t)
+			s.handler = func(w http.ResponseWriter, r *http.Request) {
+				writeToken(w, "copilot-token", time.Now().Add(25*time.Minute), 1500, tc.origin)
+			}
+			m := NewManager(ManagerConfig{
+				OAuthToken:    "gho",
+				GitHubBaseURL: s.server.URL,
+				HTTPClient:    s.server.Client(),
+				Impersonation: testImpersonation(),
+				Logger:        slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+			})
+
+			cred, err := m.Current(context.Background())
+			if err == nil {
+				t.Fatalf("Current() credential = %+v, want an invalid-origin error", cred)
+			}
+			if cred.BaseURL != "" || cred.Token != "" || cred.Headers != nil {
+				t.Errorf("Current() credential = %+v, want no published credential", cred)
+			}
+			if m.Ready() {
+				t.Error("Ready() = true after an invalid exchange origin, want false")
+			}
+		})
+	}
 }
 
 // --- AC #2a: concurrent stale/empty-cache callers collapse to one exchange ---

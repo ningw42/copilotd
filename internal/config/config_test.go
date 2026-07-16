@@ -76,6 +76,34 @@ func TestLoadDefaults(t *testing.T) {
 	}
 }
 
+func TestRemovedUpstreamBaseSettingsHaveNoEffect(t *testing.T) {
+	t.Run("environment variable", func(t *testing.T) {
+		got, err := loadServe([]string{"--apikey", testAPIKey}, envFunc(map[string]string{
+			"COPILOTD_UPSTREAM_BASE": "https://redirect.example.invalid",
+		}))
+		if err != nil {
+			t.Fatalf("loadServe() error = %v", err)
+		}
+		if got != defaultConfig() {
+			t.Errorf("loadServe() = %+v, want the default config; removed environment setting must be ignored", got)
+		}
+	})
+
+	t.Run("TOML setting", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "copilotd.toml")
+		if err := os.WriteFile(path, []byte("upstream-base = \"https://redirect.example.invalid\"\n"), 0o600); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+		got, err := loadServe([]string{"--apikey", testAPIKey, "--config", path}, noEnv())
+		if err != nil {
+			t.Fatalf("loadServe() error = %v", err)
+		}
+		if got != defaultConfig() {
+			t.Errorf("loadServe() = %+v, want the default config; removed TOML setting must be ignored", got)
+		}
+	})
+}
+
 func TestTimeoutConfigPrecedence(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "copilotd.toml")
 	if err := os.WriteFile(path, []byte("write-timeout = \"11s\"\nresponse-header-timeout = \"12s\"\n"), 0o600); err != nil {
@@ -429,7 +457,6 @@ func TestConfigLogValueEmitsOnlyNonSecretFields(t *testing.T) {
 		ShutdownTimeout:         10 * time.Second,
 		GithubOAuthTokenFile:    "/home/op/.config/copilotd/github-oauth-token",
 		APIKey:                  "super-secret-apikey-value",
-		UpstreamBase:            "https://upstream.example.invalid",
 		OutboundTimeout:         600 * time.Second,
 		StreamIdleTimeout:       90 * time.Second,
 		StreamKeepaliveInterval: 15 * time.Second,
@@ -457,7 +484,6 @@ func TestConfigLogValueEmitsOnlyNonSecretFields(t *testing.T) {
 		"config.log-file=/var/log/copilotd.log",
 		"config.shutdown-timeout=10s",
 		"config.github-oauth-token-file=/home/op/.config/copilotd/github-oauth-token",
-		"config.upstream-base=https://upstream.example.invalid",
 		"config.outbound-timeout=10m0s",
 		"config.stream-idle-timeout=1m30s",
 		"config.stream-keepalive-interval=15s",
@@ -486,6 +512,10 @@ func TestConfigLogValueEmitsOnlyNonSecretFields(t *testing.T) {
 	// is logged and legitimately shares the prefix, so we match the exact key form.)
 	if strings.Contains(out, "gho-super-secret-oauth-value") || strings.Contains(out, "github-oauth-token=") {
 		t.Errorf("log output must not contain the inline github-oauth-token\nfull: %s", out)
+	}
+
+	if strings.Contains(out, "upstream-base") {
+		t.Errorf("log output must not contain the removed upstream-base setting\nfull: %s", out)
 	}
 }
 
