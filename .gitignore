@@ -5,3 +5,5 @@
 .pre-commit-config.yaml
 # direnv
 /.direnv/
+# brainstorming visual-companion mockups
+/.superpowers/
