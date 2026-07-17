@@ -3,6 +3,7 @@ package sse
 import (
 	"context"
 	"io"
+	"log/slog"
 	"net/http"
 	"time"
 )
@@ -16,12 +17,24 @@ const (
 	OutcomeStall         Outcome = "stall"
 	OutcomeClientCancel  Outcome = "client_cancel"
 	OutcomeUpstreamError Outcome = "upstream_error"
+	// OutcomeShimError means the injected FrameTransformer failed before a
+	// terminal reached the client. In production, the transformer is the shim
+	// chain's stream adapter.
+	OutcomeShimError Outcome = "shim_error"
 )
 
+// FrameTransformer is the payload-opaque transform boundary owned by the SSE
+// engine. Transform maps one upstream frame to zero or more client-facing
+// frames; Finalize releases frames held until a pre-terminal stream teardown.
+type FrameTransformer interface {
+	Transform(context.Context, Frame) ([]Frame, error)
+	Finalize(context.Context) ([]Frame, error)
+}
+
 // Result is the request-level summary returned by Pump. Frames counts
-// successfully forwarded upstream frames; synthesized frames are not upstream
-// frames and are therefore not included. Fallbacks counts frames classified via
-// data.type because their event line was absent or empty.
+// successfully written client-facing frames; synthesized frames are not
+// transformer output and are therefore not included. Fallbacks counts upstream
+// frames classified via data.type because their event line was absent or empty.
 type Result struct {
 	Outcome   Outcome
 	Frames    int
@@ -40,6 +53,11 @@ type Policy struct {
 	KeepaliveInterval time.Duration
 	Clock             Clock
 	OnFallback        func()
+	// Logger receives metadata-only warnings for FrameTransformer errors hidden
+	// from the wire by no-double-up. Nil uses slog.Default.
+	Logger *slog.Logger
+	// SuppressedShimErrors counts those same post-terminal errors when non-nil.
+	SuppressedShimErrors *SuppressedShimErrorCounter
 }
 
 type readResult struct {
@@ -48,13 +66,19 @@ type readResult struct {
 	receivedAt time.Time
 }
 
-// Pump forwards complete upstream SSE frames verbatim and flushes each one.
-// Every exit follows cancel-then-join: cancel the upstream context, close the
-// response body, then wait for the reader goroutine to exit.
-func Pump(ctx context.Context, cancel context.CancelFunc, body io.ReadCloser, dst http.ResponseWriter, policy Policy) (result Result) {
+// Pump transforms complete upstream SSE frames when transformer is non-nil,
+// writes and flushes each resulting client-facing frame, and preserves upstream
+// frames verbatim when transformer is nil. Every exit follows cancel-then-join:
+// cancel the upstream context, close the response body, then wait for the reader
+// goroutine to exit.
+func Pump(ctx context.Context, cancel context.CancelFunc, body io.ReadCloser, dst http.ResponseWriter, policy Policy, transformer FrameTransformer) (result Result) {
 	clock := policy.Clock
 	if clock == nil {
 		clock = RealClock{}
+	}
+	logger := policy.Logger
+	if logger == nil {
+		logger = slog.Default()
 	}
 	writer := NewWriter(dst, policy.WriteTimeout, clock.Now)
 	controller := http.NewResponseController(writer)
@@ -107,10 +131,81 @@ func Pump(ctx context.Context, cancel context.CancelFunc, body io.ReadCloser, ds
 	}()
 
 	sawTerminal := false
+	writeFrames := func(frames []Frame) bool {
+		for _, frame := range frames {
+			if _, err := writer.Write(frame.Raw); err != nil {
+				result.Outcome = OutcomeClientCancel
+				return false
+			}
+			if err := controller.Flush(); err != nil {
+				result.Outcome = OutcomeClientCancel
+				return false
+			}
+			result.Frames++
+			if policy.Terminal(frame.Type) {
+				sawTerminal = true
+			}
+			if keepalive != nil {
+				resetTimer(keepalive, policy.KeepaliveInterval)
+			}
+		}
+		return true
+	}
+	renderOutcome := func(outcome Outcome) {
+		result.Outcome = outcome
+		if err := policy.RenderError(writer, outcome); err != nil {
+			result.Outcome = OutcomeClientCancel
+		}
+	}
+	recordSuppressedShimError := func(stage string) {
+		if policy.SuppressedShimErrors != nil {
+			policy.SuppressedShimErrors.Increment()
+		}
+		logger.WarnContext(ctx, "suppressed post-terminal shim error", slog.String("stage", stage))
+	}
+	writeKeepalive := func() bool {
+		if _, err := writer.Write([]byte(":\n\n")); err != nil {
+			result.Outcome = OutcomeClientCancel
+			return false
+		}
+		if err := controller.Flush(); err != nil {
+			result.Outcome = OutcomeClientCancel
+			return false
+		}
+		resetTimer(keepalive, policy.KeepaliveInterval)
+		return true
+	}
+	finishPreTerminal := func(cause Outcome) {
+		if transformer != nil {
+			frames, err := transformer.Finalize(ctx)
+			// A disconnect is authoritative even if it arrives while Finalize is
+			// running. Its output is still held and must not reach the client.
+			if ctx.Err() != nil {
+				result.Outcome = OutcomeClientCancel
+				return
+			}
+			if !writeFrames(frames) {
+				return
+			}
+			if sawTerminal {
+				if err != nil {
+					recordSuppressedShimError("finalize")
+				}
+				result.Outcome = OutcomeClean
+				return
+			}
+			if err != nil {
+				renderOutcome(OutcomeShimError)
+				return
+			}
+		}
+		renderOutcome(cause)
+	}
 	for {
 		var read readResult
 		haveRead := false
 		stallFired := false
+		keepaliveFired := false
 		select {
 		case <-ctx.Done():
 			result.Outcome = OutcomeClientCancel
@@ -142,6 +237,7 @@ func Pump(ctx context.Context, cancel context.CancelFunc, body io.ReadCloser, ds
 				stallFired = true
 			}
 		case <-keepaliveC:
+			keepaliveFired = true
 			// Client cancellation is authoritative when it races a keepalive tick.
 			if ctx.Err() != nil {
 				result.Outcome = OutcomeClientCancel
@@ -164,15 +260,9 @@ func Pump(ctx context.Context, cancel context.CancelFunc, body io.ReadCloser, ds
 					result.Outcome = OutcomeClean
 					return result
 				}
-				if _, err := writer.Write([]byte(":\n\n")); err != nil {
-					result.Outcome = OutcomeClientCancel
+				if !writeKeepalive() {
 					return result
 				}
-				if err := controller.Flush(); err != nil {
-					result.Outcome = OutcomeClientCancel
-					return result
-				}
-				resetTimer(keepalive, policy.KeepaliveInterval)
 				continue
 			}
 		case next, ok := <-reads:
@@ -207,18 +297,12 @@ func Pump(ctx context.Context, cancel context.CancelFunc, body io.ReadCloser, ds
 				result.Outcome = OutcomeClean
 				return result
 			}
-			result.Outcome = OutcomeStall
-			if err := policy.RenderError(writer, result.Outcome); err != nil {
-				result.Outcome = OutcomeClientCancel
-			}
+			finishPreTerminal(OutcomeStall)
 			return result
 		}
 		if read.err == nil {
 			// Stop the stopwatch at receipt, before any downstream work.
 			stopTimer(stall)
-			// A real upstream frame ends the keepalive idle gap. Re-arm only
-			// after the frame is successfully delivered.
-			stopTimer(keepalive)
 		}
 		// Cancellation can make both select arms ready at once. Re-checking it
 		// here keeps the client-disconnect outcome authoritative and prevents a
@@ -233,35 +317,45 @@ func Pump(ctx context.Context, cancel context.CancelFunc, body io.ReadCloser, ds
 				return result
 			}
 			if read.err == io.EOF {
-				result.Outcome = OutcomeSynthesized
-				if err := policy.RenderError(writer, result.Outcome); err != nil {
+				finishPreTerminal(OutcomeSynthesized)
+				return result
+			}
+			finishPreTerminal(OutcomeUpstreamError)
+			return result
+		}
+		frames := []Frame{read.frame}
+		if transformer != nil {
+			var err error
+			frames, err = transformer.Transform(ctx, read.frame)
+			if ctx.Err() != nil {
+				result.Outcome = OutcomeClientCancel
+				return result
+			}
+			if err != nil {
+				result.Outcome = OutcomeShimError
+				if sawTerminal {
+					recordSuppressedShimError("transform")
+					result.Outcome = OutcomeClean
+				} else if renderErr := policy.RenderError(writer, result.Outcome); renderErr != nil {
 					result.Outcome = OutcomeClientCancel
 				}
 				return result
 			}
-			result.Outcome = OutcomeUpstreamError
-			if err := policy.RenderError(writer, result.Outcome); err != nil {
-				result.Outcome = OutcomeClientCancel
+		}
+		if !writeFrames(frames) {
+			return result
+		}
+		if keepaliveFired && len(frames) == 0 {
+			if sawTerminal {
+				result.Outcome = OutcomeClean
+				return result
 			}
-			return result
-		}
-		if _, err := writer.Write(read.frame.Raw); err != nil {
-			result.Outcome = OutcomeClientCancel
-			return result
-		}
-		if err := controller.Flush(); err != nil {
-			result.Outcome = OutcomeClientCancel
-			return result
-		}
-		result.Frames++
-		if policy.Terminal(read.frame.Type) {
-			sawTerminal = true
+			if !writeKeepalive() {
+				return result
+			}
 		}
 		if stall != nil {
 			resetTimer(stall, policy.IdleTimeout)
-		}
-		if keepalive != nil {
-			resetTimer(keepalive, policy.KeepaliveInterval)
 		}
 	}
 }

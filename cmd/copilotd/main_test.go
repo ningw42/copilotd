@@ -2,12 +2,14 @@ package main
 
 import (
 	"bytes"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/ningw42/copilotd/internal/build"
+	"github.com/ningw42/copilotd/internal/config"
 )
 
 func noEnv() func(string) (string, bool) {
@@ -24,6 +26,33 @@ func runSuccessfully(t *testing.T, args ...string) string {
 		t.Fatalf("run(%q) stderr = %q, want empty", args, stderr.String())
 	}
 	return stdout.String()
+}
+
+func TestConfiguredShimRegistryFoldsNopToggleAndLogsEnabledOrder(t *testing.T) {
+	tests := []struct {
+		name    string
+		enabled bool
+		wantLog string
+	}{
+		{name: "empty enabled chain", enabled: false, wantLog: "enabled_shims=[]"},
+		{name: "enabled nop chain", enabled: true, wantLog: "enabled_shims=[nop]"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			registry := configuredShimRegistry(config.ServeConfig{ShimNopEnabled: tc.enabled})
+			if len(registry) != 1 || registry[0].Name != "nop" || registry[0].Enabled != tc.enabled {
+				t.Fatalf("configured registry = %+v, want nop enabled=%t", registry, tc.enabled)
+			}
+
+			var buf bytes.Buffer
+			logger := slog.New(slog.NewTextHandler(&buf, nil))
+			logShimChain(logger, registry)
+			if got := buf.String(); !strings.Contains(got, tc.wantLog) {
+				t.Errorf("startup log = %q, want %q", got, tc.wantLog)
+			}
+		})
+	}
 }
 
 func TestRunRejectsRemovedVersionFlags(t *testing.T) {

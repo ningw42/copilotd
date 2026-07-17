@@ -16,7 +16,7 @@ type StreamOutcomeObserver interface {
 // process-wide exporter is selected. Its fixed arrays enforce bounded labels.
 type StreamOutcomeCounter struct {
 	mu     sync.RWMutex
-	counts [2][5]uint64
+	counts [2][6]uint64
 }
 
 // NewStreamOutcomeCounter returns an empty terminal-outcome counter.
@@ -65,6 +65,8 @@ func streamOutcomeIndexes(surface string, outcome sse.Outcome) (surfaceIndex, ou
 		outcomeIndex = 3
 	case sse.OutcomeUpstreamError:
 		outcomeIndex = 4
+	case sse.OutcomeShimError:
+		outcomeIndex = 5
 	default:
 		return 0, 0, false
 	}

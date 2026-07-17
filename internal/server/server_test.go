@@ -50,7 +50,7 @@ func readyStub(baseURL string) *identity.Static {
 func testHandler(t *testing.T, logger *slog.Logger) http.Handler {
 	t.Helper()
 	prov := readyStub("")
-	fwd := forward.New(prov, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20)
+	fwd := forward.New(prov, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 	return newHandler(testAPIKey, prov, fwd, logger, NewStreamOutcomeCounter())
 }
 
@@ -260,6 +260,7 @@ func TestAccessLogObservesEveryStreamOutcomeBySurface(t *testing.T) {
 		sse.OutcomeStall,
 		sse.OutcomeClientCancel,
 		sse.OutcomeUpstreamError,
+		sse.OutcomeShimError,
 	}
 	for _, surface := range []string{"anthropic", "openai"} {
 		for _, outcome := range outcomes {
@@ -321,6 +322,7 @@ func TestAccessLogUsesOutcomeSeverity(t *testing.T) {
 		{outcome: sse.OutcomeSynthesized, level: "WARN"},
 		{outcome: sse.OutcomeStall, level: "WARN"},
 		{outcome: sse.OutcomeUpstreamError, level: "WARN"},
+		{outcome: sse.OutcomeShimError, level: "WARN"},
 	}
 	for _, tt := range tests {
 		t.Run(string(tt.outcome), func(t *testing.T) {
@@ -350,7 +352,7 @@ func TestAccessLogDoesNotLogStreamBodiesOrSecrets(t *testing.T) {
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		forward.StoreStreamResult(r.Context(), forward.StreamResult{
 			Surface: "anthropic",
-			Outcome: sse.OutcomeClean,
+			Outcome: sse.OutcomeShimError,
 			Frames:  1,
 		})
 		_, _ = io.WriteString(w, "private-frame-body")
@@ -413,7 +415,7 @@ func TestLifecycleSmoke(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	srv := New(testConfig(), discardLogger(t), readyStub(""), forward.New(readyStub(""), forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20), NewStreamOutcomeCounter())
+	srv := New(testConfig(), discardLogger(t), readyStub(""), forward.New(readyStub(""), forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil), NewStreamOutcomeCounter())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	runErr := make(chan error, 1)

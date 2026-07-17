@@ -32,14 +32,16 @@ const (
 
 	// The timeout defaults separately bound buffered response completion, stream
 	// silence, individual downstream writes, and time-to-first-byte. The
-	// request-body cap (32 MiB) is generous enough for multi-image base64 while
-	// guarding against pathological bodies.
-	defaultOutboundTimeout         = 600 * time.Second
-	defaultStreamIdleTimeout       = 90 * time.Second
-	defaultStreamKeepaliveInterval = 15 * time.Second
-	defaultWriteTimeout            = 90 * time.Second
-	defaultResponseHeaderTimeout   = 600 * time.Second
-	defaultMaxRequestBytes         = 33554432
+	// request and opt-in buffered-response caps (32 MiB each) are generous enough
+	// for multi-image base64 while guarding against pathological bodies.
+	defaultOutboundTimeout          = 600 * time.Second
+	defaultStreamIdleTimeout        = 90 * time.Second
+	defaultStreamKeepaliveInterval  = 15 * time.Second
+	defaultWriteTimeout             = 90 * time.Second
+	defaultResponseHeaderTimeout    = 600 * time.Second
+	defaultMaxRequestBytes          = 33554432
+	defaultMaxBufferedResponseBytes = 33554432
+	defaultShimNopEnabled           = false
 
 	// defaultStartupMintRetries bounds the transient-failure retries of the boot
 	// warm-up mint (total attempts = 1 + N); auth-class failures short-circuit.
@@ -109,6 +111,14 @@ type ServeConfig struct {
 	// MaxRequestBytes caps an inbound request body; an over-limit body yields 413.
 	MaxRequestBytes int64
 
+	// MaxBufferedResponseBytes caps an upstream response only when a buffered
+	// response shim is active; an over-limit body yields 413 before commit.
+	MaxBufferedResponseBytes int64
+
+	// ShimNopEnabled controls the canonical no-op shim. It is disabled by
+	// default, like the shim-defined default in the canonical registry.
+	ShimNopEnabled bool
+
 	// GithubOAuthToken is the inline GitHub OAuth token; when present it takes
 	// precedence over the GitHub OAuth token file (resolution lands in #12). It is
 	// a secret — omitted from LogValue (redaction by construction). This phase only
@@ -146,6 +156,8 @@ func (c ServeConfig) LogValue() slog.Value {
 		slog.Duration("write-timeout", c.WriteTimeout),
 		slog.Duration("response-header-timeout", c.ResponseHeaderTimeout),
 		slog.Int64("max-request-bytes", c.MaxRequestBytes),
+		slog.Int64("max-buffered-response-bytes", c.MaxBufferedResponseBytes),
+		slog.Bool("shim-nop-enabled", c.ShimNopEnabled),
 		slog.Int("startup-mint-retries", c.StartupMintRetries),
 		slog.String("copilot-integration-id", c.CopilotIntegrationID),
 		slog.String("editor-version", c.EditorVersion),
@@ -202,15 +214,17 @@ type ServeFlags struct {
 	fs     *ff.FlagSet
 
 	// serve-specific
-	addr                    *string
-	shutdownTimeout         *time.Duration
-	apikey                  *string
-	outboundTimeout         *time.Duration
-	streamIdleTimeout       *time.Duration
-	streamKeepaliveInterval *time.Duration
-	writeTimeout            *time.Duration
-	responseHeaderTimeout   *time.Duration
-	maxRequestBytes         *int64
+	addr                     *string
+	shutdownTimeout          *time.Duration
+	apikey                   *string
+	outboundTimeout          *time.Duration
+	streamIdleTimeout        *time.Duration
+	streamKeepaliveInterval  *time.Duration
+	writeTimeout             *time.Duration
+	responseHeaderTimeout    *time.Duration
+	maxRequestBytes          *int64
+	maxBufferedResponseBytes *int64
+	shimNopEnabled           *bool
 
 	githubOAuthToken     *string
 	startupMintRetries   *int
@@ -236,6 +250,8 @@ func RegisterServe(fs *ff.FlagSet) *ServeFlags {
 	f.writeTimeout = fs.DurationLong("write-timeout", defaultWriteTimeout, "per-write downstream timeout")
 	f.responseHeaderTimeout = fs.DurationLong("response-header-timeout", defaultResponseHeaderTimeout, "upstream response-header timeout")
 	f.maxRequestBytes = fs.Int64Long("max-request-bytes", defaultMaxRequestBytes, "maximum inbound request body size in bytes")
+	f.maxBufferedResponseBytes = fs.Int64Long("max-buffered-response-bytes", defaultMaxBufferedResponseBytes, "maximum buffered upstream response body size in bytes")
+	f.shimNopEnabled = fs.BoolLongDefault("shim-nop-enabled", defaultShimNopEnabled, "enable the canonical no-op shim")
 
 	f.githubOAuthToken = fs.StringLong("github-oauth-token", "", "inline GitHub OAuth token (secret; precedence over the GitHub OAuth token file)")
 	f.startupMintRetries = fs.IntLong("startup-mint-retries", defaultStartupMintRetries, "transient startup-mint retries (total attempts = 1 + N)")
@@ -260,24 +276,26 @@ func (f *ServeFlags) Resolve(lookupEnv func(string) (string, bool)) (ServeConfig
 	set := setFlags(f.fs)
 
 	cfg := ServeConfig{
-		Addr:                    defaultAddr,
-		LogLevel:                defaultLogLevel,
-		LogFormat:               defaultLogFormat,
-		LogFile:                 "",
-		ShutdownTimeout:         defaultShutdownTimeout,
-		GithubOAuthTokenFile:    defaultOAuthTokenFile(),
-		OutboundTimeout:         defaultOutboundTimeout,
-		StreamIdleTimeout:       defaultStreamIdleTimeout,
-		StreamKeepaliveInterval: defaultStreamKeepaliveInterval,
-		WriteTimeout:            defaultWriteTimeout,
-		ResponseHeaderTimeout:   defaultResponseHeaderTimeout,
-		MaxRequestBytes:         defaultMaxRequestBytes,
-		StartupMintRetries:      defaultStartupMintRetries,
-		CopilotIntegrationID:    defaultCopilotIntegrationID,
-		EditorVersion:           defaultEditorVersion,
-		EditorPluginVersion:     defaultEditorPluginVersion,
-		CopilotUserAgent:        defaultCopilotUserAgent,
-		GithubAPIVersion:        defaultGithubAPIVersion,
+		Addr:                     defaultAddr,
+		LogLevel:                 defaultLogLevel,
+		LogFormat:                defaultLogFormat,
+		LogFile:                  "",
+		ShutdownTimeout:          defaultShutdownTimeout,
+		GithubOAuthTokenFile:     defaultOAuthTokenFile(),
+		OutboundTimeout:          defaultOutboundTimeout,
+		StreamIdleTimeout:        defaultStreamIdleTimeout,
+		StreamKeepaliveInterval:  defaultStreamKeepaliveInterval,
+		WriteTimeout:             defaultWriteTimeout,
+		ResponseHeaderTimeout:    defaultResponseHeaderTimeout,
+		MaxRequestBytes:          defaultMaxRequestBytes,
+		MaxBufferedResponseBytes: defaultMaxBufferedResponseBytes,
+		ShimNopEnabled:           defaultShimNopEnabled,
+		StartupMintRetries:       defaultStartupMintRetries,
+		CopilotIntegrationID:     defaultCopilotIntegrationID,
+		EditorVersion:            defaultEditorVersion,
+		EditorPluginVersion:      defaultEditorPluginVersion,
+		CopilotUserAgent:         defaultCopilotUserAgent,
+		GithubAPIVersion:         defaultGithubAPIVersion,
 	}
 
 	// file layer (lowest precedence above defaults)
@@ -318,6 +336,12 @@ func (f *ServeFlags) Resolve(lookupEnv func(string) (string, bool)) (ServeConfig
 	}
 	if set["max-request-bytes"] {
 		cfg.MaxRequestBytes = *f.maxRequestBytes
+	}
+	if set["max-buffered-response-bytes"] {
+		cfg.MaxBufferedResponseBytes = *f.maxBufferedResponseBytes
+	}
+	if set["shim-nop-enabled"] {
+		cfg.ShimNopEnabled = *f.shimNopEnabled
 	}
 	if set["github-oauth-token"] {
 		cfg.GithubOAuthToken = *f.githubOAuthToken
@@ -472,6 +496,20 @@ func overlay(cfg *ServeConfig, source string, get func(key string) (string, bool
 		}
 		cfg.MaxRequestBytes = n
 	}
+	if v, ok := get("max-buffered-response-bytes"); ok {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			return fmt.Errorf("invalid max-buffered-response-bytes %q from %s: %w", v, source, err)
+		}
+		cfg.MaxBufferedResponseBytes = n
+	}
+	if v, ok := get("shim-nop-enabled"); ok {
+		enabled, err := strconv.ParseBool(v)
+		if err != nil {
+			return fmt.Errorf("invalid shim-nop-enabled %q from %s: %w", v, source, err)
+		}
+		cfg.ShimNopEnabled = enabled
+	}
 	if v, ok := get("startup-mint-retries"); ok {
 		n, err := strconv.Atoi(v)
 		if err != nil {
@@ -550,6 +588,9 @@ func (c ServeConfig) validate() error {
 	}
 	if c.MaxRequestBytes <= 0 {
 		return fmt.Errorf("invalid max-request-bytes %d: must be positive", c.MaxRequestBytes)
+	}
+	if c.MaxBufferedResponseBytes <= 0 {
+		return fmt.Errorf("invalid max-buffered-response-bytes %d: must be positive", c.MaxBufferedResponseBytes)
 	}
 	if c.StartupMintRetries < 0 {
 		return fmt.Errorf("invalid startup-mint-retries %d: must be >= 0", c.StartupMintRetries)

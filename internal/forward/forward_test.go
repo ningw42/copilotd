@@ -5,10 +5,14 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -16,8 +20,535 @@ import (
 	"github.com/ningw42/copilotd/internal/apierror"
 	"github.com/ningw42/copilotd/internal/identity"
 	"github.com/ningw42/copilotd/internal/logging"
+	"github.com/ningw42/copilotd/internal/shim"
 	"github.com/ningw42/copilotd/internal/sse"
 )
+
+type requestMutationShim struct {
+	query string
+}
+
+var _ shim.RequestTransformer = (*requestMutationShim)(nil)
+
+func (s *requestMutationShim) TransformRequest(_ context.Context, r *shim.Request) error {
+	s.query = r.Query()
+	r.Body = []byte(`{"shimmed":true}`)
+	r.Header = http.Header{
+		"Content-Type":   {"application/shim+json"},
+		"Editor-Version": {"shim-must-lose"},
+		"X-Shim":         {"applied"},
+	}
+	return nil
+}
+
+func TestForwardRequestShimMutationsReachUpstreamAndQueryStaysCoreOwned(t *testing.T) {
+	var gotBody []byte
+	var gotHeader http.Header
+	var gotRequestURI string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		gotHeader = r.Header.Clone()
+		gotRequestURI = r.RequestURI
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+
+	instance := &requestMutationShim{}
+	var gotSurface apierror.Surface
+	var gotRoute shim.Route
+	registry := shim.Registry{{
+		Name:    "request-mutation",
+		Enabled: true,
+		New: func(_ context.Context, surface apierror.Surface, route shim.Route) any {
+			gotSurface, gotRoute = surface, route
+			return instance
+		},
+	}}
+	f := New(readyStub(upstream.URL), NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, registry)
+	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages?tag=first&escaped=%2f%2F&flag", strings.NewReader(`{"original":true}`))
+	rec := newDeadlineRecorder()
+
+	f.Handler("/v1/messages", apierror.Anthropic)(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want upstream 204", rec.Code)
+	}
+	if gotSurface != apierror.Anthropic || gotRoute != "/v1/messages" {
+		t.Errorf("factory endpoint = (%v, %q), want (Anthropic, /v1/messages)", gotSurface, gotRoute)
+	}
+	if instance.query != "tag=first&escaped=%2f%2F&flag" {
+		t.Errorf("shim Query() = %q, want exact inbound raw query", instance.query)
+	}
+	if gotRequestURI != "/v1/messages?tag=first&escaped=%2f%2F&flag" {
+		t.Errorf("upstream RequestURI = %q, want core-owned verbatim query", gotRequestURI)
+	}
+	if string(gotBody) != `{"shimmed":true}` {
+		t.Errorf("upstream body = %q, want shimmed body", gotBody)
+	}
+	if gotHeader.Get("Content-Type") != "application/shim+json" || gotHeader.Get("X-Shim") != "applied" {
+		t.Errorf("upstream headers = %v, want shim mutations", gotHeader)
+	}
+	if gotHeader.Get("Editor-Version") != "vscode/1.104.1" {
+		t.Errorf("Editor-Version = %q, want impersonation to override shim", gotHeader.Get("Editor-Version"))
+	}
+}
+
+type preludeMutationShim struct{}
+
+var _ shim.PreludeTransformer = (*preludeMutationShim)(nil)
+
+func (*preludeMutationShim) TransformPrelude(_ context.Context, p *shim.Prelude) error {
+	p.Status = http.StatusMultiStatus
+	p.Header.Set("X-Prelude", "applied")
+	p.Header.Del("X-Remove")
+	return nil
+}
+
+type bufferedResponseShim struct {
+	calls int
+	body  []byte
+	err   error
+}
+
+var _ shim.BufferedTransformer = (*bufferedResponseShim)(nil)
+
+func (s *bufferedResponseShim) TransformBuffered(_ context.Context, b *shim.Body) error {
+	s.calls++
+	if s.err != nil {
+		return s.err
+	}
+	b.Bytes = append([]byte(nil), s.body...)
+	return nil
+}
+
+func TestForwardBufferedShimTransformsBodyAndRecomputesContentLength(t *testing.T) {
+	instance := &bufferedResponseShim{body: []byte(`{"transformed":true}`)}
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusAccepted,
+			Header: http.Header{
+				"Content-Type":   {"application/json"},
+				"Content-Length": {"8"},
+			},
+			Body:    io.NopCloser(strings.NewReader(`{"ok":1}`)),
+			Request: r,
+		}, nil
+	})}
+	registry := shim.Registry{{
+		Name:    "buffered",
+		Enabled: true,
+		New: func(context.Context, apierror.Surface, shim.Route) any {
+			return instance
+		},
+	}}
+	f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, registry)
+	rec := newDeadlineRecorder()
+
+	f.Handler("/responses", apierror.OpenAI)(rec, httptest.NewRequest(http.MethodPost, "/openai/v1/responses", strings.NewReader(`{}`)))
+
+	if rec.Code != http.StatusAccepted {
+		t.Errorf("status = %d, want 202", rec.Code)
+	}
+	if got, want := rec.Body.String(), `{"transformed":true}`; got != want {
+		t.Errorf("body = %q, want %q", got, want)
+	}
+	if got, want := rec.Header().Get("Content-Length"), "20"; got != want {
+		t.Errorf("Content-Length = %q, want transformed length %q", got, want)
+	}
+	if instance.calls != 1 {
+		t.Errorf("TransformBuffered calls = %d, want 1", instance.calls)
+	}
+}
+
+type commitObservingRecorder struct {
+	*deadlineRecorder
+	body          *observedReadCloser
+	readsAtCommit int
+}
+
+func (r *commitObservingRecorder) WriteHeader(status int) {
+	r.readsAtCommit = r.body.reads
+	r.deadlineRecorder.WriteHeader(status)
+}
+
+func TestForwardWithoutBufferedHookCommitsBeforeReadingVerbatimBody(t *testing.T) {
+	const upstream = `{"opaque":true}`
+	body := &observedReadCloser{reader: strings.NewReader(upstream)}
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusAccepted,
+			Header: http.Header{
+				"Content-Type":   {"application/json"},
+				"Content-Length": {strconv.Itoa(len(upstream))},
+			},
+			Body:    body,
+			Request: r,
+		}, nil
+	})}
+	registry := shim.CanonicalRegistry()
+	registry[0].Enabled = true
+	f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1, registry)
+	rec := &commitObservingRecorder{deadlineRecorder: newDeadlineRecorder(), body: body}
+
+	f.Handler("/v1/messages", apierror.Anthropic)(rec, httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{}`)))
+
+	if rec.readsAtCommit != 0 {
+		t.Errorf("upstream body reads at commit = %d, want zero for unbuffered path", rec.readsAtCommit)
+	}
+	if got := rec.Body.String(); got != upstream {
+		t.Errorf("body = %q, want byte-exact %q", got, upstream)
+	}
+	if got := rec.Header().Get("Content-Length"); got != strconv.Itoa(len(upstream)) {
+		t.Errorf("Content-Length = %q, want untouched %d", got, len(upstream))
+	}
+}
+
+func TestForwardBufferedShimSkipsNonIdentityEncodedResponse(t *testing.T) {
+	upstream := []byte("\x1f\x8bopaque")
+	instance := &bufferedResponseShim{body: []byte("must-not-appear")}
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header: http.Header{
+				"Content-Type":     {"application/json"},
+				"Content-Encoding": {"gzip"},
+				"Content-Length":   {strconv.Itoa(len(upstream))},
+			},
+			Body:    io.NopCloser(bytes.NewReader(upstream)),
+			Request: r,
+		}, nil
+	})}
+	registry := shim.Registry{{
+		Name:    "buffered",
+		Enabled: true,
+		New: func(context.Context, apierror.Surface, shim.Route) any {
+			return instance
+		},
+	}}
+	f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1, registry)
+	rec := newDeadlineRecorder()
+
+	f.Handler("/responses", apierror.OpenAI)(rec, httptest.NewRequest(http.MethodPost, "/openai/v1/responses", strings.NewReader(`{}`)))
+
+	if instance.calls != 0 {
+		t.Errorf("TransformBuffered calls = %d, want zero for encoded response", instance.calls)
+	}
+	if !bytes.Equal(rec.Body.Bytes(), upstream) {
+		t.Errorf("body = %q, want encoded bytes %q", rec.Body.Bytes(), upstream)
+	}
+	if got := rec.Header().Get("Content-Encoding"); got != "gzip" {
+		t.Errorf("Content-Encoding = %q, want gzip untouched", got)
+	}
+	if got := rec.Header().Get("Content-Length"); got != strconv.Itoa(len(upstream)) {
+		t.Errorf("Content-Length = %q, want untouched %d", got, len(upstream))
+	}
+}
+
+func TestForwardBufferedResponseOverCapRendersBeforeCommit(t *testing.T) {
+	instance := &bufferedResponseShim{body: []byte("must-not-appear")}
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusAccepted,
+			Header: http.Header{
+				"Content-Type": {"application/json"},
+				"X-Upstream":   {"must-not-leak"},
+			},
+			Body:    io.NopCloser(strings.NewReader("123456789")),
+			Request: r,
+		}, nil
+	})}
+	registry := shim.Registry{{
+		Name:    "buffered",
+		Enabled: true,
+		New: func(context.Context, apierror.Surface, shim.Route) any {
+			return instance
+		},
+	}}
+	f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 8, registry)
+	rec := newDeadlineRecorder()
+
+	f.Handler("/responses", apierror.OpenAI)(rec, httptest.NewRequest(http.MethodPost, "/openai/v1/responses", strings.NewReader(`{}`)))
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("status = %d, want 413", rec.Code)
+	}
+	const wantBody = `{"error":{"message":"upstream response body exceeds the maximum allowed size","type":"invalid_request_error","code":null,"param":null}}`
+	if got := rec.Body.String(); got != wantBody {
+		t.Errorf("body = %q, want native cap error %q", got, wantBody)
+	}
+	if instance.calls != 0 {
+		t.Errorf("TransformBuffered calls = %d, want zero for over-cap body", instance.calls)
+	}
+	if got := rec.Header().Get("X-Upstream"); got != "" {
+		t.Errorf("X-Upstream = %q, want no upstream header committed", got)
+	}
+}
+
+func TestForwardBufferedShimFailureRendersBeforeCommit(t *testing.T) {
+	instance := &bufferedResponseShim{err: errors.New("private transform failure")}
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusAccepted,
+			Header: http.Header{
+				"Content-Type": {"application/json"},
+				"X-Upstream":   {"must-not-leak"},
+			},
+			Body:    io.NopCloser(strings.NewReader(`{"ok":true}`)),
+			Request: r,
+		}, nil
+	})}
+	registry := shim.Registry{{
+		Name:    "buffered",
+		Enabled: true,
+		New: func(context.Context, apierror.Surface, shim.Route) any {
+			return instance
+		},
+	}}
+	f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, registry)
+	rec := newDeadlineRecorder()
+
+	f.Handler("/v1/messages", apierror.Anthropic)(rec, httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{}`)))
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500", rec.Code)
+	}
+	const wantBody = `{"type":"error","error":{"type":"api_error","message":"copilotd: shim failed"}}`
+	if got := rec.Body.String(); got != wantBody {
+		t.Errorf("body = %q, want native shim error %q", got, wantBody)
+	}
+	if got := rec.Header().Get("X-Upstream"); got != "" {
+		t.Errorf("X-Upstream = %q, want no upstream header committed", got)
+	}
+}
+
+type firstWriteRecorder struct {
+	*deadlineRecorder
+	firstStatus int
+	firstHeader http.Header
+}
+
+func newFirstWriteRecorder() *firstWriteRecorder {
+	return &firstWriteRecorder{deadlineRecorder: newDeadlineRecorder()}
+}
+
+func (r *firstWriteRecorder) Write(p []byte) (int, error) {
+	if r.firstHeader == nil {
+		r.firstStatus = r.Code
+		r.firstHeader = r.Header().Clone()
+	}
+	return r.ResponseRecorder.Write(p)
+}
+
+func TestForwardPreludeShimCommitsMutationsBeforeBodyOnBothPaths(t *testing.T) {
+	const bufferedBody = `{"ok":true}`
+	const streamBody = "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+	tests := []struct {
+		name        string
+		contentType string
+		body        string
+	}{
+		{name: "buffered", contentType: "application/json", body: bufferedBody},
+		{name: "stream", contentType: "text/event-stream", body: streamBody},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusCreated,
+					Header: http.Header{
+						"Content-Type": {tc.contentType},
+						"X-Remove":     {"upstream"},
+					},
+					Body:    io.NopCloser(strings.NewReader(tc.body)),
+					Request: r,
+				}, nil
+			})}
+			registry := shim.Registry{{
+				Name:    "prelude-mutation",
+				Enabled: true,
+				New: func(context.Context, apierror.Surface, shim.Route) any {
+					return &preludeMutationShim{}
+				},
+			}}
+			f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, registry)
+			rec := newFirstWriteRecorder()
+
+			f.Handler("/v1/messages", apierror.Anthropic)(rec, httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{}`)))
+
+			if rec.firstStatus != http.StatusMultiStatus {
+				t.Errorf("status at first body byte = %d, want prelude-mutated 207", rec.firstStatus)
+			}
+			if rec.firstHeader.Get("X-Prelude") != "applied" || rec.firstHeader.Get("X-Remove") != "" {
+				t.Errorf("headers at first body byte = %v, want prelude mutations", rec.firstHeader)
+			}
+			if got := rec.Body.String(); got != tc.body {
+				t.Errorf("body = %q, want verbatim %q", got, tc.body)
+			}
+		})
+	}
+}
+
+type rejectingRequestShim struct {
+	err error
+}
+
+var _ shim.RequestTransformer = (*rejectingRequestShim)(nil)
+
+func (s *rejectingRequestShim) TransformRequest(context.Context, *shim.Request) error {
+	return s.err
+}
+
+func TestForwardRequestShimRejectionUsesNativeShapeWithoutCallingUpstream(t *testing.T) {
+	tests := []struct {
+		name       string
+		surface    apierror.Surface
+		err        error
+		wantStatus int
+		wantType   string
+		wantBody   string
+	}{
+		{
+			name:       "bare Anthropic failure defaults to shim error",
+			surface:    apierror.Anthropic,
+			err:        errors.New("private implementation detail"),
+			wantStatus: http.StatusInternalServerError,
+			wantType:   "api_error",
+			wantBody:   `{"type":"error","error":{"type":"api_error","message":"copilotd: shim failed"}}`,
+		},
+		{
+			name:       "deliberate OpenAI rejection keeps selected kind and message",
+			surface:    apierror.OpenAI,
+			err:        apierror.Reject(apierror.InvalidRequest, "unsupported option"),
+			wantStatus: http.StatusBadRequest,
+			wantType:   "invalid_request_error",
+			wantBody:   `{"error":{"message":"unsupported option","type":"invalid_request_error","code":null,"param":null}}`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			upstreamCalls := 0
+			client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				upstreamCalls++
+				return nil, errors.New("must not be called")
+			})}
+			registry := shim.Registry{{
+				Name:    "reject",
+				Enabled: true,
+				New: func(context.Context, apierror.Surface, shim.Route) any {
+					return &rejectingRequestShim{err: tc.err}
+				},
+			}}
+			f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, registry)
+			rec := newDeadlineRecorder()
+
+			f.Handler("/route", tc.surface)(rec, httptest.NewRequest(http.MethodPost, "/provider/route", strings.NewReader(`{}`)))
+
+			if rec.Code != tc.wantStatus {
+				t.Errorf("status = %d, want %d", rec.Code, tc.wantStatus)
+			}
+			if got := rec.Body.String(); got != tc.wantBody {
+				t.Errorf("body = %q, want native shape %q", got, tc.wantBody)
+			}
+			if upstreamCalls != 0 {
+				t.Errorf("upstream calls = %d, want zero", upstreamCalls)
+			}
+			if tc.surface == apierror.Anthropic {
+				if got := anthropicErrorType(t, rec.Body.Bytes()); got != tc.wantType {
+					t.Errorf("error.type = %q, want %q", got, tc.wantType)
+				}
+			}
+		})
+	}
+}
+
+type rejectingPreludeShim struct{}
+
+var _ shim.PreludeTransformer = (*rejectingPreludeShim)(nil)
+
+func (*rejectingPreludeShim) TransformPrelude(context.Context, *shim.Prelude) error {
+	return apierror.Reject(apierror.InvalidRequest, "response envelope rejected")
+}
+
+func TestForwardPreludeShimRejectionReplacesUpstreamResponseBeforeCommit(t *testing.T) {
+	upstreamBody := &observedReadCloser{reader: strings.NewReader("must-not-leak")}
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": {"application/json"}, "X-Upstream": {"must-not-leak"}},
+			Body:       upstreamBody,
+			Request:    r,
+		}, nil
+	})}
+	registry := shim.Registry{{
+		Name:    "reject-prelude",
+		Enabled: true,
+		New: func(context.Context, apierror.Surface, shim.Route) any {
+			return &rejectingPreludeShim{}
+		},
+	}}
+	f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, registry)
+	rec := newDeadlineRecorder()
+
+	f.Handler("/responses", apierror.OpenAI)(rec, httptest.NewRequest(http.MethodPost, "/openai/v1/responses", strings.NewReader(`{}`)))
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", rec.Code)
+	}
+	const wantBody = `{"error":{"message":"response envelope rejected","type":"invalid_request_error","code":null,"param":null}}`
+	if got := rec.Body.String(); got != wantBody {
+		t.Errorf("body = %q, want %q", got, wantBody)
+	}
+	if got := rec.Header().Get("X-Upstream"); got != "" {
+		t.Errorf("X-Upstream = %q, want prelude rejection before upstream headers commit", got)
+	}
+	if upstreamBody.reads != 0 || !upstreamBody.closed {
+		t.Errorf("upstream body reads/closed = %d/%t, want 0/true", upstreamBody.reads, upstreamBody.closed)
+	}
+}
+
+func TestForwardEnabledNopIsByteExactWithEmptyChainOnBothPaths(t *testing.T) {
+	tests := []struct {
+		name        string
+		contentType string
+		body        string
+	}{
+		{name: "buffered", contentType: "application/json", body: `{"unknown":{"nested":true}}`},
+		{name: "stream", contentType: "text/event-stream", body: "event: message_stop\r\ndata: {\"type\":\"message_stop\",\"unknown\":true}\r\n\r\n"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			run := func(registry shim.Registry) *deadlineRecorder {
+				client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+					return &http.Response{
+						StatusCode: http.StatusAccepted,
+						Header:     http.Header{"Content-Type": {tc.contentType}, "X-Upstream": {"preserved"}},
+						Body:       io.NopCloser(strings.NewReader(tc.body)),
+						Request:    r,
+					}, nil
+				})}
+				f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, registry)
+				rec := newDeadlineRecorder()
+				f.Handler("/v1/messages", apierror.Anthropic)(rec, httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{"raw":true}`)))
+				return rec
+			}
+
+			empty := run(nil)
+			nopRegistry := shim.CanonicalRegistry()
+			nopRegistry[0].Enabled = true
+			nop := run(nopRegistry)
+
+			if nop.Code != empty.Code || !bytes.Equal(nop.Body.Bytes(), empty.Body.Bytes()) || !reflect.DeepEqual(nop.Header(), empty.Header()) {
+				t.Errorf("enabled nop response = status %d headers %v body %q; empty chain = status %d headers %v body %q", nop.Code, nop.Header(), nop.Body.Bytes(), empty.Code, empty.Header(), empty.Body.Bytes())
+			}
+			if got := nop.Body.String(); got != tc.body {
+				t.Errorf("nop body = %q, want exact upstream bytes %q", got, tc.body)
+			}
+		})
+	}
+}
 
 func TestStreamPolicyMapsStallToNativeTerminal(t *testing.T) {
 	policy := streamPolicy(apierror.Anthropic, time.Minute, 90*time.Second, 15*time.Second, sse.RealClock{}, nil)
@@ -29,6 +560,20 @@ func TestStreamPolicyMapsStallToNativeTerminal(t *testing.T) {
 		t.Fatalf("RenderError() error = %v", err)
 	}
 	const want = "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"copilotd: upstream stream stalled\"}}\n\n"
+	if got := rec.Body.String(); got != want {
+		t.Errorf("body = %q, want %q", got, want)
+	}
+}
+
+func TestStreamPolicyMapsShimFailureToNativeTerminal(t *testing.T) {
+	policy := streamPolicy(apierror.Anthropic, time.Minute, 90*time.Second, 15*time.Second, sse.RealClock{}, nil)
+	rec := httptest.NewRecorder()
+
+	if err := policy.RenderError(rec, sse.OutcomeShimError); err != nil {
+		t.Fatalf("RenderError() error = %v", err)
+	}
+
+	const want = "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"copilotd: shim failed\"}}\n\n"
 	if got := rec.Body.String(); got != want {
 		t.Errorf("body = %q, want %q", got, want)
 	}
@@ -76,7 +621,7 @@ func TestStreamPolicySelectsSurfaceTerminalAndKeepalive(t *testing.T) {
 }
 
 func TestNewUsesConfiguredStreamTimers(t *testing.T) {
-	f := New(readyStub("https://upstream.invalid"), http.DefaultClient, time.Minute, time.Minute, 37*time.Second, 13*time.Second, 1<<20)
+	f := New(readyStub("https://upstream.invalid"), http.DefaultClient, time.Minute, time.Minute, 37*time.Second, 13*time.Second, 1<<20, 1<<20, nil)
 	if f.streamIdleTimeout != 37*time.Second {
 		t.Errorf("streamIdleTimeout = %v, want 37s", f.streamIdleTimeout)
 	}
@@ -105,6 +650,196 @@ func (r *observedReadCloser) Close() error {
 	return nil
 }
 
+type failingEventShim struct {
+	err error
+}
+
+type holdingStreamShim struct {
+	held []sse.Frame
+}
+
+func (s *holdingStreamShim) TransformEvent(_ context.Context, frame sse.Frame) ([]sse.Frame, error) {
+	s.held = append(s.held, frame)
+	return nil, nil
+}
+
+func (s *holdingStreamShim) Finalize(context.Context) ([]sse.Frame, error) {
+	return s.held, nil
+}
+
+type alteringFailingFinalizerShim struct {
+	err error
+}
+
+type observingEventShim struct {
+	seen []sse.Frame
+}
+
+func (s *observingEventShim) TransformEvent(_ context.Context, frame sse.Frame) ([]sse.Frame, error) {
+	s.seen = append(s.seen, frame)
+	return []sse.Frame{frame}, nil
+}
+
+type failingFinalizerOnlyShim struct {
+	frames []sse.Frame
+	err    error
+}
+
+func (s *failingFinalizerOnlyShim) Finalize(context.Context) ([]sse.Frame, error) {
+	return s.frames, s.err
+}
+
+func (*alteringFailingFinalizerShim) TransformEvent(_ context.Context, frame sse.Frame) ([]sse.Frame, error) {
+	frame.Raw = append([]byte(": outer-transform\n"), frame.Raw...)
+	return []sse.Frame{frame}, nil
+}
+
+func (s *alteringFailingFinalizerShim) Finalize(context.Context) ([]sse.Frame, error) {
+	return nil, s.err
+}
+
+var _ shim.EventTransformer = (*failingEventShim)(nil)
+
+func (s *failingEventShim) TransformEvent(context.Context, sse.Frame) ([]sse.Frame, error) {
+	return nil, s.err
+}
+
+func TestForwardStreamShimFailureRendersNativeTerminalAndReleasesUpstream(t *testing.T) {
+	const upstreamFrame = "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"secret\":\"must-not-leak\"}\n\n"
+	body := &observedReadCloser{reader: strings.NewReader(upstreamFrame)}
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": {"text/event-stream"}},
+			Body:       body,
+			Request:    r,
+		}, nil
+	})}
+	instance := &failingEventShim{err: errors.New("private shim internals")}
+	registry := shim.Registry{{
+		Name:    "failing-event",
+		Enabled: true,
+		New: func(context.Context, apierror.Surface, shim.Route) any {
+			return instance
+		},
+	}}
+	f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, registry)
+	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{"stream":true}`))
+	ctx := WithStreamResultHolder(req.Context())
+	req = req.WithContext(ctx)
+	rec := newDeadlineRecorder()
+
+	f.Handler("/v1/messages", apierror.Anthropic)(rec, req)
+
+	const want = "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"copilotd: shim failed\"}}\n\n"
+	if got := rec.Body.String(); got != want {
+		t.Errorf("body = %q, want one native shim terminal %q", got, want)
+	}
+	result, ok := StreamResultFromContext(ctx)
+	if !ok || result.Outcome != sse.OutcomeShimError || result.Frames != 0 {
+		t.Errorf("stream result = %#v, %t, want shim_error with zero transformed frames", result, ok)
+	}
+	if !body.closed {
+		t.Error("upstream body is open after stream shim failure")
+	}
+}
+
+func TestForwardSuppressesOuterFinalizeErrorAfterFullyComposedTerminal(t *testing.T) {
+	const upstreamTerminal = "event: message_stop\ndata: {\"type\":\"message_stop\",\"payload\":\"frame-secret\"}\n\n"
+	body := &observedReadCloser{reader: strings.NewReader(upstreamTerminal)}
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": {"text/event-stream"}},
+			Body:       body,
+			Request:    r,
+		}, nil
+	})}
+	outer := &alteringFailingFinalizerShim{err: errors.New("private-finalize-error")}
+	inner := &holdingStreamShim{}
+	registry := shim.Registry{
+		{Name: "outer", Enabled: true, New: func(context.Context, apierror.Surface, shim.Route) any { return outer }},
+		{Name: "inner", Enabled: true, New: func(context.Context, apierror.Surface, shim.Route) any { return inner }},
+	}
+	f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, registry)
+	var logOutput bytes.Buffer
+	f.logger = slog.New(slog.NewTextHandler(&logOutput, nil))
+	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{"stream":true}`))
+	ctx := WithStreamResultHolder(req.Context())
+	req = req.WithContext(ctx)
+	rec := newDeadlineRecorder()
+
+	f.Handler("/v1/messages", apierror.Anthropic)(rec, req)
+
+	if got, want := rec.Body.String(), ": outer-transform\n"+upstreamTerminal; got != want {
+		t.Errorf("body = %q, want fully composed terminal %q", got, want)
+	}
+	result, ok := StreamResultFromContext(ctx)
+	if !ok || result.Outcome != sse.OutcomeClean || result.Frames != 1 {
+		t.Errorf("stream result = %#v, %t, want clean with one transformed frame", result, ok)
+	}
+	if got := f.suppressedShimErrors.Count(); got != 1 {
+		t.Errorf("suppressed shim errors = %d, want 1", got)
+	}
+	logText := logOutput.String()
+	if !strings.Contains(logText, "suppressed post-terminal shim error") || !strings.Contains(logText, "stage=finalize") {
+		t.Errorf("warning = %q, want suppression metadata", logText)
+	}
+	for _, secret := range []string{"frame-secret", "private-finalize-error"} {
+		if strings.Contains(logText, secret) {
+			t.Errorf("warning leaked %q: %s", secret, logText)
+		}
+	}
+	if !body.closed {
+		t.Error("upstream body is open after suppressed finalize failure")
+	}
+}
+
+func TestForwardDiscardsPartiallyComposedMiddleFinalizeOutput(t *testing.T) {
+	body := &observedReadCloser{reader: strings.NewReader("")}
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": {"text/event-stream"}},
+			Body:       body,
+			Request:    r,
+		}, nil
+	})}
+	outer := &observingEventShim{}
+	middle := &failingFinalizerOnlyShim{
+		frames: []sse.Frame{{Type: "delta", Raw: []byte("partially-composed-secret")}},
+		err:    errors.New("middle failed"),
+	}
+	inner := &failingFinalizerOnlyShim{}
+	registry := shim.Registry{
+		{Name: "outer-A", Enabled: true, New: func(context.Context, apierror.Surface, shim.Route) any { return outer }},
+		{Name: "middle-B", Enabled: true, New: func(context.Context, apierror.Surface, shim.Route) any { return middle }},
+		{Name: "inner-C", Enabled: true, New: func(context.Context, apierror.Surface, shim.Route) any { return inner }},
+	}
+	f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, registry)
+	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{"stream":true}`))
+	ctx := WithStreamResultHolder(req.Context())
+	req = req.WithContext(ctx)
+	rec := newDeadlineRecorder()
+
+	f.Handler("/v1/messages", apierror.Anthropic)(rec, req)
+
+	const want = "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"copilotd: shim failed\"}}\n\n"
+	if got := rec.Body.String(); got != want {
+		t.Errorf("body = %q, want shim terminal without partial frame %q", got, want)
+	}
+	if len(outer.seen) != 0 {
+		t.Errorf("outer event hook saw %#v, want middle output discarded at failure", outer.seen)
+	}
+	result, ok := StreamResultFromContext(ctx)
+	if !ok || result.Outcome != sse.OutcomeShimError || result.Frames != 0 {
+		t.Errorf("stream result = %#v, %t, want shim_error with no partial frames", result, ok)
+	}
+	if !body.closed {
+		t.Error("upstream body is open after middle finalize failure")
+	}
+}
+
 func TestForwardParameterizedEventStreamUsesPump(t *testing.T) {
 	const upstreamFrame = "event: content_block_delta\ndata: {\"type\":\"content_block_delta\"}\n\n"
 	const synthesized = "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"copilotd: upstream stream ended before a terminal event\"}}\n\n"
@@ -122,7 +857,7 @@ func TestForwardParameterizedEventStreamUsesPump(t *testing.T) {
 			Request: r,
 		}, nil
 	})}
-	f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20)
+	f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 	downstream := httptest.NewServer(f.Handler("/v1/messages", apierror.Anthropic))
 	defer downstream.Close()
 
@@ -172,7 +907,7 @@ func TestForwardRemovesExplicitIdentityEncodingFromEventStream(t *testing.T) {
 			Request: r,
 		}, nil
 	})}
-	f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20)
+	f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{"stream":true}`))
 	rec := newDeadlineRecorder()
 
@@ -252,7 +987,7 @@ func TestForwardRejectsUnsupportedEventStreamEncodingBeforeCommit(t *testing.T) 
 					Request: r,
 				}, nil
 			})}
-			f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20)
+			f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 			req := httptest.NewRequest(http.MethodPost, "/provider/route", strings.NewReader(`{"stream":true}`))
 			rec := newDeadlineRecorder()
 
@@ -303,7 +1038,7 @@ func TestForwardKeepsCompressedBufferedResponseOpaque(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	f := New(readyStub(upstream.URL), NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20)
+	f := New(readyStub(upstream.URL), NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{}`))
 	rec := newDeadlineRecorder()
 
@@ -334,7 +1069,7 @@ func TestForwardStoresStreamResultOnRequestHolder(t *testing.T) {
 			Request:    r,
 		}, nil
 	})}
-	f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20)
+	f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{"stream":true}`))
 	ctx := WithStreamResultHolder(req.Context())
 	req = req.WithContext(ctx)
@@ -361,7 +1096,7 @@ func TestForwardReportsDataTypeFallbacks(t *testing.T) {
 			Request:    r,
 		}, nil
 	})}
-	f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20)
+	f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{"stream":true}`))
 	ctx := WithStreamResultHolder(req.Context())
 	req = req.WithContext(ctx)
@@ -392,7 +1127,7 @@ func TestForwardOpenAITerminalsAreVerbatimAndNeverDoubled(t *testing.T) {
 					Request:    r,
 				}, nil
 			})}
-			f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20)
+			f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 			req := httptest.NewRequest(http.MethodPost, "/openai/v1/responses", strings.NewReader(`{"stream":true}`))
 			ctx := WithStreamResultHolder(req.Context())
 			req = req.WithContext(ctx)
@@ -423,7 +1158,7 @@ func TestForwardLeavesStreamResultUnsetForBufferedResponse(t *testing.T) {
 			Request:    r,
 		}, nil
 	})}
-	f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20)
+	f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{"stream":false}`))
 	ctx := WithStreamResultHolder(req.Context())
 	req = req.WithContext(ctx)
@@ -444,7 +1179,7 @@ func TestForwardStoresCanonicalOpenAIStreamSurface(t *testing.T) {
 			Request:    r,
 		}, nil
 	})}
-	f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20)
+	f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 	req := httptest.NewRequest(http.MethodPost, "/openai/v1/responses", strings.NewReader(`{"stream":true}`))
 	ctx := WithStreamResultHolder(req.Context())
 	req = req.WithContext(ctx)
@@ -505,7 +1240,7 @@ func TestForwardPreservesRawQueryOnCurrentRoutes(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	f := New(readyStub(upstream.URL), NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20)
+	f := New(readyStub(upstream.URL), NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 	tests := []struct {
 		name           string
 		inboundTarget  string
@@ -572,7 +1307,7 @@ func TestForwardPreservesBareQueryMarker(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	f := New(readyStub(upstream.URL), NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20)
+	f := New(readyStub(upstream.URL), NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages?", strings.NewReader(`{}`))
 	rec := newDeadlineRecorder()
 
@@ -594,7 +1329,7 @@ func TestForwardRequestsIdentityEncodingOnCurrentRoutes(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	f := New(readyStub(upstream.URL), NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20)
+	f := New(readyStub(upstream.URL), NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 	tests := []struct {
 		name          string
 		inboundTarget string
@@ -671,7 +1406,7 @@ func TestForwardVerbatimAndHeaderPolicy(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	f := New(readyStub(upstream.URL), NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20)
+	f := New(readyStub(upstream.URL), NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 
 	const reqBody = `{"model":"claude-3-5-sonnet","messages":[{"role":"user","content":"hi"}]}`
 	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(reqBody))
@@ -751,7 +1486,7 @@ func TestForwardJSONErrorToStreamRequestUsesBufferedPath(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	f := New(readyStub(upstream.URL), NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20)
+	f := New(readyStub(upstream.URL), NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{"stream":true}`))
 	rec := newDeadlineRecorder()
 	f.Handler("/v1/messages", apierror.Anthropic)(rec, req)
@@ -774,7 +1509,7 @@ func TestForwardSurfacePeek(t *testing.T) {
 		_, _ = io.WriteString(w, `{"ok":true}`)
 	}))
 	defer upstream.Close()
-	f := New(readyStub(upstream.URL), NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20)
+	f := New(readyStub(upstream.URL), NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 
 	forward := func(surface apierror.Surface, body string) *deadlineRecorder {
 		path := "/anthropic/v1/messages"
@@ -846,7 +1581,7 @@ func TestForwardBodyBounding(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	f := New(readyStub(upstream.URL), NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 8) // 8-byte cap
+	f := New(readyStub(upstream.URL), NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 8, 1<<20, nil) // 8-byte request cap
 	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{"model":"way too long"}`))
 	rec := newDeadlineRecorder()
 	f.Handler("/v1/messages", apierror.Anthropic)(rec, req)
@@ -867,7 +1602,7 @@ func TestForwardProxyOriginErrors(t *testing.T) {
 			w.WriteHeader(http.StatusOK)
 		}))
 		defer upstream.Close()
-		f := New(readyStub(upstream.URL), NewClient(50*time.Millisecond), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20)
+		f := New(readyStub(upstream.URL), NewClient(50*time.Millisecond), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 		req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{}`))
 		rec := newDeadlineRecorder()
 		f.Handler("/v1/messages", apierror.Anthropic)(rec, req)
@@ -882,7 +1617,7 @@ func TestForwardProxyOriginErrors(t *testing.T) {
 
 	t.Run("unreachable upstream yields 502", func(t *testing.T) {
 		// 127.0.0.1:1 refuses connections immediately.
-		f := New(readyStub("http://127.0.0.1:1"), NewClient(5*time.Second), 2*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20)
+		f := New(readyStub("http://127.0.0.1:1"), NewClient(5*time.Second), 2*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 		req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{}`))
 		rec := newDeadlineRecorder()
 		f.Handler("/v1/messages", apierror.Anthropic)(rec, req)
@@ -901,7 +1636,7 @@ func TestForwardProxyOriginErrors(t *testing.T) {
 			<-r.Context().Done()
 		}))
 		defer upstream.Close()
-		f := New(readyStub(upstream.URL), NewClient(5*time.Second), 50*time.Millisecond, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20)
+		f := New(readyStub(upstream.URL), NewClient(5*time.Second), 50*time.Millisecond, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 		req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{}`))
 		rec := newDeadlineRecorder()
 		f.Handler("/v1/messages", apierror.Anthropic)(rec, req)
@@ -926,7 +1661,7 @@ func TestOutboundTimeoutIsNotAppliedToEventStream(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	f := New(readyStub(upstream.URL), NewClient(time.Second), 50*time.Millisecond, time.Second, 90*time.Second, 15*time.Second, 1<<20)
+	f := New(readyStub(upstream.URL), NewClient(time.Second), 50*time.Millisecond, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 	req := httptest.NewRequest(http.MethodPost, "/openai/v1/responses", strings.NewReader(`{}`))
 	rec := newDeadlineRecorder()
 	f.Handler("/responses", apierror.OpenAI)(rec, req)
@@ -952,7 +1687,7 @@ func TestForwardClientCancelPropagates(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	f := New(readyStub(upstream.URL), NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20)
+	f := New(readyStub(upstream.URL), NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{}`)).WithContext(ctx)
@@ -1000,7 +1735,7 @@ func TestBufferedCopyAbortsWhenClientStopsDraining(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	f := New(readyStub(upstream.URL), NewClient(5*time.Second), 5*time.Second, 100*time.Millisecond, 90*time.Second, 15*time.Second, 1<<20)
+	f := New(readyStub(upstream.URL), NewClient(5*time.Second), 5*time.Second, 100*time.Millisecond, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 	handlerReturned := make(chan struct{})
 	downstream := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer close(handlerReturned)

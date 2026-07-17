@@ -22,6 +22,8 @@ func TestWriteShapesAndStatus(t *testing.T) {
 		{PayloadTooLarge, 413, "invalid_request_error", "invalid_request_error", ""},
 		{BadGateway, 502, "api_error", "api_error", ""},
 		{GatewayTimeout, 504, "api_error", "api_error", ""},
+		{ShimError, 500, "api_error", "api_error", ""},
+		{InvalidRequest, 400, "invalid_request_error", "invalid_request_error", ""},
 	}
 
 	for _, tc := range tests {
@@ -94,6 +96,16 @@ func TestWriteShapesAndStatus(t *testing.T) {
 	}
 }
 
+func TestRejectCarriesKindAndMessageAsAnError(t *testing.T) {
+	err := Reject(InvalidRequest, "unsupported option")
+	if err.Kind != InvalidRequest {
+		t.Errorf("Kind = %v, want InvalidRequest", err.Kind)
+	}
+	if err.Msg != "unsupported option" || err.Error() != "unsupported option" {
+		t.Errorf("message = %q / %q, want unsupported option", err.Msg, err.Error())
+	}
+}
+
 func TestWriteStreamErrorAnthropicEnded(t *testing.T) {
 	rec := httptest.NewRecorder()
 
@@ -135,6 +147,39 @@ func TestWriteStreamErrorAnthropicStalled(t *testing.T) {
 	}
 	if !rec.Flushed {
 		t.Error("stream error was not flushed")
+	}
+}
+
+func TestWriteStreamErrorShimFailureUsesNativeShape(t *testing.T) {
+	tests := []struct {
+		name    string
+		surface Surface
+		want    string
+	}{
+		{
+			name:    "Anthropic",
+			surface: Anthropic,
+			want:    "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"copilotd: shim failed\"}}\n\n",
+		},
+		{
+			name:    "OpenAI",
+			surface: OpenAI,
+			want:    "event: error\ndata: {\"type\":\"error\",\"code\":null,\"message\":\"copilotd: shim failed\",\"param\":null}\n\n",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			if err := WriteStreamError(rec, tc.surface, StreamShimFailed); err != nil {
+				t.Fatalf("WriteStreamError: %v", err)
+			}
+			if got := rec.Body.String(); got != tc.want {
+				t.Errorf("body = %q, want %q", got, tc.want)
+			}
+			if !rec.Flushed {
+				t.Error("stream shim error was not flushed")
+			}
+		})
 	}
 }
 

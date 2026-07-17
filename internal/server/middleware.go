@@ -59,7 +59,7 @@ func accessLog(logger *slog.Logger, streamOutcomes StreamOutcomeObserver, next h
 		if result, ok := forward.StreamResultFromContext(ctx); ok {
 			streamOutcomes.ObserveStreamOutcome(result.Surface, result.Outcome)
 			switch result.Outcome {
-			case sse.OutcomeSynthesized, sse.OutcomeStall, sse.OutcomeUpstreamError:
+			case sse.OutcomeSynthesized, sse.OutcomeStall, sse.OutcomeUpstreamError, sse.OutcomeShimError:
 				level = slog.LevelWarn
 			}
 			attrs = append(attrs,

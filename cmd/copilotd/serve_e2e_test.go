@@ -27,24 +27,25 @@ const testAPIKey = "test-api-key"
 // buildServeProvider, minus the flag/env/file plumbing.
 func e2eConfig(oauthToken string) config.ServeConfig {
 	return config.ServeConfig{
-		Addr:                    "127.0.0.1:0",
-		LogLevel:                "info",
-		LogFormat:               "text",
-		ShutdownTimeout:         2 * time.Second,
-		APIKey:                  testAPIKey,
-		GithubOAuthToken:        oauthToken,
-		OutboundTimeout:         5 * time.Second,
-		StreamIdleTimeout:       5 * time.Second,
-		StreamKeepaliveInterval: 15 * time.Second,
-		WriteTimeout:            5 * time.Second,
-		ResponseHeaderTimeout:   5 * time.Second,
-		MaxRequestBytes:         1 << 20,
-		StartupMintRetries:      0, // deterministic against stubs; no retries needed
-		CopilotIntegrationID:    "vscode-chat",
-		EditorVersion:           "vscode/1.104.1",
-		EditorPluginVersion:     "copilot-chat/0.26.7",
-		CopilotUserAgent:        "GitHubCopilotChat/0.26.7",
-		GithubAPIVersion:        "2025-04-01",
+		Addr:                     "127.0.0.1:0",
+		LogLevel:                 "info",
+		LogFormat:                "text",
+		ShutdownTimeout:          2 * time.Second,
+		APIKey:                   testAPIKey,
+		GithubOAuthToken:         oauthToken,
+		OutboundTimeout:          5 * time.Second,
+		StreamIdleTimeout:        5 * time.Second,
+		StreamKeepaliveInterval:  15 * time.Second,
+		WriteTimeout:             5 * time.Second,
+		ResponseHeaderTimeout:    5 * time.Second,
+		MaxRequestBytes:          1 << 20,
+		MaxBufferedResponseBytes: 1 << 20,
+		StartupMintRetries:       0, // deterministic against stubs; no retries needed
+		CopilotIntegrationID:     "vscode-chat",
+		EditorVersion:            "vscode/1.104.1",
+		EditorPluginVersion:      "copilot-chat/0.26.7",
+		CopilotUserAgent:         "GitHubCopilotChat/0.26.7",
+		GithubAPIVersion:         "2025-04-01",
 	}
 }
 
@@ -162,7 +163,7 @@ func TestServeFirstRealCallEndToEnd(t *testing.T) {
 		t.Fatalf("manager not ready after a successful startup mint")
 	}
 
-	fwd := forward.New(mgr, forward.NewClient(cfg.ResponseHeaderTimeout), cfg.OutboundTimeout, cfg.WriteTimeout, cfg.StreamIdleTimeout, cfg.StreamKeepaliveInterval, cfg.MaxRequestBytes)
+	fwd := forward.New(mgr, forward.NewClient(cfg.ResponseHeaderTimeout), cfg.OutboundTimeout, cfg.WriteTimeout, cfg.StreamIdleTimeout, cfg.StreamKeepaliveInterval, cfg.MaxRequestBytes, cfg.MaxBufferedResponseBytes, nil)
 	base := startTestServer(t, server.New(cfg, logger, mgr, fwd, server.NewStreamOutcomeCounter()))
 
 	assertImpersonation := func(t *testing.T) {
@@ -249,7 +250,7 @@ func TestServeDegradedWindow(t *testing.T) {
 		if mgr.Ready() {
 			t.Fatalf("Ready() = true before any mint, want false")
 		}
-		fwd := forward.New(mgr, forward.NewClient(cfg.ResponseHeaderTimeout), cfg.OutboundTimeout, cfg.WriteTimeout, cfg.StreamIdleTimeout, cfg.StreamKeepaliveInterval, cfg.MaxRequestBytes)
+		fwd := forward.New(mgr, forward.NewClient(cfg.ResponseHeaderTimeout), cfg.OutboundTimeout, cfg.WriteTimeout, cfg.StreamIdleTimeout, cfg.StreamKeepaliveInterval, cfg.MaxRequestBytes, cfg.MaxBufferedResponseBytes, nil)
 		base := startTestServer(t, server.New(cfg, logger, mgr, fwd, server.NewStreamOutcomeCounter()))
 
 		assertNotReady(t, base)
@@ -279,7 +280,7 @@ func TestServeDegradedWindow(t *testing.T) {
 		if mgr.Ready() {
 			t.Fatalf("Ready() = true after a failed startup mint, want false")
 		}
-		fwd := forward.New(mgr, forward.NewClient(cfg.ResponseHeaderTimeout), cfg.OutboundTimeout, cfg.WriteTimeout, cfg.StreamIdleTimeout, cfg.StreamKeepaliveInterval, cfg.MaxRequestBytes)
+		fwd := forward.New(mgr, forward.NewClient(cfg.ResponseHeaderTimeout), cfg.OutboundTimeout, cfg.WriteTimeout, cfg.StreamIdleTimeout, cfg.StreamKeepaliveInterval, cfg.MaxRequestBytes, cfg.MaxBufferedResponseBytes, nil)
 		base := startTestServer(t, server.New(cfg, logger, mgr, fwd, server.NewStreamOutcomeCounter()))
 
 		assertNotReady(t, base)

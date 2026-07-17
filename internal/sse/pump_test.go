@@ -35,7 +35,7 @@ func TestPumpSilentUpstreamStallsAndJoinsReader(t *testing.T) {
 			WriteTimeout: time.Minute,
 			IdleTimeout:  90 * time.Second,
 			Clock:        clock,
-		})
+		}, nil)
 	}()
 
 	<-body.readStarted
@@ -83,7 +83,7 @@ func TestPumpSlowDownstreamWriteIsExcludedFromStallStopwatch(t *testing.T) {
 			WriteTimeout: time.Minute,
 			IdleTimeout:  10 * time.Second,
 			Clock:        clock,
-		})
+		}, nil)
 	}()
 	<-clock.timerCreated
 
@@ -134,7 +134,7 @@ func TestPumpAnthropicPingFramesResetStallStopwatch(t *testing.T) {
 			WriteTimeout: time.Minute,
 			IdleTimeout:  10 * time.Second,
 			Clock:        clock,
-		})
+		}, nil)
 	}()
 	<-clock.timerCreated
 
@@ -186,7 +186,7 @@ func TestPumpInjectsKeepaliveAtEachOpenAIIdleGap(t *testing.T) {
 			WriteTimeout:      time.Minute,
 			KeepaliveInterval: 15 * time.Second,
 			Clock:             clock,
-		})
+		}, nil)
 	}()
 
 	<-body.readStarted
@@ -228,7 +228,7 @@ func TestPumpRealFramesResetOpenAIKeepaliveSchedule(t *testing.T) {
 			WriteTimeout:      time.Minute,
 			KeepaliveInterval: 10 * time.Second,
 			Clock:             clock,
-		})
+		}, identityFrameTransformer{})
 	}()
 	<-clock.timerCreated
 
@@ -282,7 +282,7 @@ func TestPumpOpenAIKeepalivesNeverDelayStall(t *testing.T) {
 			IdleTimeout:       25 * time.Second,
 			KeepaliveInterval: 10 * time.Second,
 			Clock:             clock,
-		})
+		}, nil)
 	}()
 	<-body.readStarted
 	<-clock.timerCreated
@@ -326,7 +326,7 @@ func TestPumpFrameArrivingDuringSlowKeepaliveBeatsStall(t *testing.T) {
 				IdleTimeout:       20 * time.Second,
 				KeepaliveInterval: 10 * time.Second,
 				Clock:             clock,
-			})
+			}, nil)
 		}()
 
 		<-clock.timerCreated
@@ -395,7 +395,7 @@ func TestPumpKeepaliveWriteFailureIsClientCancelWithNoFurtherOutput(t *testing.T
 			WriteTimeout:      time.Minute,
 			KeepaliveInterval: 10 * time.Second,
 			Clock:             clock,
-		})
+		}, nil)
 	}()
 	<-body.readStarted
 	<-clock.timerCreated
@@ -431,7 +431,7 @@ func TestPumpCancellationSuppressesReadyKeepaliveAndFurtherOutput(t *testing.T) 
 			WriteTimeout:      time.Minute,
 			KeepaliveInterval: 10 * time.Second,
 			Clock:             clock,
-		})
+		}, nil)
 	}()
 	<-body.readStarted
 	<-clock.timerCreated
@@ -466,7 +466,7 @@ func TestPumpForwardsUpstreamErrorTerminalWithoutSynthesis(t *testing.T) {
 		},
 		WriteTimeout: time.Second,
 		Clock:        RealClock{},
-	})
+	}, nil)
 
 	if result.Outcome != OutcomeClean {
 		t.Errorf("Outcome = %q, want %q", result.Outcome, OutcomeClean)
@@ -493,7 +493,7 @@ func TestPumpTerminalFollowedByReadErrorRemainsClean(t *testing.T) {
 		},
 		WriteTimeout: time.Second,
 		Clock:        RealClock{},
-	})
+	}, nil)
 
 	if result.Outcome != OutcomeClean {
 		t.Errorf("Outcome = %q, want %q", result.Outcome, OutcomeClean)
@@ -521,7 +521,7 @@ func TestPumpTerminalFollowedByIdleTimeoutRemainsClean(t *testing.T) {
 			WriteTimeout: time.Minute,
 			IdleTimeout:  10 * time.Second,
 			Clock:        clock,
-		})
+		}, nil)
 	}()
 
 	<-clock.timerCreated
@@ -555,7 +555,7 @@ func TestPumpTerminalFollowedByKeepaliveTickRemainsClean(t *testing.T) {
 			WriteTimeout:      time.Minute,
 			KeepaliveInterval: 10 * time.Second,
 			Clock:             clock,
-		})
+		}, nil)
 	}()
 
 	<-clock.timerCreated
@@ -589,7 +589,7 @@ func TestPumpClientContextCancellationStopsUpstreamAndJoinsReader(t *testing.T) 
 			},
 			WriteTimeout: time.Second,
 			Clock:        RealClock{},
-		})
+		}, nil)
 	}()
 
 	select {
@@ -642,7 +642,7 @@ func TestPumpDownstreamWriteFailureIsClientCancelAndJoinsReader(t *testing.T) {
 		},
 		WriteTimeout: time.Second,
 		Clock:        RealClock{},
-	})
+	}, nil)
 	if result.Outcome != OutcomeClientCancel {
 		t.Errorf("Outcome = %q, want %q", result.Outcome, OutcomeClientCancel)
 	}
@@ -678,7 +678,7 @@ func TestPumpDownstreamFlushFailureIsClientCancelAndJoinsReader(t *testing.T) {
 		},
 		WriteTimeout: time.Second,
 		Clock:        RealClock{},
-	})
+	}, nil)
 
 	if result.Outcome != OutcomeClientCancel {
 		t.Errorf("Outcome = %q, want %q", result.Outcome, OutcomeClientCancel)
@@ -714,7 +714,7 @@ func TestPumpSetWriteDeadlineFailureIsClientCancelWithNoWireOutput(t *testing.T)
 		},
 		WriteTimeout: time.Second,
 		Clock:        RealClock{},
-	})
+	}, nil)
 
 	if result.Outcome != OutcomeClientCancel {
 		t.Errorf("Outcome = %q, want %q", result.Outcome, OutcomeClientCancel)
@@ -750,7 +750,7 @@ func TestPumpExceededWriteDeadlineIsClientCancelWithNoWireOutput(t *testing.T) {
 		},
 		WriteTimeout: time.Second,
 		Clock:        RealClock{},
-	})
+	}, nil)
 
 	if result.Outcome != OutcomeClientCancel {
 		t.Errorf("Outcome = %q, want %q", result.Outcome, OutcomeClientCancel)
@@ -782,7 +782,7 @@ func TestPumpSynthesizedTerminalWriteFailureBecomesClientCancel(t *testing.T) {
 		},
 		WriteTimeout: time.Second,
 		Clock:        RealClock{},
-	})
+	}, nil)
 
 	if result.Outcome != OutcomeClientCancel {
 		t.Errorf("Outcome = %q, want %q", result.Outcome, OutcomeClientCancel)
@@ -807,7 +807,7 @@ func TestPumpCancellationWinsConcurrentUpstreamReadError(t *testing.T) {
 				},
 				WriteTimeout: time.Second,
 				Clock:        RealClock{},
-			})
+			}, nil)
 		}()
 		<-body.readStarted
 		cancel()
@@ -839,7 +839,7 @@ func TestPumpCancellationWinsConcurrentStallTick(t *testing.T) {
 				WriteTimeout: time.Minute,
 				IdleTimeout:  10 * time.Second,
 				Clock:        clock,
-			})
+			}, nil)
 		}()
 		<-body.readStarted
 		<-clock.timerCreated
@@ -901,7 +901,7 @@ func TestPumpWedgedClientWriteDeadlineIsClientCancelAndReleasesUpstream(t *testi
 			},
 			WriteTimeout: 100 * time.Millisecond,
 			Clock:        RealClock{},
-		})
+		}, nil)
 	}))
 	downstream.Config.ConnState = func(conn net.Conn, state http.ConnState) {
 		if state == http.StateNew {
@@ -963,7 +963,7 @@ func TestPumpForwardsCleanStreamVerbatim(t *testing.T) {
 		},
 		WriteTimeout: time.Second,
 		Clock:        RealClock{},
-	})
+	}, nil)
 
 	if result.Outcome != OutcomeClean {
 		t.Errorf("Outcome = %q, want %q", result.Outcome, OutcomeClean)
@@ -1013,7 +1013,7 @@ func TestPumpSynthesizesTerminalOnUpstreamReadError(t *testing.T) {
 		},
 		WriteTimeout: time.Second,
 		Clock:        RealClock{},
-	})
+	}, nil)
 
 	if result.Outcome != OutcomeUpstreamError {
 		t.Errorf("Outcome = %q, want %q", result.Outcome, OutcomeUpstreamError)
@@ -1050,7 +1050,7 @@ func TestPumpSynthesizesTerminalWhenEOFHasNoTerminal(t *testing.T) {
 		},
 		WriteTimeout: time.Second,
 		Clock:        RealClock{},
-	})
+	}, nil)
 
 	if result.Outcome != OutcomeSynthesized {
 		t.Errorf("Outcome = %q, want %q", result.Outcome, OutcomeSynthesized)

@@ -44,25 +44,26 @@ func loadServe(args []string, lookupEnv func(string) (string, bool)) (ServeConfi
 
 func defaultConfig() ServeConfig {
 	return ServeConfig{
-		Addr:                    "127.0.0.1:8080",
-		LogLevel:                "info",
-		LogFormat:               "text",
-		LogFile:                 "",
-		ShutdownTimeout:         10 * time.Second,
-		GithubOAuthTokenFile:    defaultOAuthTokenFile(),
-		APIKey:                  testAPIKey,
-		OutboundTimeout:         600 * time.Second,
-		StreamIdleTimeout:       90 * time.Second,
-		StreamKeepaliveInterval: 15 * time.Second,
-		WriteTimeout:            90 * time.Second,
-		ResponseHeaderTimeout:   600 * time.Second,
-		MaxRequestBytes:         33554432,
-		StartupMintRetries:      3,
-		CopilotIntegrationID:    "vscode-chat",
-		EditorVersion:           "vscode/1.104.1",
-		EditorPluginVersion:     "copilot-chat/0.26.7",
-		CopilotUserAgent:        "GitHubCopilotChat/0.26.7",
-		GithubAPIVersion:        "2025-04-01",
+		Addr:                     "127.0.0.1:8080",
+		LogLevel:                 "info",
+		LogFormat:                "text",
+		LogFile:                  "",
+		ShutdownTimeout:          10 * time.Second,
+		GithubOAuthTokenFile:     defaultOAuthTokenFile(),
+		APIKey:                   testAPIKey,
+		OutboundTimeout:          600 * time.Second,
+		StreamIdleTimeout:        90 * time.Second,
+		StreamKeepaliveInterval:  15 * time.Second,
+		WriteTimeout:             90 * time.Second,
+		ResponseHeaderTimeout:    600 * time.Second,
+		MaxRequestBytes:          33554432,
+		MaxBufferedResponseBytes: 33554432,
+		StartupMintRetries:       3,
+		CopilotIntegrationID:     "vscode-chat",
+		EditorVersion:            "vscode/1.104.1",
+		EditorPluginVersion:      "copilot-chat/0.26.7",
+		CopilotUserAgent:         "GitHubCopilotChat/0.26.7",
+		GithubAPIVersion:         "2025-04-01",
 	}
 }
 
@@ -73,6 +74,156 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if got != defaultConfig() {
 		t.Errorf("loadServe() = %+v, want %+v", got, defaultConfig())
+	}
+}
+
+func TestMaxBufferedResponseBytesConfigPrecedence(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "copilotd.toml")
+	if err := os.WriteFile(path, []byte("max-buffered-response-bytes = 11\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	tests := []struct {
+		name string
+		args []string
+		env  map[string]string
+		want int64
+	}{
+		{name: "default", want: 33554432},
+		{name: "TOML overrides default", args: []string{"--config", path}, want: 11},
+		{
+			name: "env overrides TOML",
+			args: []string{"--config", path},
+			env:  map[string]string{"COPILOTD_MAX_BUFFERED_RESPONSE_BYTES": "21"},
+			want: 21,
+		},
+		{
+			name: "flag overrides env",
+			args: []string{"--config", path, "--max-buffered-response-bytes", "31"},
+			env:  map[string]string{"COPILOTD_MAX_BUFFERED_RESPONSE_BYTES": "21"},
+			want: 31,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			env := map[string]string{"COPILOTD_APIKEY": testAPIKey}
+			for key, value := range tc.env {
+				env[key] = value
+			}
+			got, err := loadServe(tc.args, envFunc(env))
+			if err != nil {
+				t.Fatalf("loadServe() error = %v", err)
+			}
+			if got.MaxBufferedResponseBytes != tc.want {
+				t.Errorf("MaxBufferedResponseBytes = %d, want %d", got.MaxBufferedResponseBytes, tc.want)
+			}
+		})
+	}
+}
+
+func TestMaxBufferedResponseBytesRejectsMalformedOrNonPositiveValues(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "copilotd.toml")
+	if err := os.WriteFile(path, []byte("max-buffered-response-bytes = \"not-an-integer\"\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	tests := []struct {
+		name string
+		args []string
+		env  map[string]string
+	}{
+		{name: "malformed flag", args: []string{"--apikey", testAPIKey, "--max-buffered-response-bytes", "not-an-integer"}},
+		{name: "malformed env", args: []string{"--apikey", testAPIKey}, env: map[string]string{"COPILOTD_MAX_BUFFERED_RESPONSE_BYTES": "not-an-integer"}},
+		{name: "malformed TOML", args: []string{"--apikey", testAPIKey, "--config", path}},
+		{name: "zero flag", args: []string{"--apikey", testAPIKey, "--max-buffered-response-bytes", "0"}},
+		{name: "negative env", args: []string{"--apikey", testAPIKey}, env: map[string]string{"COPILOTD_MAX_BUFFERED_RESPONSE_BYTES": "-1"}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := loadServe(tc.args, envFunc(tc.env))
+			if err == nil {
+				t.Fatal("loadServe() error = nil, want buffered-response cap rejected")
+			}
+			if !strings.Contains(err.Error(), "max-buffered-response-bytes") {
+				t.Errorf("error = %q, want max-buffered-response-bytes context", err)
+			}
+		})
+	}
+}
+
+func TestShimNopEnabledConfigPrecedence(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "copilotd.toml")
+	if err := os.WriteFile(path, []byte("shim-nop-enabled = true\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	tests := []struct {
+		name string
+		args []string
+		env  map[string]string
+		want bool
+	}{
+		{name: "shim default", want: false},
+		{name: "TOML overrides default", args: []string{"--config", path}, want: true},
+		{
+			name: "env overrides TOML",
+			args: []string{"--config", path},
+			env:  map[string]string{"COPILOTD_SHIM_NOP_ENABLED": "false"},
+			want: false,
+		},
+		{
+			name: "flag overrides env",
+			args: []string{"--config", path, "--shim-nop-enabled=true"},
+			env:  map[string]string{"COPILOTD_SHIM_NOP_ENABLED": "false"},
+			want: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			env := map[string]string{"COPILOTD_APIKEY": testAPIKey}
+			for key, value := range tc.env {
+				env[key] = value
+			}
+			got, err := loadServe(tc.args, envFunc(env))
+			if err != nil {
+				t.Fatalf("loadServe() error = %v", err)
+			}
+			if got.ShimNopEnabled != tc.want {
+				t.Errorf("ShimNopEnabled = %t, want %t", got.ShimNopEnabled, tc.want)
+			}
+		})
+	}
+}
+
+func TestShimNopEnabledRejectsMalformedValues(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "copilotd.toml")
+	if err := os.WriteFile(path, []byte("shim-nop-enabled = \"not-a-bool\"\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	tests := []struct {
+		name string
+		args []string
+		env  map[string]string
+	}{
+		{name: "flag", args: []string{"--apikey", testAPIKey, "--shim-nop-enabled=not-a-bool"}},
+		{name: "env", args: []string{"--apikey", testAPIKey}, env: map[string]string{"COPILOTD_SHIM_NOP_ENABLED": "not-a-bool"}},
+		{name: "TOML", args: []string{"--apikey", testAPIKey, "--config", path}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := loadServe(tc.args, envFunc(tc.env))
+			if err == nil {
+				t.Fatal("loadServe() error = nil, want malformed shim toggle rejected")
+			}
+			if !strings.Contains(err.Error(), "shim-nop-enabled") {
+				t.Errorf("error = %q, want shim-nop-enabled context", err)
+			}
+		})
 	}
 }
 
@@ -266,6 +417,7 @@ func TestLoadPrecedence(t *testing.T) {
 		c.StreamKeepaliveInterval = 15 * time.Second
 		c.WriteTimeout = 90 * time.Second
 		c.ResponseHeaderTimeout = 600 * time.Second
+		c.MaxBufferedResponseBytes = 33554432
 		c.StartupMintRetries = 3
 		c.CopilotIntegrationID = "vscode-chat"
 		c.EditorVersion = "vscode/1.104.1"
@@ -450,26 +602,28 @@ func TestLoadValidationErrors(t *testing.T) {
 
 func TestConfigLogValueEmitsOnlyNonSecretFields(t *testing.T) {
 	cfg := ServeConfig{
-		Addr:                    "127.0.0.1:8080",
-		LogLevel:                "info",
-		LogFormat:               "text",
-		LogFile:                 "/var/log/copilotd.log",
-		ShutdownTimeout:         10 * time.Second,
-		GithubOAuthTokenFile:    "/home/op/.config/copilotd/github-oauth-token",
-		APIKey:                  "super-secret-apikey-value",
-		OutboundTimeout:         600 * time.Second,
-		StreamIdleTimeout:       90 * time.Second,
-		StreamKeepaliveInterval: 15 * time.Second,
-		WriteTimeout:            90 * time.Second,
-		ResponseHeaderTimeout:   600 * time.Second,
-		MaxRequestBytes:         33554432,
-		GithubOAuthToken:        "gho-super-secret-oauth-value",
-		StartupMintRetries:      3,
-		CopilotIntegrationID:    "vscode-chat",
-		EditorVersion:           "vscode/1.104.1",
-		EditorPluginVersion:     "copilot-chat/0.26.7",
-		CopilotUserAgent:        "GitHubCopilotChat/0.26.7",
-		GithubAPIVersion:        "2025-04-01",
+		Addr:                     "127.0.0.1:8080",
+		LogLevel:                 "info",
+		LogFormat:                "text",
+		LogFile:                  "/var/log/copilotd.log",
+		ShutdownTimeout:          10 * time.Second,
+		GithubOAuthTokenFile:     "/home/op/.config/copilotd/github-oauth-token",
+		APIKey:                   "super-secret-apikey-value",
+		OutboundTimeout:          600 * time.Second,
+		StreamIdleTimeout:        90 * time.Second,
+		StreamKeepaliveInterval:  15 * time.Second,
+		WriteTimeout:             90 * time.Second,
+		ResponseHeaderTimeout:    600 * time.Second,
+		MaxRequestBytes:          33554432,
+		MaxBufferedResponseBytes: 16777216,
+		ShimNopEnabled:           true,
+		GithubOAuthToken:         "gho-super-secret-oauth-value",
+		StartupMintRetries:       3,
+		CopilotIntegrationID:     "vscode-chat",
+		EditorVersion:            "vscode/1.104.1",
+		EditorPluginVersion:      "copilot-chat/0.26.7",
+		CopilotUserAgent:         "GitHubCopilotChat/0.26.7",
+		GithubAPIVersion:         "2025-04-01",
 	}
 
 	var buf bytes.Buffer
@@ -490,6 +644,8 @@ func TestConfigLogValueEmitsOnlyNonSecretFields(t *testing.T) {
 		"config.write-timeout=1m30s",
 		"config.response-header-timeout=10m0s",
 		"config.max-request-bytes=33554432",
+		"config.max-buffered-response-bytes=16777216",
+		"config.shim-nop-enabled=true",
 		"config.startup-mint-retries=3",
 		"config.copilot-integration-id=vscode-chat",
 		"config.editor-version=vscode/1.104.1",

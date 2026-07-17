@@ -4,8 +4,9 @@
 // error body. Upstream (Copilot) error responses are passed through verbatim by
 // the forwarder and never routed through here; apierror covers only the errors
 // copilotd itself originates: auth (401), readiness (503), the unsupported
-// background-mode reject (400), body bounding (413), copilotd-originated 502/504, and
-// native terminal SSE errors after a streaming response is committed.
+// background-mode and shim rejects (400), body bounding (413), unexpected shim
+// failures (500), copilotd-originated 502/504, and native terminal SSE errors
+// after a streaming response is committed.
 package apierror
 
 import (
@@ -24,6 +25,18 @@ const (
 	OpenAI
 )
 
+// Error carries a deliberate surface-native pre-commit rejection from a shim.
+type Error struct {
+	Kind Kind
+	Msg  string
+}
+
+// Error implements error.
+func (e *Error) Error() string { return e.Msg }
+
+// Reject constructs a deliberate surface-native pre-commit rejection.
+func Reject(kind Kind, msg string) *Error { return &Error{Kind: kind, Msg: msg} }
+
 // StreamReason identifies why copilotd must originate a terminal SSE error
 // after the HTTP response has already been committed.
 type StreamReason int
@@ -32,12 +45,14 @@ const (
 	StreamEnded StreamReason = iota
 	StreamFailed
 	StreamStalled
+	StreamShimFailed
 )
 
 var streamMessages = map[StreamReason]string{
-	StreamEnded:   "copilotd: upstream stream ended before a terminal event",
-	StreamFailed:  "copilotd: upstream stream failed",
-	StreamStalled: "copilotd: upstream stream stalled",
+	StreamEnded:      "copilotd: upstream stream ended before a terminal event",
+	StreamFailed:     "copilotd: upstream stream failed",
+	StreamStalled:    "copilotd: upstream stream stalled",
+	StreamShimFailed: "copilotd: shim failed",
 }
 
 // Kind enumerates every copilotd-originated error condition, each mapped by the
@@ -51,6 +66,8 @@ const (
 	PayloadTooLarge                   // 413 — inbound body over the cap
 	BadGateway                        // 502 — could not reach the upstream
 	GatewayTimeout                    // 504 — upstream call exceeded the deadline
+	ShimError                         // 500 — unexpected pre-commit shim failure
+	InvalidRequest                    // 400 — a shim's deliberate invalid request
 )
 
 // entry is one row of the mapping: the HTTP status and each surface's error
@@ -74,6 +91,8 @@ var table = map[Kind]entry{
 	PayloadTooLarge:       {http.StatusRequestEntityTooLarge, "invalid_request_error", "invalid_request_error", ""},
 	BadGateway:            {http.StatusBadGateway, "api_error", "api_error", ""},
 	GatewayTimeout:        {http.StatusGatewayTimeout, "api_error", "api_error", ""},
+	ShimError:             {http.StatusInternalServerError, "api_error", "api_error", ""},
+	InvalidRequest:        {http.StatusBadRequest, "invalid_request_error", "invalid_request_error", ""},
 }
 
 // Write renders kind for surface as the mapped status plus a JSON body, setting

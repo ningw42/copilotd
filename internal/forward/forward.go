@@ -14,14 +14,18 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
+	"math"
 	"mime"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/ningw42/copilotd/internal/apierror"
 	"github.com/ningw42/copilotd/internal/identity"
 	"github.com/ningw42/copilotd/internal/logging"
+	"github.com/ningw42/copilotd/internal/shim"
 	"github.com/ningw42/copilotd/internal/sse"
 )
 
@@ -32,33 +36,48 @@ const requestIDHeader = "X-Request-Id"
 
 // Forwarder forwards inbound provider-route requests upstream. Its dependencies
 // are injected so it stays Copilot-agnostic and unit-testable: the credential
-// Provider, the outbound HTTP client, the per-request context deadline, and the
-// inbound body cap.
+// Provider, the outbound HTTP client, the per-request context deadline, the
+// inbound and buffered-response body caps, and the ordered shim registry.
 type Forwarder struct {
-	provider                identity.Provider
-	client                  *http.Client
-	outboundTimeout         time.Duration
-	writeTimeout            time.Duration
-	streamIdleTimeout       time.Duration
-	streamKeepaliveInterval time.Duration
-	clock                   sse.Clock
-	fallbacks               *sse.FallbackCounter
-	maxRequestBytes         int64
+	provider                 identity.Provider
+	client                   *http.Client
+	outboundTimeout          time.Duration
+	writeTimeout             time.Duration
+	streamIdleTimeout        time.Duration
+	streamKeepaliveInterval  time.Duration
+	clock                    sse.Clock
+	fallbacks                *sse.FallbackCounter
+	logger                   *slog.Logger
+	suppressedShimErrors     *sse.SuppressedShimErrorCounter
+	maxRequestBytes          int64
+	maxBufferedResponseBytes int64
+	registry                 shim.Registry
 }
 
 // New builds a Forwarder from its injected dependencies.
-func New(provider identity.Provider, client *http.Client, outboundTimeout, writeTimeout, streamIdleTimeout, streamKeepaliveInterval time.Duration, maxRequestBytes int64) *Forwarder {
+func New(provider identity.Provider, client *http.Client, outboundTimeout, writeTimeout, streamIdleTimeout, streamKeepaliveInterval time.Duration, maxRequestBytes, maxBufferedResponseBytes int64, registry shim.Registry) *Forwarder {
+	registry = append(shim.Registry(nil), registry...)
 	return &Forwarder{
-		provider:                provider,
-		client:                  client,
-		outboundTimeout:         outboundTimeout,
-		writeTimeout:            writeTimeout,
-		streamIdleTimeout:       streamIdleTimeout,
-		streamKeepaliveInterval: streamKeepaliveInterval,
-		clock:                   sse.RealClock{},
-		fallbacks:               sse.NewFallbackCounter(),
-		maxRequestBytes:         maxRequestBytes,
+		provider:                 provider,
+		client:                   client,
+		outboundTimeout:          outboundTimeout,
+		writeTimeout:             writeTimeout,
+		streamIdleTimeout:        streamIdleTimeout,
+		streamKeepaliveInterval:  streamKeepaliveInterval,
+		clock:                    sse.RealClock{},
+		fallbacks:                sse.NewFallbackCounter(),
+		logger:                   slog.Default(),
+		suppressedShimErrors:     sse.NewSuppressedShimErrorCounter(),
+		maxRequestBytes:          maxRequestBytes,
+		maxBufferedResponseBytes: maxBufferedResponseBytes,
+		registry:                 registry,
 	}
+}
+
+// SuppressedShimErrorCount reports stream shim failures hidden from the wire by
+// the post-terminal no-double-up rule.
+func (f *Forwarder) SuppressedShimErrorCount() uint64 {
+	return f.suppressedShimErrors.Count()
 }
 
 // NewClient builds the dedicated outbound client: a tuned, connection-pooling
@@ -90,12 +109,27 @@ func (f *Forwarder) Handler(upstreamPath string, tag apierror.Surface) http.Hand
 		if !ok {
 			return
 		}
+		chain := f.registry.NewChain(r.Context(), tag, shim.Route(upstreamPath))
+		header, body, err := chain.RunRequest(r.Context(), r.URL.RawQuery, r.Header, body)
+		if err != nil {
+			writeShimError(w, tag, err)
+			return
+		}
 		if tag == apierror.OpenAI && peekBackground(body) {
 			apierror.Write(w, tag, apierror.BackgroundUnsupported, "background responses are not supported")
 			return
 		}
-		f.forward(w, r, body, upstreamPath, tag)
+		f.forward(w, r, header, body, upstreamPath, tag, chain)
 	}
+}
+
+func writeShimError(w http.ResponseWriter, surface apierror.Surface, err error) {
+	var rejected *apierror.Error
+	if errors.As(err, &rejected) {
+		apierror.Write(w, surface, rejected.Kind, rejected.Msg)
+		return
+	}
+	apierror.Write(w, surface, apierror.ShimError, "copilotd: shim failed")
 }
 
 // readBody bounds r.Body to maxRequestBytes and reads it fully into memory,
@@ -133,7 +167,7 @@ func peekBackground(body []byte) bool {
 // cancellation context and response-header bound, and copies the response back
 // verbatim. Failures originated by copilotd are classified into 502/504 (and a client
 // disconnect is swallowed — the caller has already left).
-func (f *Forwarder) forward(w http.ResponseWriter, r *http.Request, body []byte, upstreamPath string, tag apierror.Surface) {
+func (f *Forwarder) forward(w http.ResponseWriter, r *http.Request, header http.Header, body []byte, upstreamPath string, tag apierror.Surface, chain *shim.Chain) {
 	cred, err := f.provider.Current(r.Context())
 	if err != nil {
 		// A request-time credential failure (the real Manager's on-demand mint
@@ -153,7 +187,9 @@ func (f *Forwarder) forward(w http.ResponseWriter, r *http.Request, body []byte,
 	}
 	outReq.URL.RawQuery = r.URL.RawQuery
 	outReq.URL.ForceQuery = r.URL.ForceQuery
-	outReq.Header = outboundHeaders(r, cred)
+	headerRequest := *r
+	headerRequest.Header = header
+	outReq.Header = outboundHeaders(&headerRequest, cred)
 
 	resp, err := f.client.Do(outReq)
 	if err != nil {
@@ -191,11 +227,21 @@ func (f *Forwarder) forward(w http.ResponseWriter, r *http.Request, body []byte,
 			return
 		}
 	}
-	copyResponseHeaders(w.Header(), resp.Header)
+	preludeHeader := make(http.Header)
+	copyResponseHeaders(preludeHeader, resp.Header)
+	status, preludeHeader, err := chain.RunPrelude(r.Context(), resp.StatusCode, preludeHeader)
+	if err != nil {
+		writeShimError(w, tag, err)
+		return
+	}
 	if eventStream {
+		copyResponseHeaders(w.Header(), preludeHeader)
 		w.Header().Del("Content-Length")
-		w.WriteHeader(resp.StatusCode)
-		result := sse.Pump(ctx, cancel, resp.Body, w, streamPolicy(tag, f.writeTimeout, f.streamIdleTimeout, f.streamKeepaliveInterval, f.clock, f.fallbacks.Increment))
+		w.WriteHeader(status)
+		policy := streamPolicy(tag, f.writeTimeout, f.streamIdleTimeout, f.streamKeepaliveInterval, f.clock, f.fallbacks.Increment)
+		policy.Logger = f.logger
+		policy.SuppressedShimErrors = f.suppressedShimErrors
+		result := sse.Pump(ctx, cancel, resp.Body, w, policy, chain.StreamAdapter())
 		StoreStreamResult(r.Context(), StreamResult{
 			Surface:   streamSurface(tag),
 			Outcome:   result.Outcome,
@@ -204,8 +250,39 @@ func (f *Forwarder) forward(w http.ResponseWriter, r *http.Request, body []byte,
 		})
 		return
 	}
-	w.WriteHeader(resp.StatusCode)
-	_, _ = io.Copy(sse.NewWriter(w, f.writeTimeout, time.Now), resp.Body)
+	if !chain.HasBufferedTransformer() || !identityContentEncoding(resp.Header) {
+		copyResponseHeaders(w.Header(), preludeHeader)
+		w.WriteHeader(status)
+		_, _ = io.Copy(sse.NewWriter(w, f.writeTimeout, time.Now), resp.Body)
+		return
+	}
+	reader := io.Reader(resp.Body)
+	if f.maxBufferedResponseBytes < math.MaxInt64 {
+		reader = io.LimitReader(resp.Body, f.maxBufferedResponseBytes+1)
+	}
+	buffered, err := io.ReadAll(reader)
+	if err != nil {
+		apierror.Write(w, tag, apierror.BadGateway, "could not read the upstream response")
+		return
+	}
+	if int64(len(buffered)) > f.maxBufferedResponseBytes {
+		apierror.Write(w, tag, apierror.PayloadTooLarge, "upstream response body exceeds the maximum allowed size")
+		return
+	}
+	buffered, err = chain.RunBuffered(r.Context(), buffered)
+	if err != nil {
+		writeShimError(w, tag, err)
+		return
+	}
+	preludeHeader.Set("Content-Length", strconv.Itoa(len(buffered)))
+	copyResponseHeaders(w.Header(), preludeHeader)
+	w.WriteHeader(status)
+	_, _ = sse.NewWriter(w, f.writeTimeout, time.Now).Write(buffered)
+}
+
+func identityContentEncoding(header http.Header) bool {
+	values := header.Values("Content-Encoding")
+	return len(values) == 0 || len(values) == 1 && strings.EqualFold(strings.TrimSpace(values[0]), "identity")
 }
 
 func isEventStream(contentType string) bool {
@@ -235,6 +312,8 @@ func streamPolicy(surface apierror.Surface, writeTimeout, streamIdleTimeout, str
 				reason = apierror.StreamFailed
 			case sse.OutcomeStall:
 				reason = apierror.StreamStalled
+			case sse.OutcomeShimError:
+				reason = apierror.StreamShimFailed
 			}
 			return apierror.WriteStreamError(w, surface, reason)
 		},

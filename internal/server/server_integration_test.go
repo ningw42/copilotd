@@ -28,7 +28,7 @@ func stack(t *testing.T, upstreamURL string, ready bool) (http.Handler, *identit
 			"Editor-Version":         {"vscode/1.104.1"},
 		},
 	}, ready)
-	fwd := forward.New(prov, forward.NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20)
+	fwd := forward.New(prov, forward.NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 	return newHandler(testAPIKey, prov, fwd, discardLogger(t), NewStreamOutcomeCounter()), prov
 }
 
@@ -358,7 +358,7 @@ func TestEndToEndForwardViaRun(t *testing.T) {
 			"Editor-Version":         {"vscode/1.104.1"},
 		},
 	}, true)
-	fwd := forward.New(prov, forward.NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20)
+	fwd := forward.New(prov, forward.NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 	base := startServer(t, New(testConfig(), discardLogger(t), prov, fwd, NewStreamOutcomeCounter()))
 
 	const reqBody = `{"model":"claude-3-5-sonnet","messages":[{"role":"user","content":"hi"}]}`
@@ -452,7 +452,7 @@ func TestOpenAIResponsesForwardVerbatim(t *testing.T) {
 			"Editor-Version":         {"vscode/1.104.1"},
 		},
 	}, true)
-	fwd := forward.New(prov, forward.NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20)
+	fwd := forward.New(prov, forward.NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 	base := startServer(t, New(testConfig(), discardLogger(t), prov, fwd, NewStreamOutcomeCounter()))
 
 	const reqBody = `{"model":"gpt-4o","input":"hi"}`
@@ -602,7 +602,7 @@ func TestOpenAIAuthAndReadiness(t *testing.T) {
 func TestOpenAIBodyCapAndUpstreamPassthrough(t *testing.T) {
 	t.Run("over cap -> OpenAI-shaped 413", func(t *testing.T) {
 		prov := identity.NewStatic(identity.Credential{BaseURL: "http://127.0.0.1:1", Token: "t"}, true)
-		fwd := forward.New(prov, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 8) // 8-byte cap
+		fwd := forward.New(prov, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 8, 1<<20, nil) // 8-byte request cap
 		h := newHandler(testAPIKey, prov, fwd, discardLogger(t), NewStreamOutcomeCounter())
 		req := httptest.NewRequest(http.MethodPost, "/openai/v1/responses", strings.NewReader(`{"model":"way too long"}`))
 		req.Header.Set("Authorization", "Bearer "+testAPIKey)
@@ -650,7 +650,7 @@ func TestAnthropicStreamingEndToEnd(t *testing.T) {
 			Token:   "copilot-token",
 			Headers: http.Header{"Copilot-Integration-Id": {"vscode-chat"}},
 		}, true)
-		fwd := forward.New(prov, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20)
+		fwd := forward.New(prov, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 		return startServer(t, New(testConfig(), discardLogger(t), prov, fwd, NewStreamOutcomeCounter()))
 	}
 
@@ -760,7 +760,7 @@ func TestOpenAIStreamingEndToEnd(t *testing.T) {
 			Token:   "copilot-token",
 			Headers: http.Header{"Copilot-Integration-Id": {"vscode-chat"}},
 		}, true)
-		fwd := forward.New(prov, forward.NewClient(time.Second), time.Second, time.Second, 2*time.Second, keepalive, 1<<20)
+		fwd := forward.New(prov, forward.NewClient(time.Second), time.Second, time.Second, 2*time.Second, keepalive, 1<<20, 1<<20, nil)
 		outcomes := NewStreamOutcomeCounter()
 		return startServer(t, New(testConfig(), discardLogger(t), prov, fwd, outcomes)), outcomes
 	}
@@ -916,7 +916,7 @@ func TestStreamingClientHangupCancelsCopilotEndToEnd(t *testing.T) {
 		Token:   "copilot-token",
 		Headers: http.Header{"Copilot-Integration-Id": {"vscode-chat"}},
 	}, true)
-	fwd := forward.New(prov, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20)
+	fwd := forward.New(prov, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 	outcomes := NewStreamOutcomeCounter()
 	base := startServer(t, New(testConfig(), discardLogger(t), prov, fwd, outcomes))
 	req, err := http.NewRequest(http.MethodPost, base+"/anthropic/v1/messages", strings.NewReader(`{"stream":true}`))

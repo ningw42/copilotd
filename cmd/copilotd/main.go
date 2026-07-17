@@ -24,6 +24,7 @@ import (
 	"github.com/ningw42/copilotd/internal/identity"
 	"github.com/ningw42/copilotd/internal/logging"
 	"github.com/ningw42/copilotd/internal/server"
+	"github.com/ningw42/copilotd/internal/shim"
 	"github.com/peterbourgon/ff/v4"
 	"github.com/peterbourgon/ff/v4/ffhelp"
 )
@@ -276,6 +277,8 @@ func runServe(ctx context.Context, flags *config.ServeFlags, lookupEnv func(stri
 		slog.String("build", build.String()),
 		slog.Any("config", cfg),
 	)
+	registry := configuredShimRegistry(cfg)
+	logShimChain(logger, registry)
 
 	// Credential-presence check + real credential Provider, assembled BEFORE the
 	// listener binds so a missing OAuth token fails fast (non-zero exit) without
@@ -312,7 +315,7 @@ func runServe(ctx context.Context, flags *config.ServeFlags, lookupEnv func(stri
 	// mints on demand.
 	go mgr.StartupMint(serveCtx)
 
-	fwd := forward.New(mgr, forward.NewClient(cfg.ResponseHeaderTimeout), cfg.OutboundTimeout, cfg.WriteTimeout, cfg.StreamIdleTimeout, cfg.StreamKeepaliveInterval, cfg.MaxRequestBytes)
+	fwd := forward.New(mgr, forward.NewClient(cfg.ResponseHeaderTimeout), cfg.OutboundTimeout, cfg.WriteTimeout, cfg.StreamIdleTimeout, cfg.StreamKeepaliveInterval, cfg.MaxRequestBytes, cfg.MaxBufferedResponseBytes, registry)
 	streamOutcomes := server.NewStreamOutcomeCounter()
 
 	if err := server.New(cfg, logger, mgr, fwd, streamOutcomes).Run(serveCtx, ln); err != nil {
@@ -320,6 +323,27 @@ func runServe(ctx context.Context, flags *config.ServeFlags, lookupEnv func(stri
 		return errServeFailed
 	}
 	return nil
+}
+
+func configuredShimRegistry(cfg config.ServeConfig) shim.Registry {
+	registry := shim.CanonicalRegistry()
+	for i := range registry {
+		switch registry[i].Name {
+		case "nop":
+			registry[i].Enabled = cfg.ShimNopEnabled
+		}
+	}
+	return registry
+}
+
+func logShimChain(logger *slog.Logger, registry shim.Registry) {
+	enabled := make([]string, 0, len(registry))
+	for _, registration := range registry {
+		if registration.Enabled {
+			enabled = append(enabled, registration.Name)
+		}
+	}
+	logger.Info("configured shim chain", slog.Any("enabled_shims", enabled))
 }
 
 // buildServeProvider assembles the real credential Provider for `serve`: it
