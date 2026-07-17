@@ -51,12 +51,12 @@ These constrain every component below.
    specific shims that need it.
 
 2. **The onion is the only extension mechanism.** The core forwarder stays dumb.
-   All feature parity lives in composable **middleware** wrapped around it. A
-   middleware can do exactly two things:
+   All feature parity lives in composable **shims** wrapped around it. A
+   shim can do exactly two things:
    - rewrite the **inbound request** before it reaches the forwarder, and
    - transform the **outbound response** on the way back to the client.
 
-   No middleware ever talks to the upstream directly.
+   No shim ever talks to the upstream directly.
 
 3. **No cross-family translation.** Anthropic-in → Anthropic-upstream;
    Responses-in → Responses-upstream. Full stop.
@@ -82,8 +82,8 @@ would re-serialize bodies through lossy types and defeat principle #1.
 ```
                 inbound request                        outbound response
 client  ─────────────────────────►  ┌───────────────┐ ◄─────────────────────────  client
-   │                                │  middleware A  │                                ▲
-   │        rewrite request  ──────►│  middleware B  │◄──────  transform response     │
+   │                                │     shim A     │                                ▲
+   │        rewrite request  ──────►│     shim B     │◄──────  transform response     │
    │                                │      ...       │         (JSON or SSE stream)   │
    ▼                                │ ┌───────────┐  │                                │
  inbound auth  ───────────────────► │ │   dumb    │  │ ──► GitHub Copilot upstream ───┘
@@ -91,7 +91,7 @@ client  ────────────────────────
                                     │ └───────────┘  │
                                     └───────────────┘
                        (SSE streaming engine underpins the forwarder
-                        and every middleware's response half)
+                        and every shim's response half)
 ```
 
 ### Component map
@@ -103,8 +103,8 @@ client  ────────────────────────
 | **Identity**     | GitHub↔Copilot identity mgr   | Device-flow login **or** injected token; `copilot_internal` token exchange; scheduled, single-flight refresh; owner-only credential file; header impersonation |
 | **Core**         | Raw forwarder                 | Dumb upstream client: attach Copilot credential + impersonation headers, send to Copilot, return body untouched |
 | **Core**         | SSE streaming engine          | Parse upstream SSE → re-emit downstream; keepalive pings; terminal-event enforcement; client-cancel propagation |
-| **Parity**       | Middleware framework          | The onion contract: request-transform + response/stream-transform; ordering; per-shim toggle                 |
-| **Parity**       | Shim catalog                  | Individual middlewares (see §5). Grows over time.                                                             |
+| **Parity**       | Shim framework                | The onion contract: request-transform + response/stream-transform; ordering; per-shim toggle                 |
+| **Parity**       | Shim catalog                  | Individual shims (see §5). Grows over time.                                                                   |
 | **Support**      | Misc endpoints                | Two-tier support endpoints, e.g. `/models` (see §4.2)                                                         |
 | **Cross-cutting**| Observability                 | Structured logging, request-id, metrics — present from Phase 0 (see §6)                                      |
 | **Cross-cutting**| Configuration                 | Flags + env (+ optional file): bind address, managed token, timeouts, shim toggles                           |
@@ -137,19 +137,19 @@ Miscellaneous endpoints follow a general pattern, not a one-off:
 
 ---
 
-## 5. The middleware / shim model
+## 5. The shim model
 
-The middleware contract is the heart of the parity story. Each shim is one layer
+The shim contract is the heart of the parity story. Each shim is one layer
 in the onion, individually toggleable.
 
-- **Inbound half — easy.** The request is a single body, so a middleware's
+- **Inbound half — easy.** The request is a single body, so a shim's
   request side is just `f(request) → request'`.
 - **Outbound half — the hard half.** The response is usually an **SSE event
-  stream, not a value**. So a middleware's response side is a **stream
+  stream, not a value**. So a shim's response side is a **stream
   transformer** `f(eventStream) → eventStream'`, which must be able to
   pass-through, edit, drop, inject, or coalesce events.
 
-Design problems the middleware framework has to answer (named here, solved in
+Design problems the shim framework has to answer (named here, solved in
 the Phase 3 design doc):
 
 - **Stateful transforms** across a whole stream (e.g. stable Responses item-IDs:
@@ -160,7 +160,7 @@ the Phase 3 design doc):
   make the cost explicit.
 - **Composition with the stream concerns the core already owns** — keepalive
   pings, terminal-event enforcement (`message_stop` / `response.completed`), and
-  client-cancel propagation. Middleware must nest inside these without breaking
+  client-cancel propagation. Shims must nest inside these without breaking
   them.
 
 ### Seed shim catalog
@@ -176,8 +176,6 @@ Starting set; the catalog grows as parity gaps surface.
   names on the way in, preserve the client's requested name on the way out.
 - **Unsupported-param handling** — sanitize / reject params that Copilot's
   endpoints don't accept, with clear errors.
-- **Self-heal retries** — e.g. re-mint on a 401/403 before the first byte;
-  strip replayed thinking blocks on signature errors and retry once.
 
 ---
 
@@ -226,9 +224,9 @@ Upstream SSE parse → downstream emit; keepalive pings; terminal-event
 enforcement; client-cancel/disconnect propagation.
 _Outcome: genuinely usable with real streaming clients (Claude Code, Codex, SDKs)._
 
-### Phase 3 — Middleware framework
+### Phase 3 — Shim framework
 The onion contract: request-transform + response/stream-transform, ordering, and
-per-shim toggling — proven with a no-op passthrough middleware. No shims yet,
+per-shim toggling — proven with a no-op passthrough shim. No shims yet,
 just the mechanism.
 _Outcome: a place to hang parity features without touching the core._
 
@@ -260,7 +258,7 @@ _Outcome: easy to run and keep running on every target._
 - **Upstream API drift.** Copilot can change endpoints, headers, model names, or
   streaming behavior at any time; the raw-passthrough core limits our exposure
   but the shims and identity layer are drift-sensitive.
-- **Streaming middleware complexity.** The pass-through-vs-buffering tension
+- **Streaming shim complexity.** The pass-through-vs-buffering tension
   (§5) is the sharpest design risk; getting the stream-transformer contract
   right early keeps the shim catalog cheap to grow.
 
