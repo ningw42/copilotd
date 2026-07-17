@@ -69,6 +69,17 @@ One of the two inbound API dialects copilotd serves — the Anthropic surface
 its matching upstream dialect; never cross-translated.
 _Avoid_: provider, endpoint (unqualified)
 
+**Route**:
+The registered upstream path a Surface exposes — `/v1/messages`,
+`/v1/messages/count_tokens`, or `/responses`. Unique within a Surface, not assumed
+globally unique (a later Surface may reuse a path).
+_Avoid_: endpoint (unqualified), path (unqualified)
+
+**Endpoint**:
+A specific served entry point, identified by the `(Surface, Route)` pair — the
+qualified sense in which "endpoint" is allowed (bare "endpoint" is still avoided for
+Surface and Route).
+
 **Forwarder**:
 The dumb core that moves a request to Copilot and the response back with minimal
 re-interpretation (raw passthrough) — deserializing nothing beyond a shallow peek.
@@ -81,7 +92,14 @@ header set (integration-id, editor-version, …), so upstream client checks pass
 **Shim**:
 A composable middleware layer that closes one specific parity gap (Phase 3+). Not
 present in Phase 1.
-_Avoid_: plugin, filter
+_Avoid_: middleware as the *name* of the mechanism — call it a shim (nested via the
+onion); "middleware" stays reserved for the `http.Handler` request pipeline. Also
+plugin, filter.
+
+**Prelude**:
+The response envelope — status line plus headers — treated as a unit distinct from
+the body. Its shim transform runs once per response, before the body, on both the
+buffered and streaming paths (Phase 3+).
 
 ### Streaming
 

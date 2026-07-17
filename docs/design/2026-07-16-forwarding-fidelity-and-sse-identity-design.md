@@ -106,6 +106,13 @@ The buffered path does not inspect `Content-Encoding`. It copies the upstream
 status, allowed headers, and body bytes exactly as it does today, even if
 Copilot unexpectedly returns a compressed response after identity was requested.
 
+> Superseded on the buffered-*transform* path: Phase 3
+> (`docs/design/2026-07-16-phase-3-middleware-framework-design.md` §7.2) adds a
+> defensive `Content-Encoding` skip-guard when a `BufferedTransformer` is active, so
+> a surprise compressed body is copied verbatim rather than corrupted by a
+> transform. The opaque behavior described here still holds whenever no buffered
+> shim runs.
+
 All work stays at existing seams in `internal/forward`: upstream request
 construction copies the query fields, `outboundHeaders` sets the request
 encoding, and the response branch applies the SSE guard before
