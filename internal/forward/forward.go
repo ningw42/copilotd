@@ -74,23 +74,6 @@ func New(provider identity.Provider, client *http.Client, outboundTimeout, write
 	}
 }
 
-// isolatedPassthroughClient preserves the injected client's policy while giving
-// one support call a fresh stock transport with no cached connection to replay
-// against. Custom RoundTrippers keep their explicitly injected behavior.
-func isolatedPassthroughClient(client *http.Client) (*http.Client, func()) {
-	isolatedClient := *client
-	transport := client.Transport
-	if transport == nil {
-		transport = http.DefaultTransport
-	}
-	if stock, ok := transport.(*http.Transport); ok {
-		isolated := stock.Clone()
-		isolatedClient.Transport = isolated
-		return &isolatedClient, isolated.CloseIdleConnections
-	}
-	return client, func() {}
-}
-
 // SuppressedShimErrorCount reports stream shim failures hidden from the wire by
 // the post-terminal no-double-up rule.
 func (f *Forwarder) SuppressedShimErrorCount() uint64 {
@@ -176,10 +159,8 @@ func (f *Forwarder) PassthroughHandler(upstreamMethod string, upstreamRoute stri
 		outReq.URL.RawQuery = r.URL.RawQuery
 		outReq.URL.ForceQuery = r.URL.ForceQuery
 		outReq.ContentLength = r.ContentLength
-		outReq.Header = passthroughHeaders(r, cred)
-		passthroughClient, closeIdleConnections := isolatedPassthroughClient(f.client)
-		defer closeIdleConnections()
-		resp, err := passthroughClient.Do(outReq)
+		outReq.Header = authenticatedOutboundHeaders(r, cred)
+		resp, err := f.client.Do(outReq)
 		if err != nil {
 			switch {
 			case errors.Is(r.Context().Err(), context.Canceled):
@@ -456,11 +437,6 @@ func outboundHeaders(r *http.Request, cred identity.Credential) http.Header {
 	out := authenticatedOutboundHeaders(r, cred)
 	out.Set("Accept-Encoding", "identity")
 	return out
-}
-
-// passthroughHeaders leaves Accept-Encoding under client ownership.
-func passthroughHeaders(r *http.Request, cred identity.Credential) http.Header {
-	return authenticatedOutboundHeaders(r, cred)
 }
 
 // authenticatedOutboundHeaders copies every inbound header except the strip-set

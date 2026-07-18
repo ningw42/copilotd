@@ -3,10 +3,8 @@ package forward
 import (
 	"bytes"
 	"context"
-	"crypto/x509"
 	"errors"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httptrace"
@@ -24,7 +22,7 @@ import (
 	"github.com/ningw42/copilotd/internal/shim"
 )
 
-func TestIsolatedPassthroughClientPreservesAutomaticHTTP2(t *testing.T) {
+func TestForwardClientAttemptsHTTP2(t *testing.T) {
 	var gotProtocol string
 	upstream := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotProtocol = r.Proto
@@ -34,17 +32,13 @@ func TestIsolatedPassthroughClientPreservesAutomaticHTTP2(t *testing.T) {
 	upstream.StartTLS()
 	defer upstream.Close()
 
-	client, closeIdleConnections := isolatedPassthroughClient(NewClient(time.Second))
-	defer closeIdleConnections()
-
+	client := NewClient(time.Second)
 	transport := client.Transport.(*http.Transport)
-	roots := x509.NewCertPool()
-	roots.AddCert(upstream.Certificate())
-	transport.TLSClientConfig.RootCAs = roots
+	transport.TLSClientConfig = upstream.Client().Transport.(*http.Transport).TLSClientConfig.Clone()
 
 	resp, err := client.Get(upstream.URL)
 	if err != nil {
-		t.Fatalf("automatic HTTP/2 request through isolated client: %v", err)
+		t.Fatalf("automatic HTTP/2 request: %v", err)
 	}
 	defer resp.Body.Close()
 	if gotProtocol != "HTTP/2.0" {
@@ -533,7 +527,7 @@ func TestPassthroughDoesNotReplayModelsAfterResponseFailure(t *testing.T) {
 	}
 }
 
-func TestPassthroughUsesFreshSingleUseConnection(t *testing.T) {
+func TestPassthroughReusesInjectedClientConnectionPool(t *testing.T) {
 	tests := []struct {
 		name             string
 		tls              bool
@@ -545,8 +539,8 @@ func TestPassthroughUsesFreshSingleUseConnection(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			acceptedConnections := make(chan net.Conn, 4)
 			var seedProtocol string
+			var modelsProtocol string
 			var transportAttempts atomic.Int32
 			var usedCachedConnection atomic.Bool
 			var modelsCalls atomic.Int32
@@ -558,15 +552,12 @@ func TestPassthroughUsesFreshSingleUseConnection(t *testing.T) {
 					w.WriteHeader(http.StatusNoContent)
 				case "/models":
 					modelsCalls.Add(1)
+					modelsProtocol = r.Proto
 					w.WriteHeader(http.StatusNoContent)
 				default:
 					w.WriteHeader(http.StatusNotFound)
 				}
 			}))
-			upstream.Config.ConnContext = func(ctx context.Context, conn net.Conn) context.Context {
-				acceptedConnections <- conn
-				return ctx
-			}
 			if test.tls {
 				upstream.EnableHTTP2 = true
 				upstream.StartTLS()
@@ -588,7 +579,6 @@ func TestPassthroughUsesFreshSingleUseConnection(t *testing.T) {
 			if err := seedResponse.Body.Close(); err != nil {
 				t.Fatalf("close seed response body: %v", err)
 			}
-			seededServerConnection := <-acceptedConnections
 			if seedProtocol != test.expectedProtocol {
 				t.Fatalf("seed protocol = %q, want %q", seedProtocol, test.expectedProtocol)
 			}
@@ -596,17 +586,6 @@ func TestPassthroughUsesFreshSingleUseConnection(t *testing.T) {
 			trace := &httptrace.ClientTrace{GotConn: func(info httptrace.GotConnInfo) {
 				transportAttempts.Add(1)
 				usedCachedConnection.Store(info.Reused)
-				if info.Reused {
-					_ = seededServerConnection.Close()
-					return
-				}
-				freshServerConnection := <-acceptedConnections
-				if !test.tls {
-					if tcp, ok := freshServerConnection.(*net.TCPConn); ok {
-						_ = tcp.SetLinger(0)
-					}
-				}
-				_ = freshServerConnection.Close()
 			}}
 			req := httptest.NewRequest(http.MethodGet, "/models", nil)
 			req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
@@ -614,18 +593,20 @@ func TestPassthroughUsesFreshSingleUseConnection(t *testing.T) {
 			rec := newDeadlineRecorder()
 			f.PassthroughHandler(http.MethodGet, "/models", apierror.GitHubCopilot)(rec, req)
 
-			if usedCachedConnection.Load() {
-				t.Errorf("%s /models request reused the injected client's connection, want an isolated fresh connection", test.name)
+			if !usedCachedConnection.Load() {
+				t.Errorf("%s /models request did not reuse the injected client's pooled connection", test.name)
 			}
 			if got := transportAttempts.Load(); got != 1 {
-				t.Errorf("%s transport attempts = %d, want exactly one with no transparent replay", test.name, got)
+				t.Errorf("%s transport attempts = %d, want exactly one pooled attempt", test.name, got)
 			}
-			if got := modelsCalls.Load(); got != 0 {
-				t.Errorf("delivered upstream %s /models calls = %d, want zero after the fresh connection failed", test.name, got)
+			if got := modelsCalls.Load(); got != 1 {
+				t.Errorf("delivered upstream %s /models calls = %d, want one", test.name, got)
 			}
-			const wantBody = `{"type":"error","error":{"type":"api_error","message":"could not reach the upstream"}}`
-			if rec.Code != http.StatusBadGateway || rec.Body.String() != wantBody {
-				t.Errorf("%s connection failure = status %d body %q, want 502 %q", test.name, rec.Code, rec.Body.String(), wantBody)
+			if modelsProtocol != test.expectedProtocol {
+				t.Errorf("models protocol = %q, want %q", modelsProtocol, test.expectedProtocol)
+			}
+			if rec.Code != http.StatusNoContent {
+				t.Errorf("%s response status = %d, want 204", test.name, rec.Code)
 			}
 		})
 	}
