@@ -2,7 +2,7 @@
 
 **Status:** accepted
 
-The `/anthropic/models` and `/openai/models` catalogs (Phase 6a) render each model
+The `/anthropic/v1/models` and `/openai/v1/models` catalogs (Phase 6a) render each model
 in the genuine provider's `GET /v1/models` **envelope and per-model schema**, but
 populate it with **Copilot's own values** — not the provider's published data.
 copilotd only knows Copilot's view of a model, and that view diverges from the
@@ -39,7 +39,7 @@ The accepted, enumerated divergences from the genuine provider (design §5.5):
   OpenAI's `"openai"`/`"system"` convention.
 - List order is Copilot's `data[]` order, not "most recently released first."
 
-Catalog membership is keyed on the wire-Surface, not vendor: `/openai/models`
+Catalog membership is keyed on the wire-Surface, not vendor: `/openai/v1/models`
 lists every model forwardable on the Responses Surface, including non-OpenAI-vendor
 models, because vendor-gating would make the catalog under-report what a client can
 actually call.

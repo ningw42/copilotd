@@ -1,4 +1,4 @@
-# Phase 6a — Provider-shaped model catalogs (`/anthropic/models`, `/openai/models`) — Design
+# Phase 6a — Provider-shaped model catalogs (`/anthropic/v1/models`, `/openai/v1/models`) — Design
 
 Status: proposed design (polished via brainstorming), pending final written-spec review
 Date: 2026-07-18
@@ -9,8 +9,8 @@ Builds on: `docs/design/2026-07-18-phase-4-github-copilot-support-endpoint-desig
 
 ## 1. Goal and outcome
 
-Phase 6a adds two client-facing model catalogs — `GET/HEAD HOST/anthropic/models`
-and `GET/HEAD HOST/openai/models` — that fetch GitHub Copilot's raw `/models`
+Phase 6a adds two client-facing model catalogs — `GET/HEAD HOST/anthropic/v1/models`
+and `GET/HEAD HOST/openai/v1/models` — that fetch GitHub Copilot's raw `/models`
 once, keep only the models each Surface can actually forward, and re-render them
 in the native shape of the real provider's `GET /v1/models`. A client that has
 set its base URL to `HOST/anthropic` or `HOST/openai` can list models and receive
@@ -46,8 +46,8 @@ genuine provider is enumerated in §5.5 and recorded in ADR 0004.
 
 - Two provider-shaped list endpoints, each with an explicit `GET` and `HEAD`
   registration:
-  - `GET/HEAD /anthropic/models` → Anthropic `GET /v1/models` shape.
-  - `GET/HEAD /openai/models` → OpenAI `GET /v1/models` shape.
+  - `GET/HEAD /anthropic/v1/models` → Anthropic `GET /v1/models` shape.
+  - `GET/HEAD /openai/v1/models` → OpenAI `GET /v1/models` shape.
 - The existing API-key gate followed by the existing readiness gate (the same
   `guard` order as every provider route).
 - One credentialed upstream `GET /models` fetch per request, buffered and decoded.
@@ -57,8 +57,8 @@ genuine provider is enumerated in §5.5 and recorded in ADR 0004.
   (§5), and a single epoch-0 timestamp stub for the absent creation date.
 - A new pure, I/O-free `internal/catalog` package for decode + filter + render,
   plus a focused dumb `Forwarder` fetch method and `internal/server` wiring (§6).
-- Surface-shaped errors: `/anthropic/models` speaks the Anthropic error dialect,
-  `/openai/models` the OpenAI dialect (§8).
+- Surface-shaped errors: `/anthropic/v1/models` speaks the Anthropic error dialect,
+  `/openai/v1/models` the OpenAI dialect (§8).
 - Automated unit, boundary, and real-listener tests using a stub upstream, seeded
   from the real capture.
 
@@ -110,8 +110,8 @@ A Copilot model `M` is listed on Surface `S` **iff both** hold:
    *forwardable but hidden* (picker-disabled yet serving the Route), which we
    deliberately keep out of the catalog.
 2. `M.supported_endpoints` is present and contains `S`'s upstream Route:
-   - `/anthropic/models` requires `"/v1/messages" ∈ M.supported_endpoints`.
-   - `/openai/models` requires `"/responses" ∈ M.supported_endpoints`.
+   - `/anthropic/v1/models` requires `"/v1/messages" ∈ M.supported_endpoints`.
+   - `/openai/v1/models` requires `"/responses" ∈ M.supported_endpoints`.
 
 Notes:
 
@@ -119,15 +119,15 @@ Notes:
   confirm the Surface serves it.
 - The websocket variant `"ws:/responses"` is **not** `"/responses"`; the exact
   HTTP Route string is required (the WebSocket transport is a non-goal).
-- **Membership is keyed on the wire-Surface, not the vendor.** `/openai/models`
+- **Membership is keyed on the wire-Surface, not the vendor.** `/openai/v1/models`
   lists every model forwardable on the OpenAI (Responses) Surface, including
   non-OpenAI-vendor models: `mai-code-1-flash-picker` (`vendor: "Microsoft"`) and
   `gpt-5-mini` (`vendor: "Azure OpenAI"`) both serve `/responses` and are callable
   through `HOST/openai`, so both are listed. Vendor-gating would make the catalog
   under-report what a client can actually call.
 - Applied to the capture, the predicate yields the 7 current Claude models on
-  `/anthropic/models` (`claude-opus-4.6/4.7/4.8`, `claude-sonnet-4.6/5/4.5`,
-  `claude-haiku-4.5`) and 9 Responses-capable models on `/openai/models`
+  `/anthropic/v1/models` (`claude-opus-4.6/4.7/4.8`, `claude-sonnet-4.6/5/4.5`,
+  `claude-haiku-4.5`) and 9 Responses-capable models on `/openai/v1/models`
   (`gpt-5.3-codex`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.5`,
   `gpt-5.6-luna/sol/terra`, `mai-code-1-flash-picker`, `gpt-5-mini`).
 
@@ -140,7 +140,7 @@ All source fields below name Copilot response fields verbatim. Every mapping is
 **defensive**: when a source field is absent, the target key is omitted (never
 emitted as a false value), except the timestamp stub.
 
-### 5.1 OpenAI object (`/openai/models`)
+### 5.1 OpenAI object (`/openai/v1/models`)
 
 The OpenAI `Model` object is exactly four fields; its schema has no capability or
 limit slots, so "enrichment" does not apply here.
@@ -155,7 +155,7 @@ limit slots, so "enrichment" does not apply here.
 Envelope: `{ "object": "list", "data": [ … ] }` (the OpenAI models list is
 unpaginated).
 
-### 5.2 Anthropic object (`/anthropic/models`)
+### 5.2 Anthropic object (`/anthropic/v1/models`)
 
 The Anthropic model object has token-limit and capability slots, so enrichment
 materializes here.
@@ -299,7 +299,7 @@ copilotd/
     │                     I/O-free transform; depends on encoding/json, net/http, apierror.
     ├── forward/   [CHG]  + FetchModels(ctx): one credentialed, buffered GET /models with identity
     │                     encoding; typed errors; no reshaping, no shims, no SSE. Implements catalog.Fetcher.
-    └── server/    [CHG]  Registers GET/HEAD /anthropic/models and /openai/models under the existing
+    └── server/    [CHG]  Registers GET/HEAD /anthropic/v1/models and /openai/v1/models under the existing
                           guard, each bound to its Surface descriptor (tag, required endpoint, renderer).
 ```
 
@@ -365,14 +365,14 @@ each an independent explicit method registration (mirroring Phase 4's explicit
 anthropicModels := catalog.Handler(
     catalog.Descriptor{Surface: apierror.Anthropic, RequiredEndpoint: "/v1/messages", Render: catalog.RenderAnthropic},
     fwd)
-mux.Handle("GET /anthropic/models",  guard(apierror.Anthropic, anthropicModels))
-mux.Handle("HEAD /anthropic/models", guard(apierror.Anthropic, anthropicModels))
+mux.Handle("GET /anthropic/v1/models",  guard(apierror.Anthropic, anthropicModels))
+mux.Handle("HEAD /anthropic/v1/models", guard(apierror.Anthropic, anthropicModels))
 
 openaiModels := catalog.Handler(
     catalog.Descriptor{Surface: apierror.OpenAI, RequiredEndpoint: "/responses", Render: catalog.RenderOpenAI},
     fwd)
-mux.Handle("GET /openai/models",  guard(apierror.OpenAI, openaiModels))
-mux.Handle("HEAD /openai/models", guard(apierror.OpenAI, openaiModels))
+mux.Handle("GET /openai/v1/models",  guard(apierror.OpenAI, openaiModels))
+mux.Handle("HEAD /openai/v1/models", guard(apierror.OpenAI, openaiModels))
 ```
 
 `POST` and other methods receive `net/http`'s normal 405. No wildcard subtree is
@@ -382,7 +382,7 @@ introduced. The existing raw `GET/HEAD /models` (Phase 4) is untouched.
 
 A `BufferedTransformer` shim can mechanically replace a whole JSON body
 (`shim.Chain.RunBuffered` hands it `*Body{Bytes}`; `HasBufferedTransformer()`
-triggers the buffered path in `forward.go`). Routing `/anthropic/models` through
+triggers the buffered path in `forward.go`). Routing `/anthropic/v1/models` through
 the shim-bearing `Handler` was considered and rejected on grounds confirmed
 against the real source:
 
@@ -451,8 +451,8 @@ There is no cache and no single-flight; two client calls cause two upstream
 ## 8. Errors, timeout, and cancellation
 
 - Every copilotd-originated failure renders in the **route's own Surface dialect**
-  (`apierror.Anthropic` for `/anthropic/models`, `apierror.OpenAI` for
-  `/openai/models`) — resolving what Phase 4 §11 deferred for these paths.
+  (`apierror.Anthropic` for `/anthropic/v1/models`, `apierror.OpenAI` for
+  `/openai/v1/models`) — resolving what Phase 4 §11 deferred for these paths.
 - **Upstream non-2xx and unparseable 2xx bodies** both render a Surface-shaped
   502; copilotd never reshapes a non-catalog body or leaks Copilot's error shape.
 - `ResponseHeaderTimeout` bounds time-to-headers; `OutboundTimeout` bounds the
@@ -469,7 +469,7 @@ There is no cache and no single-flight; two client calls cause two upstream
 ## 9. Observability and security
 
 - Access logging records one line per request with the explicit route template
-  (`GET /anthropic/models`, `HEAD /openai/models`, …), status, byte count,
+  (`GET /anthropic/v1/models`, `HEAD /openai/v1/models`, …), status, byte count,
   duration, and the resolved correlation ID.
 - The one upstream fetch reuses the existing single-correlation-ID invariant; a
   different upstream `X-Request-Id` is suppressed downstream (and logged only per
@@ -536,7 +536,7 @@ Copilot (the Phase 4 `/models` passthrough).
 - Two client calls cause exactly two upstream `/models` fetches.
 - The single-correlation-ID invariant holds; a deliberately different upstream
   `X-Request-Id` is suppressed.
-- Unregistered methods (`POST /anthropic/models`) receive the standard 405 and
+- Unregistered methods (`POST /anthropic/v1/models`) receive the standard 405 and
   never reach Copilot.
 
 ### 10.4 Regression
@@ -548,7 +548,7 @@ Copilot (the Phase 4 `/models` passthrough).
 
 Phase 6a is complete when all hold:
 
-1. `GET/HEAD /anthropic/models` and `GET/HEAD /openai/models` are explicit,
+1. `GET/HEAD /anthropic/v1/models` and `GET/HEAD /openai/v1/models` are explicit,
    authenticated, readiness-gated endpoints.
 2. Each request issues exactly one upstream `/models` fetch; no model response is
    cached, retried, or refreshed.

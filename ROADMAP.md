@@ -135,8 +135,8 @@ GitHub Copilot support data follows a two-tier pattern:
   Surface, e.g. `(GitHubCopilot, /models)` at `HOST/models` as a straight
   passthrough. Cheap; lands early.
 - **Provider/client-shaped tier** — the same data reshaped to match what a real
-  provider or a specific client expects, e.g. `HOST/anthropic/models`,
-  `HOST/openai/models`, or Codex model-catalog metadata, with **best-effort
+  provider or a specific client expects, e.g. `HOST/anthropic/v1/models`,
+  `HOST/openai/v1/models`, or Codex model-catalog metadata, with **best-effort
   sanitization**. Explicitly **deferred** to a later, lower-priority band.
 
 ---
@@ -245,7 +245,7 @@ the roadmap's other phases are "done."
 _Outcome: real parity gaps are closed; the shim catalog is open-ended._
 
 ### Phase 6 — Provider/client-shaped support endpoints (deferred)
-`HOST/anthropic/models` and `HOST/openai/models` with best-effort sanitization to
+`HOST/anthropic/v1/models` and `HOST/openai/v1/models` with best-effort sanitization to
 match the real providers, plus a Codex catalog view that advertises configurable
 reviewer routing through `auto_review_model_override`. Low priority.
 _Outcome: support endpoints look native to their provider or client._

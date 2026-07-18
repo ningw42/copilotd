@@ -54,7 +54,7 @@ synthesis are outside the contract.
 
 ### 2.2 Out of scope
 
-- Provider/client-shaped catalogs (`/anthropic/models`, `/openai/models`, or a
+- Provider/client-shaped catalogs (`/anthropic/v1/models`, `/openai/v1/models`, or a
   Codex catalog). Those remain Phase 6.
 - The Surface identity, local-error dialect, and internal data-source boundary
   of those Phase 6 catalogs. Their future paths do not decide those questions
