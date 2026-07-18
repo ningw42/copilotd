@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/ningw42/copilotd/internal/apierror"
+	"github.com/ningw42/copilotd/internal/catalog"
 	"github.com/ningw42/copilotd/internal/forward"
 	"github.com/ningw42/copilotd/internal/identity"
 )
@@ -46,6 +47,20 @@ func newHandler(apikey string, provider identity.Provider, fwd *forward.Forwarde
 		guard(apierror.Anthropic, fwd.Handler("/v1/messages/count_tokens", apierror.Anthropic)))
 	mux.Handle("POST /openai/v1/responses",
 		guard(apierror.OpenAI, fwd.Handler("/responses", apierror.OpenAI)))
+	anthropicModels := catalog.Handler(catalog.Descriptor{
+		Surface:       apierror.Anthropic,
+		RequiredRoute: catalog.AnthropicMessagesRoute,
+		Render:        catalog.RenderAnthropic,
+	}, fwd)
+	mux.Handle("GET /anthropic/v1/models", guard(apierror.Anthropic, anthropicModels))
+	mux.Handle("HEAD /anthropic/v1/models", guard(apierror.Anthropic, anthropicModels))
+	openAIModels := catalog.Handler(catalog.Descriptor{
+		Surface:       apierror.OpenAI,
+		RequiredRoute: catalog.OpenAIResponsesRoute,
+		Render:        catalog.RenderOpenAI,
+	}, fwd)
+	mux.Handle("GET /openai/v1/models", guard(apierror.OpenAI, openAIModels))
+	mux.Handle("HEAD /openai/v1/models", guard(apierror.OpenAI, openAIModels))
 	mux.Handle("GET /models",
 		guard(apierror.GitHubCopilot,
 			fwd.PassthroughHandler(http.MethodGet, "/models", apierror.GitHubCopilot)))

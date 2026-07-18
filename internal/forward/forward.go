@@ -13,6 +13,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"math"
@@ -23,6 +24,7 @@ import (
 	"time"
 
 	"github.com/ningw42/copilotd/internal/apierror"
+	"github.com/ningw42/copilotd/internal/catalog"
 	"github.com/ningw42/copilotd/internal/identity"
 	"github.com/ningw42/copilotd/internal/logging"
 	"github.com/ningw42/copilotd/internal/shim"
@@ -209,6 +211,61 @@ func (f *Forwarder) PassthroughHandler(upstreamMethod string, upstreamRoute stri
 		_, _ = io.Copy(sse.NewWriter(w, f.writeTimeout, time.Now), resp.Body)
 	}
 }
+
+// FetchModels obtains the current account-authorized Copilot model Catalog as
+// one bounded, buffered response. The Forwarder deliberately does not decode or
+// reshape the body; callers own any provider-shaped representation.
+func (f *Forwarder) FetchModels(parent context.Context) (int, []byte, error) {
+	cred, err := f.provider.Current(parent)
+	if err != nil {
+		return 0, nil, fmt.Errorf("%w: %v", catalog.ErrNoCredential, err)
+	}
+
+	ctx, cancel := context.WithCancelCause(parent)
+	outReq, err := http.NewRequestWithContext(ctx, http.MethodGet, cred.BaseURL+"/models", &singleAttemptBody{ReadCloser: http.NoBody})
+	if err != nil {
+		cancel(nil)
+		return 0, nil, fmt.Errorf("%w: %v", catalog.ErrBuildUpstream, err)
+	}
+	outReq.Header = authenticatedOutboundHeaders(outReq, cred)
+	outReq.Header.Set("Accept-Encoding", "identity")
+
+	resp, err := f.client.Do(outReq)
+	if err != nil {
+		cancel(nil)
+		if errors.Is(err, context.DeadlineExceeded) {
+			return 0, nil, fmt.Errorf("%w: %v", catalog.ErrUpstreamTimeout, err)
+		}
+		return 0, nil, fmt.Errorf("%w: %v", catalog.ErrUpstreamUnreachable, err)
+	}
+	f.logUpstreamRequestID(parent, resp.Header)
+	defer func() {
+		cancel(nil)
+		_ = resp.Body.Close()
+	}()
+
+	timeoutCause := errors.New("models fetch outbound timeout")
+	outboundTimer := time.AfterFunc(f.outboundTimeout, func() { cancel(timeoutCause) })
+	defer outboundTimer.Stop()
+
+	reader := io.Reader(resp.Body)
+	if f.maxBufferedResponseBytes < math.MaxInt64 {
+		reader = io.LimitReader(resp.Body, f.maxBufferedResponseBytes+1)
+	}
+	body, err := io.ReadAll(reader)
+	if err != nil {
+		if cause := context.Cause(ctx); errors.Is(cause, timeoutCause) || errors.Is(cause, context.DeadlineExceeded) {
+			return 0, nil, fmt.Errorf("%w: %v", catalog.ErrUpstreamTimeout, err)
+		}
+		return 0, nil, fmt.Errorf("%w: %v", catalog.ErrUpstreamRead, err)
+	}
+	if int64(len(body)) > f.maxBufferedResponseBytes {
+		return 0, nil, fmt.Errorf("%w: upstream response body exceeds the maximum allowed size", catalog.ErrUpstreamRead)
+	}
+	return resp.StatusCode, body, nil
+}
+
+var _ catalog.Fetcher = (*Forwarder)(nil)
 
 // singleAttemptBody differs from http.NoBody only in identity. Its non-nil Body
 // and nil GetBody make Go's Transport treat an otherwise bodyless GET or HEAD as

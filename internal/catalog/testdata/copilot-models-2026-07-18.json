@@ -1,0 +1,95 @@
+{
+  "data": [
+    {
+      "id": "claude-opus-4.6",
+      "name": "Claude Opus 4.6",
+      "vendor": "Anthropic",
+      "model_picker_enabled": true,
+      "supported_endpoints": ["/v1/messages", "/chat/completions"],
+      "capabilities": {
+        "limits": {
+          "max_prompt_tokens": 936000,
+          "max_output_tokens": 64000,
+          "vision": {"supported_media_types": ["image/jpeg", "image/png", "image/webp", "image/gif", "application/pdf"]}
+        },
+        "supports": {
+          "structured_outputs": true,
+          "vision": true,
+          "reasoning_effort": ["low", "medium", "high", "max"],
+          "adaptive_thinking": true,
+          "min_thinking_budget": 1024,
+          "max_thinking_budget": 32000
+        }
+      },
+      "warning_message": "Your billing plan has changed to usage-based billing and model multipliers no longer apply."
+    },
+    {"id":"claude-opus-4.7","name":"Claude Opus 4.7","vendor":"Anthropic","model_picker_enabled":true,"supported_endpoints":["/v1/messages","/chat/completions"]},
+    {
+      "id": "claude-opus-4.8",
+      "name": "Claude Opus 4.8",
+      "vendor": "Anthropic",
+      "model_picker_enabled": true,
+      "supported_endpoints": ["/v1/messages", "/chat/completions"],
+      "capabilities": {
+        "limits": {
+          "max_prompt_tokens": 936000,
+          "max_output_tokens": 64000,
+          "vision": {"supported_media_types": ["image/jpeg", "image/png", "image/webp", "image/gif", "application/pdf"]}
+        },
+        "supports": {
+          "structured_outputs": true,
+          "vision": true,
+          "reasoning_effort": ["low", "medium", "high", "xhigh", "max"],
+          "adaptive_thinking": true,
+          "min_thinking_budget": 1024,
+          "max_thinking_budget": 32000
+        }
+      }
+    },
+    {"id":"claude-sonnet-4.6","name":"Claude Sonnet 4.6","vendor":"Anthropic","model_picker_enabled":true,"supported_endpoints":["/chat/completions","/v1/messages"]},
+    {"id":"claude-sonnet-5","name":"Claude Sonnet 5","vendor":"Anthropic","model_picker_enabled":true,"supported_endpoints":["/v1/messages","/chat/completions"]},
+    {"id":"gemini-3.1-pro-preview","name":"Gemini 3.1 Pro","vendor":"Google","model_picker_enabled":true,"supported_endpoints":["/chat/completions"]},
+    {"id":"gpt-5.3-codex","name":"GPT-5.3-Codex","vendor":"OpenAI","model_picker_enabled":true,"supported_endpoints":["/responses","ws:/responses"]},
+    {"id":"gpt-5.4-mini","name":"GPT-5.4 mini","vendor":"OpenAI","model_picker_enabled":true,"supported_endpoints":["/responses","ws:/responses"]},
+    {"id":"gpt-5.4","name":"GPT-5.4","vendor":"OpenAI","model_picker_enabled":true,"supported_endpoints":["/responses","/chat/completions","ws:/responses"]},
+    {"id":"gpt-5.5","name":"GPT-5.5","vendor":"OpenAI","model_picker_enabled":true,"supported_endpoints":["/responses","ws:/responses"]},
+    {"id":"gpt-5.6-luna","name":"GPT-5.6 Luna","vendor":"OpenAI","model_picker_enabled":true,"supported_endpoints":["/responses","ws:/responses"]},
+    {"id":"gpt-5.6-sol","name":"GPT-5.6 Sol","vendor":"OpenAI","model_picker_enabled":true,"supported_endpoints":["/responses","ws:/responses"]},
+    {"id":"gpt-5.6-terra","name":"GPT-5.6 Terra","vendor":"OpenAI","model_picker_enabled":true,"supported_endpoints":["/responses","ws:/responses"]},
+    {"id":"mai-code-1-flash-picker","name":"MAI-Code-1-Flash","vendor":"Microsoft","model_picker_enabled":true,"supported_endpoints":["/responses"]},
+    {"id":"trajectory-compaction","name":"Trajectory Compaction","vendor":"Fireworks","model_picker_enabled":false,"supported_endpoints":["/chat/completions"]},
+    {"id":"gpt-5-mini","name":"GPT-5 mini","vendor":"Azure OpenAI","model_picker_enabled":true,"supported_endpoints":["/chat/completions","/responses","ws:/responses"]},
+    {
+      "id": "claude-sonnet-4.5",
+      "name": "Claude Sonnet 4.5",
+      "vendor": "Anthropic",
+      "model_picker_enabled": true,
+      "supported_endpoints": ["/chat/completions", "/v1/messages"],
+      "capabilities": {
+        "limits": {
+          "max_prompt_tokens": 168000,
+          "max_output_tokens": 32000,
+          "vision": {"supported_media_types": ["image/jpeg", "image/png", "image/webp", "application/pdf"]}
+        },
+        "supports": {"vision": true, "min_thinking_budget": 1024, "max_thinking_budget": 32000}
+      }
+    },
+    {
+      "id": "claude-haiku-4.5",
+      "name": "Claude Haiku 4.5",
+      "vendor": "Anthropic",
+      "model_picker_enabled": true,
+      "supported_endpoints": ["/chat/completions", "/v1/messages"],
+      "capabilities": {
+        "limits": {
+          "max_prompt_tokens": 136000,
+          "max_output_tokens": 64000,
+          "vision": {"supported_media_types": ["image/jpeg", "image/png", "image/webp", "application/pdf"]}
+        },
+        "supports": {"vision": true, "min_thinking_budget": 1024, "max_thinking_budget": 32000}
+      }
+    },
+    {"id":"gemini-3-flash-preview","name":"Gemini 3 Flash (Preview)","vendor":"Google","model_picker_enabled":true},
+    {"id":"gpt-4o-mini","name":"GPT-4o mini","vendor":"Azure OpenAI","model_picker_enabled":false}
+  ]
+}
