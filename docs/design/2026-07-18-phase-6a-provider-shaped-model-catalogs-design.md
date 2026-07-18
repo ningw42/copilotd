@@ -31,7 +31,8 @@ effort split out to a separate follow-on spec (**Phase 6b**, §12).
 ### 1.1 Grounding (rule: nothing is invented without a real Copilot response)
 
 Every field mapping below is derived from a **captured** GitHub Copilot `/models`
-response (`./models.json`, obtained through the Phase 4 passthrough). The Anthropic
+response (the raw response from GitHub Copilot, obtained through the Phase 4
+`/models` passthrough). The Anthropic
 and OpenAI target shapes are taken from the live provider docs
 (`GET /v1/models`). The reasoning about a shim alternative (§6.4) is checked
 against the real `internal/shim` and `internal/forward` source. Where Copilot
@@ -342,14 +343,17 @@ A focused, dumb addition that reuses the forwarder's existing credential,
 impersonation, transport, and timeout machinery (the same primitives
 `PassthroughHandler` uses): `provider.Current` → build `GET cred.BaseURL+"/models"`
 with `authenticatedOutboundHeaders` and `Accept-Encoding: identity` → `client.Do`
-bounded by `outboundTimeout` → read the body under the buffered-response cap →
+bounded by `outboundTimeout` → log any differing upstream `X-Request-Id` via the
+existing upstream-correlation line → read the body under the buffered-response cap →
 return `(status, body, err)`. It performs **no** reshaping, runs **no** shim
 chain, and does **no** SSE classification.
 
 Failures return **typed** errors so the caller maps them to its Surface dialect
 (the error dialect is the endpoint's concern, not the forwarder's):
 `ErrNoCredential`, `ErrBuildUpstream`, `ErrUpstreamUnreachable`,
-`ErrUpstreamTimeout`, `ErrUpstreamRead`.
+`ErrUpstreamTimeout`, `ErrUpstreamRead`. Client cancellation is **not** a distinct
+sentinel: a canceled context surfaces as an unreachable/read failure, which the
+handler discards by checking the request context before writing (§7 step 3).
 
 ### 6.3 `internal/server` (wiring)
 
@@ -426,9 +430,12 @@ For any of the four registered routes:
    route; API-key auth then readiness run via `guard`.
 2. The catalog handler calls `fetcher.FetchModels(ctx)` — one credentialed GET to
    Copilot `/models` (the provider may perform its normal on-demand mint).
-3. On a typed fetch error, render the Surface dialect: `ErrNoCredential` → 503
-   `NotReady`; `ErrBuildUpstream` / `ErrUpstreamUnreachable` / `ErrUpstreamRead` →
-   502 `BadGateway`; `ErrUpstreamTimeout` → 504 `GatewayTimeout`.
+3. On a typed fetch error, first short-circuit client cancellation: if the request
+   context is canceled (the client disconnected), return without writing — the
+   caller has already left — mirroring `forward.go`'s existing check. Otherwise
+   render the Surface dialect: `ErrNoCredential` → 503 `NotReady`; `ErrBuildUpstream`
+   / `ErrUpstreamUnreachable` / `ErrUpstreamRead` → 502 `BadGateway`;
+   `ErrUpstreamTimeout` → 504 `GatewayTimeout`.
 4. On `status != 200`, render a Surface-shaped 502 `BadGateway` ("upstream models
    request failed"); Copilot's body is not forwarded.
 5. `catalog.Decode(body)`; a decode error → 502 `BadGateway`.
@@ -452,8 +459,10 @@ There is no cache and no single-flight; two client calls cause two upstream
   buffered read. No SSE idle/keepalive timers apply (this is not a stream).
 - `HEAD` returns the same status and headers as `GET` (including `Content-Length`)
   with no body.
-- Client cancellation propagates to the upstream fetch and produces no additional
-  downstream signal.
+- Client cancellation propagates to the upstream fetch; the handler detects the
+  canceled request context (§7 step 3) and returns without writing, so a caller
+  that has already left is never sent a mapped 502/504 — no additional downstream
+  signal.
 - Router-level 404/405 and panic recovery remain generic server signals, as
   elsewhere.
 
@@ -476,7 +485,14 @@ There is no cache and no single-flight; two client calls cause two upstream
 ## 10. Test design
 
 All automated tests use `httptest` upstreams and a stubbed identity; none need a
-GitHub account or network. Fixtures are derived from the real `./models.json`.
+GitHub account or network. Fixtures are derived from the raw response from GitHub
+Copilot (the Phase 4 `/models` passthrough).
+
+> **Implementation note:** this capture is not committed to the repo. The
+> implementing agent must obtain a current `/models` response through the Phase 4
+> passthrough and land it as a checked-in fixture (e.g. `internal/catalog/testdata`);
+> if no live Copilot credential is available in the environment, ask the human
+> operator to capture one.
 
 ### 10.1 `internal/catalog` unit tests (pure)
 
