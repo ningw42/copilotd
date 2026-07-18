@@ -8,9 +8,10 @@ synthesizes a native-shaped terminal `error` event whenever an upstream stream
 dies without one (truncation, stall, or read error), so a client's SSE parser
 never hangs waiting for `message_stop` / `response.completed`. Every such
 copilotd-originated signal keeps the provider's native wire shape and is
-identified **off-band** — a `copilotd:` message prefix, the `X-Request-Id`
-response header, and structured logs/metrics — never by a nonstandard field on the
-wire.
+identified **off-band** — a `copilotd:` message prefix, copilotd's resolved
+`X-Request-Id` response header, and structured logs/metrics — never by a
+nonstandard field on the wire. An upstream `X-Request-Id` is suppressed on the
+downstream response so it cannot compete with that authoritative correlation ID.
 
 ## Considered options
 
@@ -22,8 +23,9 @@ wire.
 
 ## Consequences
 
-- Clients see only native-shaped errors; the request-id is the authoritative origin
-  channel for operators.
+- Clients see only native-shaped errors; copilotd's resolved request-id is the
+  authoritative origin channel for operators and the sole downstream
+  `X-Request-Id` value.
 - The set of copilotd-originated signals is enumerated exhaustively (the
   "divergence ledger") and centralized in one package (`internal/apierror`), so the
   proxy's only divergence from a first-party endpoint stays auditable in one place.

@@ -29,7 +29,7 @@ _Avoid_: token file, credential file
 **Copilot token**:
 The short-lived (~25 min) bearer token the exchange mints from the GitHub OAuth
 token. Held in memory only, re-minted continuously, and sent as `Authorization:
-Bearer` on every upstream inference call.
+Bearer` on every authenticated upstream Copilot call.
 _Avoid_: access token, session token, token (unqualified)
 
 ### Identity lifecycle
@@ -64,15 +64,16 @@ exchange.
 ### Surfaces & forwarding
 
 **Surface**:
-One of the two inbound API dialects copilotd serves — the Anthropic surface
-(`/anthropic/...`) and the OpenAI surface (`/openai/...`). Each forwards only to
-its matching upstream dialect; never cross-translated.
+One of the three inbound API dialects copilotd serves — the Anthropic surface
+(`/anthropic/...`), the OpenAI surface (`/openai/...`), and the GitHub Copilot
+surface (initially `/models`). Each endpoint forwards only to its matching
+upstream Surface and Route; never cross-translated.
 _Avoid_: provider, endpoint (unqualified)
 
 **Route**:
 The registered upstream path a Surface exposes — `/v1/messages`,
-`/v1/messages/count_tokens`, or `/responses`. Unique within a Surface, not assumed
-globally unique (a later Surface may reuse a path).
+`/v1/messages/count_tokens`, `/responses`, or `/models`. Unique within a Surface,
+not assumed globally unique (a later Surface may reuse a path).
 _Avoid_: endpoint (unqualified), path (unqualified)
 
 **Endpoint**:
@@ -129,7 +130,7 @@ _Avoid_: fake terminal, injected error (unqualified)
 **Ready / Not-ready**:
 copilotd is *ready* when its last mint attempt succeeded — it stays ready across
 idle token expiry (the next request re-mints) and flips *not-ready* only when a
-mint fails. Surfaced at `/readyz`; when not-ready, provider routes return `503`.
+mint fails. Surfaced at `/readyz`; when not-ready, Surface endpoints return `503`.
 _Avoid_: healthy (that is liveness, `/healthz`)
 
 **Degraded**:

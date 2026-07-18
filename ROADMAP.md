@@ -12,15 +12,18 @@ design docs written as we reach each phase.
 
 ## 1. What this is
 
-`copilotd` is a single-binary proxy. On the **inbound** side it exposes two API
-surfaces that clients already know how to speak:
+`copilotd` is a single-binary proxy. On the **inbound** side it exposes two
+inference Surfaces that clients already know how to speak:
 
 - **Anthropic Messages API**, mounted under `HOST/anthropic`
 - **OpenAI Responses API**, mounted under `HOST/openai`
 
+It also exposes the native **GitHub Copilot Surface** for support data at
+unprefixed paths, beginning with `GET/HEAD HOST/models`.
+
 On the **outbound** side it talks to GitHub Copilot's **raw Anthropic Messages
-API** and **raw OpenAI Responses API**, using a managed GitHub Copilot
-credential.
+API**, **raw OpenAI Responses API**, and native support Routes, using a managed
+GitHub Copilot credential.
 
 It is **not** a translation engine. Anthropic requests are forwarded to Copilot's
 Anthropic endpoint; Responses requests are forwarded to Copilot's Responses
@@ -34,7 +37,7 @@ endpoint. There is never any cross-family translation.
 - Multi-tenant token minting, per-token quotas, or billing. Inbound auth is a
   single managed token (or a small static set).
 - Multi-account pooling / rotation of GitHub Copilot subscriptions. One account.
-- Embeddings. (Could later drop into the provider-agnostic support tier if ever
+- Embeddings. (Could later drop into the GitHub Copilot-native support tier if ever
   wanted, but it is not a goal.)
 
 ---
@@ -105,7 +108,7 @@ client  ────────────────────────
 | **Core**         | SSE streaming engine          | Parse upstream SSE → re-emit downstream; keepalive pings; terminal-event enforcement; client-cancel propagation |
 | **Parity**       | Shim framework                | The onion contract: request-transform + response/stream-transform; ordering; per-shim toggle                 |
 | **Parity**       | Shim catalog                  | Individual shims (see §5). Grows over time.                                                                   |
-| **Support**      | Misc endpoints                | Two-tier support endpoints, e.g. `/models` (see §4.2)                                                         |
+| **Support**      | GitHub Copilot support        | GitHub Copilot-native endpoints plus deferred provider/client-shaped views (see §4.2)                        |
 | **Cross-cutting**| Observability                 | Structured logging, request-id, metrics — present from Phase 0 (see §6)                                      |
 | **Cross-cutting**| Configuration                 | Flags + env (+ optional file): bind address, managed token, timeouts, shim toggles                           |
 | **Cross-cutting**| Build & distribution          | Native build per target; single binary; optional service install                                            |
@@ -126,10 +129,11 @@ set its base URL and every path beneath it is native.
 
 ### 4.2 Support endpoints — two tiers
 
-Miscellaneous endpoints follow a general pattern, not a one-off:
+GitHub Copilot support data follows a two-tier pattern:
 
-- **Provider-agnostic tier** — the raw Copilot response bound to a neutral path,
-  e.g. `HOST/models` as a straight passthrough. Cheap; lands early.
+- **GitHub Copilot-native tier** — the raw Copilot response exposed on its native
+  Surface, e.g. `(GitHubCopilot, /models)` at `HOST/models` as a straight
+  passthrough. Cheap; lands early.
 - **Provider/client-shaped tier** — the same data reshaped to match what a real
   provider or a specific client expects, e.g. `HOST/anthropic/models`,
   `HOST/openai/models`, or Codex model-catalog metadata, with **best-effort
@@ -195,15 +199,16 @@ every metric yet — the seams are there from Phase 0.
 
 ## 7. Phased roadmap
 
-Horizontal layering: each capability is built across **both** surfaces before we
-move up a layer. Observability (§6) threads through all phases.
+Horizontal layering: each inference capability is built across **both inference
+Surfaces** before we move up a layer. Observability (§6) threads through all
+phases.
 
 ### Phase 0 — Foundations / walking skeleton
 Module layout, HTTP server + router, configuration (flags/env), **structured
 logging + request-id + metrics scaffolding**, health endpoint, native build.
 _Outcome: the binary runs and is observable._
 
-### Phase 1 — Core forward path, both surfaces (non-streaming)
+### Phase 1 — Core forward path, both inference Surfaces (non-streaming)
 Three workstreams that must all land together to make the first real call:
 - **Inbound auth** — managed-token validation.
 - **GitHub↔Copilot identity** — device-flow login or injected token; token
@@ -211,13 +216,14 @@ Three workstreams that must all land together to make the first real call:
 - **Raw forwarder** — dumb passthrough with header impersonation, on the
   provider-namespaced routes.
 
-_Outcome: JSON round-trips work end-to-end against Copilot on both surfaces._
+_Outcome: JSON round-trips work end-to-end against Copilot on both inference
+Surfaces._
 
 > Note: identity and the forwarder are merged into one band because a forward
 > cannot reach Copilot without the outbound credential; they have to land
 > together to produce the first real call.
 
-### Phase 2 — SSE streaming engine, both surfaces
+### Phase 2 — SSE streaming engine, both inference Surfaces
 Upstream SSE parse → downstream emit; keepalive pings; terminal-event
 enforcement; client-cancel/disconnect propagation.
 _Outcome: genuinely usable with real streaming clients (Claude Code, Codex, SDKs)._
@@ -228,10 +234,10 @@ per-shim toggling — proven with a no-op passthrough shim. No shims yet,
 just the mechanism.
 _Outcome: a place to hang parity features without touching the core._
 
-### Phase 4 — Provider-agnostic support endpoints
-Implement the provider-agnostic support tier: `HOST/models` as a raw Copilot
-passthrough.
-_Outcome: raw Copilot support data is available at a neutral endpoint._
+### Phase 4 — GitHub Copilot support endpoint
+Implement the GitHub Copilot-native support tier: `(GitHubCopilot, /models)` at
+`HOST/models` as a raw Copilot passthrough.
+_Outcome: raw Copilot support data is available through its native endpoint._
 
 ### Phase 5 — Shim catalog (seed)
 Implement the seed shims from §5. This band is expected to keep growing after

@@ -584,7 +584,7 @@ dependencies are injected.
 | Middleware / onion framework (request/stream transform) | Phase 3 |
 | Self-heal 401 retry; unsupported-param/beta stripping; model-name mapping; stable Responses item-ids | Phase 4 |
 | Responses management sub-paths (`GET/DELETE /responses/{id}`, cancel, input_items) | Phase 4 (or when a client needs them) |
-| `/models` (provider-agnostic, then provider-shaped) | Phase 4 / Phase 5 |
+| `/models` (GitHub Copilot-native, then provider/client-shaped) | Phase 4 / Phase 6 |
 | Cross-compilation to the four targets, service install | Phase 6 |
 | Metrics build-out (Prometheus/OTel) beyond the named seams | Later phase (Phase 0 §2.1 deviation) |
 | Auto-discovery of VS Code's `apps.json` as a token source | If/when a real need appears |

@@ -320,7 +320,7 @@ dependencies are injected. Stdlib `testing` + `net/http/httptest` only (reach fo
 | --- | --- |
 | Metrics / Prometheus / OTel / traces | Later phase (conscious deviation, §2.1) |
 | Provider routes (`/anthropic/*`, `/openai/*`) | Phase 1 |
-| `/models` (provider-agnostic, then provider-shaped) | Phase 4 / Phase 5 |
+| `/models` (GitHub Copilot-native, then provider/client-shaped) | Phase 4 / Phase 6 |
 | Inbound auth (managed token) | Phase 1 |
 | GitHub↔Copilot identity, device flow, token exchange | Phase 1 |
 | Raw forwarder | Phase 1 |
