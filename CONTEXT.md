@@ -81,6 +81,14 @@ A specific served entry point, identified by the `(Surface, Route)` pair — the
 qualified sense in which "endpoint" is allowed (bare "endpoint" is still avoided for
 Surface and Route).
 
+**Catalog**:
+A provider-shaped model list served on a Surface's `/models` — Copilot's raw
+`/models` fetched once, filtered to the models that Surface can forward, and
+re-rendered in the real provider's `GET /v1/models` schema. Carries the provider's
+*schema* with Copilot's *values*, not value-level provider parity. Distinct from
+the GitHub Copilot Surface's raw `/models` passthrough, which reshapes nothing.
+_Avoid_: model list (unqualified); models endpoint (that is the raw passthrough)
+
 **Forwarder**:
 The dumb core that moves a request to Copilot and the response back with minimal
 re-interpretation (raw passthrough) — deserializing nothing beyond a shallow peek.

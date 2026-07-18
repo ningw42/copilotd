@@ -14,8 +14,9 @@ and `GET/HEAD HOST/openai/models` — that fetch GitHub Copilot's raw `/models`
 once, keep only the models each Surface can actually forward, and re-render them
 in the native shape of the real provider's `GET /v1/models`. A client that has
 set its base URL to `HOST/anthropic` or `HOST/openai` can list models and receive
-a response whose envelope and per-model object match what it would get from the
-genuine provider.
+a response whose envelope and per-model **schema** are the genuine provider's,
+**populated with Copilot's own values** — which may differ from the genuine
+provider's published numbers and capability tree (§5.5).
 
 **Outcome:** the two inference Surfaces gain a native, provider-shaped model list
 built entirely from real Copilot data, with best-effort sanitization. Unlike the
@@ -34,8 +35,9 @@ response (`./models.json`, obtained through the Phase 4 passthrough). The Anthro
 and OpenAI target shapes are taken from the live provider docs
 (`GET /v1/models`). The reasoning about a shim alternative (§6.4) is checked
 against the real `internal/shim` and `internal/forward` source. Where Copilot
-supplies no basis for a provider field, that field is dropped, except the single
-timestamp stub called out in §5.
+supplies no basis for a provider field, that field is dropped, except the
+timestamp stub called out in §5. The full set of resulting divergences from the
+genuine provider is enumerated in §5.5 and recorded in ADR 0004.
 
 ## 2. Scope
 
@@ -81,8 +83,8 @@ timestamp stub called out in §5.
 | Decision | Choice | Rationale |
 | --- | --- | --- |
 | Which models each endpoint lists | `model_picker_enabled == true` **and** `supported_endpoints` contains the Surface's upstream Route (`/v1/messages` for Anthropic, `/responses` for OpenAI) | Advertises only models copilotd can actually forward — correctness, not arbitrary sanitization. Endpoint-less / chat-only / embedding models drop out because copilotd cannot serve them. |
-| Object richness | Provider core fields, **enriched only where Copilot supplies a basis**; drop the rest | Best-effort match to the real provider without fabricating capability claims. Enrichment materializes only on the Anthropic object; the OpenAI object schema has no capability slots. |
-| Missing creation date | Stub epoch 0 (`created: 0` / `created_at: "1970-01-01T00:00:00Z"`) | Copilot returns no timestamp on any model. A single, unmistakable "unknown" sentinel keeps strict client SDKs that require the field deserializing, at the cost of one documented, ledgered stub. |
+| Object richness | Provider core fields, **enriched only where Copilot supplies a basis**; drop the rest | Best-effort match to the real provider's *schema* without fabricating capability claims. The emitted `capabilities` tree is therefore a **subset** of the genuine Anthropic tree (§5.5). Enrichment materializes only on the Anthropic object; the OpenAI object schema has no capability slots. |
+| Missing creation date | Stub epoch 0 (`created: 0` / `created_at: "1970-01-01T00:00:00Z"`) | Copilot returns no timestamp on any model. For **Anthropic** this is provider-sanctioned — the live docs state `created_at` "may be set to an epoch value if the release date is unknown" — so it is a native "unknown" sentinel, not a divergence. For **OpenAI**, `created: 0` is a genuine stub (OpenAI documents no unknown-sentinel), kept so strict SDKs that require the field still deserialize. |
 | Response handling | Parse Copilot's body and reconstruct the provider shape | These endpoints own their wire shape; that is the entire point. This is the deliberate departure from Phase 4's byte-verbatim passthrough. |
 | Implementation vehicle | A **standalone handler** composing a dumb forwarder fetch with a pure `internal/catalog` renderer | A first-party support endpoint may construct its own representation; a shim may not (no-fabrication invariant), the inference path hardcodes POST, and Phase 4 kept `/models` off the shim path. See §6.4. |
 | Package boundary | New pure `internal/catalog`; forwarder gains a focused dumb `FetchModels`; server wires the handler | Keeps the raw forwarder Copilot-agnostic; isolates the typed transform in one deep, unit-testable unit; matches the repo's dependency-inversion posture. |
@@ -99,9 +101,13 @@ Surface is precisely the models that advertise that Surface's Route.
 
 A Copilot model `M` is listed on Surface `S` **iff both** hold:
 
-1. `M.model_picker_enabled == true` — excludes Copilot's hidden/deprecated/internal
-   entries (old `gpt-4o-*`, `gpt-3.5-turbo`, `gpt-41-copilot`, embeddings,
-   `trajectory-compaction`, …).
+1. `M.model_picker_enabled == true` — a **defensive** gate against Copilot's
+   hidden/deprecated/internal entries. On the current capture it is **redundant**:
+   every `model_picker_enabled:false` entry (old `gpt-4o-*`, `gpt-3.5-turbo`,
+   `gpt-41-copilot`, embeddings, `trajectory-compaction`, …) already fails
+   predicate 2. Its only live effect is on a hypothetical future model that is
+   *forwardable but hidden* (picker-disabled yet serving the Route), which we
+   deliberately keep out of the catalog.
 2. `M.supported_endpoints` is present and contains `S`'s upstream Route:
    - `/anthropic/models` requires `"/v1/messages" ∈ M.supported_endpoints`.
    - `/openai/models` requires `"/responses" ∈ M.supported_endpoints`.
@@ -112,6 +118,12 @@ Notes:
   confirm the Surface serves it.
 - The websocket variant `"ws:/responses"` is **not** `"/responses"`; the exact
   HTTP Route string is required (the WebSocket transport is a non-goal).
+- **Membership is keyed on the wire-Surface, not the vendor.** `/openai/models`
+  lists every model forwardable on the OpenAI (Responses) Surface, including
+  non-OpenAI-vendor models: `mai-code-1-flash-picker` (`vendor: "Microsoft"`) and
+  `gpt-5-mini` (`vendor: "Azure OpenAI"`) both serve `/responses` and are callable
+  through `HOST/openai`, so both are listed. Vendor-gating would make the catalog
+  under-report what a client can actually call.
 - Applied to the capture, the predicate yields the 7 current Claude models on
   `/anthropic/models` (`claude-opus-4.6/4.7/4.8`, `claude-sonnet-4.6/5/4.5`,
   `claude-haiku-4.5`) and 9 Responses-capable models on `/openai/models`
@@ -137,7 +149,7 @@ limit slots, so "enrichment" does not apply here.
 | `id` | `M.id` | e.g. `"gpt-5.6-luna"` |
 | `object` | constant | `"model"` |
 | `created` | — (no Copilot basis) | `0` (epoch-0 stub) |
-| `owned_by` | `M.vendor` | verbatim, e.g. `"OpenAI"`, `"Azure OpenAI"`, `"Microsoft"` |
+| `owned_by` | `M.vendor` | Copilot's vendor string verbatim, e.g. `"OpenAI"`, `"Azure OpenAI"`, `"Microsoft"` — not normalized to OpenAI's `"openai"`/`"system"` convention (§5.5) |
 
 Envelope: `{ "object": "list", "data": [ … ] }` (the OpenAI models list is
 unpaginated).
@@ -152,9 +164,9 @@ materializes here.
 | `id` | `M.id` | |
 | `type` | constant | `"model"` |
 | `display_name` | `M.name` | e.g. `"Claude Opus 4.6"` |
-| `created_at` | — (no Copilot basis) | `"1970-01-01T00:00:00Z"` (epoch-0 stub, RFC 3339) |
-| `max_input_tokens` | `M.capabilities.limits.max_prompt_tokens` | omit if absent |
-| `max_tokens` | `M.capabilities.limits.max_output_tokens` | the output-parameter ceiling; omit if absent |
+| `created_at` | — (no Copilot basis) | `"1970-01-01T00:00:00Z"` (RFC 3339). Provider-sanctioned: Anthropic's docs allow an epoch value when the release date is unknown, so this is a native sentinel, not a divergence. |
+| `max_input_tokens` | `M.capabilities.limits.max_prompt_tokens` | Copilot's forwardable prompt budget; may sit below the provider's published context window (§5.5). Omit if absent. |
+| `max_tokens` | `M.capabilities.limits.max_output_tokens` | Copilot's output-parameter ceiling; may sit below the provider's published max output (§5.5). Omit if absent. |
 | `capabilities.structured_outputs.supported` | `M.capabilities.supports.structured_outputs` | omit key if absent |
 | `capabilities.image_input.supported` | `M.capabilities.supports.vision` | omit key if absent |
 | `capabilities.pdf_input.supported` | `"application/pdf" ∈ M.capabilities.limits.vision.supported_media_types` | omit key if no vision limits |
@@ -192,24 +204,37 @@ numeric budget slot. Rules:
   This is the only source for adaptive; it is independent of the budgets.
 - `capabilities.thinking.types.enabled.supported =` **an explicit budget is
   advertised**, i.e. `min_thinking_budget` **or** `max_thinking_budget` is
-  present. Basis: Anthropic "enabled" thinking is `{type:"enabled", budget_tokens:N}`
-  — an explicit budget — and a model advertising a min/max budget accepts one.
-  This is the single inferential step in the whole mapping and is stated here so
-  it is a conscious, reviewable choice.
+  present. This is the single inferential step in the whole mapping, and it is a
+  **Copilot-derived signal that can diverge from the genuine Anthropic API**:
+  Copilot advertises a budget range even for adaptive-only models that in fact
+  *reject* `budget_tokens` upstream, and the models whose real `enabled` answer
+  differs are indistinguishable in Copilot's data (worked example below), so no
+  mapping can reproduce it faithfully. We keep the inference under the
+  provider-*shaped* contract (§5.5) — it reports Copilot's advertised budget —
+  while accepting that it reads `true` where the genuine API returns `false`.
+  Stated here so the divergence is a conscious, reviewable choice.
 - `capabilities.thinking.supported = adaptive.supported || enabled.supported`.
 - The budget **magnitudes** (e.g. `1024` / `32000`) are surfaced **nowhere** —
   Anthropic's model schema has no field for them; they serve only as the boolean
   signal above.
 
-Worked examples from the capture (validating that the distinction is real):
+Worked examples from the capture (the first two match the genuine API; the third
+is the documented divergence):
 
 - `claude-opus-4.6`: `adaptive_thinking:true`, budgets present →
   `thinking = { supported:true, types:{ adaptive:{supported:true}, enabled:{supported:true} } }`;
-  `effort` present with `low/medium/high/max` supported.
+  `effort` present with `low/medium/high/max` supported. **Matches** the genuine
+  Anthropic object (opus-4.6 still honors `budget_tokens`).
 - `claude-sonnet-4.5`, `claude-haiku-4.5`: **no** `adaptive_thinking`, budgets
   present, **no** `reasoning_effort` →
   `thinking = { supported:true, types:{ adaptive:{supported:false}, enabled:{supported:true} } }`;
-  `effort` block omitted.
+  `effort` block omitted. **Matches** the genuine API.
+- `claude-opus-4.8` (**divergence**): Copilot's thinking signals are *identical* to
+  opus-4.6 (`adaptive_thinking:true`, `min/max_thinking_budget` present), so we emit
+  `enabled:{supported:true}` — but the genuine Anthropic API returns
+  `enabled:{supported:false}` (4.7+ rejected `budget_tokens`; adaptive-only). The
+  discriminating fact is absent from Copilot's data, so no mapping could reproduce
+  it — the §5.5 divergence made concrete.
 
 ### 5.3 Envelopes and pagination
 
@@ -228,6 +253,37 @@ Because the reshape reads only the mapped fields, the provider-shaped output
 `capabilities.family`, `tokenizer`, `version`, and `supported_endpoints`. The
 catalogs therefore do not leak Copilot's billing warnings or policy text — a
 benefit of reconstructing rather than passing through.
+
+### 5.5 Fidelity contract — provider-shaped, not provider-identical
+
+These catalogs promise the genuine provider's **envelope and per-model schema**,
+populated with **Copilot's own values**. They do **not** promise value-level
+parity with the real provider — copilotd only knows Copilot's view of each model,
+and that view differs from the provider's published data in enumerable ways. The
+complete set of accepted divergences:
+
+- **Token limits are Copilot's forwardable budgets, not the provider's published
+  ceilings.** `max_input_tokens ← max_prompt_tokens` and `max_tokens ←
+  max_output_tokens` report what Copilot will actually accept/emit, which can be
+  lower than the provider's headline numbers (e.g. `claude-opus-4.6`: 936K/64K
+  here vs Anthropic's published 1M/128K).
+- **The `capabilities` tree is a subset.** Leaves Copilot gives no basis for
+  (`batch`, `citations`, `code_execution`, `context_management`) are omitted
+  rather than fabricated. A client doing unguarded bracket access into an omitted
+  leaf — which Anthropic's own SDK guidance encourages, since the genuine API
+  always returns the full tree — will not find it.
+- **`enabled` thinking support is inferred and can be wrong.** Per §5.2.2 it reads
+  `true` for adaptive-only models (`opus-4.7/4.8`, `sonnet-5`) where the genuine
+  API returns `false`.
+- **`owned_by` is Copilot's `vendor` verbatim** (e.g. `"Azure OpenAI"`,
+  `"Microsoft"`), not normalized to OpenAI's `"openai"`/`"system"` convention.
+- **List order is Copilot's `data[]` order**, not the provider's "most recently
+  released first" convention.
+
+Each divergence is a deliberate consequence of the no-fabrication rule: where a
+faithful provider-shaped value is not derivable from Copilot's data, copilotd
+reports Copilot's value (or omits the field) rather than inventing the provider's.
+This contract is recorded in ADR 0004.
 
 ## 6. Architecture and package boundaries
 
@@ -327,13 +383,15 @@ the shim-bearing `Handler` was considered and rejected on grounds confirmed
 against the real source:
 
 - **No-fabrication invariant** (`internal/shim` package doc; Phase 3 §10.2): a
-  shim "must not fabricate information without an upstream basis." The epoch-0
-  timestamp stub has no upstream basis, and the whole-envelope synthesis
-  (`object:"list"`, `has_more`, `first_id`/`last_id`, constant `type`) is §10.2's
-  "structural repair" — explicitly *not pre-authorized*, requiring a named
-  divergence-ledger amendment. A first-party support endpoint is *expected* to
-  construct its representation; Phase 4 already established support endpoints as
-  first-party, not shim-transformed.
+  shim "must not fabricate information without an upstream basis." The
+  whole-envelope synthesis (`object:"list"`, `has_more`, `first_id`/`last_id`,
+  constant `type`) has no upstream basis — it is §10.2's "structural repair,"
+  explicitly *not pre-authorized* and requiring a named divergence-ledger
+  amendment. (The epoch `created_at` is *not* the offending part — Anthropic
+  sanctions an epoch value for an unknown date, §5.2; the synthesized list
+  envelope is.) A first-party support endpoint is *expected* to construct its
+  representation; Phase 4 already established support endpoints as first-party,
+  not shim-transformed.
 - **The inference path hardcodes POST.** `forward.forward()` builds the upstream
   request with `http.MethodPost`; `/models` is a `GET` Route. A shim would force a
   method seam into the dumb core the onion exists to keep untouched.
@@ -429,10 +487,12 @@ GitHub account or network. Fixtures are derived from the real `./models.json`.
   `owned_by` = vendor verbatim; envelope `{object:"list", data}`; order preserved.
 - **Anthropic render — enrichment:** `max_input_tokens`←`max_prompt_tokens`,
   `max_tokens`←`max_output_tokens`; `structured_outputs`/`image_input`/`pdf_input`
-  from the right sources; `effort` per §5.2.1; `thinking` per §5.2.2 with the two
+  from the right sources; `effort` per §5.2.1; `thinking` per §5.2.2 with the three
   worked examples asserted exactly (`opus-4.6` adaptive+enabled+effort;
-  `sonnet-4.5`/`haiku-4.5` enabled-only, no adaptive, no effort); envelope with
-  `has_more:false` and correct `first_id`/`last_id`; empty list → `null` ids.
+  `sonnet-4.5`/`haiku-4.5` enabled-only, no adaptive, no effort; `opus-4.8` the
+  §5.5 divergence — `enabled:true` emitted despite the genuine API's `false`, since
+  the rule follows Copilot's advertised budget); envelope with `has_more:false` and
+  correct `first_id`/`last_id`; empty list → `null` ids.
 - **Defensive omit:** a model missing vision limits → no `pdf_input`/`image_input`
   keys; missing `reasoning_effort` → no `effort` block; missing all thinking
   signals → no `thinking` block; missing a limit → that token field omitted.
@@ -480,7 +540,8 @@ Phase 6a is complete when all hold:
    Surface.
 4. The OpenAI object matches §5.1 and the Anthropic object matches §5.2 (including
    the §5.2.1 effort and §5.2.2 thinking rules and the epoch-0 stub), with
-   defensive omission of unsupported keys.
+   defensive omission of unsupported keys, and the documented §5.5 divergences
+   hold as specified (no attempt at value-level provider parity).
 5. Envelopes and pagination match §5.3.
 6. copilotd-originated failures render in the route's own Surface dialect;
    upstream non-2xx and unparseable bodies render a Surface-shaped 502.
