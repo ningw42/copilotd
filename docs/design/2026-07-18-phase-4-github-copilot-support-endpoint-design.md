@@ -69,7 +69,9 @@ synthesis are outside the contract.
   The normal identity manager may perform an on-demand mint before the call;
   this is credential lifecycle, not a retry of the `/models` request.
 - Applying the shim onion or SSE engine to the support response, regardless of
-  its reported `Content-Type`.
+  its reported `Content-Type`. ADR-0003's synthesized-terminal guarantee applies
+  only to Routes whose contracts include SSE semantics; a raw passthrough Route
+  does not opt in through `Content-Type` alone.
 - Applying the inference request-body cap to the GitHub Copilot endpoint. GET
   and HEAD bodies are unusual but stream through without buffering or a local
   size limit.
@@ -128,6 +130,14 @@ request ID → access log → recovery → API-key auth → readiness → passth
 
 `POST /models` and every other unregistered method receive `net/http`'s normal
 method-not-allowed response. No wildcard `/models/` subtree is introduced.
+
+The implementation tickets are cumulative and independently mergeable. Because
+a Go `GET` pattern also matches `HEAD`, the first server-facing tracer registers
+both explicit patterns and minimally proves `GET`→`GET`, `HEAD`→`HEAD`, and no
+downstream HEAD body. Later request-, response-, and HEAD-focused tickets deepen
+the shared fidelity and failure coverage; they do not repair an intentionally
+incorrect intermediate HEAD mapping. Phase 4 is complete only after its final
+real-listener capstone.
 
 ### 4.2 `internal/forward`
 
@@ -300,6 +310,11 @@ Surface-rendered errors.
 `OutboundTimeout` is the total backstop while copying the support response after
 headers arrive, and `WriteTimeout` bounds each downstream write.
 The SSE-only idle and keepalive timers do not apply.
+
+ADR-0003 does not require a synthesized terminal here because the `/models`
+Route contract is raw passthrough rather than SSE. A reported
+`Content-Type: text/event-stream` remains opaque response metadata and does not
+change the selected response policy.
 
 After response headers are committed, a read failure, body timeout, write
 failure, or client disconnect cannot be replaced with a JSON error without

@@ -120,9 +120,11 @@ on the wire.
 _Avoid_: proxy error, internal error
 
 **Synthesized terminal**:
-A terminal error event copilotd originates when an upstream stream dies without
-one, so a client's SSE parser never hangs. A copilotd-originated signal — never
-conflated with a forwarded upstream terminal.
+A terminal error event copilotd originates when an upstream stream on a Route
+whose contract includes SSE semantics dies without one, so a client's SSE parser
+never hangs; a raw passthrough Route does not acquire SSE semantics from a
+`Content-Type` value alone. It is a copilotd-originated signal, never conflated
+with a forwarded upstream terminal.
 _Avoid_: fake terminal, injected error (unqualified)
 
 ### Runtime state
