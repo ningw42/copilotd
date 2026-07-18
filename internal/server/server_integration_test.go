@@ -3,10 +3,13 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -35,6 +38,10 @@ func stack(t *testing.T, upstreamURL string, ready bool) (http.Handler, *identit
 type controllerRecorder struct {
 	*httptest.ResponseRecorder
 }
+
+type serverRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f serverRoundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 func newControllerRecorder() *controllerRecorder {
 	return &controllerRecorder{ResponseRecorder: httptest.NewRecorder()}
@@ -292,6 +299,677 @@ func TestAuthBeforeReadiness(t *testing.T) {
 	})
 }
 
+func TestModelsTracerMapsExplicitGETAndHEADAtAssembledBoundary(t *testing.T) {
+	type upstreamRequest struct {
+		method string
+		route  string
+		auth   string
+		apiKey string
+		host   string
+	}
+	var got []upstreamRequest
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = append(got, upstreamRequest{
+			method: r.Method,
+			route:  r.URL.Path,
+			auth:   r.Header.Get("Authorization"),
+			apiKey: r.Header.Get("X-Api-Key"),
+			host:   r.Host,
+		})
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("X-Upstream-Marker", r.Method)
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = io.WriteString(w, "opaque body without an SSE terminal")
+	}))
+	defer upstream.Close()
+	h, _ := stack(t, upstream.URL, true)
+
+	t.Run("GET maps to one upstream GET", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/models", nil)
+		req.Host = "inbound.example"
+		req.Header.Set("Authorization", "Bearer "+testAPIKey)
+		rec := newControllerRecorder()
+		h.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusAccepted {
+			t.Errorf("status = %d, want upstream 202", rec.Code)
+		}
+		if got := rec.Header().Get("X-Upstream-Marker"); got != http.MethodGet {
+			t.Errorf("X-Upstream-Marker = %q, want GET", got)
+		}
+		if got := rec.Body.String(); got != "opaque body without an SSE terminal" {
+			t.Errorf("body = %q, want opaque upstream body without synthesis", got)
+		}
+	})
+
+	t.Run("HEAD maps to one upstream HEAD and writes no body", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodHead, "/models", nil)
+		req.Host = "inbound.example"
+		req.Header.Set("X-Api-Key", testAPIKey)
+		rec := newControllerRecorder()
+		h.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusAccepted {
+			t.Errorf("status = %d, want upstream 202", rec.Code)
+		}
+		if got := rec.Header().Get("X-Upstream-Marker"); got != http.MethodHead {
+			t.Errorf("X-Upstream-Marker = %q, want HEAD", got)
+		}
+		if rec.Body.Len() != 0 {
+			t.Errorf("HEAD body = %q, want empty", rec.Body.String())
+		}
+	})
+
+	if len(got) != 2 {
+		t.Fatalf("upstream calls = %d, want exactly 2", len(got))
+	}
+	for i, wantMethod := range []string{http.MethodGet, http.MethodHead} {
+		if got[i].method != wantMethod || got[i].route != "/models" {
+			t.Errorf("upstream call %d = %s Route %s, want %s Route /models", i, got[i].method, got[i].route, wantMethod)
+		}
+		if got[i].auth != "Bearer copilot-token" || got[i].apiKey != "" {
+			t.Errorf("upstream credentials %d = auth %q x-api-key %q, want only Copilot token", i, got[i].auth, got[i].apiKey)
+		}
+		if got[i].host == "inbound.example" {
+			t.Errorf("upstream Host %d = inbound Host %q", i, got[i].host)
+		}
+	}
+}
+
+func TestModelsRequestOwnershipAndIdentityBoundariesAtAssembledServer(t *testing.T) {
+	const (
+		apiKeySentinel           = "inbound-api-key-sentinel-43"
+		githubOAuthTokenSentinel = "github-oauth-token-sentinel-43"
+		copilotTokenSentinel     = "copilot-token-sentinel-43"
+		requestBodySentinel      = "unusual-models-get-body-sentinel-43"
+		requestID                = "models-request-id-43"
+		requestTarget            = "/models?dup=query-first-sentinel-43&escaped=query%2fescaped%2Fsentinel-43&flag&empty=&dup=query-second-sentinel-43"
+	)
+
+	type modelsRequest struct {
+		requestURI    string
+		header        http.Header
+		body          string
+		contentLength int64
+		host          string
+	}
+	modelsRequests := make(chan modelsRequest, 1)
+	modelsUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read models request body: %v", err)
+		}
+		modelsRequests <- modelsRequest{
+			requestURI:    r.RequestURI,
+			header:        r.Header.Clone(),
+			body:          string(body),
+			contentLength: r.ContentLength,
+			host:          r.Host,
+		}
+		w.Header().Set("X-Models-Result", "raw")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer modelsUpstream.Close()
+
+	exchangeRequests := make(chan http.Header, 1)
+	exchange := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		exchangeRequests <- r.Header.Clone()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"token":      copilotTokenSentinel,
+			"expires_at": time.Now().Add(time.Hour).Unix(),
+			"refresh_in": 3600,
+			"endpoints":  map[string]string{"api": modelsUpstream.URL},
+		})
+	}))
+	defer exchange.Close()
+
+	logger, logs := bufferLogger(t, "info")
+	provider := identity.NewManager(identity.ManagerConfig{
+		OAuthToken:    githubOAuthTokenSentinel,
+		GitHubBaseURL: exchange.URL,
+		HTTPClient:    exchange.Client(),
+		Impersonation: http.Header{
+			"Copilot-Integration-Id": {"vscode-chat"},
+			"Editor-Version":         {"vscode/1.104.1"},
+		},
+		Logger: logger,
+	})
+	provider.StartupMint(context.Background())
+	exchangeHeader := <-exchangeRequests
+	if got := exchangeHeader.Get("Authorization"); got != "token "+githubOAuthTokenSentinel {
+		t.Fatalf("exchange Authorization = %q, want GitHub OAuth token", got)
+	}
+
+	fwd := forward.New(provider, forward.NewClient(time.Second), time.Second, time.Second, time.Second, time.Second, 1, 1, nil)
+	h := newHandler(apiKeySentinel, provider, fwd, logger, NewStreamOutcomeCounter())
+	req := httptest.NewRequest(http.MethodGet, requestTarget, nil)
+	req.Body = io.NopCloser(strings.NewReader(requestBodySentinel))
+	req.ContentLength = int64(len(requestBodySentinel))
+	req.Host = "client-owned-host.invalid"
+	req.Header = http.Header{
+		"Accept":                 {"application/vnd.github+json"},
+		"Accept-Encoding":        {"br;q=1.0, gzip;q=0.8"},
+		"Authorization":          {"Bearer " + apiKeySentinel},
+		"Connection":             {"X-Connection-Only"},
+		"Content-Length":         {"999999"},
+		"Copilot-Integration-Id": {"client-integration"},
+		"Editor-Version":         {"client-editor"},
+		"Host":                   {"client-header-host.invalid"},
+		"If-None-Match":          {`"models-v7"`},
+		"X-Api-Key":              {apiKeySentinel},
+		"X-Connection-Only":      {"must-not-cross"},
+		"X-End-To-End":           {"client-owned"},
+		"X-Request-Id":           {requestID},
+	}
+	rec := newControllerRecorder()
+
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want upstream 204", rec.Code)
+	}
+	if got := rec.Header().Get("X-Models-Result"); got != "raw" {
+		t.Errorf("X-Models-Result = %q, want raw", got)
+	}
+	got := <-modelsRequests
+	if got.requestURI != requestTarget {
+		t.Errorf("upstream request target = %q, want %q", got.requestURI, requestTarget)
+	}
+	if got.body != requestBodySentinel {
+		t.Errorf("upstream body = %q, want sentinel body", got.body)
+	}
+	if got.contentLength != int64(len(requestBodySentinel)) {
+		t.Errorf("upstream ContentLength = %d, want %d", got.contentLength, len(requestBodySentinel))
+	}
+	if got.host == "client-owned-host.invalid" || got.host == "client-header-host.invalid" {
+		t.Errorf("upstream Host = %q, want models origin", got.host)
+	}
+	for _, name := range []string{"Connection", "Host", "X-Api-Key", "X-Connection-Only"} {
+		if values, ok := got.header[http.CanonicalHeaderKey(name)]; ok {
+			t.Errorf("%s survived upstream with values %q", name, values)
+		}
+	}
+	if value := got.header.Get("Content-Length"); value != strconv.Itoa(len(requestBodySentinel)) {
+		t.Errorf("wire Content-Length = %q, want structured length %d", value, len(requestBodySentinel))
+	}
+	for name, want := range map[string]string{
+		"Accept":                 "application/vnd.github+json",
+		"Accept-Encoding":        "br;q=1.0, gzip;q=0.8",
+		"Authorization":          "Bearer " + copilotTokenSentinel,
+		"Copilot-Integration-Id": "vscode-chat",
+		"Editor-Version":         "vscode/1.104.1",
+		"If-None-Match":          `"models-v7"`,
+		"X-End-To-End":           "client-owned",
+		"X-Request-Id":           requestID,
+	} {
+		if value := got.header.Get(name); value != want {
+			t.Errorf("upstream %s = %q, want %q", name, value, want)
+		}
+	}
+
+	headerContains := func(header http.Header, sentinel string) bool {
+		for _, values := range header {
+			for _, value := range values {
+				if strings.Contains(value, sentinel) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	for _, secret := range []string{apiKeySentinel, copilotTokenSentinel} {
+		if headerContains(exchangeHeader, secret) {
+			t.Errorf("secret %q crossed the GitHub token exchange boundary", secret)
+		}
+	}
+	for _, secret := range []string{apiKeySentinel, githubOAuthTokenSentinel} {
+		if headerContains(got.header, secret) || strings.Contains(got.body, secret) {
+			t.Errorf("secret %q crossed the models boundary", secret)
+		}
+	}
+	for _, secret := range []string{apiKeySentinel, githubOAuthTokenSentinel, copilotTokenSentinel} {
+		if headerContains(rec.Header(), secret) || strings.Contains(rec.Body.String(), secret) {
+			t.Errorf("secret %q crossed the downstream boundary", secret)
+		}
+	}
+	for _, private := range []string{
+		apiKeySentinel,
+		githubOAuthTokenSentinel,
+		copilotTokenSentinel,
+		"query-first-sentinel-43",
+		"query%2fescaped%2Fsentinel-43",
+		"query/escaped/sentinel-43",
+		"query-second-sentinel-43",
+		requestBodySentinel,
+	} {
+		if strings.Contains(logs.String(), private) {
+			t.Errorf("private request material %q appeared in logs:\n%s", private, logs.String())
+		}
+	}
+}
+
+func TestModelsHEADPreservesRequestAndResponseContractAtRealListener(t *testing.T) {
+	const (
+		requestBody   = "unusual-models-head-body-sentinel-45"
+		requestID     = "models-head-request-id-45"
+		requestTarget = "/models?dup=head-first&escaped=head%2fescaped%2Fvalue&flag&empty=&dup=head-second"
+	)
+
+	type upstreamRequest struct {
+		method        string
+		requestURI    string
+		header        http.Header
+		body          string
+		contentLength int64
+		host          string
+	}
+	requests := make(chan upstreamRequest, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read upstream HEAD body: %v", err)
+		}
+		requests <- upstreamRequest{
+			method:        r.Method,
+			requestURI:    r.RequestURI,
+			header:        r.Header.Clone(),
+			body:          string(body),
+			contentLength: r.ContentLength,
+			host:          r.Host,
+		}
+		w.Header().Add("Cache-Control", "private")
+		w.Header().Add("Cache-Control", "max-age=0")
+		w.Header().Set("Connection", "X-Upstream-Hop")
+		w.Header().Set("Content-Length", "4242")
+		w.Header().Set("Content-Type", "application/vnd.github+json")
+		w.Header().Set("X-End-To-End-Upstream", "preserved")
+		w.Header().Set("X-Request-Id", "upstream-head-id-must-not-cross")
+		w.Header().Set("X-Upstream-Hop", "drop")
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = io.WriteString(w, "upstream HEAD representation must not reach either wire")
+	}))
+	defer upstream.Close()
+
+	provider := identity.NewStatic(identity.Credential{
+		BaseURL: upstream.URL,
+		Token:   "copilot-token",
+		Headers: http.Header{
+			"Copilot-Integration-Id": {"vscode-chat"},
+			"Editor-Version":         {"vscode/1.104.1"},
+		},
+	}, true)
+	fwd := forward.New(provider, forward.NewClient(time.Second), time.Second, time.Second, time.Second, time.Second, 1, 1, nil)
+	logger, logs := bufferLogger(t, "info")
+	server := httptest.NewServer(newHandler(testAPIKey, provider, fwd, logger, NewStreamOutcomeCounter()))
+	defer server.Close()
+
+	req, err := http.NewRequest(http.MethodHead, server.URL+requestTarget, strings.NewReader(requestBody))
+	if err != nil {
+		t.Fatalf("build HEAD: %v", err)
+	}
+	req.Host = "client-owned-host.invalid"
+	req.Header = http.Header{
+		"Accept-Encoding":        {"br, gzip"},
+		"Authorization":          {"Bearer " + testAPIKey},
+		"Connection":             {"X-Connection-Only"},
+		"Copilot-Integration-Id": {"client-integration"},
+		"Editor-Version":         {"client-editor"},
+		"If-None-Match":          {`"models-head-v1"`},
+		"X-Api-Key":              {testAPIKey},
+		"X-Connection-Only":      {"drop"},
+		"X-End-To-End":           {"client-owned"},
+		"X-Request-Id":           {requestID},
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("HEAD /models: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read downstream HEAD response: %v", err)
+	}
+
+	if resp.StatusCode != http.StatusPartialContent || len(body) != 0 {
+		t.Errorf("downstream HEAD = status %d body %q, want upstream 206 with no wire body", resp.StatusCode, body)
+	}
+	for name, want := range (http.Header{
+		"Cache-Control":         {"private", "max-age=0"},
+		"Content-Length":        {"4242"},
+		"Content-Type":          {"application/vnd.github+json"},
+		"X-End-To-End-Upstream": {"preserved"},
+	}) {
+		if got := resp.Header.Values(name); !reflect.DeepEqual(got, want) {
+			t.Errorf("downstream %s = %q, want %q", name, got, want)
+		}
+	}
+	if got := resp.Header.Values("X-Request-Id"); !reflect.DeepEqual(got, []string{requestID}) {
+		t.Errorf("downstream X-Request-Id = %q, want sole resolved ID", got)
+	}
+	for _, name := range []string{"Connection", "X-Upstream-Hop"} {
+		if got := resp.Header.Values(name); len(got) != 0 {
+			t.Errorf("hop-by-hop downstream %s survived with values %q", name, got)
+		}
+	}
+
+	got := <-requests
+	if got.method != http.MethodHead || got.requestURI != requestTarget {
+		t.Errorf("upstream request = %s %s, want HEAD %s", got.method, got.requestURI, requestTarget)
+	}
+	if got.body != requestBody || got.contentLength != int64(len(requestBody)) {
+		t.Errorf("upstream body/length = %q/%d, want %q/%d", got.body, got.contentLength, requestBody, len(requestBody))
+	}
+	if got.host == "client-owned-host.invalid" {
+		t.Errorf("inbound Host survived upstream: %q", got.host)
+	}
+	for name, want := range map[string]string{
+		"Accept-Encoding":        "br, gzip",
+		"Authorization":          "Bearer copilot-token",
+		"Copilot-Integration-Id": "vscode-chat",
+		"Editor-Version":         "vscode/1.104.1",
+		"If-None-Match":          `"models-head-v1"`,
+		"X-End-To-End":           "client-owned",
+		"X-Request-Id":           requestID,
+	} {
+		if value := got.header.Get(name); value != want {
+			t.Errorf("upstream %s = %q, want %q", name, value, want)
+		}
+	}
+	for _, name := range []string{"Connection", "X-Api-Key", "X-Connection-Only"} {
+		if values := got.header.Values(name); len(values) != 0 {
+			t.Errorf("owned upstream %s survived with values %q", name, values)
+		}
+	}
+	if log := logs.String(); !strings.Contains(log, `route="HEAD /models"`) || !strings.Contains(log, "status=206") || !strings.Contains(log, "bytes=0") || !strings.Contains(log, "request_id="+requestID) {
+		t.Errorf("HEAD access log lacks explicit route/status/zero-byte/correlation metadata:\n%s", log)
+	}
+}
+
+func TestModelsAuthoritativeResponseAtAssembledBoundaryOmitsResponseDataFromLogs(t *testing.T) {
+	const (
+		requestID          = "resolved-models-response-id-44"
+		upstreamRequestID  = "upstream-models-response-id-44"
+		responseData       = "event: future.model.event\ndata: {\"unknown_model_field\":\"response-data-sentinel-44\"}\n\n"
+		responseHeaderData = "response-header-sentinel-44"
+	)
+	calls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Header().Add("Cache-Control", "private")
+		w.Header().Add("Cache-Control", "max-age=0")
+		w.Header().Set("Connection", "X-Upstream-Hop")
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("X-Models-Metadata", responseHeaderData)
+		w.Header().Set("X-Request-Id", upstreamRequestID)
+		w.Header().Set("X-Upstream-Hop", "must-not-cross")
+		w.WriteHeader(http.StatusTeapot)
+		_, _ = io.WriteString(w, responseData)
+	}))
+	defer upstream.Close()
+
+	provider := identity.NewStatic(identity.Credential{BaseURL: upstream.URL, Token: "copilot-token"}, true)
+	fwd := forward.New(provider, forward.NewClient(time.Second), time.Second, time.Second, time.Nanosecond, time.Nanosecond, 1, 1, nil)
+	logger, logs := bufferLogger(t, "info")
+	h := newHandler(testAPIKey, provider, fwd, logger, NewStreamOutcomeCounter())
+	req := httptest.NewRequest(http.MethodGet, "/models", nil)
+	req.Header.Set("Authorization", "Bearer "+testAPIKey)
+	req.Header.Set("X-Request-Id", requestID)
+	rec := newControllerRecorder()
+
+	h.ServeHTTP(rec, req)
+
+	if calls != 1 {
+		t.Errorf("upstream calls = %d, want exactly 1", calls)
+	}
+	if rec.Code != http.StatusTeapot {
+		t.Errorf("status = %d, want authoritative upstream 418", rec.Code)
+	}
+	if got := rec.Body.String(); got != responseData {
+		t.Errorf("body = %q, want opaque upstream bytes %q", got, responseData)
+	}
+	if got := rec.Header().Values("Cache-Control"); len(got) != 2 || got[0] != "private" || got[1] != "max-age=0" {
+		t.Errorf("Cache-Control values = %q, want [private max-age=0]", got)
+	}
+	if got := rec.Header().Get("Content-Type"); got != "text/event-stream" {
+		t.Errorf("Content-Type = %q, want opaque text/event-stream", got)
+	}
+	if got := rec.Header().Get("X-Models-Metadata"); got != responseHeaderData {
+		t.Errorf("X-Models-Metadata = %q, want %q", got, responseHeaderData)
+	}
+	if got := rec.Header().Values("X-Request-Id"); len(got) != 1 || got[0] != requestID {
+		t.Errorf("X-Request-Id values = %q, want sole resolved id", got)
+	}
+	for _, name := range []string{"Connection", "X-Upstream-Hop"} {
+		if got := rec.Header().Values(name); len(got) != 0 {
+			t.Errorf("hop-by-hop %s survived with values %q", name, got)
+		}
+	}
+	for _, private := range []string{responseData, "response-data-sentinel-44", responseHeaderData, upstreamRequestID} {
+		if strings.Contains(logs.String(), private) {
+			t.Errorf("response data %q appeared in logs:\n%s", private, logs.String())
+		}
+	}
+	if got := logs.String(); !strings.Contains(got, `route="GET /models"`) || !strings.Contains(got, "status=418") || !strings.Contains(got, "request_id="+requestID) {
+		t.Errorf("access log lacks route/status/correlation metadata:\n%s", got)
+	}
+}
+
+func TestModelsTracerGateFailuresAndRouterBehavior(t *testing.T) {
+	upstreamCalls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalls++
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+	h, provider := stack(t, upstream.URL, false)
+
+	assertError := func(t *testing.T, req *http.Request, wantStatus int, wantBody string) {
+		t.Helper()
+		rec := newControllerRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != wantStatus {
+			t.Errorf("status = %d, want %d", rec.Code, wantStatus)
+		}
+		if got := rec.Body.String(); got != wantBody {
+			t.Errorf("body = %q, want %q", got, wantBody)
+		}
+		if upstreamCalls != 0 {
+			t.Errorf("upstream calls = %d, want zero", upstreamCalls)
+		}
+	}
+
+	const unauthorized = `{"type":"error","error":{"type":"authentication_error","message":"missing or invalid API key"}}`
+	assertError(t, httptest.NewRequest(http.MethodGet, "/models", nil), http.StatusUnauthorized, unauthorized)
+	wrong := httptest.NewRequest(http.MethodGet, "/models", nil)
+	wrong.Header.Set("Authorization", "Bearer wrong")
+	assertError(t, wrong, http.StatusUnauthorized, unauthorized)
+
+	const notReady = `{"type":"error","error":{"type":"api_error","message":"service not ready"}}`
+	authenticated := httptest.NewRequest(http.MethodGet, "/models", nil)
+	authenticated.Header.Set("Authorization", "Bearer "+testAPIKey)
+	assertError(t, authenticated, http.StatusServiceUnavailable, notReady)
+
+	provider.SetReady(true)
+	provider.SetError(errors.New("mint failed"))
+	const noCredential = `{"type":"error","error":{"type":"api_error","message":"no upstream credential available"}}`
+	currentFailure := httptest.NewRequest(http.MethodGet, "/models", nil)
+	currentFailure.Header.Set("Authorization", "Bearer "+testAPIKey)
+	assertError(t, currentFailure, http.StatusServiceUnavailable, noCredential)
+	provider.SetError(nil)
+
+	for _, tc := range []struct {
+		method     string
+		target     string
+		wantStatus int
+	}{
+		{method: http.MethodPost, target: "/models", wantStatus: http.StatusMethodNotAllowed},
+		{method: http.MethodGet, target: "/models/", wantStatus: http.StatusNotFound},
+	} {
+		req := httptest.NewRequest(tc.method, tc.target, nil)
+		req.Header.Set("Authorization", "Bearer "+testAPIKey)
+		rec := newControllerRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != tc.wantStatus {
+			t.Errorf("%s %s status = %d, want %d", tc.method, tc.target, rec.Code, tc.wantStatus)
+		}
+		if upstreamCalls != 0 {
+			t.Errorf("%s %s made %d upstream calls, want zero", tc.method, tc.target, upstreamCalls)
+		}
+	}
+}
+
+func TestModelsHEADLocalFailuresHaveNoWireBody(t *testing.T) {
+	tests := []struct {
+		name          string
+		credential    identity.Credential
+		ready         bool
+		providerError error
+		authorize     bool
+		roundTrip     serverRoundTripFunc
+		wantStatus    int
+		wantBody      string
+		wantCalls     int
+	}{
+		{
+			name:       "auth before readiness",
+			wantStatus: http.StatusUnauthorized,
+			wantBody:   `{"type":"error","error":{"type":"authentication_error","message":"missing or invalid API key"}}`,
+		},
+		{
+			name:       "not ready",
+			authorize:  true,
+			wantStatus: http.StatusServiceUnavailable,
+			wantBody:   `{"type":"error","error":{"type":"api_error","message":"service not ready"}}`,
+		},
+		{
+			name:          "current credential failure",
+			credential:    identity.Credential{BaseURL: "https://upstream.invalid", Token: "copilot-token"},
+			ready:         true,
+			providerError: errors.New("mint failed"),
+			authorize:     true,
+			wantStatus:    http.StatusServiceUnavailable,
+			wantBody:      `{"type":"error","error":{"type":"api_error","message":"no upstream credential available"}}`,
+		},
+		{
+			name:       "request construction",
+			credential: identity.Credential{BaseURL: "http://[::1", Token: "copilot-token"},
+			ready:      true,
+			authorize:  true,
+			wantStatus: http.StatusBadGateway,
+			wantBody:   `{"type":"error","error":{"type":"api_error","message":"could not build the upstream request"}}`,
+		},
+		{
+			name:       "reachability",
+			credential: identity.Credential{BaseURL: "https://upstream.invalid", Token: "copilot-token"},
+			ready:      true,
+			authorize:  true,
+			roundTrip: func(*http.Request) (*http.Response, error) {
+				return nil, errors.New("network unreachable")
+			},
+			wantStatus: http.StatusBadGateway,
+			wantBody:   `{"type":"error","error":{"type":"api_error","message":"could not reach the upstream"}}`,
+			wantCalls:  1,
+		},
+		{
+			name:       "deadline",
+			credential: identity.Credential{BaseURL: "https://upstream.invalid", Token: "copilot-token"},
+			ready:      true,
+			authorize:  true,
+			roundTrip: func(*http.Request) (*http.Response, error) {
+				return nil, context.DeadlineExceeded
+			},
+			wantStatus: http.StatusGatewayTimeout,
+			wantBody:   `{"type":"error","error":{"type":"api_error","message":"the upstream request timed out"}}`,
+			wantCalls:  1,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			provider := identity.NewStatic(tc.credential, tc.ready)
+			provider.SetError(tc.providerError)
+			calls := 0
+			roundTrip := tc.roundTrip
+			if roundTrip == nil {
+				roundTrip = func(*http.Request) (*http.Response, error) {
+					t.Error("unexpected upstream call")
+					return nil, errors.New("unexpected upstream call")
+				}
+			}
+			client := &http.Client{Transport: serverRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+				calls++
+				return roundTrip(r)
+			})}
+			fwd := forward.New(provider, client, time.Second, time.Second, time.Second, time.Second, 1, 1, nil)
+			logger, logs := bufferLogger(t, "info")
+			server := httptest.NewServer(newHandler(testAPIKey, provider, fwd, logger, NewStreamOutcomeCounter()))
+			defer server.Close()
+
+			req, err := http.NewRequest(http.MethodHead, server.URL+"/models", nil)
+			if err != nil {
+				t.Fatalf("build HEAD: %v", err)
+			}
+			if tc.authorize {
+				req.Header.Set("Authorization", "Bearer "+testAPIKey)
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("HEAD: %v", err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatalf("read HEAD response: %v", err)
+			}
+			if resp.StatusCode != tc.wantStatus {
+				t.Errorf("status = %d, want %d", resp.StatusCode, tc.wantStatus)
+			}
+			if calls != tc.wantCalls {
+				t.Errorf("upstream calls = %d, want %d", calls, tc.wantCalls)
+			}
+			if got := resp.Header.Get("Content-Type"); got != "application/json" {
+				t.Errorf("Content-Type = %q, want application/json", got)
+			}
+			if got := resp.Header.Get("Content-Length"); got != strconv.Itoa(len(tc.wantBody)) {
+				t.Errorf("Content-Length = %q, want HEAD representation length %d", got, len(tc.wantBody))
+			}
+			if len(body) != 0 {
+				t.Errorf("wire body = %q, want empty for HEAD", body)
+			}
+			if log := logs.String(); !strings.Contains(log, `route="HEAD /models"`) || !strings.Contains(log, "status="+strconv.Itoa(tc.wantStatus)) || !strings.Contains(log, "bytes=0") {
+				t.Errorf("HEAD failure access log lacks explicit route/status/zero bytes:\n%s", log)
+			}
+		})
+	}
+}
+
+func TestModelsExplicitPatternsReachAccessLog(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+	provider := identity.NewStatic(identity.Credential{
+		BaseURL: upstream.URL,
+		Token:   "copilot-token",
+	}, true)
+	fwd := forward.New(provider, forward.NewClient(time.Second), time.Second, time.Second, time.Second, time.Second, 1, 1, nil)
+	logger, logs := bufferLogger(t, "info")
+	h := newHandler(testAPIKey, provider, fwd, logger, NewStreamOutcomeCounter())
+
+	for _, method := range []string{http.MethodGet, http.MethodHead} {
+		req := httptest.NewRequest(method, "/models", nil)
+		req.Header.Set("Authorization", "Bearer "+testAPIKey)
+		h.ServeHTTP(newControllerRecorder(), req)
+	}
+
+	for _, route := range []string{`route="GET /models"`, `route="HEAD /models"`} {
+		if count := strings.Count(logs.String(), route); count != 1 {
+			t.Errorf("access log count for %s = %d, want 1:\n%s", route, count, logs.String())
+		}
+	}
+}
+
 // TestAnthropicStreamForwardedAtBoundary replaces the Phase 1 stream reject
 // proof: stream:true now crosses the full assembled stack unchanged, and the
 // upstream response is copied back on the existing buffered path.
@@ -323,6 +1001,111 @@ func TestAnthropicStreamForwardedAtBoundary(t *testing.T) {
 	}
 	if got := rec.Header().Get("X-Upstream-Marker"); got != "present" {
 		t.Errorf("X-Upstream-Marker = %q, want present", got)
+	}
+}
+
+func TestInferenceRoutesReturnFirstUpstreamRedirect(t *testing.T) {
+	tests := []struct {
+		name          string
+		inboundPath   string
+		upstreamRoute string
+	}{
+		{
+			name:          "Anthropic",
+			inboundPath:   "/anthropic/v1/messages",
+			upstreamRoute: "/v1/messages",
+		},
+		{
+			name:          "OpenAI",
+			inboundPath:   "/openai/v1/responses",
+			upstreamRoute: "/responses",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var hits int
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				hits++
+				if r.URL.Path != tc.upstreamRoute {
+					w.WriteHeader(http.StatusOK)
+					_, _ = io.WriteString(w, "redirect was followed")
+					return
+				}
+				w.Header().Set("Location", "/redirect-target")
+				w.Header().Set("X-Upstream-Marker", "first-response")
+				w.WriteHeader(http.StatusTemporaryRedirect)
+				_, _ = io.WriteString(w, "first response body")
+			}))
+			defer upstream.Close()
+
+			h, _ := stack(t, upstream.URL, true)
+			req := httptest.NewRequest(http.MethodPost, tc.inboundPath, strings.NewReader(`{}`))
+			req.Header.Set("Authorization", "Bearer "+testAPIKey)
+			rec := newControllerRecorder()
+
+			h.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusTemporaryRedirect {
+				t.Errorf("status = %d, want first upstream 307", rec.Code)
+			}
+			if hits != 1 {
+				t.Errorf("upstream hits = %d, want exactly 1", hits)
+			}
+			if got := rec.Header().Get("Location"); got != "/redirect-target" {
+				t.Errorf("Location = %q, want /redirect-target", got)
+			}
+			if got := rec.Header().Get("X-Upstream-Marker"); got != "first-response" {
+				t.Errorf("X-Upstream-Marker = %q, want first-response", got)
+			}
+			if got := rec.Body.String(); got != "first response body" {
+				t.Errorf("body = %q, want first response body", got)
+			}
+		})
+	}
+}
+
+func TestInferenceResponsesKeepOnlyResolvedRequestID(t *testing.T) {
+	tests := []struct {
+		name        string
+		inboundPath string
+	}{
+		{name: "Anthropic", inboundPath: "/anthropic/v1/messages"},
+		{name: "OpenAI", inboundPath: "/openai/v1/responses"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Add("X-Request-Id", "upstream-first")
+				w.Header().Add("X-Request-Id", "upstream-second")
+				w.Header().Set("X-Upstream-Marker", "preserved")
+				w.WriteHeader(http.StatusAccepted)
+				_, _ = io.WriteString(w, "opaque upstream body")
+			}))
+			defer upstream.Close()
+
+			h, _ := stack(t, upstream.URL, true)
+			req := httptest.NewRequest(http.MethodPost, tc.inboundPath, strings.NewReader(`{}`))
+			req.Header.Set("Authorization", "Bearer "+testAPIKey)
+			req.Header.Set("X-Request-Id", "resolved-request-id")
+			rec := newControllerRecorder()
+
+			h.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusAccepted {
+				t.Errorf("status = %d, want 202", rec.Code)
+			}
+			if got := rec.Header().Values("X-Request-Id"); len(got) != 1 || got[0] != "resolved-request-id" {
+				t.Errorf("X-Request-Id values = %q, want exactly [resolved-request-id]", got)
+			}
+			if got := rec.Header().Get("X-Upstream-Marker"); got != "preserved" {
+				t.Errorf("X-Upstream-Marker = %q, want preserved", got)
+			}
+			if got := rec.Body.String(); got != "opaque upstream body" {
+				t.Errorf("body = %q, want opaque upstream body", got)
+			}
+		})
 	}
 }
 

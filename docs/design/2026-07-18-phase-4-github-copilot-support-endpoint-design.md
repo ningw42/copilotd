@@ -88,7 +88,7 @@ synthesis are outside the contract.
 | Decision | Choice | Rationale |
 | --- | --- | --- |
 | Upstream behavior | One matching Copilot GET or HEAD `/models` call after credential acquisition | Auth, readiness, and credential failures issue no models call; every forwarded request describes one exact upstream interaction. |
-| Implementation boundary | Focused passthrough handler on the existing `forward.Forwarder` | Reuses credential, transport, cancellation, timeout, and header machinery without a new package or route-policy framework. |
+| Implementation boundary | Focused passthrough handler on the existing `forward.Forwarder` | Reuses credential, injected client/transport policy, cancellation, timeout, and header machinery without a new package or route-policy framework. |
 | Existing inference handler | Leave its public contract and shim/SSE pipeline intact | `/models` is not an inference Surface and must not acquire parity transformations accidentally. |
 | Route registration | Register GET and HEAD explicitly; preserve the method upstream | Makes both mappings visible and testable instead of relying on `ServeMux`'s implicit GET→HEAD match. |
 | HEAD behavior | Forward HEAD as HEAD and emit no downstream body | Preserves client ownership of the method and avoids downloading a GET representation for a bodyless request. |
@@ -151,10 +151,19 @@ func (f *Forwarder) PassthroughHandler(
 ) http.HandlerFunc
 ```
 
-It uses the same injected `identity.Provider`, `http.Client`, timeouts, logger,
-and low-level header helpers as inference forwarding. It does not call
-`shim.Registry.NewChain`, inspect JSON, classify `Content-Type`, invoke the SSE
-pump, buffer either body, or enforce request/response body size caps.
+It uses the same injected `identity.Provider`, client and transport policy,
+timeouts, logger, and low-level header helpers as inference forwarding. For a
+stock `*http.Transport`, each support call shallow-copies the injected
+`http.Client` and clones its transport configuration, intentionally excluding
+only the original transport's connection pool. A custom `RoundTripper` remains
+directly injected. This preserves proxy, TLS, timeout, compression, redirect,
+and normal Go HTTP/1 or HTTP/2 negotiation policy while preventing a cached
+connection failure from transparently replaying `/models`. Inference calls
+continue to use the original client and its shared pool.
+
+The handler does not call `shim.Registry.NewChain`, inspect JSON, classify
+`Content-Type`, invoke the SSE pump, buffer either body, or enforce
+request/response body size caps.
 
 This is a second, intentionally small policy path inside the module that already
 owns upstream I/O. It is not a general route descriptor: existing inference
@@ -172,12 +181,15 @@ error renderer. For the same kind and message, a call to `apierror.Write` with
 `GitHubCopilot` produces the same status, headers, and body bytes as a call with
 `Anthropic`.
 
-### 4.4 Shared transport and response-header policy
+### 4.4 Transport and response-header policy
 
 The shared HTTP transport disables its automatic compression behavior. Existing
 inference calls continue to set `Accept-Encoding: identity`, so their behavior
 does not change. The new passthrough handler preserves the client's header; when
-the client supplies none, the transport supplies none.
+the client supplies none, the transport supplies none. Its per-call stock
+transport clone copies this policy but starts with an isolated connection pool;
+it does not disable keepalives, force a protocol version, or emit a
+`Connection: close` request header.
 
 The shared HTTP client also sets a no-follow redirect policy. A 3xx response is
 returned to the caller with its original `Location` and body instead of causing
@@ -205,12 +217,15 @@ For either registered route:
 6. The handler builds one outbound request using the registered GET or HEAD
    method, path `/models`, the incoming body stream, and the exact raw query
    representation.
-7. It applies the request-header policy in §6.1 and calls Copilot once.
+7. It applies the request-header policy in §6.1 and calls Copilot once through
+   the isolated stock transport policy described in §4.2, or directly through
+   a custom injected `RoundTripper`.
 8. If Copilot returns a response, the handler commits its status and filtered
    headers without interpreting the status or body.
 9. For inbound GET, it streams the body directly to the client. For inbound
    HEAD, it commits the upstream HEAD status and headers without writing a body.
-10. It closes the upstream body and releases the connection normally.
+10. It closes the upstream body and closes idle connections owned by the
+    per-call stock transport.
 
 There is no result cache or single-flight layer. Two sequential or concurrent
 client calls cause two independent Copilot `/models` calls. Credential caching
@@ -363,6 +378,9 @@ account or network access.
   client values.
 - The transport does not synthesize `Accept-Encoding` or transparently
   decompress a compressed response.
+- Seeded HTTP/1 and HTTP/2 pools do not supply the support connection; a fresh
+  connection failure causes one transport attempt and no replay, while normal
+  protocol negotiation remains enabled.
 - A redirect is returned verbatim and causes no second upstream call.
 - Upstream 2xx and non-2xx status, body bytes, and legal headers pass through.
 - Hop-by-hop response headers and upstream `X-Request-Id` do not pass through.

@@ -46,6 +46,12 @@ func newHandler(apikey string, provider identity.Provider, fwd *forward.Forwarde
 		guard(apierror.Anthropic, fwd.Handler("/v1/messages/count_tokens", apierror.Anthropic)))
 	mux.Handle("POST /openai/v1/responses",
 		guard(apierror.OpenAI, fwd.Handler("/responses", apierror.OpenAI)))
+	mux.Handle("GET /models",
+		guard(apierror.GitHubCopilot,
+			fwd.PassthroughHandler(http.MethodGet, "/models", apierror.GitHubCopilot)))
+	mux.Handle("HEAD /models",
+		guard(apierror.GitHubCopilot,
+			fwd.PassthroughHandler(http.MethodHead, "/models", apierror.GitHubCopilot)))
 
 	return requestID(accessLog(logger, streamOutcomes, recoverMW(logger, mux)))
 }

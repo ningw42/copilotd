@@ -216,6 +216,23 @@ func TestAccessLogUnmatchedRoute(t *testing.T) {
 	}
 }
 
+func TestAccessLogRecordsZeroDownstreamBodyBytesForHEAD(t *testing.T) {
+	logger, buf := bufferLogger(t, "info")
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = io.WriteString(w, `{"error":"representation exists but HEAD emits no wire body"}`)
+	})
+	h := accessLog(logger, NewStreamOutcomeCounter(), inner)
+	rec := httptest.NewRecorder()
+
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodHead, "/models", nil))
+
+	if !strings.Contains(buf.String(), "bytes=0") {
+		t.Errorf("HEAD access log counted representation bytes that are not emitted on the wire:\n%s", buf.String())
+	}
+}
+
 func TestAccessLogEnrichesStreamSummary(t *testing.T) {
 	logger, buf := bufferLogger(t, "info")
 	metrics := NewStreamOutcomeCounter()

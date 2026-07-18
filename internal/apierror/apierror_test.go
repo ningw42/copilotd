@@ -1,8 +1,10 @@
 package apierror
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 )
 
@@ -94,6 +96,40 @@ func TestWriteShapesAndStatus(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestGitHubCopilotWriteMatchesAnthropicForEveryKind(t *testing.T) {
+	for kind := range table {
+		t.Run(kindName(kind), func(t *testing.T) {
+			anthropic := httptest.NewRecorder()
+			Write(anthropic, Anthropic, kind, "same message")
+			githubCopilot := httptest.NewRecorder()
+			Write(githubCopilot, GitHubCopilot, kind, "same message")
+
+			if githubCopilot.Code != anthropic.Code {
+				t.Errorf("status = %d, want Anthropic status %d", githubCopilot.Code, anthropic.Code)
+			}
+			if !reflect.DeepEqual(githubCopilot.Header(), anthropic.Header()) {
+				t.Errorf("headers = %v, want Anthropic headers %v", githubCopilot.Header(), anthropic.Header())
+			}
+			if !bytes.Equal(githubCopilot.Body.Bytes(), anthropic.Body.Bytes()) {
+				t.Errorf("body = %s, want Anthropic body %s", githubCopilot.Body.Bytes(), anthropic.Body.Bytes())
+			}
+		})
+	}
+}
+
+func kindName(kind Kind) string {
+	return map[Kind]string{
+		Unauthorized:          "Unauthorized",
+		NotReady:              "NotReady",
+		BackgroundUnsupported: "BackgroundUnsupported",
+		PayloadTooLarge:       "PayloadTooLarge",
+		BadGateway:            "BadGateway",
+		GatewayTimeout:        "GatewayTimeout",
+		ShimError:             "ShimError",
+		InvalidRequest:        "InvalidRequest",
+	}[kind]
 }
 
 func TestRejectCarriesKindAndMessageAsAnError(t *testing.T) {

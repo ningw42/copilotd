@@ -35,7 +35,11 @@ func requestID(next http.Handler) http.Handler {
 func accessLog(logger *slog.Logger, streamOutcomes StreamOutcomeObserver, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
+		sw := &statusWriter{
+			ResponseWriter:    w,
+			status:            http.StatusOK,
+			suppressBodyBytes: r.Method == http.MethodHead,
+		}
 
 		ctx := forward.WithStreamResultHolder(r.Context())
 		requestWithHolder := r.WithContext(ctx)
@@ -93,9 +97,10 @@ func recoverMW(logger *slog.Logger, next http.Handler) http.Handler {
 // statusWriter captures the status code and byte count for the access log.
 type statusWriter struct {
 	http.ResponseWriter
-	status      int
-	bytes       int64
-	wroteHeader bool
+	status            int
+	bytes             int64
+	wroteHeader       bool
+	suppressBodyBytes bool
 }
 
 func (w *statusWriter) WriteHeader(code int) {
@@ -109,7 +114,13 @@ func (w *statusWriter) WriteHeader(code int) {
 func (w *statusWriter) Write(b []byte) (int, error) {
 	w.wroteHeader = true
 	n, err := w.ResponseWriter.Write(b)
-	w.bytes += int64(n)
+	// net/http accepts representation writes for HEAD so it can derive the
+	// response headers, but suppresses those bytes on the wire. Access logs
+	// report downstream body bytes, so only methods that can emit a body count
+	// the accepted representation bytes.
+	if !w.suppressBodyBytes {
+		w.bytes += int64(n)
+	}
 	return n, err
 }
 

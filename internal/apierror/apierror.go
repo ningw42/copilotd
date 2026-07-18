@@ -1,9 +1,10 @@
 // Package apierror renders copilotd-originated signals in the inbound
-// surface's own dialect — Anthropic-shaped on the Anthropic surface, OpenAI-shaped
-// on the OpenAI surface — from a single table, so no other package hand-rolls an
-// error body. Upstream (Copilot) error responses are passed through verbatim by
-// the forwarder and never routed through here; apierror covers only the errors
-// copilotd itself originates: auth (401), readiness (503), the unsupported
+// surface's selected dialect — Anthropic-shaped on the Anthropic and GitHub
+// Copilot surfaces for now, OpenAI-shaped on the OpenAI surface — from a single
+// table, so no other package hand-rolls an error body. Upstream (Copilot) error
+// responses are passed through verbatim by the forwarder and never routed
+// through here; apierror covers only the errors copilotd itself originates: auth
+// (401), readiness (503), the unsupported
 // background-mode and shim rejects (400), body bounding (413), unexpected shim
 // failures (500), copilotd-originated 502/504, and native terminal SSE errors
 // after a streaming response is committed.
@@ -14,15 +15,16 @@ import (
 	"net/http"
 )
 
-// Surface selects the error dialect. It is also the forwarder's per-route
-// surface tag, so a route's tag drives both its peek behavior and its error
-// shape. (CONTEXT.md reserves "provider" for the credential provider;
-// the inbound API dialect is a Surface.)
+// Surface identifies the inbound API dialect. Forwarding policy selects the
+// local error shape explicitly from this truthful Surface identity. (CONTEXT.md
+// reserves "provider" for the credential provider; the inbound API dialect is a
+// Surface.)
 type Surface int
 
 const (
 	Anthropic Surface = iota
 	OpenAI
+	GitHubCopilot
 )
 
 // Error carries a deliberate surface-native pre-commit rejection from a shim.
@@ -131,7 +133,8 @@ type openaiStreamError struct {
 }
 
 func body(surface Surface, e entry, msg string) []byte {
-	if surface == OpenAI {
+	switch surface {
+	case OpenAI:
 		var b openaiError
 		b.Error.Message = msg
 		b.Error.Type = e.openaiType
@@ -141,6 +144,10 @@ func body(surface Surface, e entry, msg string) []byte {
 		}
 		out, _ := json.Marshal(b)
 		return out
+	case GitHubCopilot:
+		// GitHub Copilot is a distinct Surface even though its local failures
+		// deliberately reuse the Anthropic envelope for now.
+		return body(Anthropic, e, msg)
 	}
 	var b anthropicError
 	b.Type = "error"

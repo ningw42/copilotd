@@ -1018,6 +1018,50 @@ func TestForwardRejectsUnsupportedEventStreamEncodingBeforeCommit(t *testing.T) 
 	}
 }
 
+func TestNewClientLeavesCompressionNegotiationAndDecodingToCaller(t *testing.T) {
+	var compressed bytes.Buffer
+	zw := gzip.NewWriter(&compressed)
+	if _, err := zw.Write([]byte(`{"opaque":true}`)); err != nil {
+		t.Fatalf("compress fixture: %v", err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("finish compressed fixture: %v", err)
+	}
+	wantBody := append([]byte(nil), compressed.Bytes()...)
+
+	var gotAcceptEncoding []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAcceptEncoding = append([]string(nil), r.Header.Values("Accept-Encoding")...)
+		w.Header().Set("Content-Encoding", "gzip")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(wantBody)
+	}))
+	defer upstream.Close()
+
+	resp, err := NewClient(5 * time.Second).Get(upstream.URL)
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+
+	if len(gotAcceptEncoding) != 0 {
+		t.Errorf("transport-supplied Accept-Encoding = %q, want absent", gotAcceptEncoding)
+	}
+	if resp.Uncompressed {
+		t.Error("response marked transparently decompressed, want encoded response")
+	}
+	if got := resp.Header.Get("Content-Encoding"); got != "gzip" {
+		t.Errorf("Content-Encoding = %q, want gzip", got)
+	}
+	if !bytes.Equal(body, wantBody) {
+		t.Errorf("body = %x, want encoded bytes %x", body, wantBody)
+	}
+}
+
 func TestForwardKeepsCompressedBufferedResponseOpaque(t *testing.T) {
 	var compressed bytes.Buffer
 	zw := gzip.NewWriter(&compressed)
