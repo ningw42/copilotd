@@ -315,7 +315,7 @@ func runServe(ctx context.Context, flags *config.ServeFlags, lookupEnv func(stri
 	// mints on demand.
 	go mgr.StartupMint(serveCtx)
 
-	fwd := forward.New(mgr, forward.NewClient(cfg.ResponseHeaderTimeout), cfg.OutboundTimeout, cfg.WriteTimeout, cfg.StreamIdleTimeout, cfg.StreamKeepaliveInterval, cfg.MaxRequestBytes, cfg.MaxBufferedResponseBytes, registry)
+	fwd := forward.New(mgr, forward.NewClient(cfg.ResponseHeaderTimeout), cfg.OutboundTimeout, cfg.WriteTimeout, cfg.StreamIdleTimeout, cfg.StreamKeepaliveInterval, cfg.MaxRequestBytes, cfg.MaxBufferedResponseBytes, registry, forward.WithLogger(logger))
 	streamOutcomes := server.NewStreamOutcomeCounter()
 
 	if err := server.New(cfg, logger, mgr, fwd, streamOutcomes).Run(serveCtx, ln); err != nil {

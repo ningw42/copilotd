@@ -163,7 +163,7 @@ func TestServeFirstRealCallEndToEnd(t *testing.T) {
 		t.Fatalf("manager not ready after a successful startup mint")
 	}
 
-	fwd := forward.New(mgr, forward.NewClient(cfg.ResponseHeaderTimeout), cfg.OutboundTimeout, cfg.WriteTimeout, cfg.StreamIdleTimeout, cfg.StreamKeepaliveInterval, cfg.MaxRequestBytes, cfg.MaxBufferedResponseBytes, nil)
+	fwd := forward.New(mgr, forward.NewClient(cfg.ResponseHeaderTimeout), cfg.OutboundTimeout, cfg.WriteTimeout, cfg.StreamIdleTimeout, cfg.StreamKeepaliveInterval, cfg.MaxRequestBytes, cfg.MaxBufferedResponseBytes, nil, forward.WithLogger(logger))
 	base := startTestServer(t, server.New(cfg, logger, mgr, fwd, server.NewStreamOutcomeCounter()))
 
 	assertImpersonation := func(t *testing.T) {
@@ -250,7 +250,7 @@ func TestServeDegradedWindow(t *testing.T) {
 		if mgr.Ready() {
 			t.Fatalf("Ready() = true before any mint, want false")
 		}
-		fwd := forward.New(mgr, forward.NewClient(cfg.ResponseHeaderTimeout), cfg.OutboundTimeout, cfg.WriteTimeout, cfg.StreamIdleTimeout, cfg.StreamKeepaliveInterval, cfg.MaxRequestBytes, cfg.MaxBufferedResponseBytes, nil)
+		fwd := forward.New(mgr, forward.NewClient(cfg.ResponseHeaderTimeout), cfg.OutboundTimeout, cfg.WriteTimeout, cfg.StreamIdleTimeout, cfg.StreamKeepaliveInterval, cfg.MaxRequestBytes, cfg.MaxBufferedResponseBytes, nil, forward.WithLogger(logger))
 		base := startTestServer(t, server.New(cfg, logger, mgr, fwd, server.NewStreamOutcomeCounter()))
 
 		assertNotReady(t, base)
@@ -280,7 +280,7 @@ func TestServeDegradedWindow(t *testing.T) {
 		if mgr.Ready() {
 			t.Fatalf("Ready() = true after a failed startup mint, want false")
 		}
-		fwd := forward.New(mgr, forward.NewClient(cfg.ResponseHeaderTimeout), cfg.OutboundTimeout, cfg.WriteTimeout, cfg.StreamIdleTimeout, cfg.StreamKeepaliveInterval, cfg.MaxRequestBytes, cfg.MaxBufferedResponseBytes, nil)
+		fwd := forward.New(mgr, forward.NewClient(cfg.ResponseHeaderTimeout), cfg.OutboundTimeout, cfg.WriteTimeout, cfg.StreamIdleTimeout, cfg.StreamKeepaliveInterval, cfg.MaxRequestBytes, cfg.MaxBufferedResponseBytes, nil, forward.WithLogger(logger))
 		base := startTestServer(t, server.New(cfg, logger, mgr, fwd, server.NewStreamOutcomeCounter()))
 
 		assertNotReady(t, base)

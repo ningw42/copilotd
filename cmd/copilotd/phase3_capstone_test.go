@@ -68,6 +68,7 @@ func startPhase3CapstoneServerWithObservers(
 		cfg.MaxRequestBytes,
 		cfg.MaxBufferedResponseBytes,
 		registry,
+		forward.WithLogger(logger),
 	)
 	slog.SetDefault(previousDefault)
 	return startTestServer(t, server.New(cfg, logger, provider, forwarder, outcomes)), forwarder

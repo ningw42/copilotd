@@ -110,10 +110,15 @@ func TestPhase4InferenceCorrelationAndRedirectRegressionsEndToEnd(t *testing.T) 
 		if !strings.Contains(logs.String(), "request_id="+tc.requestID) {
 			t.Errorf("access logs lack resolved correlation %q:\n%s", tc.requestID, logs.String())
 		}
-	}
-	for _, suppressed := range []string{"phase4-inference-upstream-id-one", "phase4-inference-upstream-id-two"} {
-		if strings.Contains(logs.String(), suppressed) {
-			t.Errorf("suppressed upstream request ID %q appeared in logs:\n%s", suppressed, logs.String())
+		lines := phase4LogLinesContaining(logs.String(),
+			"upstream_request_id=phase4-inference-upstream-id-one",
+			"request_id="+tc.requestID,
+		)
+		if len(lines) != 1 {
+			t.Errorf("correlation lines for %q = %d, want one:\n%s", tc.requestID, len(lines), strings.Join(lines, "\n"))
 		}
+	}
+	if strings.Contains(logs.String(), "phase4-inference-upstream-id-two") {
+		t.Errorf("secondary upstream request ID appeared in logs:\n%s", logs.String())
 	}
 }

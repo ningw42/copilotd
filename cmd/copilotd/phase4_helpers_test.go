@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/ningw42/copilotd/internal/config"
@@ -28,6 +29,23 @@ func newPhase4Logger(t *testing.T, dst io.Writer) *slog.Logger {
 	return logger
 }
 
+func phase4LogLinesContaining(logOutput string, fragments ...string) []string {
+	var matches []string
+	for _, line := range strings.Split(logOutput, "\n") {
+		match := true
+		for _, fragment := range fragments {
+			if !strings.Contains(line, fragment) {
+				match = false
+				break
+			}
+		}
+		if match {
+			matches = append(matches, line)
+		}
+	}
+	return matches
+}
+
 func startPhase4Server(t *testing.T, cfg config.ServeConfig, provider identity.Provider, logger *slog.Logger) string {
 	t.Helper()
 	forwarder := forward.New(
@@ -40,6 +58,7 @@ func startPhase4Server(t *testing.T, cfg config.ServeConfig, provider identity.P
 		cfg.MaxRequestBytes,
 		cfg.MaxBufferedResponseBytes,
 		configuredShimRegistry(cfg),
+		forward.WithLogger(logger),
 	)
 	return startTestServer(t, server.New(cfg, logger, provider, forwarder, server.NewStreamOutcomeCounter()))
 }

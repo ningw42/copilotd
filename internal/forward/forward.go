@@ -54,10 +54,23 @@ type Forwarder struct {
 	registry                 shim.Registry
 }
 
+// Option configures an optional Forwarder dependency.
+type Option func(*Forwarder)
+
+// WithLogger routes Forwarder-owned records through logger. A nil logger keeps
+// the process default captured by New.
+func WithLogger(logger *slog.Logger) Option {
+	return func(f *Forwarder) {
+		if logger != nil {
+			f.logger = logger
+		}
+	}
+}
+
 // New builds a Forwarder from its injected dependencies.
-func New(provider identity.Provider, client *http.Client, outboundTimeout, writeTimeout, streamIdleTimeout, streamKeepaliveInterval time.Duration, maxRequestBytes, maxBufferedResponseBytes int64, registry shim.Registry) *Forwarder {
+func New(provider identity.Provider, client *http.Client, outboundTimeout, writeTimeout, streamIdleTimeout, streamKeepaliveInterval time.Duration, maxRequestBytes, maxBufferedResponseBytes int64, registry shim.Registry, options ...Option) *Forwarder {
 	registry = append(shim.Registry(nil), registry...)
-	return &Forwarder{
+	f := &Forwarder{
 		provider:                 provider,
 		client:                   client,
 		outboundTimeout:          outboundTimeout,
@@ -72,6 +85,10 @@ func New(provider identity.Provider, client *http.Client, outboundTimeout, write
 		maxBufferedResponseBytes: maxBufferedResponseBytes,
 		registry:                 registry,
 	}
+	for _, configure := range options {
+		configure(f)
+	}
+	return f
 }
 
 // SuppressedShimErrorCount reports stream shim failures hidden from the wire by
@@ -172,6 +189,7 @@ func (f *Forwarder) PassthroughHandler(upstreamMethod string, upstreamRoute stri
 			}
 			return
 		}
+		f.logUpstreamRequestID(r.Context(), resp.Header)
 		// A committed response can only be terminated, never replaced. Cancel
 		// upstream work before closing its body so every post-commit exit path
 		// releases a body whose Close may itself wait for cancellation.
@@ -281,6 +299,7 @@ func (f *Forwarder) forward(w http.ResponseWriter, r *http.Request, header http.
 		}
 		return
 	}
+	f.logUpstreamRequestID(r.Context(), resp.Header)
 	defer func() { _ = resp.Body.Close() }()
 
 	// A synchronous completion keeps the existing total-duration backstop. SSE
@@ -350,6 +369,19 @@ func (f *Forwarder) forward(w http.ResponseWriter, r *http.Request, header http.
 	copyResponseHeaders(w.Header(), preludeHeader)
 	w.WriteHeader(status)
 	_, _ = sse.NewWriter(w, f.writeTimeout, time.Now).Write(buffered)
+}
+
+func (f *Forwarder) logUpstreamRequestID(ctx context.Context, header http.Header) {
+	requestID, ok := logging.RequestIDFrom(ctx)
+	if !ok {
+		return
+	}
+	upstreamRequestID := header.Get(requestIDHeader)
+	if upstreamRequestID == "" || upstreamRequestID == requestID {
+		return
+	}
+	f.logger.InfoContext(ctx, "upstream response correlation",
+		slog.String("upstream_request_id", upstreamRequestID))
 }
 
 func identityContentEncoding(header http.Header) bool {

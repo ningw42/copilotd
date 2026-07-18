@@ -356,20 +356,14 @@ func TestPhase4ModelsOutcomeEndToEnd(t *testing.T) {
 
 	logOutput := logs.String()
 	for _, tc := range authCases {
-		line := ""
-		lineCount := 0
-		for _, candidate := range strings.Split(logOutput, "\n") {
-			if strings.Contains(candidate, "msg=access") && strings.Contains(candidate, "request_id="+tc.requestID) {
-				line = candidate
-				lineCount++
-			}
+		accessLines := phase4LogLinesContaining(logOutput, "msg=access", "request_id="+tc.requestID)
+		if len(accessLines) != 1 {
+			t.Errorf("access lines for %s = %d, want exactly one", tc.requestID, len(accessLines))
 		}
-		if lineCount != 1 {
-			t.Errorf("access lines for %s = %d, want exactly one", tc.requestID, lineCount)
-		}
-		if line == "" {
+		if len(accessLines) == 0 {
 			continue
 		}
+		line := accessLines[0]
 		wantStatus := "status=200"
 		wantBytes := "bytes=" + strconv.Itoa(len(phase4ResponseBody))
 		if tc.method == http.MethodHead {
@@ -381,6 +375,14 @@ func TestPhase4ModelsOutcomeEndToEnd(t *testing.T) {
 				t.Errorf("access line for %s missing %q: %s", tc.requestID, want, line)
 			}
 		}
+		correlationLines := phase4LogLinesContaining(logOutput,
+			`msg="upstream response correlation"`,
+			"request_id="+tc.requestID,
+			"upstream_request_id="+phase4UpstreamReqID,
+		)
+		if len(correlationLines) != 1 {
+			t.Errorf("correlation lines for %s = %d, want one with upstream ID:\n%s", tc.requestID, len(correlationLines), strings.Join(correlationLines, "\n"))
+		}
 	}
 	for _, private := range []string{
 		phase4APIKey,
@@ -390,7 +392,7 @@ func TestPhase4ModelsOutcomeEndToEnd(t *testing.T) {
 		phase4RequestBody,
 		phase4ResponseBody,
 		"phase4-response-body-sentinel",
-		phase4UpstreamReqID,
+		phase4UpstreamReqID + "-second",
 	} {
 		if strings.Contains(logOutput, private) {
 			t.Errorf("private material %q appeared in logs:\n%s", private, logOutput)
