@@ -3,6 +3,7 @@ package forward
 import (
 	"bytes"
 	"context"
+	"crypto/x509"
 	"errors"
 	"io"
 	"net"
@@ -22,6 +23,34 @@ import (
 	"github.com/ningw42/copilotd/internal/logging"
 	"github.com/ningw42/copilotd/internal/shim"
 )
+
+func TestIsolatedPassthroughClientPreservesAutomaticHTTP2(t *testing.T) {
+	var gotProtocol string
+	upstream := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotProtocol = r.Proto
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	upstream.EnableHTTP2 = true
+	upstream.StartTLS()
+	defer upstream.Close()
+
+	client, closeIdleConnections := isolatedPassthroughClient(NewClient(time.Second))
+	defer closeIdleConnections()
+
+	transport := client.Transport.(*http.Transport)
+	roots := x509.NewCertPool()
+	roots.AddCert(upstream.Certificate())
+	transport.TLSClientConfig.RootCAs = roots
+
+	resp, err := client.Get(upstream.URL)
+	if err != nil {
+		t.Fatalf("automatic HTTP/2 request through isolated client: %v", err)
+	}
+	defer resp.Body.Close()
+	if gotProtocol != "HTTP/2.0" {
+		t.Errorf("upstream protocol = %q, want HTTP/2.0 preserved from the injected client policy", gotProtocol)
+	}
+}
 
 func TestPassthroughPreservesRawQueryAndForceQuery(t *testing.T) {
 	tests := []struct {
