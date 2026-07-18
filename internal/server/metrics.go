@@ -12,11 +12,27 @@ type StreamOutcomeObserver interface {
 	ObserveStreamOutcome(surface string, outcome sse.Outcome)
 }
 
+const (
+	streamSurfaceAnthropicIndex = iota
+	streamSurfaceOpenAIIndex
+	streamSurfaceCount
+)
+
+const (
+	streamOutcomeCleanIndex = iota
+	streamOutcomeSynthesizedIndex
+	streamOutcomeStallIndex
+	streamOutcomeClientCancelIndex
+	streamOutcomeUpstreamErrorIndex
+	streamOutcomeShimErrorIndex
+	streamOutcomeCount
+)
+
 // StreamOutcomeCounter is the zero-dependency metrics backend used until a
 // process-wide exporter is selected. Its fixed arrays enforce bounded labels.
 type StreamOutcomeCounter struct {
 	mu     sync.RWMutex
-	counts [2][6]uint64
+	counts [streamSurfaceCount][streamOutcomeCount]uint64
 }
 
 // NewStreamOutcomeCounter returns an empty terminal-outcome counter.
@@ -48,25 +64,25 @@ func (c *StreamOutcomeCounter) Count(surface string, outcome sse.Outcome) uint64
 func streamOutcomeIndexes(surface string, outcome sse.Outcome) (surfaceIndex, outcomeIndex int, ok bool) {
 	switch surface {
 	case "anthropic":
-		surfaceIndex = 0
+		surfaceIndex = streamSurfaceAnthropicIndex
 	case "openai":
-		surfaceIndex = 1
+		surfaceIndex = streamSurfaceOpenAIIndex
 	default:
 		return 0, 0, false
 	}
 	switch outcome {
 	case sse.OutcomeClean:
-		outcomeIndex = 0
+		outcomeIndex = streamOutcomeCleanIndex
 	case sse.OutcomeSynthesized:
-		outcomeIndex = 1
+		outcomeIndex = streamOutcomeSynthesizedIndex
 	case sse.OutcomeStall:
-		outcomeIndex = 2
+		outcomeIndex = streamOutcomeStallIndex
 	case sse.OutcomeClientCancel:
-		outcomeIndex = 3
+		outcomeIndex = streamOutcomeClientCancelIndex
 	case sse.OutcomeUpstreamError:
-		outcomeIndex = 4
+		outcomeIndex = streamOutcomeUpstreamErrorIndex
 	case sse.OutcomeShimError:
-		outcomeIndex = 5
+		outcomeIndex = streamOutcomeShimErrorIndex
 	default:
 		return 0, 0, false
 	}

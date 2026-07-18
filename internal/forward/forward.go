@@ -217,15 +217,11 @@ func (f *Forwarder) forward(w http.ResponseWriter, r *http.Request, header http.
 	}
 
 	if eventStream {
-		encodings := resp.Header.Values("Content-Encoding")
-		switch {
-		case len(encodings) == 0:
-		case len(encodings) == 1 && strings.EqualFold(strings.TrimSpace(encodings[0]), "identity"):
-			resp.Header.Del("Content-Encoding")
-		default:
+		if !identityContentEncoding(resp.Header) {
 			apierror.Write(w, tag, apierror.BadGateway, "upstream returned unsupported Content-Encoding for an event stream")
 			return
 		}
+		resp.Header.Del("Content-Encoding")
 	}
 	preludeHeader := make(http.Header)
 	copyResponseHeaders(preludeHeader, resp.Header)
