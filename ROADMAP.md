@@ -130,10 +130,10 @@ Miscellaneous endpoints follow a general pattern, not a one-off:
 
 - **Provider-agnostic tier** — the raw Copilot response bound to a neutral path,
   e.g. `HOST/models` as a straight passthrough. Cheap; lands early.
-- **Provider-specific tier** — the same data reshaped to match what the *real*
-  provider returns, e.g. `HOST/anthropic/models` and `HOST/openai/models`, with
-  **best-effort sanitization**. Explicitly **deferred** to a later, lower-priority
-  band.
+- **Provider/client-shaped tier** — the same data reshaped to match what a real
+  provider or a specific client expects, e.g. `HOST/anthropic/models`,
+  `HOST/openai/models`, or Codex model-catalog metadata, with **best-effort
+  sanitization**. Explicitly **deferred** to a later, lower-priority band.
 
 ---
 
@@ -170,8 +170,6 @@ Starting set; the catalog grows as parity gaps surface.
 - **Stable Responses item-IDs** — Copilot emits a different opaque `id` on every
   Responses SSE event for the same item, violating OpenAI's stable-id contract;
   pin the first-seen id per `output_index`.
-- **`codex-auto-review` availability** — make the behavior the Codex auto-review
-  flow expects available through the proxy.
 - **Model-name mapping** — normalize client-facing model aliases to Copilot's
   names on the way in, preserve the client's requested name on the way out.
 - **Unsupported-param handling** — sanitize / reject params that Copilot's
@@ -230,18 +228,26 @@ per-shim toggling — proven with a no-op passthrough shim. No shims yet,
 just the mechanism.
 _Outcome: a place to hang parity features without touching the core._
 
-### Phase 4 — Shim catalog (seed) + provider-agnostic support endpoints
-Implement the seed shims from §5 and the provider-agnostic support tier
-(`HOST/models` raw passthrough). This band is expected to keep growing after the
-roadmap's other phases are "done."
-_Outcome: real parity gaps closed; the catalog is open-ended._
+### Phase 4 — Provider-agnostic support endpoints
+Implement the provider-agnostic support tier: `HOST/models` as a raw Copilot
+passthrough.
+_Outcome: raw Copilot support data is available at a neutral endpoint._
 
-### Phase 5 — Provider-shaped support endpoints (deferred)
-`HOST/anthropic/models`, `HOST/openai/models` with best-effort sanitization to
-match the real providers. Low priority.
-_Outcome: support endpoints that look native per provider._
+### Phase 5 — Shim catalog (seed)
+Implement the seed shims from §5. This band is expected to keep growing after
+the roadmap's other phases are "done."
+_Outcome: real parity gaps are closed; the shim catalog is open-ended._
 
-### Phase 6 — Distribution & service management
+### Phase 6 — Provider/client-shaped support endpoints (deferred)
+`HOST/anthropic/models` and `HOST/openai/models` with best-effort sanitization to
+match the real providers, plus a Codex catalog view that advertises configurable
+reviewer routing through `auto_review_model_override`. Low priority.
+_Outcome: support endpoints look native to their provider or client._
+
+> Dependency note: Phases 4 and 5 are independent. Phase 6 builds on Phase 4's
+> upstream support-data plumbing, but does not depend on Phase 5.
+
+### Phase 7 — Distribution & service management
 Optional daemon / OS-service install (systemd, launchd, Windows SCM), packaging
 across the four native targets (cross-compilation is a cheap opt-in with Go, not
 a requirement), and documentation.
