@@ -55,6 +55,60 @@ func TestConfiguredShimRegistryFoldsNopToggleAndLogsEnabledOrder(t *testing.T) {
 	}
 }
 
+func TestLogCodexCatalogStaging(t *testing.T) {
+	tests := []struct {
+		name    string
+		cfg     config.ServeConfig
+		wantLog bool
+	}{
+		{
+			name: "disabled catalog with staged reviewer",
+			cfg: config.ServeConfig{
+				APIKey:           "super-secret-apikey-value",
+				GithubOAuthToken: "gho-super-secret-oauth-value",
+				Codex: config.CodexConfig{
+					AutoReviewModel: "gpt-5.6-luna",
+				},
+			},
+			wantLog: true,
+		},
+		{
+			name: "enabled catalog",
+			cfg: config.ServeConfig{Codex: config.CodexConfig{
+				Enabled:         true,
+				AutoReviewModel: "gpt-5.6-luna",
+			}},
+		},
+		{
+			name: "disabled catalog without reviewer",
+			cfg: config.ServeConfig{Codex: config.CodexConfig{
+				OverrideLimits: true,
+			}},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			logger := slog.New(slog.NewTextHandler(&buf, nil))
+			logCodexCatalogStaging(logger, tc.cfg)
+			out := buf.String()
+			if tc.wantLog {
+				if !strings.Contains(out, "level=INFO") || !strings.Contains(out, "gpt-5.6-luna") {
+					t.Errorf("startup log = %q, want info line naming staged reviewer", out)
+				}
+			} else if out != "" {
+				t.Errorf("startup log = %q, want none", out)
+			}
+			for _, secret := range []string{"super-secret-apikey-value", "gho-super-secret-oauth-value"} {
+				if strings.Contains(out, secret) {
+					t.Errorf("startup log leaked secret %q: %s", secret, out)
+				}
+			}
+		})
+	}
+}
+
 func TestRunRejectsRemovedVersionFlags(t *testing.T) {
 	for _, flag := range []string{"--version", "-version"} {
 		t.Run(flag, func(t *testing.T) {

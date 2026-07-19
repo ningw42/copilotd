@@ -77,6 +77,126 @@ func TestLoadDefaults(t *testing.T) {
 	}
 }
 
+func TestCodexConfigPrecedence(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "copilotd.toml")
+	document := strings.Join([]string{
+		`codex-catalog-enabled = true`,
+		`codex-auto-review-model = "reviewer-from-file"`,
+		`codex-catalog-override-limits = true`,
+	}, "\n")
+	if err := os.WriteFile(path, []byte(document), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	tests := []struct {
+		name string
+		args []string
+		env  map[string]string
+		want CodexConfig
+	}{
+		{name: "defaults", want: CodexConfig{}},
+		{
+			name: "TOML overrides defaults",
+			args: []string{"--config", path},
+			want: CodexConfig{Enabled: true, AutoReviewModel: "reviewer-from-file", OverrideLimits: true},
+		},
+		{
+			name: "env overrides TOML",
+			args: []string{"--config", path},
+			env: map[string]string{
+				"COPILOTD_CODEX_CATALOG_ENABLED":         "false",
+				"COPILOTD_CODEX_AUTO_REVIEW_MODEL":       "reviewer-from-env",
+				"COPILOTD_CODEX_CATALOG_OVERRIDE_LIMITS": "false",
+			},
+			want: CodexConfig{Enabled: false, AutoReviewModel: "reviewer-from-env", OverrideLimits: false},
+		},
+		{
+			name: "flags override env",
+			args: []string{
+				"--config", path,
+				"--codex-catalog-enabled=true",
+				"--codex-auto-review-model", "reviewer-from-flag",
+				"--codex-catalog-override-limits=true",
+			},
+			env: map[string]string{
+				"COPILOTD_CODEX_CATALOG_ENABLED":         "false",
+				"COPILOTD_CODEX_AUTO_REVIEW_MODEL":       "reviewer-from-env",
+				"COPILOTD_CODEX_CATALOG_OVERRIDE_LIMITS": "false",
+			},
+			want: CodexConfig{Enabled: true, AutoReviewModel: "reviewer-from-flag", OverrideLimits: true},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			env := map[string]string{"COPILOTD_APIKEY": testAPIKey}
+			for key, value := range tc.env {
+				env[key] = value
+			}
+			got, err := loadServe(tc.args, envFunc(env))
+			if err != nil {
+				t.Fatalf("loadServe() error = %v", err)
+			}
+			if got.Codex != tc.want {
+				t.Errorf("Codex = %+v, want %+v", got.Codex, tc.want)
+			}
+		})
+	}
+}
+
+func TestCodexConfigRejectsMalformedBooleans(t *testing.T) {
+	files := map[string]string{
+		"codex-catalog-enabled":         `codex-catalog-enabled = "not-a-bool"`,
+		"codex-catalog-override-limits": `codex-catalog-override-limits = "not-a-bool"`,
+	}
+
+	for _, key := range []string{"codex-catalog-enabled", "codex-catalog-override-limits"} {
+		key := key
+		t.Run(key, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "copilotd.toml")
+			if err := os.WriteFile(path, []byte(files[key]+"\n"), 0o600); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+			envKey := envVarName(key)
+			for _, tc := range []struct {
+				name string
+				args []string
+				env  map[string]string
+			}{
+				{name: "flag", args: []string{"--apikey", testAPIKey, "--" + key + "=not-a-bool"}},
+				{name: "env", args: []string{"--apikey", testAPIKey}, env: map[string]string{envKey: "not-a-bool"}},
+				{name: "TOML", args: []string{"--apikey", testAPIKey, "--config", path}},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					_, err := loadServe(tc.args, envFunc(tc.env))
+					if err == nil {
+						t.Fatalf("loadServe() error = nil, want malformed %s rejected", key)
+					}
+					if !strings.Contains(err.Error(), key) {
+						t.Errorf("error = %q, want %s context", err, key)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestCodexConfigIsInertWhenDisabled(t *testing.T) {
+	got, err := loadServe([]string{
+		"--apikey", testAPIKey,
+		"--codex-catalog-enabled=false",
+		"--codex-auto-review-model", "staged-reviewer",
+		"--codex-catalog-override-limits=true",
+	}, noEnv())
+	if err != nil {
+		t.Fatalf("loadServe() error = %v, want staged disabled config accepted", err)
+	}
+	want := CodexConfig{AutoReviewModel: "staged-reviewer", OverrideLimits: true}
+	if got.Codex != want {
+		t.Errorf("Codex = %+v, want inert staged config %+v", got.Codex, want)
+	}
+}
+
 func TestMaxBufferedResponseBytesConfigPrecedence(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "copilotd.toml")
 	if err := os.WriteFile(path, []byte("max-buffered-response-bytes = 11\n"), 0o600); err != nil {
@@ -618,12 +738,17 @@ func TestConfigLogValueEmitsOnlyNonSecretFields(t *testing.T) {
 		MaxBufferedResponseBytes: 16777216,
 		ShimNopEnabled:           true,
 		GithubOAuthToken:         "gho-super-secret-oauth-value",
-		StartupMintRetries:       3,
-		CopilotIntegrationID:     "vscode-chat",
-		EditorVersion:            "vscode/1.104.1",
-		EditorPluginVersion:      "copilot-chat/0.26.7",
-		CopilotUserAgent:         "GitHubCopilotChat/0.26.7",
-		GithubAPIVersion:         "2025-04-01",
+		Codex: CodexConfig{
+			Enabled:         true,
+			AutoReviewModel: "gpt-5.6-luna",
+			OverrideLimits:  true,
+		},
+		StartupMintRetries:   3,
+		CopilotIntegrationID: "vscode-chat",
+		EditorVersion:        "vscode/1.104.1",
+		EditorPluginVersion:  "copilot-chat/0.26.7",
+		CopilotUserAgent:     "GitHubCopilotChat/0.26.7",
+		GithubAPIVersion:     "2025-04-01",
 	}
 
 	var buf bytes.Buffer
@@ -652,6 +777,9 @@ func TestConfigLogValueEmitsOnlyNonSecretFields(t *testing.T) {
 		"config.editor-plugin-version=copilot-chat/0.26.7",
 		"config.copilot-user-agent=GitHubCopilotChat/0.26.7",
 		"config.github-api-version=2025-04-01",
+		"config.codex-catalog-enabled=true",
+		"config.codex-auto-review-model=gpt-5.6-luna",
+		"config.codex-catalog-override-limits=true",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("log output missing %q\nfull: %s", want, out)

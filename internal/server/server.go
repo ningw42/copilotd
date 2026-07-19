@@ -49,7 +49,7 @@ func New(cfg config.ServeConfig, logger *slog.Logger, provider identity.Provider
 		cfg:    cfg,
 		logger: logger,
 		http: &http.Server{
-			Handler:           newHandler(cfg.APIKey, provider, fwd, logger, streamOutcomes),
+			Handler:           newHandler(cfg.APIKey, provider, fwd, logger, streamOutcomes, cfg.Codex),
 			ReadHeaderTimeout: readHeaderTimeout,
 			ReadTimeout:       readTimeout,
 			WriteTimeout:      writeTimeout,

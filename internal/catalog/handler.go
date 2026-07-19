@@ -2,6 +2,7 @@ package catalog
 
 import (
 	"errors"
+	"log/slog"
 	"net/http"
 	"strconv"
 
@@ -14,6 +15,16 @@ type Descriptor struct {
 	Surface       apierror.Surface
 	RequiredRoute Route
 	Render        func([]Model) ([]byte, error)
+	Codex         CodexDescriptor
+	Logger        *slog.Logger
+}
+
+// CodexDescriptor contains the opt-in gate and pure-render settings for the
+// OpenAI catalog's Codex client shape. A zero value preserves the provider-
+// shaped Phase 6a response.
+type CodexDescriptor struct {
+	Enabled      bool
+	RenderConfig CodexRenderConfig
 }
 
 // Handler fetches one current Copilot catalog and renders it for a Surface.
@@ -38,10 +49,26 @@ func Handler(desc Descriptor, fetcher Fetcher) http.HandlerFunc {
 			apierror.Write(w, desc.Surface, apierror.BadGateway, "upstream models response was invalid")
 			return
 		}
-		representation, err := desc.Render(Filter(models, desc.RequiredRoute))
+		filtered := Filter(models, desc.RequiredRoute)
+		shape := CatalogShapeOpenAI
+		var representation []byte
+		if servesCodexShape(desc, r) {
+			shape = CatalogShapeCodex
+			var outcome CodexRenderOutcome
+			representation, outcome, err = RenderCodex(filtered, desc.Codex.RenderConfig)
+			if err == nil && outcome.SkippedReviewer != "" && desc.Logger != nil {
+				desc.Logger.WarnContext(r.Context(), "Codex catalog reviewer was skipped",
+					slog.String("reviewer", outcome.SkippedReviewer))
+			}
+		} else {
+			representation, err = desc.Render(filtered)
+		}
 		if err != nil {
 			apierror.Write(w, desc.Surface, apierror.BadGateway, "could not render the models catalog")
 			return
+		}
+		if desc.Surface == apierror.OpenAI {
+			StoreCatalogShape(r.Context(), shape)
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -51,6 +78,13 @@ func Handler(desc Descriptor, fetcher Fetcher) http.HandlerFunc {
 			_, _ = w.Write(representation)
 		}
 	}
+}
+
+func servesCodexShape(desc Descriptor, r *http.Request) bool {
+	return desc.Surface == apierror.OpenAI &&
+		r.URL.Query().Has("client_version") &&
+		desc.Codex.Enabled &&
+		(desc.Codex.RenderConfig.AutoReviewModel != "" || desc.Codex.RenderConfig.OverrideLimits)
 }
 
 func writeFetchError(w http.ResponseWriter, surface apierror.Surface, err error) {

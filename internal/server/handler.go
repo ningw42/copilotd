@@ -7,6 +7,7 @@ import (
 
 	"github.com/ningw42/copilotd/internal/apierror"
 	"github.com/ningw42/copilotd/internal/catalog"
+	"github.com/ningw42/copilotd/internal/config"
 	"github.com/ningw42/copilotd/internal/forward"
 	"github.com/ningw42/copilotd/internal/identity"
 )
@@ -26,7 +27,7 @@ const (
 // order on a provider route is therefore requestID -> accessLog -> recover ->
 // auth -> readiness -> forward. /healthz and /readyz are never gated by auth or
 // readiness.
-func newHandler(apikey string, provider identity.Provider, fwd *forward.Forwarder, logger *slog.Logger, streamOutcomes StreamOutcomeObserver) http.Handler {
+func newHandler(apikey string, provider identity.Provider, fwd *forward.Forwarder, logger *slog.Logger, streamOutcomes StreamOutcomeObserver, codexConfig config.CodexConfig) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET "+healthPath, handleHealth)
 	mux.HandleFunc("GET "+readyPath, handleReady(provider))
@@ -58,6 +59,14 @@ func newHandler(apikey string, provider identity.Provider, fwd *forward.Forwarde
 		Surface:       apierror.OpenAI,
 		RequiredRoute: catalog.OpenAIResponsesRoute,
 		Render:        catalog.RenderOpenAI,
+		Codex: catalog.CodexDescriptor{
+			Enabled: codexConfig.Enabled,
+			RenderConfig: catalog.CodexRenderConfig{
+				AutoReviewModel: codexConfig.AutoReviewModel,
+				OverrideLimits:  codexConfig.OverrideLimits,
+			},
+		},
+		Logger: logger,
 	}, fwd)
 	mux.Handle("GET /openai/v1/models", guard(apierror.OpenAI, openAIModels))
 	mux.Handle("HEAD /openai/v1/models", guard(apierror.OpenAI, openAIModels))

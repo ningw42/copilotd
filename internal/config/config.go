@@ -42,6 +42,9 @@ const (
 	defaultMaxRequestBytes          = 33554432
 	defaultMaxBufferedResponseBytes = 33554432
 	defaultShimNopEnabled           = false
+	defaultCodexCatalogEnabled      = false
+	defaultCodexAutoReviewModel     = ""
+	defaultCodexOverrideLimits      = false
 
 	// defaultStartupMintRetries bounds the transient-failure retries of the boot
 	// warm-up mint (total attempts = 1 + N); auth-class failures short-circuit.
@@ -72,6 +75,16 @@ var (
 	validLogLevels  = []string{"debug", "info", "warn", "error"}
 	validLogFormats = []string{"text", "json"}
 )
+
+// CodexConfig is the resolved configuration consumed by the Codex catalog
+// renderer. Its operator-facing keys remain flat alongside the other serve
+// settings, while this value gives the server one cohesive value to thread to
+// the catalog renderer.
+type CodexConfig struct {
+	Enabled         bool
+	AutoReviewModel string
+	OverrideLimits  bool
+}
 
 // ServeConfig is the resolved, validated configuration for `copilotd serve`. It
 // carries the common operational fields (logging, config-selected values, and
@@ -119,6 +132,11 @@ type ServeConfig struct {
 	// default, like the shim-defined default in the canonical registry.
 	ShimNopEnabled bool
 
+	// Codex controls the opt-in client-shaped Codex catalog and its overlays.
+	// These settings are non-secret and remain valid but inert while the catalog
+	// is disabled.
+	Codex CodexConfig
+
 	// GithubOAuthToken is the inline GitHub OAuth token; when present it takes
 	// precedence over the GitHub OAuth token file (resolution lands in #12). It is
 	// a secret — omitted from LogValue (redaction by construction). This phase only
@@ -158,6 +176,9 @@ func (c ServeConfig) LogValue() slog.Value {
 		slog.Int64("max-request-bytes", c.MaxRequestBytes),
 		slog.Int64("max-buffered-response-bytes", c.MaxBufferedResponseBytes),
 		slog.Bool("shim-nop-enabled", c.ShimNopEnabled),
+		slog.Bool("codex-catalog-enabled", c.Codex.Enabled),
+		slog.String("codex-auto-review-model", c.Codex.AutoReviewModel),
+		slog.Bool("codex-catalog-override-limits", c.Codex.OverrideLimits),
 		slog.Int("startup-mint-retries", c.StartupMintRetries),
 		slog.String("copilot-integration-id", c.CopilotIntegrationID),
 		slog.String("editor-version", c.EditorVersion),
@@ -225,6 +246,9 @@ type ServeFlags struct {
 	maxRequestBytes          *int64
 	maxBufferedResponseBytes *int64
 	shimNopEnabled           *bool
+	codexCatalogEnabled      *bool
+	codexAutoReviewModel     *string
+	codexOverrideLimits      *bool
 
 	githubOAuthToken     *string
 	startupMintRetries   *int
@@ -252,6 +276,9 @@ func RegisterServe(fs *ff.FlagSet) *ServeFlags {
 	f.maxRequestBytes = fs.Int64Long("max-request-bytes", defaultMaxRequestBytes, "maximum inbound request body size in bytes")
 	f.maxBufferedResponseBytes = fs.Int64Long("max-buffered-response-bytes", defaultMaxBufferedResponseBytes, "maximum buffered upstream response body size in bytes")
 	f.shimNopEnabled = fs.BoolLongDefault("shim-nop-enabled", defaultShimNopEnabled, "enable the canonical no-op shim")
+	f.codexCatalogEnabled = fs.BoolLongDefault("codex-catalog-enabled", defaultCodexCatalogEnabled, "enable the Codex client-shaped catalog")
+	f.codexAutoReviewModel = fs.StringLong("codex-auto-review-model", defaultCodexAutoReviewModel, "reviewer model injected into the Codex catalog")
+	f.codexOverrideLimits = fs.BoolLongDefault("codex-catalog-override-limits", defaultCodexOverrideLimits, "override Codex catalog limits with live Copilot limits")
 
 	f.githubOAuthToken = fs.StringLong("github-oauth-token", "", "inline GitHub OAuth token (secret; precedence over the GitHub OAuth token file)")
 	f.startupMintRetries = fs.IntLong("startup-mint-retries", defaultStartupMintRetries, "transient startup-mint retries (total attempts = 1 + N)")
@@ -290,12 +317,17 @@ func (f *ServeFlags) Resolve(lookupEnv func(string) (string, bool)) (ServeConfig
 		MaxRequestBytes:          defaultMaxRequestBytes,
 		MaxBufferedResponseBytes: defaultMaxBufferedResponseBytes,
 		ShimNopEnabled:           defaultShimNopEnabled,
-		StartupMintRetries:       defaultStartupMintRetries,
-		CopilotIntegrationID:     defaultCopilotIntegrationID,
-		EditorVersion:            defaultEditorVersion,
-		EditorPluginVersion:      defaultEditorPluginVersion,
-		CopilotUserAgent:         defaultCopilotUserAgent,
-		GithubAPIVersion:         defaultGithubAPIVersion,
+		Codex: CodexConfig{
+			Enabled:         defaultCodexCatalogEnabled,
+			AutoReviewModel: defaultCodexAutoReviewModel,
+			OverrideLimits:  defaultCodexOverrideLimits,
+		},
+		StartupMintRetries:   defaultStartupMintRetries,
+		CopilotIntegrationID: defaultCopilotIntegrationID,
+		EditorVersion:        defaultEditorVersion,
+		EditorPluginVersion:  defaultEditorPluginVersion,
+		CopilotUserAgent:     defaultCopilotUserAgent,
+		GithubAPIVersion:     defaultGithubAPIVersion,
 	}
 
 	// file layer (lowest precedence above defaults)
@@ -342,6 +374,15 @@ func (f *ServeFlags) Resolve(lookupEnv func(string) (string, bool)) (ServeConfig
 	}
 	if set["shim-nop-enabled"] {
 		cfg.ShimNopEnabled = *f.shimNopEnabled
+	}
+	if set["codex-catalog-enabled"] {
+		cfg.Codex.Enabled = *f.codexCatalogEnabled
+	}
+	if set["codex-auto-review-model"] {
+		cfg.Codex.AutoReviewModel = *f.codexAutoReviewModel
+	}
+	if set["codex-catalog-override-limits"] {
+		cfg.Codex.OverrideLimits = *f.codexOverrideLimits
 	}
 	if set["github-oauth-token"] {
 		cfg.GithubOAuthToken = *f.githubOAuthToken
@@ -509,6 +550,23 @@ func overlay(cfg *ServeConfig, source string, get func(key string) (string, bool
 			return fmt.Errorf("invalid shim-nop-enabled %q from %s: %w", v, source, err)
 		}
 		cfg.ShimNopEnabled = enabled
+	}
+	if v, ok := get("codex-catalog-enabled"); ok {
+		enabled, err := strconv.ParseBool(v)
+		if err != nil {
+			return fmt.Errorf("invalid codex-catalog-enabled %q from %s: %w", v, source, err)
+		}
+		cfg.Codex.Enabled = enabled
+	}
+	if v, ok := get("codex-auto-review-model"); ok {
+		cfg.Codex.AutoReviewModel = v
+	}
+	if v, ok := get("codex-catalog-override-limits"); ok {
+		enabled, err := strconv.ParseBool(v)
+		if err != nil {
+			return fmt.Errorf("invalid codex-catalog-override-limits %q from %s: %w", v, source, err)
+		}
+		cfg.Codex.OverrideLimits = enabled
 	}
 	if v, ok := get("startup-mint-retries"); ok {
 		n, err := strconv.Atoi(v)

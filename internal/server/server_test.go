@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ningw42/copilotd/internal/catalog"
 	"github.com/ningw42/copilotd/internal/config"
 	"github.com/ningw42/copilotd/internal/forward"
 	"github.com/ningw42/copilotd/internal/identity"
@@ -51,7 +52,7 @@ func testHandler(t *testing.T, logger *slog.Logger) http.Handler {
 	t.Helper()
 	prov := readyStub("")
 	fwd := forward.New(prov, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
-	return newHandler(testAPIKey, prov, fwd, logger, NewStreamOutcomeCounter())
+	return newHandler(testAPIKey, prov, fwd, logger, NewStreamOutcomeCounter(), config.CodexConfig{})
 }
 
 // bufferLogger returns a logger writing to an in-memory buffer at the given
@@ -383,6 +384,38 @@ func TestAccessLogDoesNotLogStreamBodiesOrSecrets(t *testing.T) {
 	for _, forbidden := range []string{"private-frame-body", "private-request-body", "private-api-key"} {
 		if strings.Contains(out, forbidden) {
 			t.Errorf("access line leaked %q:\n%s", forbidden, out)
+		}
+	}
+}
+
+func TestAccessLogRecordsOnlyTheBoundedCatalogShape(t *testing.T) {
+	logger, buf := bufferLogger(t, "info")
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		catalog.StoreCatalogShape(r.Context(), catalog.CatalogShapeCodex)
+		_, _ = io.WriteString(w, "private-catalog-body")
+	})
+	h := accessLog(logger, NewStreamOutcomeCounter(), inner)
+	req := httptest.NewRequest(http.MethodGet, "/openai/v1/models?client_version=private-query-value", strings.NewReader("private-request-body"))
+	req.Header.Set("Authorization", "Bearer private-api-key")
+	recorder := httptest.NewRecorder()
+
+	h.ServeHTTP(recorder, req)
+
+	out := buf.String()
+	if n := strings.Count(out, "msg=access"); n != 1 {
+		t.Fatalf("want exactly one access line, got %d:\n%s", n, out)
+	}
+	if !strings.Contains(out, "catalog_shape=codex") {
+		t.Errorf("catalog access line missing bounded shape:\n%s", out)
+	}
+	for _, forbidden := range []string{"private-catalog-body", "private-query-value", "private-request-body", "private-api-key"} {
+		if strings.Contains(out, forbidden) {
+			t.Errorf("catalog access line leaked %q:\n%s", forbidden, out)
+		}
+	}
+	for header := range recorder.Header() {
+		if strings.Contains(strings.ToLower(header), "catalog") {
+			t.Errorf("internal catalog metadata leaked in response header %q", header)
 		}
 	}
 }

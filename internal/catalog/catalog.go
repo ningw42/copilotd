@@ -37,9 +37,10 @@ type Capabilities struct {
 
 // Limits is the relevant subset of Copilot's model limits.
 type Limits struct {
-	MaxPromptTokens *int          `json:"max_prompt_tokens"`
-	MaxOutputTokens *int          `json:"max_output_tokens"`
-	Vision          *VisionLimits `json:"vision"`
+	MaxPromptTokens        *int          `json:"max_prompt_tokens"`
+	MaxOutputTokens        *int          `json:"max_output_tokens"`
+	MaxContextWindowTokens *int          `json:"max_context_window_tokens"`
+	Vision                 *VisionLimits `json:"vision"`
 }
 
 // VisionLimits contains the source signal used for Anthropic PDF input.

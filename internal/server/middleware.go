@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/ningw42/copilotd/internal/catalog"
 	"github.com/ningw42/copilotd/internal/forward"
 	"github.com/ningw42/copilotd/internal/logging"
 	"github.com/ningw42/copilotd/internal/sse"
@@ -41,7 +42,7 @@ func accessLog(logger *slog.Logger, streamOutcomes StreamOutcomeObserver, next h
 			suppressBodyBytes: r.Method == http.MethodHead,
 		}
 
-		ctx := forward.WithStreamResultHolder(r.Context())
+		ctx := catalog.WithShapeResultHolder(forward.WithStreamResultHolder(r.Context()))
 		requestWithHolder := r.WithContext(ctx)
 		next.ServeHTTP(sw, requestWithHolder)
 
@@ -71,6 +72,9 @@ func accessLog(logger *slog.Logger, streamOutcomes StreamOutcomeObserver, next h
 				slog.Int("frames", result.Frames),
 				slog.Int("fallbacks", result.Fallbacks),
 			)
+		}
+		if shape, ok := catalog.ShapeResultFromContext(ctx); ok {
+			attrs = append(attrs, slog.String("catalog_shape", string(shape)))
 		}
 		logger.LogAttrs(r.Context(), level, "access", attrs...)
 	})

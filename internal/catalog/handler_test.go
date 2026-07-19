@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 
 	"github.com/ningw42/copilotd/internal/apierror"
@@ -16,6 +17,113 @@ type stubFetcher struct {
 	body   []byte
 	err    error
 	fetch  func(context.Context) (int, []byte, error)
+}
+
+func TestHandlerNegotiatesCodexShapeOnlyWhenEveryGateIsOpen(t *testing.T) {
+	upstreamBody := []byte(`{"data":[{"id":"gpt-5.4","vendor":"OpenAI","model_picker_enabled":true,"supported_endpoints":["/responses"]}]}`)
+	models, err := Decode(upstreamBody)
+	if err != nil {
+		t.Fatalf("decode fixture: %v", err)
+	}
+	wantOpenAI, err := RenderOpenAI(Filter(models, OpenAIResponsesRoute))
+	if err != nil {
+		t.Fatalf("render expected OpenAI catalog: %v", err)
+	}
+
+	tests := []struct {
+		name          string
+		rawQuery      string
+		enabled       bool
+		reviewer      string
+		overrideLimit bool
+		wantCodex     bool
+	}{
+		{name: "client key absent", enabled: true, reviewer: "gpt-5.4"},
+		{name: "catalog disabled", rawQuery: "client_version=0.144.5", reviewer: "gpt-5.4"},
+		{name: "nothing to inject", rawQuery: "client_version=0.144.5", enabled: true},
+		{name: "empty client value is present with reviewer", rawQuery: "client_version=", enabled: true, reviewer: "gpt-5.4", wantCodex: true},
+		{name: "valueless client key is present with limits", rawQuery: "client_version", enabled: true, overrideLimit: true, wantCodex: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			desc := Descriptor{
+				Surface:       apierror.OpenAI,
+				RequiredRoute: OpenAIResponsesRoute,
+				Render:        RenderOpenAI,
+				Codex: CodexDescriptor{
+					Enabled: tc.enabled,
+					RenderConfig: CodexRenderConfig{
+						AutoReviewModel: tc.reviewer,
+						OverrideLimits:  tc.overrideLimit,
+					},
+				},
+			}
+			handler := Handler(desc, stubFetcher{status: http.StatusOK, body: upstreamBody})
+			target := "/openai/v1/models"
+			if tc.rawQuery != "" {
+				target += "?" + tc.rawQuery
+			}
+			recorder := httptest.NewRecorder()
+
+			handler(recorder, httptest.NewRequest(http.MethodGet, target, nil))
+
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200: %s", recorder.Code, recorder.Body.String())
+			}
+			if got, want := recorder.Header().Get("Content-Length"), strconv.Itoa(recorder.Body.Len()); got != want {
+				t.Errorf("Content-Length = %q, want %q", got, want)
+			}
+			if tc.wantCodex {
+				if got := recorder.Body.String(); len(got) < len(`{"models":`) || got[:len(`{"models":`)] != `{"models":` {
+					t.Errorf("body = %s, want Codex catalog shape", got)
+				}
+				return
+			}
+			if got := recorder.Body.Bytes(); string(got) != string(wantOpenAI) {
+				t.Errorf("OpenAI fallback body changed:\n got %s\nwant %s", got, wantOpenAI)
+			}
+		})
+	}
+}
+
+func TestHandlerCodexHEADMatchesGETHeadersAndSuppressesBody(t *testing.T) {
+	upstreamBody := []byte(`{"data":[{"id":"gpt-5.4","vendor":"OpenAI","model_picker_enabled":true,"supported_endpoints":["/responses"]}]}`)
+	desc := Descriptor{
+		Surface:       apierror.OpenAI,
+		RequiredRoute: OpenAIResponsesRoute,
+		Render:        RenderOpenAI,
+		Codex: CodexDescriptor{
+			Enabled: true,
+			RenderConfig: CodexRenderConfig{
+				AutoReviewModel: "gpt-5.4",
+			},
+		},
+	}
+	handler := Handler(desc, stubFetcher{status: http.StatusOK, body: upstreamBody})
+
+	getRecorder := httptest.NewRecorder()
+	handler(getRecorder, httptest.NewRequest(http.MethodGet, "/openai/v1/models?client_version=secret-query-value", nil))
+	headRecorder := httptest.NewRecorder()
+	handler(headRecorder, httptest.NewRequest(http.MethodHead, "/openai/v1/models?client_version=", nil))
+
+	if getRecorder.Code != http.StatusOK || headRecorder.Code != http.StatusOK {
+		t.Fatalf("GET/HEAD status = %d/%d, want 200/200", getRecorder.Code, headRecorder.Code)
+	}
+	for _, header := range []string{"Content-Type", "Content-Length"} {
+		if got, want := headRecorder.Header().Get(header), getRecorder.Header().Get(header); got != want {
+			t.Errorf("HEAD %s = %q, want GET value %q", header, got, want)
+		}
+	}
+	if got := headRecorder.Body.Len(); got != 0 {
+		t.Errorf("HEAD body length = %d, want 0", got)
+	}
+	if got, want := getRecorder.Header().Get("Content-Length"), strconv.Itoa(getRecorder.Body.Len()); got != want {
+		t.Errorf("GET Content-Length = %q, want %q", got, want)
+	}
+	if got := getRecorder.Header().Get("X-Catalog-Shape"); got != "" {
+		t.Errorf("internal catalog shape header leaked as %q", got)
+	}
 }
 
 func (f stubFetcher) FetchModels(ctx context.Context) (int, []byte, error) {

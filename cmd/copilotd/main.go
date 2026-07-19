@@ -277,6 +277,7 @@ func runServe(ctx context.Context, flags *config.ServeFlags, lookupEnv func(stri
 		slog.String("build", build.String()),
 		slog.Any("config", cfg),
 	)
+	logCodexCatalogStaging(logger, cfg)
 	registry := configuredShimRegistry(cfg)
 	logShimChain(logger, registry)
 
@@ -323,6 +324,14 @@ func runServe(ctx context.Context, flags *config.ServeFlags, lookupEnv func(stri
 		return errServeFailed
 	}
 	return nil
+}
+
+func logCodexCatalogStaging(logger *slog.Logger, cfg config.ServeConfig) {
+	if cfg.Codex.Enabled || cfg.Codex.AutoReviewModel == "" {
+		return
+	}
+	logger.Info("Codex reviewer is staged while the Codex catalog is disabled",
+		slog.String("reviewer", cfg.Codex.AutoReviewModel))
 }
 
 func configuredShimRegistry(cfg config.ServeConfig) shim.Registry {
