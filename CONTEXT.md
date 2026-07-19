@@ -94,6 +94,8 @@ _Avoid_: model list (unqualified); models endpoint (that is the raw passthrough)
 **Forwarder**:
 The dumb core that moves a request to Copilot and the response back with minimal
 re-interpretation (raw passthrough) — deserializing nothing beyond a shallow peek.
+The approved WebSocket transport retains `wsforward.Proxy` as its exported Go
+identifier; outside code references, call it the **WebSocket forwarder**.
 _Avoid_: proxy (unqualified), router
 
 **Impersonation**:

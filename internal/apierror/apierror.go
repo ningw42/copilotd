@@ -65,6 +65,7 @@ const (
 	Unauthorized          Kind = iota // 401 — missing or invalid API key
 	NotReady                          // 503 — identity has no working credential yet
 	BackgroundUnsupported             // 400 — background:true (OpenAI surface only)
+	NotAWebSocketUpgrade              // 426 — OpenAI Responses Route called without a WebSocket upgrade
 	PayloadTooLarge                   // 413 — inbound body over the cap
 	BadGateway                        // 502 — could not reach the upstream
 	GatewayTimeout                    // 504 — upstream call exceeded the deadline
@@ -90,6 +91,7 @@ var table = map[Kind]entry{
 	Unauthorized:          {http.StatusUnauthorized, "authentication_error", "invalid_request_error", "invalid_api_key"},
 	NotReady:              {http.StatusServiceUnavailable, "api_error", "api_error", ""},
 	BackgroundUnsupported: {http.StatusBadRequest, "invalid_request_error", "invalid_request_error", ""},
+	NotAWebSocketUpgrade:  {http.StatusUpgradeRequired, "invalid_request_error", "invalid_request_error", ""},
 	PayloadTooLarge:       {http.StatusRequestEntityTooLarge, "invalid_request_error", "invalid_request_error", ""},
 	BadGateway:            {http.StatusBadGateway, "api_error", "api_error", ""},
 	GatewayTimeout:        {http.StatusGatewayTimeout, "api_error", "api_error", ""},

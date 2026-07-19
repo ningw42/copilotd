@@ -44,26 +44,27 @@ func loadServe(args []string, lookupEnv func(string) (string, bool)) (ServeConfi
 
 func defaultConfig() ServeConfig {
 	return ServeConfig{
-		Addr:                     "127.0.0.1:8080",
-		LogLevel:                 "info",
-		LogFormat:                "text",
-		LogFile:                  "",
-		ShutdownTimeout:          10 * time.Second,
-		GithubOAuthTokenFile:     defaultOAuthTokenFile(),
-		APIKey:                   testAPIKey,
-		OutboundTimeout:          600 * time.Second,
-		StreamIdleTimeout:        5 * time.Minute,
-		StreamKeepaliveInterval:  15 * time.Second,
-		WriteTimeout:             90 * time.Second,
-		ResponseHeaderTimeout:    600 * time.Second,
-		MaxRequestBytes:          33554432,
-		MaxBufferedResponseBytes: 33554432,
-		StartupMintRetries:       3,
-		CopilotIntegrationID:     "vscode-chat",
-		EditorVersion:            "vscode/1.104.1",
-		EditorPluginVersion:      "copilot-chat/0.26.7",
-		CopilotUserAgent:         "GitHubCopilotChat/0.26.7",
-		GithubAPIVersion:         "2025-04-01",
+		Addr:                      "127.0.0.1:8080",
+		LogLevel:                  "info",
+		LogFormat:                 "text",
+		LogFile:                   "",
+		ShutdownTimeout:           10 * time.Second,
+		GithubOAuthTokenFile:      defaultOAuthTokenFile(),
+		APIKey:                    testAPIKey,
+		OutboundTimeout:           600 * time.Second,
+		StreamIdleTimeout:         5 * time.Minute,
+		StreamKeepaliveInterval:   15 * time.Second,
+		WriteTimeout:              90 * time.Second,
+		ResponseHeaderTimeout:     600 * time.Second,
+		WebSocketHandshakeTimeout: 10 * time.Second,
+		MaxRequestBytes:           33554432,
+		MaxBufferedResponseBytes:  33554432,
+		StartupMintRetries:        3,
+		CopilotIntegrationID:      "vscode-chat",
+		EditorVersion:             "vscode/1.104.1",
+		EditorPluginVersion:       "copilot-chat/0.26.7",
+		CopilotUserAgent:          "GitHubCopilotChat/0.26.7",
+		GithubAPIVersion:          "2025-04-01",
 	}
 }
 
@@ -436,6 +437,51 @@ func TestTimeoutConfigPrecedence(t *testing.T) {
 	}
 }
 
+func TestWebSocketHandshakeTimeoutConfigPrecedence(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "copilotd.toml")
+	if err := os.WriteFile(path, []byte("ws-handshake-timeout = \"11s\"\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	tests := []struct {
+		name string
+		args []string
+		env  map[string]string
+		want time.Duration
+	}{
+		{name: "default", want: 10 * time.Second},
+		{name: "TOML overrides default", args: []string{"--config", path}, want: 11 * time.Second},
+		{
+			name: "env overrides TOML",
+			args: []string{"--config", path},
+			env:  map[string]string{"COPILOTD_WS_HANDSHAKE_TIMEOUT": "21s"},
+			want: 21 * time.Second,
+		},
+		{
+			name: "flag overrides env",
+			args: []string{"--config", path, "--ws-handshake-timeout", "31s"},
+			env:  map[string]string{"COPILOTD_WS_HANDSHAKE_TIMEOUT": "21s"},
+			want: 31 * time.Second,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			env := map[string]string{"COPILOTD_APIKEY": testAPIKey}
+			for key, value := range tc.env {
+				env[key] = value
+			}
+			got, err := loadServe(tc.args, envFunc(env))
+			if err != nil {
+				t.Fatalf("loadServe() error = %v", err)
+			}
+			if got.WebSocketHandshakeTimeout != tc.want {
+				t.Errorf("WebSocketHandshakeTimeout = %v, want %v", got.WebSocketHandshakeTimeout, tc.want)
+			}
+		})
+	}
+}
+
 func TestStreamIdleTimeoutConfigPrecedence(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "copilotd.toml")
 	if err := os.WriteFile(path, []byte("stream-idle-timeout = \"11s\"\n"), 0o600); err != nil {
@@ -537,6 +583,7 @@ func TestLoadPrecedence(t *testing.T) {
 		c.StreamKeepaliveInterval = 15 * time.Second
 		c.WriteTimeout = 90 * time.Second
 		c.ResponseHeaderTimeout = 600 * time.Second
+		c.WebSocketHandshakeTimeout = 10 * time.Second
 		c.MaxBufferedResponseBytes = 33554432
 		c.StartupMintRetries = 3
 		c.CopilotIntegrationID = "vscode-chat"
@@ -704,6 +751,7 @@ func TestLoadValidationErrors(t *testing.T) {
 		{"non-positive stream keepalive interval", []string{"--apikey", testAPIKey, "--stream-keepalive-interval", "0s"}, "stream-keepalive-interval"},
 		{"non-positive write timeout", []string{"--apikey", testAPIKey, "--write-timeout", "0s"}, "write-timeout"},
 		{"non-positive response header timeout", []string{"--apikey", testAPIKey, "--response-header-timeout", "0s"}, "response-header-timeout"},
+		{"non-positive WebSocket handshake timeout", []string{"--apikey", testAPIKey, "--ws-handshake-timeout", "0s"}, "ws-handshake-timeout"},
 		{"non-positive max request bytes", []string{"--apikey", testAPIKey, "--max-request-bytes", "0"}, "max-request-bytes"},
 		{"negative startup mint retries", []string{"--apikey", testAPIKey, "--startup-mint-retries", "-1"}, "startup-mint-retries"},
 	}
@@ -722,22 +770,23 @@ func TestLoadValidationErrors(t *testing.T) {
 
 func TestConfigLogValueEmitsOnlyNonSecretFields(t *testing.T) {
 	cfg := ServeConfig{
-		Addr:                     "127.0.0.1:8080",
-		LogLevel:                 "info",
-		LogFormat:                "text",
-		LogFile:                  "/var/log/copilotd.log",
-		ShutdownTimeout:          10 * time.Second,
-		GithubOAuthTokenFile:     "/home/op/.config/copilotd/github-oauth-token",
-		APIKey:                   "super-secret-apikey-value",
-		OutboundTimeout:          600 * time.Second,
-		StreamIdleTimeout:        90 * time.Second,
-		StreamKeepaliveInterval:  15 * time.Second,
-		WriteTimeout:             90 * time.Second,
-		ResponseHeaderTimeout:    600 * time.Second,
-		MaxRequestBytes:          33554432,
-		MaxBufferedResponseBytes: 16777216,
-		ShimNopEnabled:           true,
-		GithubOAuthToken:         "gho-super-secret-oauth-value",
+		Addr:                      "127.0.0.1:8080",
+		LogLevel:                  "info",
+		LogFormat:                 "text",
+		LogFile:                   "/var/log/copilotd.log",
+		ShutdownTimeout:           10 * time.Second,
+		GithubOAuthTokenFile:      "/home/op/.config/copilotd/github-oauth-token",
+		APIKey:                    "super-secret-apikey-value",
+		OutboundTimeout:           600 * time.Second,
+		StreamIdleTimeout:         90 * time.Second,
+		StreamKeepaliveInterval:   15 * time.Second,
+		WriteTimeout:              90 * time.Second,
+		ResponseHeaderTimeout:     600 * time.Second,
+		WebSocketHandshakeTimeout: 12 * time.Second,
+		MaxRequestBytes:           33554432,
+		MaxBufferedResponseBytes:  16777216,
+		ShimNopEnabled:            true,
+		GithubOAuthToken:          "gho-super-secret-oauth-value",
 		Codex: CodexConfig{
 			Enabled:         true,
 			AutoReviewModel: "gpt-5.6-luna",
@@ -768,6 +817,7 @@ func TestConfigLogValueEmitsOnlyNonSecretFields(t *testing.T) {
 		"config.stream-keepalive-interval=15s",
 		"config.write-timeout=1m30s",
 		"config.response-header-timeout=10m0s",
+		"config.ws-handshake-timeout=12s",
 		"config.max-request-bytes=33554432",
 		"config.max-buffered-response-bytes=16777216",
 		"config.shim-nop-enabled=true",

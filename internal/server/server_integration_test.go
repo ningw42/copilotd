@@ -33,7 +33,7 @@ func stack(t *testing.T, upstreamURL string, ready bool) (http.Handler, *identit
 		},
 	}, ready)
 	fwd := forward.New(prov, forward.NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
-	return newHandler(testAPIKey, prov, fwd, discardLogger(t), NewStreamOutcomeCounter(), config.CodexConfig{}), prov
+	return newHandler(testAPIKey, prov, fwd, discardLogger(t), NewStreamOutcomeCounter(), config.CodexConfig{}, nil), prov
 }
 
 type controllerRecorder struct {
@@ -443,7 +443,7 @@ func TestModelsRequestOwnershipAndIdentityBoundariesAtAssembledServer(t *testing
 	}
 
 	fwd := forward.New(provider, forward.NewClient(time.Second), time.Second, time.Second, time.Second, time.Second, 1, 1, nil)
-	h := newHandler(apiKeySentinel, provider, fwd, logger, NewStreamOutcomeCounter(), config.CodexConfig{})
+	h := newHandler(apiKeySentinel, provider, fwd, logger, NewStreamOutcomeCounter(), config.CodexConfig{}, nil)
 	req := httptest.NewRequest(http.MethodGet, requestTarget, nil)
 	req.Body = io.NopCloser(strings.NewReader(requestBodySentinel))
 	req.ContentLength = int64(len(requestBodySentinel))
@@ -602,7 +602,7 @@ func TestModelsHEADPreservesRequestAndResponseContractAtRealListener(t *testing.
 	}, true)
 	fwd := forward.New(provider, forward.NewClient(time.Second), time.Second, time.Second, time.Second, time.Second, 1, 1, nil)
 	logger, logs := bufferLogger(t, "info")
-	server := httptest.NewServer(newHandler(testAPIKey, provider, fwd, logger, NewStreamOutcomeCounter(), config.CodexConfig{}))
+	server := httptest.NewServer(newHandler(testAPIKey, provider, fwd, logger, NewStreamOutcomeCounter(), config.CodexConfig{}, nil))
 	defer server.Close()
 
 	req, err := http.NewRequest(http.MethodHead, server.URL+requestTarget, strings.NewReader(requestBody))
@@ -712,7 +712,7 @@ func TestModelsAuthoritativeResponseAtAssembledBoundaryOmitsResponseDataFromLogs
 	provider := identity.NewStatic(identity.Credential{BaseURL: upstream.URL, Token: "copilot-token"}, true)
 	fwd := forward.New(provider, forward.NewClient(time.Second), time.Second, time.Second, time.Nanosecond, time.Nanosecond, 1, 1, nil)
 	logger, logs := bufferLogger(t, "info")
-	h := newHandler(testAPIKey, provider, fwd, logger, NewStreamOutcomeCounter(), config.CodexConfig{})
+	h := newHandler(testAPIKey, provider, fwd, logger, NewStreamOutcomeCounter(), config.CodexConfig{}, nil)
 	req := httptest.NewRequest(http.MethodGet, "/models", nil)
 	req.Header.Set("Authorization", "Bearer "+testAPIKey)
 	req.Header.Set("X-Request-Id", requestID)
@@ -904,7 +904,7 @@ func TestModelsHEADLocalFailuresHaveNoWireBody(t *testing.T) {
 			})}
 			fwd := forward.New(provider, client, time.Second, time.Second, time.Second, time.Second, 1, 1, nil)
 			logger, logs := bufferLogger(t, "info")
-			server := httptest.NewServer(newHandler(testAPIKey, provider, fwd, logger, NewStreamOutcomeCounter(), config.CodexConfig{}))
+			server := httptest.NewServer(newHandler(testAPIKey, provider, fwd, logger, NewStreamOutcomeCounter(), config.CodexConfig{}, nil))
 			defer server.Close()
 
 			req, err := http.NewRequest(http.MethodHead, server.URL+"/models", nil)
@@ -956,7 +956,7 @@ func TestModelsExplicitPatternsReachAccessLog(t *testing.T) {
 	}, true)
 	fwd := forward.New(provider, forward.NewClient(time.Second), time.Second, time.Second, time.Second, time.Second, 1, 1, nil)
 	logger, logs := bufferLogger(t, "info")
-	h := newHandler(testAPIKey, provider, fwd, logger, NewStreamOutcomeCounter(), config.CodexConfig{})
+	h := newHandler(testAPIKey, provider, fwd, logger, NewStreamOutcomeCounter(), config.CodexConfig{}, nil)
 
 	for _, method := range []string{http.MethodGet, http.MethodHead} {
 		req := httptest.NewRequest(method, "/models", nil)
@@ -1143,7 +1143,7 @@ func TestEndToEndForwardViaRun(t *testing.T) {
 		},
 	}, true)
 	fwd := forward.New(prov, forward.NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
-	base := startServer(t, New(testConfig(), discardLogger(t), prov, fwd, NewStreamOutcomeCounter()))
+	base := startServer(t, New(testConfig(), discardLogger(t), prov, fwd, nil, NewStreamOutcomeCounter()))
 
 	const reqBody = `{"model":"claude-3-5-sonnet","messages":[{"role":"user","content":"hi"}]}`
 
@@ -1237,7 +1237,7 @@ func TestOpenAIResponsesForwardVerbatim(t *testing.T) {
 		},
 	}, true)
 	fwd := forward.New(prov, forward.NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
-	base := startServer(t, New(testConfig(), discardLogger(t), prov, fwd, NewStreamOutcomeCounter()))
+	base := startServer(t, New(testConfig(), discardLogger(t), prov, fwd, nil, NewStreamOutcomeCounter()))
 
 	const reqBody = `{"model":"gpt-4o","input":"hi"}`
 	req, _ := http.NewRequest(http.MethodPost, base+"/openai/v1/responses", strings.NewReader(reqBody))
@@ -1387,7 +1387,7 @@ func TestOpenAIBodyCapAndUpstreamPassthrough(t *testing.T) {
 	t.Run("over cap -> OpenAI-shaped 413", func(t *testing.T) {
 		prov := identity.NewStatic(identity.Credential{BaseURL: "http://127.0.0.1:1", Token: "t"}, true)
 		fwd := forward.New(prov, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 8, 1<<20, nil) // 8-byte request cap
-		h := newHandler(testAPIKey, prov, fwd, discardLogger(t), NewStreamOutcomeCounter(), config.CodexConfig{})
+		h := newHandler(testAPIKey, prov, fwd, discardLogger(t), NewStreamOutcomeCounter(), config.CodexConfig{}, nil)
 		req := httptest.NewRequest(http.MethodPost, "/openai/v1/responses", strings.NewReader(`{"model":"way too long"}`))
 		req.Header.Set("Authorization", "Bearer "+testAPIKey)
 		rec := newControllerRecorder()
@@ -1435,7 +1435,7 @@ func TestAnthropicStreamingEndToEnd(t *testing.T) {
 			Headers: http.Header{"Copilot-Integration-Id": {"vscode-chat"}},
 		}, true)
 		fwd := forward.New(prov, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
-		return startServer(t, New(testConfig(), discardLogger(t), prov, fwd, NewStreamOutcomeCounter()))
+		return startServer(t, New(testConfig(), discardLogger(t), prov, fwd, nil, NewStreamOutcomeCounter()))
 	}
 
 	request := func(t *testing.T, base string) *http.Response {
@@ -1546,7 +1546,7 @@ func TestOpenAIStreamingEndToEnd(t *testing.T) {
 		}, true)
 		fwd := forward.New(prov, forward.NewClient(time.Second), time.Second, time.Second, 2*time.Second, keepalive, 1<<20, 1<<20, nil)
 		outcomes := NewStreamOutcomeCounter()
-		return startServer(t, New(testConfig(), discardLogger(t), prov, fwd, outcomes)), outcomes
+		return startServer(t, New(testConfig(), discardLogger(t), prov, fwd, nil, outcomes)), outcomes
 	}
 
 	request := func(t *testing.T, base string) *http.Response {
@@ -1702,7 +1702,7 @@ func TestStreamingClientHangupCancelsCopilotEndToEnd(t *testing.T) {
 	}, true)
 	fwd := forward.New(prov, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 	outcomes := NewStreamOutcomeCounter()
-	base := startServer(t, New(testConfig(), discardLogger(t), prov, fwd, outcomes))
+	base := startServer(t, New(testConfig(), discardLogger(t), prov, fwd, nil, outcomes))
 	req, err := http.NewRequest(http.MethodPost, base+"/anthropic/v1/messages", strings.NewReader(`{"stream":true}`))
 	if err != nil {
 		t.Fatalf("build stream request: %v", err)

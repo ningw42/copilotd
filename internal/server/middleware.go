@@ -61,6 +61,9 @@ func accessLog(logger *slog.Logger, streamOutcomes StreamOutcomeObserver, next h
 			slog.Int64("bytes", sw.bytes),
 			slog.Duration("duration", time.Since(start)),
 		}
+		if route == "GET /openai/v1/responses" {
+			attrs = append(attrs, slog.Bool("ws", true))
+		}
 		if result, ok := forward.StreamResultFromContext(ctx); ok {
 			streamOutcomes.ObserveStreamOutcome(result.Surface, result.Outcome)
 			switch result.Outcome {

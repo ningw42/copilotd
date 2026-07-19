@@ -720,7 +720,7 @@ to that.
 | Configurable shim ordering | When the catalog needs it |
 | Per-shim / per-event latency metrics | Later phase (seam pre-positioned) |
 | Structural-repair injection; stream-side envelope revision | Only if a shim proves it necessary (§10.2, §8.4) |
-| OpenAI Responses WebSocket (bidirectional) mode | Non-goal (separate transport) |
+| OpenAI Responses WebSocket (bidirectional) mode | Now in scope as a separate, payload-opaque transport; see `docs/design/2026-07-19-openai-responses-websocket-forwarding-design.md` and `docs/adr/0006-openai-responses-websocket-transport.md` |
 
 ## 16. Notes & open items
 

@@ -118,7 +118,9 @@ Notes:
 - A model with **no** `supported_endpoints` is **not** listed: copilotd cannot
   confirm the Surface serves it.
 - The websocket variant `"ws:/responses"` is **not** `"/responses"`; the exact
-  HTTP Route string is required (the WebSocket transport is a non-goal).
+  HTTP Route string remains required, so WebSocket-only models stay intentionally
+  excluded. See `docs/design/2026-07-19-openai-responses-websocket-forwarding-design.md`
+  and `docs/adr/0006-openai-responses-websocket-transport.md`.
 - **Membership is keyed on the wire-Surface, not the vendor.** `/openai/v1/models`
   lists every model forwardable on the OpenAI (Responses) Surface, including
   non-OpenAI-vendor models: `mai-code-1-flash-picker` (`vendor: "Microsoft"`) and

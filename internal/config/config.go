@@ -34,17 +34,18 @@ const (
 	// silence, individual downstream writes, and time-to-first-byte. The
 	// request and opt-in buffered-response caps (32 MiB each) are generous enough
 	// for multi-image base64 while guarding against pathological bodies.
-	defaultOutboundTimeout          = 600 * time.Second
-	defaultStreamIdleTimeout        = 5 * time.Minute
-	defaultStreamKeepaliveInterval  = 15 * time.Second
-	defaultWriteTimeout             = 90 * time.Second
-	defaultResponseHeaderTimeout    = 600 * time.Second
-	defaultMaxRequestBytes          = 33554432
-	defaultMaxBufferedResponseBytes = 33554432
-	defaultShimNopEnabled           = false
-	defaultCodexCatalogEnabled      = false
-	defaultCodexAutoReviewModel     = ""
-	defaultCodexOverrideLimits      = false
+	defaultOutboundTimeout           = 600 * time.Second
+	defaultStreamIdleTimeout         = 5 * time.Minute
+	defaultStreamKeepaliveInterval   = 15 * time.Second
+	defaultWriteTimeout              = 90 * time.Second
+	defaultResponseHeaderTimeout     = 600 * time.Second
+	defaultWebSocketHandshakeTimeout = 10 * time.Second
+	defaultMaxRequestBytes           = 33554432
+	defaultMaxBufferedResponseBytes  = 33554432
+	defaultShimNopEnabled            = false
+	defaultCodexCatalogEnabled       = false
+	defaultCodexAutoReviewModel      = ""
+	defaultCodexOverrideLimits       = false
 
 	// defaultStartupMintRetries bounds the transient-failure retries of the boot
 	// warm-up mint (total attempts = 1 + N); auth-class failures short-circuit.
@@ -121,6 +122,9 @@ type ServeConfig struct {
 	// ResponseHeaderTimeout bounds the wait for upstream response headers.
 	ResponseHeaderTimeout time.Duration
 
+	// WebSocketHandshakeTimeout bounds the upstream WebSocket dial only.
+	WebSocketHandshakeTimeout time.Duration
+
 	// MaxRequestBytes caps an inbound request body; an over-limit body yields 413.
 	MaxRequestBytes int64
 
@@ -173,6 +177,7 @@ func (c ServeConfig) LogValue() slog.Value {
 		slog.Duration("stream-keepalive-interval", c.StreamKeepaliveInterval),
 		slog.Duration("write-timeout", c.WriteTimeout),
 		slog.Duration("response-header-timeout", c.ResponseHeaderTimeout),
+		slog.Duration("ws-handshake-timeout", c.WebSocketHandshakeTimeout),
 		slog.Int64("max-request-bytes", c.MaxRequestBytes),
 		slog.Int64("max-buffered-response-bytes", c.MaxBufferedResponseBytes),
 		slog.Bool("shim-nop-enabled", c.ShimNopEnabled),
@@ -235,20 +240,21 @@ type ServeFlags struct {
 	fs     *ff.FlagSet
 
 	// serve-specific
-	addr                     *string
-	shutdownTimeout          *time.Duration
-	apikey                   *string
-	outboundTimeout          *time.Duration
-	streamIdleTimeout        *time.Duration
-	streamKeepaliveInterval  *time.Duration
-	writeTimeout             *time.Duration
-	responseHeaderTimeout    *time.Duration
-	maxRequestBytes          *int64
-	maxBufferedResponseBytes *int64
-	shimNopEnabled           *bool
-	codexCatalogEnabled      *bool
-	codexAutoReviewModel     *string
-	codexOverrideLimits      *bool
+	addr                      *string
+	shutdownTimeout           *time.Duration
+	apikey                    *string
+	outboundTimeout           *time.Duration
+	streamIdleTimeout         *time.Duration
+	streamKeepaliveInterval   *time.Duration
+	writeTimeout              *time.Duration
+	responseHeaderTimeout     *time.Duration
+	webSocketHandshakeTimeout *time.Duration
+	maxRequestBytes           *int64
+	maxBufferedResponseBytes  *int64
+	shimNopEnabled            *bool
+	codexCatalogEnabled       *bool
+	codexAutoReviewModel      *string
+	codexOverrideLimits       *bool
 
 	githubOAuthToken     *string
 	startupMintRetries   *int
@@ -273,6 +279,7 @@ func RegisterServe(fs *ff.FlagSet) *ServeFlags {
 	f.streamKeepaliveInterval = fs.DurationLong("stream-keepalive-interval", defaultStreamKeepaliveInterval, "OpenAI stream keepalive interval")
 	f.writeTimeout = fs.DurationLong("write-timeout", defaultWriteTimeout, "per-write downstream timeout")
 	f.responseHeaderTimeout = fs.DurationLong("response-header-timeout", defaultResponseHeaderTimeout, "upstream response-header timeout")
+	f.webSocketHandshakeTimeout = fs.DurationLong("ws-handshake-timeout", defaultWebSocketHandshakeTimeout, "upstream WebSocket handshake timeout")
 	f.maxRequestBytes = fs.Int64Long("max-request-bytes", defaultMaxRequestBytes, "maximum inbound request body size in bytes")
 	f.maxBufferedResponseBytes = fs.Int64Long("max-buffered-response-bytes", defaultMaxBufferedResponseBytes, "maximum buffered upstream response body size in bytes")
 	f.shimNopEnabled = fs.BoolLongDefault("shim-nop-enabled", defaultShimNopEnabled, "enable the canonical no-op shim")
@@ -303,20 +310,21 @@ func (f *ServeFlags) Resolve(lookupEnv func(string) (string, bool)) (ServeConfig
 	set := setFlags(f.fs)
 
 	cfg := ServeConfig{
-		Addr:                     defaultAddr,
-		LogLevel:                 defaultLogLevel,
-		LogFormat:                defaultLogFormat,
-		LogFile:                  "",
-		ShutdownTimeout:          defaultShutdownTimeout,
-		GithubOAuthTokenFile:     defaultOAuthTokenFile(),
-		OutboundTimeout:          defaultOutboundTimeout,
-		StreamIdleTimeout:        defaultStreamIdleTimeout,
-		StreamKeepaliveInterval:  defaultStreamKeepaliveInterval,
-		WriteTimeout:             defaultWriteTimeout,
-		ResponseHeaderTimeout:    defaultResponseHeaderTimeout,
-		MaxRequestBytes:          defaultMaxRequestBytes,
-		MaxBufferedResponseBytes: defaultMaxBufferedResponseBytes,
-		ShimNopEnabled:           defaultShimNopEnabled,
+		Addr:                      defaultAddr,
+		LogLevel:                  defaultLogLevel,
+		LogFormat:                 defaultLogFormat,
+		LogFile:                   "",
+		ShutdownTimeout:           defaultShutdownTimeout,
+		GithubOAuthTokenFile:      defaultOAuthTokenFile(),
+		OutboundTimeout:           defaultOutboundTimeout,
+		StreamIdleTimeout:         defaultStreamIdleTimeout,
+		StreamKeepaliveInterval:   defaultStreamKeepaliveInterval,
+		WriteTimeout:              defaultWriteTimeout,
+		ResponseHeaderTimeout:     defaultResponseHeaderTimeout,
+		WebSocketHandshakeTimeout: defaultWebSocketHandshakeTimeout,
+		MaxRequestBytes:           defaultMaxRequestBytes,
+		MaxBufferedResponseBytes:  defaultMaxBufferedResponseBytes,
+		ShimNopEnabled:            defaultShimNopEnabled,
 		Codex: CodexConfig{
 			Enabled:         defaultCodexCatalogEnabled,
 			AutoReviewModel: defaultCodexAutoReviewModel,
@@ -365,6 +373,9 @@ func (f *ServeFlags) Resolve(lookupEnv func(string) (string, bool)) (ServeConfig
 	}
 	if set["response-header-timeout"] {
 		cfg.ResponseHeaderTimeout = *f.responseHeaderTimeout
+	}
+	if set["ws-handshake-timeout"] {
+		cfg.WebSocketHandshakeTimeout = *f.webSocketHandshakeTimeout
 	}
 	if set["max-request-bytes"] {
 		cfg.MaxRequestBytes = *f.maxRequestBytes
@@ -530,6 +541,13 @@ func overlay(cfg *ServeConfig, source string, get func(key string) (string, bool
 		}
 		cfg.ResponseHeaderTimeout = d
 	}
+	if v, ok := get("ws-handshake-timeout"); ok {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return fmt.Errorf("invalid ws-handshake-timeout %q from %s: %w", v, source, err)
+		}
+		cfg.WebSocketHandshakeTimeout = d
+	}
 	if v, ok := get("max-request-bytes"); ok {
 		n, err := strconv.ParseInt(v, 10, 64)
 		if err != nil {
@@ -643,6 +661,9 @@ func (c ServeConfig) validate() error {
 	}
 	if c.ResponseHeaderTimeout <= 0 {
 		return fmt.Errorf("invalid response-header-timeout %v: must be positive", c.ResponseHeaderTimeout)
+	}
+	if c.WebSocketHandshakeTimeout <= 0 {
+		return fmt.Errorf("invalid ws-handshake-timeout %v: must be positive", c.WebSocketHandshakeTimeout)
 	}
 	if c.MaxRequestBytes <= 0 {
 		return fmt.Errorf("invalid max-request-bytes %d: must be positive", c.MaxRequestBytes)

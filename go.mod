@@ -3,6 +3,7 @@ module github.com/ningw42/copilotd
 go 1.26
 
 require (
+	github.com/coder/websocket v1.8.15
 	github.com/google/uuid v1.6.0
 	github.com/peterbourgon/ff/v4 v4.0.0-beta.1
 	golang.org/x/sync v0.22.0

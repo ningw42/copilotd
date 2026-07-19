@@ -164,7 +164,7 @@ func TestServeFirstRealCallEndToEnd(t *testing.T) {
 	}
 
 	fwd := forward.New(mgr, forward.NewClient(cfg.ResponseHeaderTimeout), cfg.OutboundTimeout, cfg.WriteTimeout, cfg.StreamIdleTimeout, cfg.StreamKeepaliveInterval, cfg.MaxRequestBytes, cfg.MaxBufferedResponseBytes, nil, forward.WithLogger(logger))
-	base := startTestServer(t, server.New(cfg, logger, mgr, fwd, server.NewStreamOutcomeCounter()))
+	base := startTestServer(t, server.New(cfg, logger, mgr, fwd, nil, server.NewStreamOutcomeCounter()))
 
 	assertImpersonation := func(t *testing.T) {
 		t.Helper()
@@ -251,7 +251,7 @@ func TestServeDegradedWindow(t *testing.T) {
 			t.Fatalf("Ready() = true before any mint, want false")
 		}
 		fwd := forward.New(mgr, forward.NewClient(cfg.ResponseHeaderTimeout), cfg.OutboundTimeout, cfg.WriteTimeout, cfg.StreamIdleTimeout, cfg.StreamKeepaliveInterval, cfg.MaxRequestBytes, cfg.MaxBufferedResponseBytes, nil, forward.WithLogger(logger))
-		base := startTestServer(t, server.New(cfg, logger, mgr, fwd, server.NewStreamOutcomeCounter()))
+		base := startTestServer(t, server.New(cfg, logger, mgr, fwd, nil, server.NewStreamOutcomeCounter()))
 
 		assertNotReady(t, base)
 
@@ -281,7 +281,7 @@ func TestServeDegradedWindow(t *testing.T) {
 			t.Fatalf("Ready() = true after a failed startup mint, want false")
 		}
 		fwd := forward.New(mgr, forward.NewClient(cfg.ResponseHeaderTimeout), cfg.OutboundTimeout, cfg.WriteTimeout, cfg.StreamIdleTimeout, cfg.StreamKeepaliveInterval, cfg.MaxRequestBytes, cfg.MaxBufferedResponseBytes, nil, forward.WithLogger(logger))
-		base := startTestServer(t, server.New(cfg, logger, mgr, fwd, server.NewStreamOutcomeCounter()))
+		base := startTestServer(t, server.New(cfg, logger, mgr, fwd, nil, server.NewStreamOutcomeCounter()))
 
 		assertNotReady(t, base)
 	})

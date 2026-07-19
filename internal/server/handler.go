@@ -10,6 +10,7 @@ import (
 	"github.com/ningw42/copilotd/internal/config"
 	"github.com/ningw42/copilotd/internal/forward"
 	"github.com/ningw42/copilotd/internal/identity"
+	"github.com/ningw42/copilotd/internal/wsforward"
 )
 
 const (
@@ -27,7 +28,7 @@ const (
 // order on a provider route is therefore requestID -> accessLog -> recover ->
 // auth -> readiness -> forward. /healthz and /readyz are never gated by auth or
 // readiness.
-func newHandler(apikey string, provider identity.Provider, fwd *forward.Forwarder, logger *slog.Logger, streamOutcomes StreamOutcomeObserver, codexConfig config.CodexConfig) http.Handler {
+func newHandler(apikey string, provider identity.Provider, fwd *forward.Forwarder, logger *slog.Logger, streamOutcomes StreamOutcomeObserver, codexConfig config.CodexConfig, wsProxy *wsforward.Proxy) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET "+healthPath, handleHealth)
 	mux.HandleFunc("GET "+readyPath, handleReady(provider))
@@ -48,6 +49,10 @@ func newHandler(apikey string, provider identity.Provider, fwd *forward.Forwarde
 		guard(apierror.Anthropic, fwd.Handler("/v1/messages/count_tokens", apierror.Anthropic)))
 	mux.Handle("POST /openai/v1/responses",
 		guard(apierror.OpenAI, fwd.Handler("/responses", apierror.OpenAI)))
+	if wsProxy != nil {
+		mux.Handle("GET /openai/v1/responses",
+			guard(apierror.OpenAI, wsProxy.Handler()))
+	}
 	anthropicModels := catalog.Handler(catalog.Descriptor{
 		Surface:       apierror.Anthropic,
 		RequiredRoute: catalog.AnthropicMessagesRoute,

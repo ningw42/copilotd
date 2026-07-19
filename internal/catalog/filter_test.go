@@ -10,6 +10,7 @@ func TestFilterRequiresPickerVisibilityAndExactSurfaceRoute(t *testing.T) {
 		{ID: "route-less", ModelPickerEnabled: true},
 		{ID: "chat-only", ModelPickerEnabled: true, SupportedRoutes: []Route{"/chat/completions"}},
 		{ID: "embedding", ModelPickerEnabled: true, SupportedRoutes: []Route{"/embeddings"}},
+		// WebSocket-only models are intentionally excluded from the exact /responses catalog.
 		{ID: "websocket-only", ModelPickerEnabled: true, SupportedRoutes: []Route{"ws:/responses"}},
 		{ID: "hidden-but-forwardable", ModelPickerEnabled: false, SupportedRoutes: []Route{OpenAIResponsesRoute}},
 		{ID: "microsoft-visible", Vendor: "Microsoft", ModelPickerEnabled: true, SupportedRoutes: []Route{OpenAIResponsesRoute}},

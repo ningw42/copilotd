@@ -3,11 +3,13 @@ package server
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -52,7 +54,7 @@ func testHandler(t *testing.T, logger *slog.Logger) http.Handler {
 	t.Helper()
 	prov := readyStub("")
 	fwd := forward.New(prov, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
-	return newHandler(testAPIKey, prov, fwd, logger, NewStreamOutcomeCounter(), config.CodexConfig{})
+	return newHandler(testAPIKey, prov, fwd, logger, NewStreamOutcomeCounter(), config.CodexConfig{}, nil)
 }
 
 // bufferLogger returns a logger writing to an in-memory buffer at the given
@@ -465,7 +467,7 @@ func TestLifecycleSmoke(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	srv := New(testConfig(), discardLogger(t), readyStub(""), forward.New(readyStub(""), forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil), NewStreamOutcomeCounter())
+	srv := New(testConfig(), discardLogger(t), readyStub(""), forward.New(readyStub(""), forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil), nil, NewStreamOutcomeCounter())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	runErr := make(chan error, 1)
@@ -490,6 +492,66 @@ func TestLifecycleSmoke(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("Run did not return within the grace period after cancel")
 	}
+}
+
+func TestShutdownSequencesWebSocketDrainBeforeHTTPAndKeepsHardCloseFallback(t *testing.T) {
+	var events []string
+	httpFailure := errors.New("HTTP drain timed out")
+	wsFailure := errors.New("WebSocket drain timed out")
+	httpServer := &recordingHTTPServer{
+		events:      &events,
+		shutdownErr: httpFailure,
+	}
+	wsProxy := &recordingWebSocketDrainer{
+		events:      &events,
+		shutdownErr: wsFailure,
+	}
+	srv := &Server{
+		cfg:    testConfig(),
+		logger: discardLogger(t),
+		http:   httpServer,
+		ws:     wsProxy,
+	}
+
+	err := srv.shutdown()
+	if !errors.Is(err, httpFailure) || !errors.Is(err, wsFailure) {
+		t.Fatalf("shutdown error = %v, want both graceful drain failures", err)
+	}
+	want := []string{"ws_start_drain", "http_shutdown", "ws_shutdown", "http_close"}
+	if !reflect.DeepEqual(events, want) {
+		t.Fatalf("shutdown events = %v, want %v", events, want)
+	}
+}
+
+type recordingHTTPServer struct {
+	events      *[]string
+	shutdownErr error
+}
+
+func (s *recordingHTTPServer) Serve(net.Listener) error { return http.ErrServerClosed }
+
+func (s *recordingHTTPServer) Shutdown(context.Context) error {
+	*s.events = append(*s.events, "http_shutdown")
+	return s.shutdownErr
+}
+
+func (s *recordingHTTPServer) Close() error {
+	*s.events = append(*s.events, "http_close")
+	return nil
+}
+
+type recordingWebSocketDrainer struct {
+	events      *[]string
+	shutdownErr error
+}
+
+func (d *recordingWebSocketDrainer) StartDrain() {
+	*d.events = append(*d.events, "ws_start_drain")
+}
+
+func (d *recordingWebSocketDrainer) Shutdown(context.Context) error {
+	*d.events = append(*d.events, "ws_shutdown")
+	return d.shutdownErr
 }
 
 func getWithRetry(t *testing.T, url string) (*http.Response, error) {

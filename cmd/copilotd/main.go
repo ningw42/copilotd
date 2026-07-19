@@ -25,6 +25,7 @@ import (
 	"github.com/ningw42/copilotd/internal/logging"
 	"github.com/ningw42/copilotd/internal/server"
 	"github.com/ningw42/copilotd/internal/shim"
+	"github.com/ningw42/copilotd/internal/wsforward"
 	"github.com/peterbourgon/ff/v4"
 	"github.com/peterbourgon/ff/v4/ffhelp"
 )
@@ -317,9 +318,16 @@ func runServe(ctx context.Context, flags *config.ServeFlags, lookupEnv func(stri
 	go mgr.StartupMint(serveCtx)
 
 	fwd := forward.New(mgr, forward.NewClient(cfg.ResponseHeaderTimeout), cfg.OutboundTimeout, cfg.WriteTimeout, cfg.StreamIdleTimeout, cfg.StreamKeepaliveInterval, cfg.MaxRequestBytes, cfg.MaxBufferedResponseBytes, registry, forward.WithLogger(logger))
+	wsDialClient := &http.Client{Transport: &http.Transport{Proxy: http.ProxyFromEnvironment}}
+	wsAccepts := server.NewWsAcceptCounter()
+	wsTerminals := server.NewWsSessionTerminalCounter()
+	wsProxy := wsforward.New(mgr, wsDialClient, cfg.WebSocketHandshakeTimeout, cfg.WriteTimeout, cfg.MaxRequestBytes, logger, wsforward.WsMetrics{
+		Accept:          wsAccepts,
+		SessionTerminal: wsTerminals,
+	})
 	streamOutcomes := server.NewStreamOutcomeCounter()
 
-	if err := server.New(cfg, logger, mgr, fwd, streamOutcomes).Run(serveCtx, ln); err != nil {
+	if err := server.New(cfg, logger, mgr, fwd, wsProxy, streamOutcomes).Run(serveCtx, ln); err != nil {
 		logger.Error("server error", slog.Any("error", err))
 		return errServeFailed
 	}

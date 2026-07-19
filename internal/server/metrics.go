@@ -4,6 +4,7 @@ import (
 	"sync"
 
 	"github.com/ningw42/copilotd/internal/sse"
+	"github.com/ningw42/copilotd/internal/wsforward"
 )
 
 // StreamOutcomeObserver is the backend seam for the per-surface terminal
@@ -87,4 +88,112 @@ func streamOutcomeIndexes(surface string, outcome sse.Outcome) (surfaceIndex, ou
 		return 0, 0, false
 	}
 	return surfaceIndex, outcomeIndex, true
+}
+
+const (
+	wsAcceptEstablishedIndex = iota
+	wsAcceptRejectedIndex
+	wsAcceptDialFailedIndex
+	wsAcceptOutcomeCount
+)
+
+// WsAcceptCounter is the zero-dependency WebSocket handshake metric. Its fixed
+// array keeps the outcome label bounded.
+type WsAcceptCounter struct {
+	mu     sync.RWMutex
+	counts [wsAcceptOutcomeCount]uint64
+}
+
+// NewWsAcceptCounter returns an empty WebSocket handshake counter.
+func NewWsAcceptCounter() *WsAcceptCounter { return &WsAcceptCounter{} }
+
+// ObserveAccept increments one canonical handshake outcome. Unknown outcomes
+// are ignored so request-derived values cannot create metric series.
+func (c *WsAcceptCounter) ObserveAccept(outcome wsforward.AcceptOutcome) {
+	index, ok := wsAcceptOutcomeIndex(outcome)
+	if !ok {
+		return
+	}
+	c.mu.Lock()
+	c.counts[index]++
+	c.mu.Unlock()
+}
+
+// Count returns the observed count for one canonical handshake outcome.
+func (c *WsAcceptCounter) Count(outcome wsforward.AcceptOutcome) uint64 {
+	index, ok := wsAcceptOutcomeIndex(outcome)
+	if !ok {
+		return 0
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.counts[index]
+}
+
+func wsAcceptOutcomeIndex(outcome wsforward.AcceptOutcome) (int, bool) {
+	switch outcome {
+	case wsforward.AcceptEstablished:
+		return wsAcceptEstablishedIndex, true
+	case wsforward.AcceptRejected:
+		return wsAcceptRejectedIndex, true
+	case wsforward.AcceptDialFailed:
+		return wsAcceptDialFailedIndex, true
+	default:
+		return 0, false
+	}
+}
+
+const (
+	wsSessionClientClosedIndex = iota
+	wsSessionUpstreamClosedIndex
+	wsSessionErrorIndex
+	wsSessionTerminalCount
+)
+
+// WsSessionTerminalCounter is the zero-dependency established-session terminal
+// metric. Its fixed array keeps the terminal label bounded.
+type WsSessionTerminalCounter struct {
+	mu     sync.RWMutex
+	counts [wsSessionTerminalCount]uint64
+}
+
+// NewWsSessionTerminalCounter returns an empty session-terminal counter.
+func NewWsSessionTerminalCounter() *WsSessionTerminalCounter {
+	return &WsSessionTerminalCounter{}
+}
+
+// ObserveSessionTerminal increments one canonical terminal outcome. Unknown
+// outcomes are ignored so request-derived values cannot create metric series.
+func (c *WsSessionTerminalCounter) ObserveSessionTerminal(terminal wsforward.SessionTerminal) {
+	index, ok := wsSessionTerminalIndex(terminal)
+	if !ok {
+		return
+	}
+	c.mu.Lock()
+	c.counts[index]++
+	c.mu.Unlock()
+}
+
+// Count returns the observed count for one canonical session terminal.
+func (c *WsSessionTerminalCounter) Count(terminal wsforward.SessionTerminal) uint64 {
+	index, ok := wsSessionTerminalIndex(terminal)
+	if !ok {
+		return 0
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.counts[index]
+}
+
+func wsSessionTerminalIndex(terminal wsforward.SessionTerminal) (int, bool) {
+	switch terminal {
+	case wsforward.SessionClientClosed:
+		return wsSessionClientClosedIndex, true
+	case wsforward.SessionUpstreamClosed:
+		return wsSessionUpstreamClosedIndex, true
+	case wsforward.SessionError:
+		return wsSessionErrorIndex, true
+	default:
+		return 0, false
+	}
 }

@@ -71,7 +71,7 @@ func startPhase3CapstoneServerWithObservers(
 		forward.WithLogger(logger),
 	)
 	slog.SetDefault(previousDefault)
-	return startTestServer(t, server.New(cfg, logger, provider, forwarder, outcomes)), forwarder
+	return startTestServer(t, server.New(cfg, logger, provider, forwarder, nil, outcomes)), forwarder
 }
 
 type phase3BufferedTranscript struct {

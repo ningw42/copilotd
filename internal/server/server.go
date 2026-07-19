@@ -16,6 +16,7 @@ import (
 	"github.com/ningw42/copilotd/internal/config"
 	"github.com/ningw42/copilotd/internal/forward"
 	"github.com/ningw42/copilotd/internal/identity"
+	"github.com/ningw42/copilotd/internal/wsforward"
 )
 
 // Inbound HTTP timeouts (client <-> copilotd), distinct from the Phase-1
@@ -36,7 +37,19 @@ const (
 type Server struct {
 	cfg    config.ServeConfig
 	logger *slog.Logger
-	http   *http.Server
+	http   httpLifecycle
+	ws     websocketDrainer
+}
+
+type httpLifecycle interface {
+	Serve(net.Listener) error
+	Shutdown(context.Context) error
+	Close() error
+}
+
+type websocketDrainer interface {
+	StartDrain()
+	Shutdown(context.Context) error
 }
 
 // New builds the server from cfg and logger. The identity Provider supplies the
@@ -44,20 +57,26 @@ type Server struct {
 // and streamOutcomes receives the bounded stream terminal-outcome metric. The
 // listener is supplied later to Run, so main owns bind and the server owns
 // serve/shutdown.
-func New(cfg config.ServeConfig, logger *slog.Logger, provider identity.Provider, fwd *forward.Forwarder, streamOutcomes StreamOutcomeObserver) *Server {
+func New(cfg config.ServeConfig, logger *slog.Logger, provider identity.Provider, fwd *forward.Forwarder, wsProxy *wsforward.Proxy, streamOutcomes StreamOutcomeObserver) *Server {
+	var ws websocketDrainer
+	if wsProxy != nil {
+		ws = wsProxy
+	}
+	httpServer := &http.Server{
+		Handler:           newHandler(cfg.APIKey, provider, fwd, logger, streamOutcomes, cfg.Codex, wsProxy),
+		ReadHeaderTimeout: readHeaderTimeout,
+		ReadTimeout:       readTimeout,
+		WriteTimeout:      writeTimeout,
+		IdleTimeout:       idleTimeout,
+		// Bridge the server's internal errors into the structured logger so
+		// all output shares one format and destination.
+		ErrorLog: slog.NewLogLogger(logger.Handler(), slog.LevelWarn),
+	}
 	return &Server{
 		cfg:    cfg,
 		logger: logger,
-		http: &http.Server{
-			Handler:           newHandler(cfg.APIKey, provider, fwd, logger, streamOutcomes, cfg.Codex),
-			ReadHeaderTimeout: readHeaderTimeout,
-			ReadTimeout:       readTimeout,
-			WriteTimeout:      writeTimeout,
-			IdleTimeout:       idleTimeout,
-			// Bridge the server's internal errors into the structured logger so
-			// all output shares one format and destination.
-			ErrorLog: slog.NewLogLogger(logger.Handler(), slog.LevelWarn),
-		},
+		ws:     ws,
+		http:   httpServer,
 	}
 }
 
@@ -86,7 +105,15 @@ func (s *Server) shutdown() error {
 	s.logger.Info("shutting down", slog.Duration("timeout", s.cfg.ShutdownTimeout))
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), s.cfg.ShutdownTimeout)
 	defer cancel()
-	if err := s.http.Shutdown(shutdownCtx); err != nil {
+	if s.ws != nil {
+		s.ws.StartDrain()
+	}
+	httpErr := s.http.Shutdown(shutdownCtx)
+	var wsErr error
+	if s.ws != nil {
+		wsErr = s.ws.Shutdown(shutdownCtx)
+	}
+	if err := errors.Join(httpErr, wsErr); err != nil {
 		// Graceful shutdown overran; force the remaining connections closed.
 		_ = s.http.Close()
 		return fmt.Errorf("graceful shutdown: %w", err)
