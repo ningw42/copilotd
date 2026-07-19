@@ -87,6 +87,8 @@ A provider-shaped model list served on a Surface's `/models` — Copilot's raw
 re-rendered in the real provider's `GET /v1/models` schema. Carries the provider's
 *schema* with Copilot's *values*, not value-level provider parity. Distinct from
 the GitHub Copilot Surface's raw `/models` passthrough, which reshapes nothing.
+This is the **provider-shaped** catalog; the **Codex catalog** is the client-shaped
+counterpart.
 _Avoid_: model list (unqualified); models endpoint (that is the raw passthrough)
 
 **Forwarder**:
@@ -109,6 +111,34 @@ plugin, filter.
 The response envelope — status line plus headers — treated as a unit distinct from
 the body. Its shim transform runs once per response, before the body, on both the
 buffered and streaming paths (Phase 3+).
+
+### Codex catalog & auto-review
+
+**Codex catalog**:
+The client-shaped model list served on the OpenAI Surface's `/models` when a
+request carries Codex's `?client_version=` and the feature is enabled — Codex's own
+`ModelInfo` entries (from a vendored snapshot) re-emitted field-for-field with a
+reviewer override injected. Carries *Codex's* schema and values, not Copilot's.
+Contrast the provider-shaped **Catalog**.
+_Avoid_: model list (unqualified).
+
+**Reviewer model**:
+The real, forwardable model copilotd routes Codex's guardian auto-review to via
+`auto_review_model_override`, replacing Codex's unforwardable default
+`codex-auto-review`.
+_Avoid_: auto-reviewer, guardian model.
+
+**Command-auth provider**:
+The Codex `[model_providers.NAME.auth]` configuration whose `command` prints
+copilotd's API key to stdout — the only condition (`has_command_auth()`) under
+which Codex fetches a self-hosted proxy's model catalog.
+_Avoid_: auth provider (unqualified).
+
+**Vendored snapshot**:
+The pinned copy of Codex's bundled `models.json` (`rust-v0.144.5`) embedded in
+copilotd, carried with Apache-2.0 `LICENSE`/`NOTICE` and a `PROVENANCE` record —
+the only faithful source for the `ModelInfo` fields Copilot never returns.
+_Avoid_: snapshot (unqualified) where ambiguous.
 
 ### Streaming
 

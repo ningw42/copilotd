@@ -1,11 +1,12 @@
 # Phase 6b — Codex model catalog + auto-review routing (`auto_review_model_override`) — Design
 
-Status: proposed design (polished via brainstorming), pending final written-spec review
+Status: proposed design (polished via brainstorming + grilling), pending final written-spec review
 Date: 2026-07-19
 Roadmap reference: `ROADMAP.md` §4.2 and §7 "Phase 6 — Provider/client-shaped support endpoints"; the **client-shaped** half deferred by the Phase 6a design (§2.2, §12).
 Builds on: `docs/design/2026-07-18-phase-6a-provider-shaped-model-catalogs-design.md`,
 `docs/design/2026-07-18-phase-4-github-copilot-support-endpoint-design.md`.
-Follow-on: snapshot freshness automation is split to `ningw42/copilotd#53` (see §16).
+Follow-on: snapshot freshness automation is split to `ningw42/copilotd#53` (§16);
+per-model reviewer overrides to `ningw42/copilotd#54` (§2.2).
 
 ## 1. Goal and outcome
 
@@ -98,19 +99,19 @@ entries** (from a vendored snapshot) with the override injected.
 ### 2.1 In scope
 
 - **Content negotiation on `GET/HEAD /openai/v1/models`**: a request carrying
-  `?client_version=` **and** `codex-catalog-enabled=true` receives the Codex
-  `{"models":[…]}` catalog; otherwise the Phase 6a OpenAI list is served
-  unchanged.
+  `?client_version=` receives the Codex `{"models":[…]}` catalog **iff** the
+  catalog is enabled **and** there is something to inject — a global reviewer or
+  the limits overlay (§6); otherwise the Phase 6a OpenAI list is served unchanged.
 - A **vendored snapshot** of Codex's `models.json` (pinned to `rust-v0.144.5`),
   embedded via Go `embed`, carried with provenance and Apache-2.0 attribution.
 - The emitted Codex catalog = **intersection** of the live Copilot
   Responses-forwardable set (Phase 6a filter) and the snapshot's slugs, each entry
-  emitted **verbatim** with `auto_review_model_override` injected per config and,
-  optionally, `context_window`/`max_context_window` overlaid from Copilot's live
-  limits.
-- A **four-key configuration surface** (§8): `codex-catalog-enabled`,
-  `codex-auto-review-model`, `codex-auto-review-model-overrides`,
-  `codex-catalog-override-limits`.
+  re-emitted **field-for-field except** for an injected `auto_review_model_override`
+  (per config) and, optionally, `context_window`/`max_context_window` overlaid from
+  Copilot's live limits.
+- A **three-key configuration surface** (§8): `codex-catalog-enabled`,
+  `codex-auto-review-model`, `codex-catalog-override-limits` (all scalar).
+  Per-model reviewer overrides are deferred to `ningw42/copilotd#54`.
 - Operator documentation of the required Codex **command-auth provider** config
   (§4). No new copilotd inbound auth: the catalog request is authenticated by the
   existing managed API key.
@@ -125,6 +126,11 @@ entries** (from a vendored snapshot) with the override injected.
 - **Snapshot freshness automation** (commit-based caching / TTL / upstream-change
   detection). Deferred to `ningw42/copilotd#53` (§16). Phase 6b ships the static
   embedded snapshot as the correct baseline.
+- **Per-model reviewer overrides** (routing different active models to different
+  reviewers). v1 ships a single global reviewer; per-model routing is deferred to
+  `ningw42/copilotd#54`. Any forwardable model is a valid reviewer (§5), so one
+  global reviewer covers the common case, and a per-model map would be copilotd's
+  only non-scalar config key.
 - **Advertising Copilot-only Responses models that are absent from the snapshot**
   (`mai-code-1-flash-picker`, `gpt-5-mini`, `gpt-5.3-codex`). We have no faithful
   `base_instructions` for them; they are not advertised to Codex in v1 (they
@@ -145,17 +151,18 @@ entries** (from a vendored snapshot) with the override injected.
 
 | Decision | Choice | Rationale |
 | --- | --- | --- |
-| How to enable auto-approval | Patch `auto_review_model_override` (Codex catalog-native), not payload aliasing | The field is Codex's designed mechanism; it survives both HTTP and WebSocket transports (`guardian/review.rs`). Aliasing the request breaks under WSS (the rejected PR). |
+| How to enable auto-approval | Patch `auto_review_model_override` (Codex catalog-native), not payload aliasing | The field is Codex's designed mechanism; it survives both HTTP and WebSocket transports (`guardian/review.rs`). Aliasing the request breaks under WSS (the rejected PR). OpenAI's own Amazon Bedrock provider solves the same "no `codex-auto-review` on a non-ChatGPT backend" problem by overriding `approval_review_preferred_model()` to a real model (`gpt-5.4`) — prior art validating this approach. |
 | Precondition on the operator | Configure copilotd as a Codex **command-auth provider** | The catalog fetch gate is `uses_codex_backend() || has_command_auth()` (`manager.rs:390`); command auth is the only path a self-hosted proxy can turn on. The auth command simply prints copilotd's managed API key. |
 | Endpoint behavior | Content-negotiate `GET/HEAD /openai/v1/models` on `?client_version=` + the enable toggle | Codex hardcodes `{base_url}/models`; the standard list and the Codex catalog must share the route. `client_version` is Codex's own signal; standard OpenAI SDKs never send it. |
+| When the Codex shape is emitted | Only when enabled **and** there is something to inject — a global reviewer **or** the limits overlay | Emitting the intersection re-sends every advertised model's complete `ModelInfo`, pinning its snapshot `base_instructions` (§13.2); doing that with nothing to inject would degrade prompts for no benefit, so a bare `codex-catalog-enabled=true` emits nothing and Codex falls back to its own bundle (fails safe). |
 | Where entry bodies come from | Vendored Codex `models.json` (`rust-v0.144.5`), emitted **verbatim** + injected override | The merge is wholesale per slug (`manager.rs:422`) and empty `base_instructions` degrades the active model with no fallback (`client.rs:867`). Re-emitting Codex's own entries is the only faithful option. |
 | Catalog coverage | Intersection of live Copilot-forwardable and snapshot slugs | Advertise only models copilotd can actually forward **and** for which we have a faithful body. Currently the 6 overlapping slugs. |
 | Copilot-only non-snapshot models | Not advertised to Codex in v1 | No faithful `base_instructions`; degrading a user's active model is worse than omitting it. |
-| Reviewer configuration | Global `codex-auto-review-model` + per-model `codex-auto-review-model-overrides`; overrides win | Fits copilotd's flat config; a single knob covers the common case, the map covers per-model routing. |
-| Reviewer validity | Patch only when the resolved reviewer is itself in the emitted catalog; else skip + warn | A reviewer Copilot can't forward would fail the review call; failing safe to Codex's native default is cleaner than advertising a broken reviewer. |
-| Limits fidelity | Verbatim snapshot limits by default; `codex-catalog-override-limits=true` overlays Copilot's live `max_prompt_tokens` | Verbatim is the faithful Codex representation; operators who hit context-length errors can opt into Copilot's honest forwardable budget (Phase 6a §5.5 principle). |
+| Reviewer configuration | A single global `codex-auto-review-model` (per-model overrides deferred to #54) | Any forwardable model is a valid reviewer (the guardian review runs Codex's own policy, not the reviewer's instructions — §5), so one global knob covers the common case; a per-model map would be copilotd's only non-scalar config, so it waits for real demand. |
+| Reviewer validity | Patch only when the resolved reviewer is itself in the emitted intersection; else skip + warn | A reviewer Copilot can't forward would fail the review call; failing safe to Codex's native default is cleaner than advertising a broken reviewer. Intersection membership also guarantees Codex resolves the reviewer's real `ModelInfo`, not fallback metadata. |
+| Limits fidelity | Snapshot limits by default; `codex-catalog-override-limits=true` overlays `context_window ← max_prompt_tokens` and `max_context_window ← max_context_window_tokens` | Snapshot is the faithful Codex representation; the overlay reports Copilot's honest forwardable budget (Phase 6a §5.5). Off by default because it is a capability-affecting change that must be opted into, never silent. |
 | Rendering technique | Decode each snapshot entry to `map[string]json.RawMessage`, inject/overwrite specific keys, re-marshal | Preserves every `ModelInfo` field verbatim without modelling the ~40-field struct; insulates us from fields we don't read (JSON object key order is insignificant to Codex's serde). |
-| Master toggle | `codex-catalog-enabled` (default **false**) | The Codex `ModelInfo` shape is a Codex-internal, non-stable type pinned to one version; serving it is opt-in so drift can't silently break clients that didn't ask for it. |
+| Master toggle | `codex-catalog-enabled` (default **false**) | The Codex `ModelInfo` shape is a Codex-internal, non-stable type pinned to one version; serving it is opt-in so drift can't silently break clients that didn't ask for it. This reflects a project tenet: copilotd never silently changes a model's behavior — the catalog, the reviewer routing, and the limits overlay are each independently opt-in. |
 | Snapshot load failure | Fail fast at **startup** | The snapshot is embedded; a decode failure is a build/packaging defect, not a runtime condition. |
 
 ## 4. The enabling precondition — a command-auth provider
@@ -206,15 +213,38 @@ The reviewer must therefore be **a real model copilotd can forward** and **prese
 in the emitted catalog** (so Codex resolves its metadata). Both hold for any slug
 in the intersection (§7).
 
+The review itself runs Codex's own **guardian policy** — resolved as the operator's
+`guardian_policy_config`, else the reviewer's `model_messages.auto_review.policy`,
+else a compiled-in default (`build_guardian_review_session_config` in
+`guardian/review_session.rs`) — with the reviewer model only as the engine. It does
+**not** use the reviewer's `base_instructions`. So any forwardable model is a valid
+reviewer and the choice is a cost/latency matter, not a correctness one (each
+guarded action spends Copilot quota on a real review call). Codex's default reviewer
+is the hardcoded, unforwardable `codex-auto-review` (`approval_review_preferred_model()`
+returns `DEFAULT_APPROVAL_REVIEW_PREFERRED_MODEL`, not operator-settable), so the
+override is the only lever a self-hosted provider has — the same lever OpenAI's
+Bedrock provider uses to route to `gpt-5.4`.
+
 ## 6. When the Codex catalog is served — content negotiation
 
 `GET/HEAD /openai/v1/models` decides its body shape as:
 
-| `?client_version=` present | `codex-catalog-enabled` | Response |
-| --- | --- | --- |
-| no | any | Phase 6a OpenAI list `{"object":"list","data":[…]}` (unchanged) |
-| yes | `true` | Codex catalog `{"models":[…]}` |
-| yes | `false` | Phase 6a OpenAI list (Codex's fetch fails to parse it and falls back to its own bundle — fails **safe**, no auto-review, exactly as today) |
+| `?client_version=` | `codex-catalog-enabled` | reviewer set **or** limits overlay on | Response |
+| --- | --- | --- | --- |
+| no | any | any | Phase 6a OpenAI list `{"object":"list","data":[…]}` (unchanged) |
+| yes | `false` | any | Phase 6a OpenAI list |
+| yes | `true` | no | Phase 6a OpenAI list (nothing to inject — see below) |
+| yes | `true` | yes | Codex catalog `{"models":[…]}` |
+
+The Codex shape is emitted only when the feature is enabled **and** there is
+something to inject — a global `codex-auto-review-model` **or**
+`codex-catalog-override-limits=true`. In every other case copilotd serves the
+OpenAI list; Codex's fetch fails to parse it and **falls back to its own bundle**
+(fails **safe**, no auto-review, exactly as today). This is deliberate: emitting
+the intersection re-sends every advertised model's complete `ModelInfo` — pinning
+its snapshot `base_instructions` (§13.2) — so a bare `codex-catalog-enabled=true`
+with nothing to inject would degrade prompts for no benefit, and is treated as
+"serve the OpenAI list."
 
 Presence of `client_version` is detected by key, not value; copilotd does not
 parse or echo it (Codex uses it only as a client-side cache key). `HEAD` computes
@@ -271,38 +301,52 @@ out. The set is computed per request, so it tracks Copilot's live lineup.
 
 ### 7.3 Reviewer resolution & patching
 
-For each advertised model `M` (by slug):
+For each advertised model `M` (by slug), the reviewer is the single global
+`codex-auto-review-model` (per-model overrides are deferred to `ningw42/copilotd#54`):
 
 ```
-reviewer = overrides[M.slug]            // per-model map, if present
-        ?? codex-auto-review-model      // global default, if non-empty
+reviewer = codex-auto-review-model      // global, if non-empty
         ?? ""                           // none
 ```
 
 The `auto_review_model_override` key is injected into `M`'s entry **iff**
 `reviewer != ""` **and** `reviewer` is itself in the emitted (intersection)
-catalog. Otherwise the key is omitted for `M`:
+catalog. Otherwise the key is omitted:
 
-- reviewer empty → `M` has no override → Codex uses its native default for `M`
-  (auto-review remains broken for `M`, by choice);
-- reviewer configured but not forwardable/absent → **skip + log a warning** naming
-  the offending reviewer and model (a bad config never advertises a reviewer that
-  would fail the review call).
+- reviewer empty → no model carries an override → Codex uses its native default
+  (`codex-auto-review`), so auto-review stays broken, by choice (§13.5);
+- reviewer configured but not in the intersection → **skip + log a warning** naming
+  the reviewer (a bad config never advertises a reviewer that would fail the review
+  call).
 
-Injection overwrites any `auto_review_model_override` present in the snapshot
-entry (the snapshot's overlapping slugs carry none today, but overwrite is the
-defined behavior).
+Requiring the reviewer to be in the intersection is what guarantees (a) copilotd
+can forward the review call and (b) Codex resolves the reviewer's real `ModelInfo`
+(with its `model_messages`) rather than fallback metadata. Any intersection member
+is a valid reviewer — the guardian review runs Codex's own policy with the reviewer
+as the engine (§5), so no "reviewer-capable" check is needed. Injection overwrites
+any `auto_review_model_override` present in the snapshot entry (the overlapping
+slugs carry none today, but overwrite is the defined behavior).
 
 ### 7.4 Limits overlay (`codex-catalog-override-limits`)
 
 - **false (default):** emit the snapshot's `context_window` /
   `max_context_window` verbatim (Codex's own numbers).
-- **true:** overwrite `context_window` and `max_context_window` with Copilot's
-  live `max_prompt_tokens` for that model (from the Phase 6a decode), when Copilot
-  supplies it; fall back to the snapshot value when it does not. This reports
-  Copilot's honest forwardable budget (Phase 6a §5.5 principle) so Codex never
-  packs a request longer than Copilot will accept, at the cost of diverging from
-  the numbers Codex ships.
+- **true:** overlay each field from its semantically-matching Copilot limit —
+  `context_window ← max_prompt_tokens` (the field Codex actually packs and
+  auto-compacts against; `resolved_context_window()` prefers it) and
+  `max_context_window ← max_context_window_tokens` (the ceiling Codex clamps a
+  user's manual context override to). Each falls back to the snapshot value when
+  Copilot does not supply it (no-fabrication: the implementing agent must confirm
+  `max_context_window_tokens` is present in a live capture; Phase 6a consumed only
+  `max_prompt_tokens`/`max_output_tokens`). This reports Copilot's honest
+  forwardable budget (Phase 6a §5.5) so Codex never packs past what Copilot
+  accepts. Two consequences (§13.3): it diverges from the numbers Codex ships, and
+  because Codex reserves output headroom *inside* `context_window`, the effective
+  input lands slightly under Copilot's true prompt budget — safe, mildly
+  conservative. `context_window` must take `max_prompt_tokens`, not the larger
+  total window: Codex packs input up to ~95% of `context_window`, so seeding it
+  with the total window would let Codex exceed Copilot's prompt budget and earn a
+  `400`.
 
 No other fields are ever modified. `model_messages`, `base_instructions`,
 `shell_type`, `truncation_policy`, `supported_reasoning_levels`, `visibility`,
@@ -310,27 +354,26 @@ No other fields are ever modified. `model_messages`, `base_instructions`,
 
 ## 8. Configuration schema
 
-Four new flat keys, following copilotd's existing ff/kebab conventions
+Three new flat keys, following copilotd's existing ff/kebab conventions
 (flag = TOML key; env = `COPILOTD_` + upper-snake; precedence flags > env > file >
 default). All are non-secret and enumerated in `ServeConfig.LogValue`.
 
 | Key (flag / TOML) | Env | Type | Default | Meaning |
 | --- | --- | --- | --- | --- |
-| `codex-catalog-enabled` | `COPILOTD_CODEX_CATALOG_ENABLED` | bool | `false` | Master opt-in. Emit the Codex `{"models":[…]}` shape when `?client_version=` is present. |
-| `codex-auto-review-model` | `COPILOTD_CODEX_AUTO_REVIEW_MODEL` | string | `""` | Global reviewer slug, injected as `auto_review_model_override` on every advertised model lacking a per-model override. Empty = no global routing. |
-| `codex-auto-review-model-overrides` | `COPILOTD_CODEX_AUTO_REVIEW_MODEL_OVERRIDES` | string (`"active=reviewer,…"`) | `""` | Per-active-model reviewer, parsed to `map[string]string`; wins over the global for the named model. |
-| `codex-catalog-override-limits` | `COPILOTD_CODEX_CATALOG_OVERRIDE_LIMITS` | bool | `false` | Overlay `context_window`/`max_context_window` from Copilot's live `max_prompt_tokens` (§7.4). |
+| `codex-catalog-enabled` | `COPILOTD_CODEX_CATALOG_ENABLED` | bool | `false` | Master opt-in. When `?client_version=` is present **and** there is something to inject (reviewer set or limits overlay on), emit the Codex `{"models":[…]}` shape (§6). |
+| `codex-auto-review-model` | `COPILOTD_CODEX_AUTO_REVIEW_MODEL` | string | `""` | Reviewer slug, injected as `auto_review_model_override` on every advertised model. Empty = no auto-review routing. Example: `gpt-5.6-luna`. |
+| `codex-catalog-override-limits` | `COPILOTD_CODEX_CATALOG_OVERRIDE_LIMITS` | bool | `false` | Overlay `context_window ← max_prompt_tokens` and `max_context_window ← max_context_window_tokens` from Copilot's live limits (§7.4). |
 
 ### 8.1 Parsing and validation
 
-- **Overrides string** parses as comma-separated `active=reviewer` pairs, each
-  split on the first `=`, both sides trimmed. A malformed pair (empty key or
-  value, missing `=`, duplicate key) is a **config validation error** at serve
-  startup — consistent with copilotd's fail-fast posture.
-- No cross-field errors: the reviewer keys and the limits toggle are simply
+- **Per-model reviewer overrides** (a parsed `active=reviewer` map) are **not** in
+  v1; the reviewer is the single scalar `codex-auto-review-model`. The map is
+  tracked in `ningw42/copilotd#54` and would be copilotd's first non-scalar config
+  key.
+- No cross-field errors: the reviewer key and the limits toggle are simply
   **inert** when `codex-catalog-enabled=false`, so operators can stage config. A
-  non-empty reviewer configuration with the catalog disabled emits an
-  informational log line at startup (not an error).
+  non-empty reviewer with the catalog disabled emits an informational log line at
+  startup (not an error).
 - **Reviewer-forwardability is not validated at config time** (the live catalog is
   unknown until a request): it is enforced at render time as a skip + warning
   (§7.3).
@@ -352,7 +395,7 @@ copilotd/
     │   │                            override injection -> {"models":[...]} marshal.
     │   └── handler.go         [CHG] OpenAI descriptor branches on client_version + enabled:
     │                                RenderCodex vs the existing RenderOpenAI.
-    ├── config/                [CHG] four keys; pair-string->map parser; validation; LogValue.
+    ├── config/                [CHG] three scalar keys; validation; LogValue.
     ├── forward/               [UNCHANGED] FetchModels reused as-is.
     └── server/                [CHG] resolve CodexConfig; pass it into the OpenAI catalog descriptor.
 ```
@@ -367,10 +410,9 @@ copilotd/
   branch: if `r.URL.Query().Has("client_version")` and `cfg.Enabled`, render the
   Codex shape; else the Phase 6a OpenAI list. The Anthropic descriptor is
   unaffected. `HEAD` handling and error dialect are unchanged.
-- **`internal/config`.** Registers the four flags, applies them in the existing
-  overlay/precedence machinery, parses the overrides pair-string, validates, and
-  exposes a resolved `CodexConfig` (enabled, global reviewer, overrides map,
-  override-limits) plus `LogValue` entries.
+- **`internal/config`.** Registers the three flags, applies them in the existing
+  overlay/precedence machinery, validates, and exposes a resolved `CodexConfig`
+  (enabled, global reviewer, override-limits) plus `LogValue` entries.
 - **`internal/server`.** Threads the resolved `CodexConfig` into the OpenAI
   catalog `Descriptor` at `newHandler`. No route changes; the existing
   `GET/HEAD /openai/v1/models` registrations carry the new behavior.
@@ -450,13 +492,21 @@ no-fabrication constraints (mirroring Phase 6a §5.5 / ADR 0004):
    single undecodable entry sinks the whole response for that client, not just the
    drifted model. A documented resync procedure plus the best-effort freshness
    automation in `ningw42/copilotd#53` (§16) are the mitigations.
-2. **Prompt/behavior values are Codex `rust-v0.144.5`'s.** A user on a different
-   Codex version silently receives our pinned `base_instructions`/`model_messages`
-   for the overlapping slugs (our fetched entry always wins per slug under command
-   auth). Functional, but not that Codex's native values.
+2. **Prompt/behavior values are Codex `rust-v0.144.5`'s — for every advertised
+   model.** Whenever the Codex shape is emitted, each intersection member is
+   re-sent whole, so its `base_instructions`/`model_messages` are pinned to our
+   snapshot (our fetched entry wins per slug under command auth); a user on a
+   different Codex version silently gets our pinned values. This pinning is
+   co-extensive with what you opted into: the emission gate (§6) only fires when a
+   reviewer or the limits overlay is set, so a model's prompt is only ever pinned
+   when you are also giving it auto-review routing or an honest limits budget —
+   never gratuitously. Functional, but not that Codex version's native values.
 3. **Limits are Codex's numbers by default;** `codex-catalog-override-limits=true`
-   swaps in Copilot's forwardable budget — more forward-safe, but diverging from
-   Codex's shipped `context_window`.
+   overlays `context_window ← max_prompt_tokens` and `max_context_window ←
+   max_context_window_tokens` (§7.4) — more forward-safe, but diverging from
+   Codex's shipped numbers, and mildly conservative (Codex reserves output headroom
+   inside `context_window`). Off by default: a capability-affecting change is opted
+   into, never silent.
 4. **Coverage is the intersection.** Copilot-only Responses models absent from the
    snapshot do not appear in the Codex picker in v1.
 5. **Auto-review requires operator config.** With no reviewer configured (global
@@ -481,26 +531,28 @@ the embedded snapshot.
   injected keys is byte-identical to the source (round-trip through
   `map[string]json.RawMessage`), and `base_instructions`/`model_messages` are
   non-empty.
-- **Override injection:** global-only applies to all; a per-model override wins for
-  its slug; a slug with neither gets no `auto_review_model_override` key; a
+- **Override injection:** a configured global reviewer is injected on every
+  advertised model; empty reviewer → no `auto_review_model_override` key on any; a
   reviewer not in the intersection is skipped with a warning and no key.
 - **Limits overlay:** off → snapshot `context_window`/`max_context_window`
-  verbatim; on → Copilot `max_prompt_tokens` substituted where present, snapshot
-  value where absent.
+  verbatim; on → `context_window`←`max_prompt_tokens` and
+  `max_context_window`←`max_context_window_tokens` where present, snapshot value
+  where absent.
 - **Envelope:** `{"models":[…]}`; every emitted entry deserializes into Codex's
   required-field set (a local mirror of the required keys guards drift).
 
 ### 14.2 `internal/config` unit tests
 
-- The four keys resolve through flags/env/TOML with correct precedence and
+- The three keys resolve through flags/env/TOML with correct precedence and
   defaults; `LogValue` includes them.
-- Overrides pair-string parses to the right map; malformed pairs (missing `=`,
-  empty side, duplicate key) fail validation; empty string → empty map.
+- A non-empty reviewer with the catalog disabled logs the informational staging
+  line (not an error).
 
 ### 14.3 Server boundary and real-listener tests
 
-- `?client_version` + enabled → `{"models":[…]}`; absent `client_version` →
-  Phase 6a OpenAI list; `client_version` + disabled → OpenAI list.
+- `?client_version` + enabled + reviewer set → `{"models":[…]}`; `?client_version`
+  + enabled but nothing to inject → OpenAI list; absent `client_version` → OpenAI
+  list; `client_version` + disabled → OpenAI list.
 - Both API-key forms authorize; invalid auth → 401 before readiness; not-ready →
   OpenAI-shaped 503; upstream non-2xx / malformed → OpenAI-shaped 502.
 - `HEAD` returns headers (incl. `Content-Length`) with no body over a real
@@ -520,16 +572,18 @@ the embedded snapshot.
 
 Phase 6b is complete when all hold:
 
-1. `GET/HEAD /openai/v1/models` content-negotiates: `?client_version=` + enabled →
-   `{"models":[…]}`; otherwise the Phase 6a OpenAI list, unchanged.
+1. `GET/HEAD /openai/v1/models` content-negotiates: `?client_version=` + enabled +
+   something-to-inject → `{"models":[…]}`; otherwise the Phase 6a OpenAI list,
+   unchanged (§6).
 2. The Codex catalog advertises exactly the intersection of live
    Copilot-forwardable Responses models and the vendored snapshot, entries emitted
    verbatim except for the injected keys.
-3. `auto_review_model_override` is injected per §7.3 (global default, per-model
-   override precedence, skip-with-warning when the reviewer is not forwardable).
-4. `codex-catalog-override-limits` overlays Copilot's `max_prompt_tokens` when
-   true and emits snapshot limits when false; no other field is modified.
-5. The four config keys resolve with the documented types/defaults/precedence and
+3. `auto_review_model_override` is injected per §7.3 (single global reviewer,
+   skip-with-warning when the reviewer is not in the emitted intersection).
+4. `codex-catalog-override-limits` overlays `context_window ← max_prompt_tokens`
+   and `max_context_window ← max_context_window_tokens` when true (snapshot fallback
+   where absent) and emits snapshot limits when false; no other field is modified.
+5. The three config keys resolve with the documented types/defaults/precedence and
    validation, and are logged non-secret.
 6. The vendored snapshot is embedded with Apache-2.0 `LICENSE`/`NOTICE` and a
    `PROVENANCE` record; a decode failure fails startup.
