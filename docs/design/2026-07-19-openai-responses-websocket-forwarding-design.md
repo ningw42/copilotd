@@ -1,6 +1,7 @@
 # OpenAI Responses WebSocket forwarding (payload-opaque)
 
-Status: approved 2026-07-19; revised 2026-07-19 after a design-grilling pass.
+Status: approved 2026-07-19; revised 2026-07-19 after a design-grilling pass;
+revised 2026-07-20 to add an establishment-time log record.
 Design for adding a WebSocket transport to copilotd's OpenAI Responses surface.
 It is grounded in
 [the 2026-07-19 research note](../research/2026-07-19-responses-websocket-mode.md)
@@ -303,9 +304,10 @@ No other `apierror` changes: dial and readiness failures reuse `BadGateway`,
 A hijacked WebSocket request has **two lifecycle phases** — the HTTP handshake and
 the long-lived session — and forcing both onto a single access-log line would make
 its generic `status`/`bytes` fields contradictory (a `101` carries no body; the
-session's real byte counts are all post-hijack). copilotd therefore emits **two
-correlated log lines**, each describing its own phase, which also removes the need
-for a stream-style context holder on this path.
+session's real byte counts are all post-hijack). copilotd therefore emits **three
+correlated records** for an established session: an immediate establishment
+record, a close-time session record, and the standard close-time access record.
+This also removes the need for a stream-style context holder on this path.
 
 The WS handler **blocks for the whole session** (it runs the pumps under
 `errgroup.Wait` and returns only at close), so the outer `accessLog` line is
@@ -313,25 +315,32 @@ emitted once, on return, with `duration = time.Since(start)` = the full request
 lifetime — the same property the HTTP stream path relies on
 ([middleware](../../internal/server/middleware.go#L45-L75)).
 
-- **Line 1 — HTTP handshake** (the existing `accessLog`, unchanged):
-  `method`, `route`, `status`, `bytes`, `duration`, `request_id`, plus `ws=true`.
+- **Immediate establishment record** (`websocket established`, emitted directly
+  after downstream `101`): `method`, `route`, `status=101`, `bytes=0`, `ws=true`,
+  `request_id`, and handshake `duration`. This is the live signal that a client
+  is currently using the WebSocket transport.
+- **Request access record** (the existing `accessLog`, unchanged and emitted when
+  the handler returns): `method`, `route`, `status`, `bytes`, `duration`,
+  `request_id`, plus `ws=true`.
   `status` is captured for free — `Accept` calls `w.WriteHeader(101)` before
   hijacking, so `statusWriter` records `101`; a pre-upgrade failure sets its
   status (`426`/`503`/`502`/`504`) through `apierror.Write` on the same writer.
-  `bytes` is `0`, which is truthful for a bodyless `101`. A pre-upgrade failure
-  produces **only** this line (no session).
-- **Line 2 — WS session** (emitted by the `wsforward` handler at close,
-  post-upgrade only): `msgs_c2u`, `msgs_u2c`, `bytes_c2u`, `bytes_u2c`,
+  `bytes` is `0`, which is truthful for a bodyless `101`. Its duration is the
+  full request lifetime. A pre-upgrade failure produces **only** this record (no
+  establishment or session record).
+- **WS session record** (`websocket session`, emitted by the `wsforward` handler
+  at close, post-upgrade only): `msgs_c2u`, `msgs_u2c`, `bytes_c2u`, `bytes_u2c`,
   `close_code`, `terminal_reason`, and `duration` measured **from
   `Accept`/101 to close** (session time only, isolated from handshake/dial
-  latency). Correlated to line 1 by `request_id`, captured at handler entry via
+  latency). Correlated to the other records by `request_id`, captured at handler
+  entry via
   [logging.RequestIDFrom](../../internal/forward/forward.go#L549-L551) and passed
   explicitly (the post-hijack session context descends from `baseCtx`, which does
   not carry the request id). Level `info` on a clean close, `warn` on an abnormal
   terminal.
 
-Because the handler logs line 2 from local data, the stream-style `SessionResult`
-context holder is **not** introduced.
+Because the handler logs the establishment and session records from local data,
+the stream-style `SessionResult` context holder is **not** introduced.
 
 **Metrics.** Two bounded, single-axis counters, each mirroring
 [`StreamOutcomeCounter`](../../internal/server/metrics.go#L31-L51)'s fixed-array
@@ -433,9 +442,10 @@ echo/scripted servers for **both** upstream and downstream. Coverage:
     top-of-handler `wg.Add`) is drained rather than skipped.
 12. Slow-reader write stall → the per-write deadline trips and the session is torn
     down (no goroutine leak).
-13. Two-line logging: the handshake line reports `status=101` and the session line
-    reports the directional counters + `close_code`; a pre-upgrade failure emits
-    **only** the handshake line with the mapped status.
+13. Three-record logging: the establishment record appears immediately after
+    `101`; the session record reports directional counters + `close_code` at
+    close; and the access record reports the full request lifetime. A pre-upgrade
+    failure emits **only** the access record with the mapped status.
 14. Both metric counters increment on the correct axes (accept vs session
     terminal), once each per session.
 15. The `ws://` scheme path (the `http → ws` test mapping) and proxy/TLS wiring.
@@ -458,14 +468,15 @@ echo/scripted servers for **both** upstream and downstream. Coverage:
 Reused unchanged: the identity/credential seam, local auth + readiness
 middleware, request-ID correlation, most of the configuration, the access-log
 context-holder **pattern** (still used by the stream/shape paths), and the general
-payload-opaque forwarding policy. Note the WS path deliberately emits a **paired
-(handshake, session) log** rather than a single line — a scoped, intentional
-exception to the one-line-per-request habit, justified by the two genuine
-lifecycle phases of a hijacked request.
+payload-opaque forwarding policy. Note the WS path deliberately adds immediate
+establishment and close-time session records alongside the standard access log —
+a scoped, intentional exception to the one-line-per-request habit, justified by
+the two genuine lifecycle phases of a hijacked request.
 
 New: the `internal/wsforward` package (accept, dial, pumps, session lifecycle,
-shutdown draining), one `apierror` kind (`NotAWebSocketUpgrade` → 426), the second
-WS access-log line and two single-axis WS-outcome counters, one config knob
-(`WebSocketHandshakeTimeout`), the `coder/websocket` v1.8.15 dependency, and the
+shutdown draining), one `apierror` kind (`NotAWebSocketUpgrade` → 426), the two
+WS establishment and session records, two single-axis WS-outcome
+counters, one config knob (`WebSocketHandshakeTimeout`), the `coder/websocket`
+v1.8.15 dependency, and the
 `GET /openai/v1/responses` route. No WS context holder is introduced. The HTTP
 `Forwarder` and the SSE engine are untouched.

@@ -80,6 +80,7 @@ func New(provider identity.Provider, dialClient *http.Client, dialTimeout, write
 // Handler returns the OpenAI Responses WebSocket forwarding handler.
 func (p *Proxy) Handler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		handshakeStart := time.Now()
 		p.wg.Add(1)
 		defer p.wg.Done()
 		phaseCtx, cancelPhase := context.WithCancel(r.Context())
@@ -145,6 +146,18 @@ func (p *Proxy) Handler() http.HandlerFunc {
 		}
 		defer func() { _ = client.CloseNow() }()
 		sessionStart := time.Now()
+		route := r.Pattern
+		if route == "" {
+			route = "unmatched"
+		}
+		p.logger.LogAttrs(r.Context(), slog.LevelInfo, "websocket established",
+			slog.String("method", r.Method),
+			slog.String("route", route),
+			slog.Int("status", http.StatusSwitchingProtocols),
+			slog.Int64("bytes", 0),
+			slog.Bool("ws", true),
+			slog.Duration("duration", time.Since(handshakeStart)),
+		)
 		p.metrics.observeAccept(AcceptEstablished)
 
 		session := &activeSession{client: client, upstream: upstream}

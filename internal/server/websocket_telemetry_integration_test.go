@@ -47,7 +47,7 @@ func websocketTelemetryLogger(t *testing.T) (*slog.Logger, *synchronizedLogBuffe
 	return logger, buffer
 }
 
-func TestWebSocketTelemetryEmitsCorrelatedHandshakeAndSessionLines(t *testing.T) {
+func TestWebSocketTelemetryEmitsEstablishmentSessionAndAccessRecords(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := websocket.Accept(w, r, nil)
 		if err != nil {
@@ -91,6 +91,28 @@ func TestWebSocketTelemetryEmitsCorrelatedHandshakeAndSessionLines(t *testing.T)
 		}
 		t.Fatalf("dial downstream WebSocket: %v", err)
 	}
+	defer func() { _ = client.CloseNow() }()
+	waitForWsLog(t, logs, `msg="websocket established"`)
+	established := logs.String()
+	for _, want := range []string{
+		`msg="websocket established"`,
+		"method=GET",
+		`route="GET /openai/v1/responses"`,
+		"status=101",
+		"bytes=0",
+		"ws=true",
+		"duration=",
+		"request_id=ws-telemetry-request",
+	} {
+		if !strings.Contains(established, want) {
+			t.Errorf("established telemetry missing %q before close:\n%s", want, established)
+		}
+	}
+	for _, closeTimeRecord := range []string{"msg=access", `msg="websocket session"`} {
+		if strings.Contains(established, closeTimeRecord) {
+			t.Errorf("close-time record %q emitted while WebSocket remains open:\n%s", closeTimeRecord, established)
+		}
+	}
 	payload := []byte("private-session-payload")
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	if err := client.Write(ctx, websocket.MessageText, payload); err != nil {
@@ -122,6 +144,9 @@ func TestWebSocketTelemetryEmitsCorrelatedHandshakeAndSessionLines(t *testing.T)
 	if got := strings.Count(out, `msg="websocket session"`); got != 1 {
 		t.Fatalf("session lines = %d, want 1:\n%s", got, out)
 	}
+	if got := strings.Count(out, `msg="websocket established"`); got != 1 {
+		t.Fatalf("established lines = %d, want 1:\n%s", got, out)
+	}
 	for _, want := range []string{
 		`route="GET /openai/v1/responses"`,
 		"status=101",
@@ -136,11 +161,11 @@ func TestWebSocketTelemetryEmitsCorrelatedHandshakeAndSessionLines(t *testing.T)
 		"terminal_reason=client_closed",
 	} {
 		if !strings.Contains(out, want) {
-			t.Errorf("paired telemetry missing %q:\n%s", want, out)
+			t.Errorf("correlated telemetry missing %q:\n%s", want, out)
 		}
 	}
-	if got := strings.Count(out, "request_id=ws-telemetry-request"); got != 2 {
-		t.Errorf("correlated request_id occurrences = %d, want 2:\n%s", got, out)
+	if got := strings.Count(out, "request_id=ws-telemetry-request"); got != 3 {
+		t.Errorf("correlated request_id occurrences = %d, want 3:\n%s", got, out)
 	}
 	for _, secret := range []string{"private-session-payload", "copilot-token", testAPIKey} {
 		if strings.Contains(out, secret) {
@@ -149,7 +174,7 @@ func TestWebSocketTelemetryEmitsCorrelatedHandshakeAndSessionLines(t *testing.T)
 	}
 }
 
-func TestWebSocketPreUpgradeFailureEmitsOnlyHandshakeLine(t *testing.T) {
+func TestWebSocketPreUpgradeFailureEmitsOnlyAccessRecord(t *testing.T) {
 	provider := readyStub("http://unused.invalid")
 	logger, logs := websocketTelemetryLogger(t)
 	forwarder := forward.New(provider, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
@@ -193,8 +218,10 @@ func TestWebSocketPreUpgradeFailureEmitsOnlyHandshakeLine(t *testing.T) {
 	if got := strings.Count(out, "msg=access"); got != 1 {
 		t.Fatalf("access lines = %d, want 1:\n%s", got, out)
 	}
-	if strings.Contains(out, `msg="websocket session"`) {
-		t.Fatalf("pre-upgrade failure emitted a session line:\n%s", out)
+	for _, establishedOnlyRecord := range []string{`msg="websocket established"`, `msg="websocket session"`} {
+		if strings.Contains(out, establishedOnlyRecord) {
+			t.Fatalf("pre-upgrade failure emitted %q:\n%s", establishedOnlyRecord, out)
+		}
 	}
 	for _, want := range []string{
 		`route="GET /openai/v1/responses"`,
@@ -293,8 +320,18 @@ func TestAssembledServerRecoversPostUpgradeObserverPanicAndClosesBothSockets(t *
 
 func waitForWsCount(t *testing.T, count func() uint64, want uint64) {
 	t.Helper()
+	waitForWsCondition(t, func() bool { return count() == want })
+}
+
+func waitForWsLog(t *testing.T, logs *synchronizedLogBuffer, want string) {
+	t.Helper()
+	waitForWsCondition(t, func() bool { return strings.Contains(logs.String(), want) })
+}
+
+func waitForWsCondition(t *testing.T, condition func() bool) {
+	t.Helper()
 	deadline := time.Now().Add(time.Second)
-	for count() != want && time.Now().Before(deadline) {
+	for !condition() && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
 }
