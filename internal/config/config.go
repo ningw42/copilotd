@@ -35,7 +35,7 @@ const (
 	// request and opt-in buffered-response caps (32 MiB each) are generous enough
 	// for multi-image base64 while guarding against pathological bodies.
 	defaultOutboundTimeout          = 600 * time.Second
-	defaultStreamIdleTimeout        = 90 * time.Second
+	defaultStreamIdleTimeout        = 5 * time.Minute
 	defaultStreamKeepaliveInterval  = 15 * time.Second
 	defaultWriteTimeout             = 90 * time.Second
 	defaultResponseHeaderTimeout    = 600 * time.Second

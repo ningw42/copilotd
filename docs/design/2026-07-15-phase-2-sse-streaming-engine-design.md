@@ -379,7 +379,7 @@ default; env names `COPILOTD_` + upper(flag, `-`→`_`).
 
 | Setting | TOML | Flag | Env | Default | Remarks |
 | --- | --- | --- | --- | --- | --- |
-| Stream idle/stall timeout | `stream-idle-timeout` | `--stream-idle-timeout` | `COPILOTD_STREAM_IDLE_TIMEOUT` | `90s` | Both surfaces, stream path; upstream silence (excludes our write time) ⇒ synthesized terminal error + close |
+| Stream idle/stall timeout | `stream-idle-timeout` | `--stream-idle-timeout` | `COPILOTD_STREAM_IDLE_TIMEOUT` | `5m` | Both surfaces, stream path; upstream silence (excludes our write time) ⇒ synthesized terminal error + close |
 | Stream keepalive interval | `stream-keepalive-interval` | `--stream-keepalive-interval` | `COPILOTD_STREAM_KEEPALIVE_INTERVAL` | `15s` | OpenAI stream path only; idle gap ⇒ `:` comment to the client |
 | Write timeout | `write-timeout` | `--write-timeout` | `COPILOTD_WRITE_TIMEOUT` | `90s` | **Both paths**; per-write deadline catching a client that stopped draining; exceeded ⇒ `client_cancel` / abort |
 | Response header timeout | `response-header-timeout` | `--response-header-timeout` | `COPILOTD_RESPONSE_HEADER_TIMEOUT` | `600s` | Both paths; time-to-first-byte bound (TTFB exceeded ⇒ 504) |

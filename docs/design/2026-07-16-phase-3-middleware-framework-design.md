@@ -446,7 +446,7 @@ follows (non-nil transformer; a `nil` transformer is exactly Phase 2):
 The **cancel-then-join** lifecycle and the deadline-bounded writer are unchanged.
 Delay note: a full-buffering `hold` shim normally flushes at **EOF** (upstream
 closes after its terminal) — prompt; only the pathological "terminal delivered but
-connection held open" case waits for `stall` (≤ `--stream-idle-timeout`, 90s, with
+connection held open" case waits for `stall` (≤ `--stream-idle-timeout`, 5m, with
 `:` pings every 15s meanwhile) before the held content flushes. That is the shim's
 own coalescing choice, not a framework stall.
 

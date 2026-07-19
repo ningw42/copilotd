@@ -52,7 +52,7 @@ func defaultConfig() ServeConfig {
 		GithubOAuthTokenFile:     defaultOAuthTokenFile(),
 		APIKey:                   testAPIKey,
 		OutboundTimeout:          600 * time.Second,
-		StreamIdleTimeout:        90 * time.Second,
+		StreamIdleTimeout:        5 * time.Minute,
 		StreamKeepaliveInterval:  15 * time.Second,
 		WriteTimeout:             90 * time.Second,
 		ResponseHeaderTimeout:    600 * time.Second,
@@ -448,7 +448,7 @@ func TestStreamIdleTimeoutConfigPrecedence(t *testing.T) {
 		env  map[string]string
 		want time.Duration
 	}{
-		{name: "default", want: 90 * time.Second},
+		{name: "default", want: 5 * time.Minute},
 		{name: "TOML overrides default", args: []string{"--config", path}, want: 11 * time.Second},
 		{
 			name: "env overrides TOML",
@@ -533,7 +533,7 @@ func TestLoadPrecedence(t *testing.T) {
 	// retry default) into a precedence want, since Resolve now populates them; the
 	// precedence cases only exercise addr/log/file fields.
 	withDefaults := func(c ServeConfig) ServeConfig {
-		c.StreamIdleTimeout = 90 * time.Second
+		c.StreamIdleTimeout = 5 * time.Minute
 		c.StreamKeepaliveInterval = 15 * time.Second
 		c.WriteTimeout = 90 * time.Second
 		c.ResponseHeaderTimeout = 600 * time.Second
