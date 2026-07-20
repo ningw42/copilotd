@@ -68,18 +68,36 @@ One of the three inbound API dialects copilotd serves — the Anthropic surface
 (`/anthropic/...`), the OpenAI surface (`/openai/...`), and the GitHub Copilot
 surface (initially `/models`). Each endpoint forwards only to its matching
 upstream Surface and Route; never cross-translated.
+The `Surface` type lives in `internal/endpoint`; error rendering (`apierror`)
+and the other consumers depend on it, not the reverse.
 _Avoid_: provider, endpoint (unqualified)
 
 **Route**:
 The registered upstream path a Surface exposes — `/v1/messages`,
 `/v1/messages/count_tokens`, `/responses`, or `/models`. Unique within a Surface,
 not assumed globally unique (a later Surface may reuse a path).
+Modeled as the single `endpoint.Route` type, shared by HTTP forwarding, catalog
+required-route membership, and shim dispatch; the earlier separate `shim.Route`
+and `catalog.Route` types are removed.
 _Avoid_: endpoint (unqualified), path (unqualified)
 
 **Endpoint**:
-A specific served entry point, identified by the `(Surface, Route)` pair — the
-qualified sense in which "endpoint" is allowed (bare "endpoint" is still avoided for
-Surface and Route).
+How copilotd serves one operation — an inbound binding paired with an upstream
+(outbound) dependency, modeled as a typed served *contract* (one of: HTTP
+forward, WebSocket forward, raw passthrough, or Catalog). A route with an
+inbound side but no outbound dependency (`/healthz`, `/readyz`) is not an
+Endpoint. An Endpoint owns its Surface, so Surface-level facts (the terminal
+event, the error dialect) are governed through it; a fact sits directly on the
+Endpoint only when it can differ between two endpoints of the same Surface (for
+example, whether it may stream). Lives in `internal/endpoint`; rendering,
+handlers, authentication, clients, and logging are kept out. Replaces the
+earlier `(Surface, Route)`-pair sense.
+_Avoid_: "valid Endpoint identities", "valid (Surface, Route) pair"
+
+**`/models` Endpoint note**:
+`/models` is one upstream path serving three Endpoints: the raw passthrough plus
+both catalogs' outbound source — the same upstream dependency, but three
+different served contracts.
 
 **Catalog**:
 A provider-shaped model list served on a Surface's `/models` — Copilot's raw
@@ -176,5 +194,5 @@ mint fails. Surfaced at `/readyz`; when not-ready, Surface endpoints return `503
 _Avoid_: healthy (that is liveness, `/healthz`)
 
 **Degraded**:
-Running but not-ready — serving `/healthz` and refusing provider routes with
+Running but not-ready — serving `/healthz` and refusing Surface endpoints with
 `503` — because no mint has yet succeeded (or the last one failed).

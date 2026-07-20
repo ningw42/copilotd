@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/ningw42/copilotd/internal/endpoint"
 	"github.com/ningw42/copilotd/internal/identity"
 )
 
@@ -242,7 +243,7 @@ func startSession(t *testing.T, maxMessageBytes int64, writeTimeout time.Duratio
 	)
 	sessionDone := make(chan struct{})
 	downstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		proxy.Handler().ServeHTTP(w, r)
+		proxy.Handler(endpoint.OpenAIResponsesWS()).ServeHTTP(w, r)
 		close(sessionDone)
 	}))
 	clientURL := "ws" + strings.TrimPrefix(downstream.URL, "http") + "/openai/v1/responses"

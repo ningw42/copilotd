@@ -4,7 +4,6 @@ import (
 	"context"
 	"sync"
 
-	"github.com/ningw42/copilotd/internal/apierror"
 	"github.com/ningw42/copilotd/internal/sse"
 )
 
@@ -56,15 +55,4 @@ func StoreStreamResult(ctx context.Context, result StreamResult) {
 	holder.result = result
 	holder.set = true
 	holder.mu.Unlock()
-}
-
-func streamSurface(surface apierror.Surface) string {
-	switch surface {
-	case apierror.Anthropic:
-		return "anthropic"
-	case apierror.OpenAI:
-		return "openai"
-	default:
-		panic("forward: unknown stream surface")
-	}
 }

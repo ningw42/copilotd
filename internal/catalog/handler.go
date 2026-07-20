@@ -7,16 +7,15 @@ import (
 	"strconv"
 
 	"github.com/ningw42/copilotd/internal/apierror"
+	"github.com/ningw42/copilotd/internal/endpoint"
 )
 
-// Descriptor binds a provider-shaped catalog to its Surface, upstream Route
-// membership predicate, and pure renderer.
-type Descriptor struct {
-	Surface       apierror.Surface
-	RequiredRoute Route
-	Render        func([]Model) ([]byte, error)
-	Codex         CodexDescriptor
-	Logger        *slog.Logger
+// Rendering bundles the request-time and representation concerns that stay
+// outside the facts-only endpoint contract.
+type Rendering struct {
+	Render func([]Model) ([]byte, error)
+	Codex  CodexDescriptor
+	Logger *slog.Logger
 }
 
 // CodexDescriptor contains the opt-in gate and pure-render settings for the
@@ -29,45 +28,45 @@ type CodexDescriptor struct {
 
 // Handler fetches one current Copilot catalog and renders it for a Surface.
 // Credential/transport details stay behind the narrow Fetcher interface.
-func Handler(desc Descriptor, fetcher Fetcher) http.HandlerFunc {
+func Handler(ep endpoint.Catalog, rendering Rendering, fetcher Fetcher) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		status, body, err := fetcher.FetchModels(r.Context())
+		status, body, err := fetcher.FetchModels(r.Context(), ep.Upstream())
 		if err != nil {
 			if r.Context().Err() != nil {
 				return
 			}
-			writeFetchError(w, desc.Surface, err)
+			writeFetchError(w, ep.Surface(), err)
 			return
 		}
 		if status != http.StatusOK {
-			apierror.Write(w, desc.Surface, apierror.BadGateway, "upstream models request failed")
+			apierror.Write(w, ep.Surface(), apierror.BadGateway, "upstream models request failed")
 			return
 		}
 
 		models, err := Decode(body)
 		if err != nil {
-			apierror.Write(w, desc.Surface, apierror.BadGateway, "upstream models response was invalid")
+			apierror.Write(w, ep.Surface(), apierror.BadGateway, "upstream models response was invalid")
 			return
 		}
-		filtered := Filter(models, desc.RequiredRoute)
+		filtered := Filter(models, ep.RequiredRoute())
 		shape := CatalogShapeOpenAI
 		var representation []byte
-		if servesCodexShape(desc, r) {
+		if servesCodexShape(ep, rendering, r) {
 			shape = CatalogShapeCodex
 			var outcome CodexRenderOutcome
-			representation, outcome, err = RenderCodex(filtered, desc.Codex.RenderConfig)
-			if err == nil && outcome.SkippedReviewer != "" && desc.Logger != nil {
-				desc.Logger.WarnContext(r.Context(), "Codex catalog reviewer was skipped",
+			representation, outcome, err = RenderCodex(filtered, rendering.Codex.RenderConfig)
+			if err == nil && outcome.SkippedReviewer != "" && rendering.Logger != nil {
+				rendering.Logger.WarnContext(r.Context(), "Codex catalog reviewer was skipped",
 					slog.String("reviewer", outcome.SkippedReviewer))
 			}
 		} else {
-			representation, err = desc.Render(filtered)
+			representation, err = rendering.Render(filtered)
 		}
 		if err != nil {
-			apierror.Write(w, desc.Surface, apierror.BadGateway, "could not render the models catalog")
+			apierror.Write(w, ep.Surface(), apierror.BadGateway, "could not render the models catalog")
 			return
 		}
-		if desc.Surface == apierror.OpenAI {
+		if ep.Surface() == endpoint.OpenAI {
 			StoreCatalogShape(r.Context(), shape)
 		}
 
@@ -80,14 +79,14 @@ func Handler(desc Descriptor, fetcher Fetcher) http.HandlerFunc {
 	}
 }
 
-func servesCodexShape(desc Descriptor, r *http.Request) bool {
-	return desc.Surface == apierror.OpenAI &&
+func servesCodexShape(ep endpoint.Catalog, rendering Rendering, r *http.Request) bool {
+	return ep.Surface() == endpoint.OpenAI &&
 		r.URL.Query().Has("client_version") &&
-		desc.Codex.Enabled &&
-		(desc.Codex.RenderConfig.AutoReviewModel != "" || desc.Codex.RenderConfig.OverrideLimits)
+		rendering.Codex.Enabled &&
+		(rendering.Codex.RenderConfig.AutoReviewModel != "" || rendering.Codex.RenderConfig.OverrideLimits)
 }
 
-func writeFetchError(w http.ResponseWriter, surface apierror.Surface, err error) {
+func writeFetchError(w http.ResponseWriter, surface endpoint.Surface, err error) {
 	switch {
 	case errors.Is(err, ErrNoCredential):
 		apierror.Write(w, surface, apierror.NotReady, "no upstream credential available")

@@ -13,18 +13,8 @@ package apierror
 import (
 	"encoding/json"
 	"net/http"
-)
 
-// Surface identifies the inbound API dialect. Forwarding policy selects the
-// local error shape explicitly from this truthful Surface identity. (CONTEXT.md
-// reserves "provider" for the credential provider; the inbound API dialect is a
-// Surface.)
-type Surface int
-
-const (
-	Anthropic Surface = iota
-	OpenAI
-	GitHubCopilot
+	"github.com/ningw42/copilotd/internal/endpoint"
 )
 
 // Error carries a deliberate surface-native pre-commit rejection from a shim.
@@ -101,7 +91,7 @@ var table = map[Kind]entry{
 
 // Write renders kind for surface as the mapped status plus a JSON body, setting
 // Content-Type: application/json. msg is the human-readable message.
-func Write(w http.ResponseWriter, surface Surface, kind Kind, msg string) {
+func Write(w http.ResponseWriter, surface endpoint.Surface, kind Kind, msg string) {
 	e := table[kind]
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(e.status)
@@ -109,15 +99,15 @@ func Write(w http.ResponseWriter, surface Surface, kind Kind, msg string) {
 }
 
 // WriteStreamError writes and flushes one native-shaped terminal SSE error.
-func WriteStreamError(w http.ResponseWriter, surface Surface, reason StreamReason) error {
+func WriteStreamError(w http.ResponseWriter, surface endpoint.Surface, reason StreamReason) error {
 	var payload []byte
-	if surface == OpenAI {
+	if surface == endpoint.OpenAI {
 		var b openaiStreamError
 		b.Type = "error"
 		b.Message = streamMessages[reason]
 		payload, _ = json.Marshal(b)
 	} else {
-		payload = body(Anthropic, entry{anthropicType: "api_error"}, streamMessages[reason])
+		payload = body(endpoint.Anthropic, entry{anthropicType: "api_error"}, streamMessages[reason])
 	}
 	if _, err := w.Write(append(append([]byte("event: error\ndata: "), payload...), '\n', '\n')); err != nil {
 		return err
@@ -134,9 +124,9 @@ type openaiStreamError struct {
 	Param   *string `json:"param"`
 }
 
-func body(surface Surface, e entry, msg string) []byte {
+func body(surface endpoint.Surface, e entry, msg string) []byte {
 	switch surface {
-	case OpenAI:
+	case endpoint.OpenAI:
 		var b openaiError
 		b.Error.Message = msg
 		b.Error.Type = e.openaiType
@@ -146,10 +136,10 @@ func body(surface Surface, e entry, msg string) []byte {
 		}
 		out, _ := json.Marshal(b)
 		return out
-	case GitHubCopilot:
+	case endpoint.GitHubCopilot:
 		// GitHub Copilot is a distinct Surface even though its local failures
 		// deliberately reuse the Anthropic envelope for now.
-		return body(Anthropic, e, msg)
+		return body(endpoint.Anthropic, e, msg)
 	}
 	var b anthropicError
 	b.Type = "error"

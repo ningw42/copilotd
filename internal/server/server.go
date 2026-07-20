@@ -53,15 +53,11 @@ type websocketDrainer interface {
 }
 
 // New builds the server from cfg and logger. The identity Provider supplies the
-// outbound Copilot credential (and readiness), fwd drives the provider routes,
+// outbound Copilot credential (and readiness), fwd drives the Surface endpoints,
 // and streamOutcomes receives the bounded stream terminal-outcome metric. The
 // listener is supplied later to Run, so main owns bind and the server owns
 // serve/shutdown.
 func New(cfg config.ServeConfig, logger *slog.Logger, provider identity.Provider, fwd *forward.Forwarder, wsProxy *wsforward.Proxy, streamOutcomes StreamOutcomeObserver) *Server {
-	var ws websocketDrainer
-	if wsProxy != nil {
-		ws = wsProxy
-	}
 	httpServer := &http.Server{
 		Handler:           newHandler(cfg.APIKey, provider, fwd, logger, streamOutcomes, cfg.Codex, wsProxy),
 		ReadHeaderTimeout: readHeaderTimeout,
@@ -75,7 +71,7 @@ func New(cfg config.ServeConfig, logger *slog.Logger, provider identity.Provider
 	return &Server{
 		cfg:    cfg,
 		logger: logger,
-		ws:     ws,
+		ws:     wsProxy,
 		http:   httpServer,
 	}
 }
@@ -105,14 +101,9 @@ func (s *Server) shutdown() error {
 	s.logger.Info("shutting down", slog.Duration("timeout", s.cfg.ShutdownTimeout))
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), s.cfg.ShutdownTimeout)
 	defer cancel()
-	if s.ws != nil {
-		s.ws.StartDrain()
-	}
+	s.ws.StartDrain()
 	httpErr := s.http.Shutdown(shutdownCtx)
-	var wsErr error
-	if s.ws != nil {
-		wsErr = s.ws.Shutdown(shutdownCtx)
-	}
+	wsErr := s.ws.Shutdown(shutdownCtx)
 	if err := errors.Join(httpErr, wsErr); err != nil {
 		// Graceful shutdown overran; force the remaining connections closed.
 		_ = s.http.Close()

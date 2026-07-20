@@ -6,27 +6,20 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-)
 
-// Route is one exact upstream path advertised by a Copilot model. Route values
-// are never normalized because each Surface has an exact forwarding contract.
-type Route string
-
-const (
-	AnthropicMessagesRoute Route = "/v1/messages"
-	OpenAIResponsesRoute   Route = "/responses"
+	"github.com/ningw42/copilotd/internal/endpoint"
 )
 
 // Model contains only the Copilot model fields that provider-shaped catalogs
 // can honestly map. Pointer fields preserve the distinction between an absent
 // capability and an explicitly advertised false or zero value.
 type Model struct {
-	ID                 string       `json:"id"`
-	Name               string       `json:"name"`
-	Vendor             string       `json:"vendor"`
-	ModelPickerEnabled bool         `json:"model_picker_enabled"`
-	SupportedRoutes    []Route      `json:"supported_endpoints"`
-	Capabilities       Capabilities `json:"capabilities"`
+	ID                 string           `json:"id"`
+	Name               string           `json:"name"`
+	Vendor             string           `json:"vendor"`
+	ModelPickerEnabled bool             `json:"model_picker_enabled"`
+	SupportedRoutes    []endpoint.Route `json:"supported_endpoints"`
+	Capabilities       Capabilities     `json:"capabilities"`
 }
 
 // Capabilities is the relevant subset of Copilot's model capabilities.
@@ -90,7 +83,7 @@ func Decode(body []byte) ([]Model, error) {
 
 // Filter selects picker-visible models that advertise the exact upstream
 // Route required by a Surface. Input order is preserved.
-func Filter(models []Model, requiredRoute Route) []Model {
+func Filter(models []Model, requiredRoute endpoint.Route) []Model {
 	filtered := make([]Model, 0, len(models))
 	for _, model := range models {
 		if !model.ModelPickerEnabled || !contains(model.SupportedRoutes, requiredRoute) {

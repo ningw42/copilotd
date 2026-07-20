@@ -1,6 +1,10 @@
 package catalog
 
-import "context"
+import (
+	"context"
+
+	"github.com/ningw42/copilotd/internal/endpoint"
+)
 
 // FetchErrorKind identifies why a model Catalog fetch could not produce a
 // complete response. Values implement error so callers can classify wrapped
@@ -35,5 +39,5 @@ func (kind FetchErrorKind) Error() string {
 // Fetcher obtains one current, account-authorized Copilot model Catalog without
 // interpreting its response.
 type Fetcher interface {
-	FetchModels(ctx context.Context) (status int, body []byte, err error)
+	FetchModels(ctx context.Context, upstream endpoint.Route) (status int, body []byte, err error)
 }

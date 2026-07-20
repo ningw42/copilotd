@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ningw42/copilotd/internal/apierror"
 	"github.com/ningw42/copilotd/internal/config"
+	"github.com/ningw42/copilotd/internal/endpoint"
 	"github.com/ningw42/copilotd/internal/forward"
 	"github.com/ningw42/copilotd/internal/identity"
 	"github.com/ningw42/copilotd/internal/logging"
@@ -30,13 +30,13 @@ type catalogFailureScenario struct {
 	roundTrip     serverRoundTripFunc
 	wantStatus    int
 	wantCalls     int32
-	wantErrorType func(apierror.Surface) string
+	wantErrorType func(endpoint.Surface) string
 }
 
 func TestCatalogLocalFailuresHaveGETEquivalentHEADFramingOverRealListener(t *testing.T) {
-	apiError := func(apierror.Surface) string { return "api_error" }
-	authError := func(surface apierror.Surface) string {
-		if surface == apierror.OpenAI {
+	apiError := func(endpoint.Surface) string { return "api_error" }
+	authError := func(surface endpoint.Surface) string {
+		if surface == endpoint.OpenAI {
 			return "invalid_request_error"
 		}
 		return "authentication_error"
@@ -73,10 +73,10 @@ func TestCatalogLocalFailuresHaveGETEquivalentHEADFramingOverRealListener(t *tes
 	surfaces := []struct {
 		name    string
 		path    string
-		surface apierror.Surface
+		surface endpoint.Surface
 	}{
-		{name: "Anthropic", path: "/anthropic/v1/models", surface: apierror.Anthropic},
-		{name: "OpenAI", path: "/openai/v1/models", surface: apierror.OpenAI},
+		{name: "Anthropic", path: "/anthropic/v1/models", surface: endpoint.Anthropic},
+		{name: "OpenAI", path: "/openai/v1/models", surface: endpoint.OpenAI},
 	}
 
 	for _, surface := range surfaces {
@@ -104,7 +104,7 @@ func TestCatalogLocalFailuresHaveGETEquivalentHEADFramingOverRealListener(t *tes
 					responseLimit = 1 << 20
 				}
 				forwarder := forward.New(provider, client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, responseLimit, nil)
-				base := startServer(t, New(testConfig(), discardLogger(t), provider, forwarder, nil, NewStreamOutcomeCounter()))
+				base := startServer(t, New(testConfig(), discardLogger(t), provider, forwarder, newTestWSProxy(provider), NewStreamOutcomeCounter()))
 
 				do := func(method string) (*http.Response, []byte) {
 					t.Helper()
@@ -159,9 +159,9 @@ type catalogErrorReader struct{ err error }
 
 func (r catalogErrorReader) Read([]byte) (int, error) { return 0, r.err }
 
-func catalogErrorType(t *testing.T, surface apierror.Surface, body []byte) string {
+func catalogErrorType(t *testing.T, surface endpoint.Surface, body []byte) string {
 	t.Helper()
-	if surface == apierror.OpenAI {
+	if surface == endpoint.OpenAI {
 		return openaiErrorType(t, body)
 	}
 	return anthropicErrorType(t, body)
@@ -186,7 +186,7 @@ func TestCatalogClientCancellationPropagatesToCopilotOverRealListener(t *testing
 
 			provider := identity.NewStatic(identity.Credential{BaseURL: upstream.URL, Token: "copilot-token"}, true)
 			forwarder := forward.New(provider, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
-			base := startServer(t, New(testConfig(), discardLogger(t), provider, forwarder, nil, NewStreamOutcomeCounter()))
+			base := startServer(t, New(testConfig(), discardLogger(t), provider, forwarder, newTestWSProxy(provider), NewStreamOutcomeCounter()))
 			ctx, cancel := context.WithCancel(context.Background())
 			req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+path, nil)
 			if err != nil {
@@ -259,7 +259,7 @@ func TestCatalogCorrelationAccessLogsAndSecretRedaction(t *testing.T) {
 	}
 	provider := identity.NewStatic(identity.Credential{BaseURL: upstream.URL, Token: copilotToken}, true)
 	forwarder := forward.New(provider, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil, forward.WithLogger(logger))
-	base := startServer(t, New(testConfig(), logger, provider, forwarder, nil, NewStreamOutcomeCounter()))
+	base := startServer(t, New(testConfig(), logger, provider, forwarder, newTestWSProxy(provider), NewStreamOutcomeCounter()))
 
 	do := func(method, requestID string) (*http.Response, []byte) {
 		t.Helper()

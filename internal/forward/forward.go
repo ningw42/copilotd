@@ -25,6 +25,7 @@ import (
 
 	"github.com/ningw42/copilotd/internal/apierror"
 	"github.com/ningw42/copilotd/internal/catalog"
+	"github.com/ningw42/copilotd/internal/endpoint"
 	"github.com/ningw42/copilotd/internal/identity"
 	"github.com/ningw42/copilotd/internal/logging"
 	"github.com/ningw42/copilotd/internal/shim"
@@ -36,7 +37,7 @@ import (
 // not import server (which would be a cycle).
 const requestIDHeader = "X-Request-Id"
 
-// Forwarder forwards inbound provider-route requests upstream. Its dependencies
+// Forwarder forwards inbound Surface endpoint requests upstream. Its dependencies
 // are injected so it stays Copilot-agnostic and unit-testable: the credential
 // Provider, the outbound HTTP client, the per-request context deadline, the
 // inbound and buffered-response body caps, and the ordered shim registry.
@@ -121,38 +122,39 @@ func NewClient(responseHeaderTimeout time.Duration) *http.Client {
 	}
 }
 
-// Handler returns the http.Handler for one route: it forwards to upstreamPath on
-// the credential's base URL and tags any copilotd-originated signal with tag (the
-// error dialect). Anthropic requests are forwarded without a peek; the OpenAI
-// surface peeks only background:true, which remains unsupported.
-// A new route (e.g. OpenAI POST /openai/v1/responses -> /responses,
-// apierror.OpenAI) is added by registering another Handler; the forwarding core
-// does not change.
-func (f *Forwarder) Handler(upstreamPath string, tag apierror.Surface) http.HandlerFunc {
+// Handler returns the handler for one HTTP-forward endpoint contract. The
+// contract supplies both the upstream route and the Surface error dialect.
+// Anthropic requests are forwarded without a peek; the OpenAI surface peeks
+// only background:true, which remains unsupported.
+func (f *Forwarder) Handler(ep endpoint.HTTPForward) http.HandlerFunc {
+	upstream := ep.Upstream()
+	surface := ep.Surface()
 	return func(w http.ResponseWriter, r *http.Request) {
-		body, ok := f.readBody(w, r, tag)
+		body, ok := f.readBody(w, r, surface)
 		if !ok {
 			return
 		}
-		chain := f.registry.NewChain(r.Context(), tag, shim.Route(upstreamPath))
+		chain := f.registry.NewChain(r.Context(), surface, upstream)
 		header, body, err := chain.RunRequest(r.Context(), r.URL.RawQuery, r.Header, body)
 		if err != nil {
-			writeShimError(w, tag, err)
+			writeShimError(w, surface, err)
 			return
 		}
-		if tag == apierror.OpenAI && peekBackground(body) {
-			apierror.Write(w, tag, apierror.BackgroundUnsupported, "background responses are not supported")
+		if surface == endpoint.OpenAI && peekBackground(body) {
+			apierror.Write(w, surface, apierror.BackgroundUnsupported, "background responses are not supported")
 			return
 		}
-		f.forward(w, r, header, body, upstreamPath, tag, chain)
+		f.forward(w, r, header, body, ep, chain)
 	}
 }
 
-// PassthroughHandler returns the raw support-route handler for one explicit
-// inbound-to-upstream method mapping. It streams both request and response
-// bodies, and deliberately bypasses request peeking, body caps, shims, and SSE
-// classification.
-func (f *Forwarder) PassthroughHandler(upstreamMethod string, upstreamRoute string, surface apierror.Surface) http.HandlerFunc {
+// PassthroughHandler returns the raw support-route handler for one passthrough
+// endpoint contract. It streams both request and response bodies, and
+// deliberately bypasses request peeking, body caps, shims, and SSE
+// classification. The inbound request method is preserved upstream.
+func (f *Forwarder) PassthroughHandler(ep endpoint.Passthrough) http.HandlerFunc {
+	upstream := ep.Upstream()
+	surface := ep.Surface()
 	return func(w http.ResponseWriter, r *http.Request) {
 		cred, err := f.provider.Current(r.Context())
 		if err != nil {
@@ -170,7 +172,7 @@ func (f *Forwarder) PassthroughHandler(upstreamMethod string, upstreamRoute stri
 			// wire while making this request explicitly single-attempt.
 			outboundBody = &singleAttemptBody{ReadCloser: http.NoBody}
 		}
-		outReq, err := http.NewRequestWithContext(ctx, upstreamMethod, cred.BaseURL+upstreamRoute, outboundBody)
+		outReq, err := http.NewRequestWithContext(ctx, r.Method, cred.BaseURL+string(upstream), outboundBody)
 		if err != nil {
 			apierror.Write(w, surface, apierror.BadGateway, "could not build the upstream request")
 			return
@@ -205,7 +207,7 @@ func (f *Forwarder) PassthroughHandler(upstreamMethod string, upstreamRoute stri
 
 		copyResponseHeaders(w.Header(), resp.Header)
 		w.WriteHeader(resp.StatusCode)
-		if upstreamMethod == http.MethodHead {
+		if r.Method == http.MethodHead {
 			return
 		}
 		_, _ = io.Copy(sse.NewWriter(w, f.writeTimeout, time.Now), resp.Body)
@@ -215,14 +217,14 @@ func (f *Forwarder) PassthroughHandler(upstreamMethod string, upstreamRoute stri
 // FetchModels obtains the current account-authorized Copilot model Catalog as
 // one bounded, buffered response. The Forwarder deliberately does not decode or
 // reshape the body; callers own any provider-shaped representation.
-func (f *Forwarder) FetchModels(parent context.Context) (int, []byte, error) {
+func (f *Forwarder) FetchModels(parent context.Context, upstream endpoint.Route) (int, []byte, error) {
 	cred, err := f.provider.Current(parent)
 	if err != nil {
 		return 0, nil, fmt.Errorf("%w: %v", catalog.ErrNoCredential, err)
 	}
 
 	ctx, cancel := context.WithCancelCause(parent)
-	outReq, err := http.NewRequestWithContext(ctx, http.MethodGet, cred.BaseURL+"/models", &singleAttemptBody{ReadCloser: http.NoBody})
+	outReq, err := http.NewRequestWithContext(ctx, http.MethodGet, cred.BaseURL+string(upstream), &singleAttemptBody{ReadCloser: http.NoBody})
 	if err != nil {
 		cancel(nil)
 		return 0, nil, fmt.Errorf("%w: %v", catalog.ErrBuildUpstream, err)
@@ -274,7 +276,7 @@ type singleAttemptBody struct {
 	io.ReadCloser
 }
 
-func writeShimError(w http.ResponseWriter, surface apierror.Surface, err error) {
+func writeShimError(w http.ResponseWriter, surface endpoint.Surface, err error) {
 	var rejected *apierror.Error
 	if errors.As(err, &rejected) {
 		apierror.Write(w, surface, rejected.Kind, rejected.Msg)
@@ -287,12 +289,12 @@ func writeShimError(w http.ResponseWriter, surface apierror.Surface, err error) 
 // returning false (after a 413) if the cap is exceeded. A different read error
 // means the client vanished mid-body, so nothing useful can be sent and it
 // returns false without a response.
-func (f *Forwarder) readBody(w http.ResponseWriter, r *http.Request, tag apierror.Surface) ([]byte, bool) {
+func (f *Forwarder) readBody(w http.ResponseWriter, r *http.Request, surface endpoint.Surface) ([]byte, bool) {
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, f.maxRequestBytes))
 	if err != nil {
 		var maxErr *http.MaxBytesError
 		if errors.As(err, &maxErr) {
-			apierror.Write(w, tag, apierror.PayloadTooLarge, "request body exceeds the maximum allowed size")
+			apierror.Write(w, surface, apierror.PayloadTooLarge, "request body exceeds the maximum allowed size")
 		}
 		return nil, false
 	}
@@ -318,22 +320,24 @@ func peekBackground(body []byte) bool {
 // cancellation context and response-header bound, and copies the response back
 // verbatim. Failures originated by copilotd are classified into 502/504 (and a client
 // disconnect is swallowed — the caller has already left).
-func (f *Forwarder) forward(w http.ResponseWriter, r *http.Request, header http.Header, body []byte, upstreamPath string, tag apierror.Surface, chain *shim.Chain) {
+func (f *Forwarder) forward(w http.ResponseWriter, r *http.Request, header http.Header, body []byte, ep endpoint.HTTPForward, chain *shim.Chain) {
+	upstream := ep.Upstream()
+	surface := ep.Surface()
 	cred, err := f.provider.Current(r.Context())
 	if err != nil {
 		// A request-time credential failure (the real Manager's on-demand mint
 		// failing, #11) leaves nothing to forward; surface it as not-ready. The
 		// static stub never errors here.
-		apierror.Write(w, tag, apierror.NotReady, "no upstream credential available")
+		apierror.Write(w, surface, apierror.NotReady, "no upstream credential available")
 		return
 	}
 
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 
-	outReq, err := http.NewRequestWithContext(ctx, http.MethodPost, cred.BaseURL+upstreamPath, bytes.NewReader(body))
+	outReq, err := http.NewRequestWithContext(ctx, http.MethodPost, cred.BaseURL+string(upstream), bytes.NewReader(body))
 	if err != nil {
-		apierror.Write(w, tag, apierror.BadGateway, "could not build the upstream request")
+		apierror.Write(w, surface, apierror.BadGateway, "could not build the upstream request")
 		return
 	}
 	outReq.URL.RawQuery = r.URL.RawQuery
@@ -350,9 +354,9 @@ func (f *Forwarder) forward(w http.ResponseWriter, r *http.Request, header http.
 			// cancelled the upstream call, and there is no one left to answer.
 			return
 		case errors.Is(err, context.DeadlineExceeded):
-			apierror.Write(w, tag, apierror.GatewayTimeout, "the upstream request timed out")
+			apierror.Write(w, surface, apierror.GatewayTimeout, "the upstream request timed out")
 		default:
-			apierror.Write(w, tag, apierror.BadGateway, "could not reach the upstream")
+			apierror.Write(w, surface, apierror.BadGateway, "could not reach the upstream")
 		}
 		return
 	}
@@ -361,7 +365,7 @@ func (f *Forwarder) forward(w http.ResponseWriter, r *http.Request, header http.
 
 	// A synchronous completion keeps the existing total-duration backstop. SSE
 	// responses deliberately do not have a total-duration cap.
-	eventStream := isEventStream(resp.Header.Get("Content-Type"))
+	eventStream := ep.AllowsSSE() && isEventStream(resp.Header.Get("Content-Type"))
 	var outboundTimer *time.Timer
 	if !eventStream {
 		outboundTimer = time.AfterFunc(f.outboundTimeout, cancel)
@@ -370,7 +374,7 @@ func (f *Forwarder) forward(w http.ResponseWriter, r *http.Request, header http.
 
 	if eventStream {
 		if !identityContentEncoding(resp.Header) {
-			apierror.Write(w, tag, apierror.BadGateway, "upstream returned unsupported Content-Encoding for an event stream")
+			apierror.Write(w, surface, apierror.BadGateway, "upstream returned unsupported Content-Encoding for an event stream")
 			return
 		}
 		resp.Header.Del("Content-Encoding")
@@ -379,19 +383,19 @@ func (f *Forwarder) forward(w http.ResponseWriter, r *http.Request, header http.
 	copyResponseHeaders(preludeHeader, resp.Header)
 	status, preludeHeader, err := chain.RunPrelude(r.Context(), resp.StatusCode, preludeHeader)
 	if err != nil {
-		writeShimError(w, tag, err)
+		writeShimError(w, surface, err)
 		return
 	}
 	if eventStream {
 		copyResponseHeaders(w.Header(), preludeHeader)
 		w.Header().Del("Content-Length")
 		w.WriteHeader(status)
-		policy := streamPolicy(tag, f.writeTimeout, f.streamIdleTimeout, f.streamKeepaliveInterval, f.clock, f.fallbacks.Increment)
+		policy := streamPolicy(ep.Surface(), f.writeTimeout, f.streamIdleTimeout, f.streamKeepaliveInterval, f.clock, f.fallbacks.Increment)
 		policy.Logger = f.logger
 		policy.SuppressedShimErrors = f.suppressedShimErrors
 		result := sse.Pump(ctx, cancel, resp.Body, w, policy, chain.StreamAdapter())
 		StoreStreamResult(r.Context(), StreamResult{
-			Surface:   streamSurface(tag),
+			Surface:   ep.Surface().String(),
 			Outcome:   result.Outcome,
 			Frames:    result.Frames,
 			Fallbacks: result.Fallbacks,
@@ -410,16 +414,16 @@ func (f *Forwarder) forward(w http.ResponseWriter, r *http.Request, header http.
 	}
 	buffered, err := io.ReadAll(reader)
 	if err != nil {
-		apierror.Write(w, tag, apierror.BadGateway, "could not read the upstream response")
+		apierror.Write(w, surface, apierror.BadGateway, "could not read the upstream response")
 		return
 	}
 	if int64(len(buffered)) > f.maxBufferedResponseBytes {
-		apierror.Write(w, tag, apierror.PayloadTooLarge, "upstream response body exceeds the maximum allowed size")
+		apierror.Write(w, surface, apierror.PayloadTooLarge, "upstream response body exceeds the maximum allowed size")
 		return
 	}
 	buffered, err = chain.RunBuffered(r.Context(), buffered)
 	if err != nil {
-		writeShimError(w, tag, err)
+		writeShimError(w, surface, err)
 		return
 	}
 	preludeHeader.Set("Content-Length", strconv.Itoa(len(buffered)))
@@ -451,9 +455,9 @@ func isEventStream(contentType string) bool {
 	return err == nil && strings.EqualFold(mediaType, "text/event-stream")
 }
 
-func streamPolicy(surface apierror.Surface, writeTimeout, streamIdleTimeout, streamKeepaliveInterval time.Duration, clock sse.Clock, onFallback func()) sse.Policy {
+func streamPolicy(surface endpoint.Surface, writeTimeout, streamIdleTimeout, streamKeepaliveInterval time.Duration, clock sse.Clock, onFallback func()) sse.Policy {
 	keepaliveInterval := time.Duration(0)
-	if surface == apierror.OpenAI {
+	if surface == endpoint.OpenAI {
 		keepaliveInterval = streamKeepaliveInterval
 	}
 	return sse.Policy{
@@ -461,7 +465,7 @@ func streamPolicy(surface apierror.Surface, writeTimeout, streamIdleTimeout, str
 			if eventType == "error" {
 				return true
 			}
-			if surface == apierror.Anthropic {
+			if surface == endpoint.Anthropic {
 				return eventType == "message_stop"
 			}
 			return eventType == "response.completed" || eventType == "response.failed" || eventType == "response.incomplete"

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/ningw42/copilotd/internal/apierror"
+	"github.com/ningw42/copilotd/internal/endpoint"
 	"github.com/ningw42/copilotd/internal/identity"
 	"github.com/ningw42/copilotd/internal/logging"
 	"github.com/ningw42/copilotd/internal/shim"
@@ -54,12 +55,12 @@ func TestForwardRequestShimMutationsReachUpstreamAndQueryStaysCoreOwned(t *testi
 	defer upstream.Close()
 
 	instance := &requestMutationShim{}
-	var gotSurface apierror.Surface
-	var gotRoute shim.Route
+	var gotSurface endpoint.Surface
+	var gotRoute endpoint.Route
 	registry := shim.Registry{{
 		Name:    "request-mutation",
 		Enabled: true,
-		New: func(_ context.Context, surface apierror.Surface, route shim.Route) any {
+		New: func(_ context.Context, surface endpoint.Surface, route endpoint.Route) any {
 			gotSurface, gotRoute = surface, route
 			return instance
 		},
@@ -68,13 +69,13 @@ func TestForwardRequestShimMutationsReachUpstreamAndQueryStaysCoreOwned(t *testi
 	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages?tag=first&escaped=%2f%2F&flag", strings.NewReader(`{"original":true}`))
 	rec := newDeadlineRecorder()
 
-	f.Handler("/v1/messages", apierror.Anthropic)(rec, req)
+	f.Handler(endpoint.AnthropicMessages())(rec, req)
 
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("status = %d, want upstream 204", rec.Code)
 	}
-	if gotSurface != apierror.Anthropic || gotRoute != "/v1/messages" {
-		t.Errorf("factory endpoint = (%v, %q), want (Anthropic, /v1/messages)", gotSurface, gotRoute)
+	if gotSurface != endpoint.Anthropic || gotRoute != "/v1/messages" {
+		t.Errorf("shim factory Surface/Route = (%v, %q), want (Anthropic, /v1/messages)", gotSurface, gotRoute)
 	}
 	if instance.query != "tag=first&escaped=%2f%2F&flag" {
 		t.Errorf("shim Query() = %q, want exact inbound raw query", instance.query)
@@ -137,14 +138,14 @@ func TestForwardBufferedShimTransformsBodyAndRecomputesContentLength(t *testing.
 	registry := shim.Registry{{
 		Name:    "buffered",
 		Enabled: true,
-		New: func(context.Context, apierror.Surface, shim.Route) any {
+		New: func(context.Context, endpoint.Surface, endpoint.Route) any {
 			return instance
 		},
 	}}
 	f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, registry)
 	rec := newDeadlineRecorder()
 
-	f.Handler("/responses", apierror.OpenAI)(rec, httptest.NewRequest(http.MethodPost, "/openai/v1/responses", strings.NewReader(`{}`)))
+	f.Handler(endpoint.OpenAIResponsesHTTP())(rec, httptest.NewRequest(http.MethodPost, "/openai/v1/responses", strings.NewReader(`{}`)))
 
 	if rec.Code != http.StatusAccepted {
 		t.Errorf("status = %d, want 202", rec.Code)
@@ -190,7 +191,7 @@ func TestForwardWithoutBufferedHookCommitsBeforeReadingVerbatimBody(t *testing.T
 	f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1, registry)
 	rec := &commitObservingRecorder{deadlineRecorder: newDeadlineRecorder(), body: body}
 
-	f.Handler("/v1/messages", apierror.Anthropic)(rec, httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{}`)))
+	f.Handler(endpoint.AnthropicMessages())(rec, httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{}`)))
 
 	if rec.readsAtCommit != 0 {
 		t.Errorf("upstream body reads at commit = %d, want zero for unbuffered path", rec.readsAtCommit)
@@ -221,14 +222,14 @@ func TestForwardBufferedShimSkipsNonIdentityEncodedResponse(t *testing.T) {
 	registry := shim.Registry{{
 		Name:    "buffered",
 		Enabled: true,
-		New: func(context.Context, apierror.Surface, shim.Route) any {
+		New: func(context.Context, endpoint.Surface, endpoint.Route) any {
 			return instance
 		},
 	}}
 	f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1, registry)
 	rec := newDeadlineRecorder()
 
-	f.Handler("/responses", apierror.OpenAI)(rec, httptest.NewRequest(http.MethodPost, "/openai/v1/responses", strings.NewReader(`{}`)))
+	f.Handler(endpoint.OpenAIResponsesHTTP())(rec, httptest.NewRequest(http.MethodPost, "/openai/v1/responses", strings.NewReader(`{}`)))
 
 	if instance.calls != 0 {
 		t.Errorf("TransformBuffered calls = %d, want zero for encoded response", instance.calls)
@@ -260,14 +261,14 @@ func TestForwardBufferedResponseOverCapRendersBeforeCommit(t *testing.T) {
 	registry := shim.Registry{{
 		Name:    "buffered",
 		Enabled: true,
-		New: func(context.Context, apierror.Surface, shim.Route) any {
+		New: func(context.Context, endpoint.Surface, endpoint.Route) any {
 			return instance
 		},
 	}}
 	f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 8, registry)
 	rec := newDeadlineRecorder()
 
-	f.Handler("/responses", apierror.OpenAI)(rec, httptest.NewRequest(http.MethodPost, "/openai/v1/responses", strings.NewReader(`{}`)))
+	f.Handler(endpoint.OpenAIResponsesHTTP())(rec, httptest.NewRequest(http.MethodPost, "/openai/v1/responses", strings.NewReader(`{}`)))
 
 	if rec.Code != http.StatusRequestEntityTooLarge {
 		t.Errorf("status = %d, want 413", rec.Code)
@@ -300,14 +301,14 @@ func TestForwardBufferedShimFailureRendersBeforeCommit(t *testing.T) {
 	registry := shim.Registry{{
 		Name:    "buffered",
 		Enabled: true,
-		New: func(context.Context, apierror.Surface, shim.Route) any {
+		New: func(context.Context, endpoint.Surface, endpoint.Route) any {
 			return instance
 		},
 	}}
 	f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, registry)
 	rec := newDeadlineRecorder()
 
-	f.Handler("/v1/messages", apierror.Anthropic)(rec, httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{}`)))
+	f.Handler(endpoint.AnthropicMessages())(rec, httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{}`)))
 
 	if rec.Code != http.StatusInternalServerError {
 		t.Errorf("status = %d, want 500", rec.Code)
@@ -367,14 +368,14 @@ func TestForwardPreludeShimCommitsMutationsBeforeBodyOnBothPaths(t *testing.T) {
 			registry := shim.Registry{{
 				Name:    "prelude-mutation",
 				Enabled: true,
-				New: func(context.Context, apierror.Surface, shim.Route) any {
+				New: func(context.Context, endpoint.Surface, endpoint.Route) any {
 					return &preludeMutationShim{}
 				},
 			}}
 			f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, registry)
 			rec := newFirstWriteRecorder()
 
-			f.Handler("/v1/messages", apierror.Anthropic)(rec, httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{}`)))
+			f.Handler(endpoint.AnthropicMessages())(rec, httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{}`)))
 
 			if rec.firstStatus != http.StatusMultiStatus {
 				t.Errorf("status at first body byte = %d, want prelude-mutated 207", rec.firstStatus)
@@ -402,7 +403,7 @@ func (s *rejectingRequestShim) TransformRequest(context.Context, *shim.Request) 
 func TestForwardRequestShimRejectionUsesNativeShapeWithoutCallingUpstream(t *testing.T) {
 	tests := []struct {
 		name       string
-		surface    apierror.Surface
+		ep         endpoint.HTTPForward
 		err        error
 		wantStatus int
 		wantType   string
@@ -410,7 +411,7 @@ func TestForwardRequestShimRejectionUsesNativeShapeWithoutCallingUpstream(t *tes
 	}{
 		{
 			name:       "bare Anthropic failure defaults to shim error",
-			surface:    apierror.Anthropic,
+			ep:         endpoint.AnthropicMessages(),
 			err:        errors.New("private implementation detail"),
 			wantStatus: http.StatusInternalServerError,
 			wantType:   "api_error",
@@ -418,7 +419,7 @@ func TestForwardRequestShimRejectionUsesNativeShapeWithoutCallingUpstream(t *tes
 		},
 		{
 			name:       "deliberate OpenAI rejection keeps selected kind and message",
-			surface:    apierror.OpenAI,
+			ep:         endpoint.OpenAIResponsesHTTP(),
 			err:        apierror.Reject(apierror.InvalidRequest, "unsupported option"),
 			wantStatus: http.StatusBadRequest,
 			wantType:   "invalid_request_error",
@@ -436,14 +437,14 @@ func TestForwardRequestShimRejectionUsesNativeShapeWithoutCallingUpstream(t *tes
 			registry := shim.Registry{{
 				Name:    "reject",
 				Enabled: true,
-				New: func(context.Context, apierror.Surface, shim.Route) any {
+				New: func(context.Context, endpoint.Surface, endpoint.Route) any {
 					return &rejectingRequestShim{err: tc.err}
 				},
 			}}
 			f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, registry)
 			rec := newDeadlineRecorder()
 
-			f.Handler("/route", tc.surface)(rec, httptest.NewRequest(http.MethodPost, "/provider/route", strings.NewReader(`{}`)))
+			f.Handler(tc.ep)(rec, httptest.NewRequest(http.MethodPost, "/provider/route", strings.NewReader(`{}`)))
 
 			if rec.Code != tc.wantStatus {
 				t.Errorf("status = %d, want %d", rec.Code, tc.wantStatus)
@@ -454,7 +455,7 @@ func TestForwardRequestShimRejectionUsesNativeShapeWithoutCallingUpstream(t *tes
 			if upstreamCalls != 0 {
 				t.Errorf("upstream calls = %d, want zero", upstreamCalls)
 			}
-			if tc.surface == apierror.Anthropic {
+			if tc.ep.Surface() == endpoint.Anthropic {
 				if got := anthropicErrorType(t, rec.Body.Bytes()); got != tc.wantType {
 					t.Errorf("error.type = %q, want %q", got, tc.wantType)
 				}
@@ -484,14 +485,14 @@ func TestForwardPreludeShimRejectionReplacesUpstreamResponseBeforeCommit(t *test
 	registry := shim.Registry{{
 		Name:    "reject-prelude",
 		Enabled: true,
-		New: func(context.Context, apierror.Surface, shim.Route) any {
+		New: func(context.Context, endpoint.Surface, endpoint.Route) any {
 			return &rejectingPreludeShim{}
 		},
 	}}
 	f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, registry)
 	rec := newDeadlineRecorder()
 
-	f.Handler("/responses", apierror.OpenAI)(rec, httptest.NewRequest(http.MethodPost, "/openai/v1/responses", strings.NewReader(`{}`)))
+	f.Handler(endpoint.OpenAIResponsesHTTP())(rec, httptest.NewRequest(http.MethodPost, "/openai/v1/responses", strings.NewReader(`{}`)))
 
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400", rec.Code)
@@ -531,7 +532,7 @@ func TestForwardEnabledNopIsByteExactWithEmptyChainOnBothPaths(t *testing.T) {
 				})}
 				f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, registry)
 				rec := newDeadlineRecorder()
-				f.Handler("/v1/messages", apierror.Anthropic)(rec, httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{"raw":true}`)))
+				f.Handler(endpoint.AnthropicMessages())(rec, httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{"raw":true}`)))
 				return rec
 			}
 
@@ -551,7 +552,7 @@ func TestForwardEnabledNopIsByteExactWithEmptyChainOnBothPaths(t *testing.T) {
 }
 
 func TestStreamPolicyMapsStallToNativeTerminal(t *testing.T) {
-	policy := streamPolicy(apierror.Anthropic, time.Minute, 90*time.Second, 15*time.Second, sse.RealClock{}, nil)
+	policy := streamPolicy(endpoint.Anthropic, time.Minute, 90*time.Second, 15*time.Second, sse.RealClock{}, nil)
 	if policy.IdleTimeout != 90*time.Second {
 		t.Fatalf("IdleTimeout = %v, want 90s", policy.IdleTimeout)
 	}
@@ -566,7 +567,7 @@ func TestStreamPolicyMapsStallToNativeTerminal(t *testing.T) {
 }
 
 func TestStreamPolicyMapsShimFailureToNativeTerminal(t *testing.T) {
-	policy := streamPolicy(apierror.Anthropic, time.Minute, 90*time.Second, 15*time.Second, sse.RealClock{}, nil)
+	policy := streamPolicy(endpoint.Anthropic, time.Minute, 90*time.Second, 15*time.Second, sse.RealClock{}, nil)
 	rec := httptest.NewRecorder()
 
 	if err := policy.RenderError(rec, sse.OutcomeShimError); err != nil {
@@ -582,19 +583,19 @@ func TestStreamPolicyMapsShimFailureToNativeTerminal(t *testing.T) {
 func TestStreamPolicySelectsSurfaceTerminalAndKeepalive(t *testing.T) {
 	tests := []struct {
 		name          string
-		surface       apierror.Surface
+		surface       endpoint.Surface
 		wantKeepalive time.Duration
 		terminal      map[string]bool
 	}{
 		{
 			name:          "Anthropic forwards upstream pings without injection",
-			surface:       apierror.Anthropic,
+			surface:       endpoint.Anthropic,
 			wantKeepalive: 0,
 			terminal:      map[string]bool{"message_stop": true, "error": true},
 		},
 		{
 			name:          "OpenAI injects keepalive and recognizes every terminal",
-			surface:       apierror.OpenAI,
+			surface:       endpoint.OpenAI,
 			wantKeepalive: 17 * time.Second,
 			terminal: map[string]bool{
 				"response.completed":  true,
@@ -719,7 +720,7 @@ func TestForwardStreamShimFailureRendersNativeTerminalAndReleasesUpstream(t *tes
 	registry := shim.Registry{{
 		Name:    "failing-event",
 		Enabled: true,
-		New: func(context.Context, apierror.Surface, shim.Route) any {
+		New: func(context.Context, endpoint.Surface, endpoint.Route) any {
 			return instance
 		},
 	}}
@@ -729,7 +730,7 @@ func TestForwardStreamShimFailureRendersNativeTerminalAndReleasesUpstream(t *tes
 	req = req.WithContext(ctx)
 	rec := newDeadlineRecorder()
 
-	f.Handler("/v1/messages", apierror.Anthropic)(rec, req)
+	f.Handler(endpoint.AnthropicMessages())(rec, req)
 
 	const want = "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"copilotd: shim failed\"}}\n\n"
 	if got := rec.Body.String(); got != want {
@@ -758,8 +759,8 @@ func TestForwardSuppressesOuterFinalizeErrorAfterFullyComposedTerminal(t *testin
 	outer := &alteringFailingFinalizerShim{err: errors.New("private-finalize-error")}
 	inner := &holdingStreamShim{}
 	registry := shim.Registry{
-		{Name: "outer", Enabled: true, New: func(context.Context, apierror.Surface, shim.Route) any { return outer }},
-		{Name: "inner", Enabled: true, New: func(context.Context, apierror.Surface, shim.Route) any { return inner }},
+		{Name: "outer", Enabled: true, New: func(context.Context, endpoint.Surface, endpoint.Route) any { return outer }},
+		{Name: "inner", Enabled: true, New: func(context.Context, endpoint.Surface, endpoint.Route) any { return inner }},
 	}
 	f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, registry)
 	var logOutput bytes.Buffer
@@ -769,7 +770,7 @@ func TestForwardSuppressesOuterFinalizeErrorAfterFullyComposedTerminal(t *testin
 	req = req.WithContext(ctx)
 	rec := newDeadlineRecorder()
 
-	f.Handler("/v1/messages", apierror.Anthropic)(rec, req)
+	f.Handler(endpoint.AnthropicMessages())(rec, req)
 
 	if got, want := rec.Body.String(), ": outer-transform\n"+upstreamTerminal; got != want {
 		t.Errorf("body = %q, want fully composed terminal %q", got, want)
@@ -812,9 +813,9 @@ func TestForwardDiscardsPartiallyComposedMiddleFinalizeOutput(t *testing.T) {
 	}
 	inner := &failingFinalizerOnlyShim{}
 	registry := shim.Registry{
-		{Name: "outer-A", Enabled: true, New: func(context.Context, apierror.Surface, shim.Route) any { return outer }},
-		{Name: "middle-B", Enabled: true, New: func(context.Context, apierror.Surface, shim.Route) any { return middle }},
-		{Name: "inner-C", Enabled: true, New: func(context.Context, apierror.Surface, shim.Route) any { return inner }},
+		{Name: "outer-A", Enabled: true, New: func(context.Context, endpoint.Surface, endpoint.Route) any { return outer }},
+		{Name: "middle-B", Enabled: true, New: func(context.Context, endpoint.Surface, endpoint.Route) any { return middle }},
+		{Name: "inner-C", Enabled: true, New: func(context.Context, endpoint.Surface, endpoint.Route) any { return inner }},
 	}
 	f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, registry)
 	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{"stream":true}`))
@@ -822,7 +823,7 @@ func TestForwardDiscardsPartiallyComposedMiddleFinalizeOutput(t *testing.T) {
 	req = req.WithContext(ctx)
 	rec := newDeadlineRecorder()
 
-	f.Handler("/v1/messages", apierror.Anthropic)(rec, req)
+	f.Handler(endpoint.AnthropicMessages())(rec, req)
 
 	const want = "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"copilotd: shim failed\"}}\n\n"
 	if got := rec.Body.String(); got != want {
@@ -837,6 +838,79 @@ func TestForwardDiscardsPartiallyComposedMiddleFinalizeOutput(t *testing.T) {
 	}
 	if !body.closed {
 		t.Error("upstream body is open after middle finalize failure")
+	}
+}
+
+func TestForwardEndpointContractControlsEventStreamProcessing(t *testing.T) {
+	const (
+		countTokensBody = `{"input_tokens":17}`
+		anthropicBody   = "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+		openAIBody      = "event: response.completed\ndata: {\"type\":\"response.completed\"}\n\n"
+	)
+	tests := []struct {
+		name       string
+		ep         endpoint.HTTPForward
+		body       string
+		wantPumped bool
+	}{
+		{
+			name: "Anthropic Count Tokens stays verbatim when upstream mislabels JSON as an event stream",
+			ep:   endpoint.AnthropicCountTokens(),
+			body: countTokensBody,
+		},
+		{
+			name:       "Anthropic Messages pumps an event stream allowed by its contract",
+			ep:         endpoint.AnthropicMessages(),
+			body:       anthropicBody,
+			wantPumped: true,
+		},
+		{
+			name:       "OpenAI Responses pumps an event stream allowed by its contract",
+			ep:         endpoint.OpenAIResponsesHTTP(),
+			body:       openAIBody,
+			wantPumped: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header: http.Header{
+						"Content-Type":   {"text/event-stream"},
+						"Content-Length": {strconv.Itoa(len(tc.body))},
+					},
+					Body:    io.NopCloser(strings.NewReader(tc.body)),
+					Request: r,
+				}, nil
+			})}
+			f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
+			req := httptest.NewRequest(http.MethodPost, "/provider/route", strings.NewReader(`{}`))
+			ctx := WithStreamResultHolder(req.Context())
+			req = req.WithContext(ctx)
+			rec := newDeadlineRecorder()
+
+			f.Handler(tc.ep)(rec, req)
+
+			if got := rec.Body.String(); got != tc.body {
+				t.Errorf("body = %q, want upstream bytes verbatim %q", got, tc.body)
+			}
+			result, pumped := StreamResultFromContext(ctx)
+			if pumped != tc.wantPumped {
+				t.Errorf("SSE pump recorded result = %t, want %t (result %#v)", pumped, tc.wantPumped, result)
+			}
+			if tc.wantPumped {
+				if result.Outcome != sse.OutcomeClean || result.Frames != 1 {
+					t.Errorf("stream result = %#v, want clean one-frame terminal", result)
+				}
+				if got := rec.Header().Get("Content-Length"); got != "" {
+					t.Errorf("Content-Length = %q, want stripped by SSE pump", got)
+				}
+			} else if got := rec.Header().Get("Content-Length"); got != strconv.Itoa(len(tc.body)) {
+				t.Errorf("Content-Length = %q, want buffered upstream value %d", got, len(tc.body))
+			}
+		})
 	}
 }
 
@@ -858,7 +932,7 @@ func TestForwardParameterizedEventStreamUsesPump(t *testing.T) {
 		}, nil
 	})}
 	f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
-	downstream := httptest.NewServer(f.Handler("/v1/messages", apierror.Anthropic))
+	downstream := httptest.NewServer(f.Handler(endpoint.AnthropicMessages()))
 	defer downstream.Close()
 
 	resp, err := http.Post(downstream.URL, "application/json", strings.NewReader(`{"stream":true}`))
@@ -911,7 +985,7 @@ func TestForwardRemovesExplicitIdentityEncodingFromEventStream(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{"stream":true}`))
 	rec := newDeadlineRecorder()
 
-	f.Handler("/v1/messages", apierror.Anthropic)(rec, req)
+	f.Handler(endpoint.AnthropicMessages())(rec, req)
 
 	if rec.Code != http.StatusAccepted {
 		t.Errorf("status = %d, want upstream 202", rec.Code)
@@ -930,43 +1004,43 @@ func TestForwardRejectsUnsupportedEventStreamEncodingBeforeCommit(t *testing.T) 
 	const openAIError = `{"error":{"message":"` + message + `","type":"api_error","code":null,"param":null}}`
 	tests := []struct {
 		name      string
-		surface   apierror.Surface
+		ep        endpoint.HTTPForward
 		encodings []string
 		wantBody  string
 	}{
 		{
 			name:      "Anthropic rejects gzip",
-			surface:   apierror.Anthropic,
+			ep:        endpoint.AnthropicMessages(),
 			encodings: []string{"gzip"},
 			wantBody:  anthropicError,
 		},
 		{
 			name:      "OpenAI rejects another coding in its native envelope",
-			surface:   apierror.OpenAI,
+			ep:        endpoint.OpenAIResponsesHTTP(),
 			encodings: []string{"br"},
 			wantBody:  openAIError,
 		},
 		{
 			name:      "rejects comma-separated coding chain",
-			surface:   apierror.Anthropic,
+			ep:        endpoint.AnthropicMessages(),
 			encodings: []string{"identity, gzip"},
 			wantBody:  anthropicError,
 		},
 		{
 			name:      "rejects explicit empty value",
-			surface:   apierror.Anthropic,
+			ep:        endpoint.AnthropicMessages(),
 			encodings: []string{""},
 			wantBody:  anthropicError,
 		},
 		{
 			name:      "rejects repeated identity fields",
-			surface:   apierror.Anthropic,
+			ep:        endpoint.AnthropicMessages(),
 			encodings: []string{"identity", "identity"},
 			wantBody:  anthropicError,
 		},
 		{
 			name:      "rejects repeated different fields",
-			surface:   apierror.Anthropic,
+			ep:        endpoint.AnthropicMessages(),
 			encodings: []string{"identity", "gzip"},
 			wantBody:  anthropicError,
 		},
@@ -991,7 +1065,7 @@ func TestForwardRejectsUnsupportedEventStreamEncodingBeforeCommit(t *testing.T) 
 			req := httptest.NewRequest(http.MethodPost, "/provider/route", strings.NewReader(`{"stream":true}`))
 			rec := newDeadlineRecorder()
 
-			f.Handler("/upstream", tc.surface)(rec, req)
+			f.Handler(tc.ep)(rec, req)
 
 			if rec.Code != http.StatusBadGateway {
 				t.Errorf("status = %d, want copilotd-originated 502", rec.Code)
@@ -1086,7 +1160,7 @@ func TestForwardKeepsCompressedBufferedResponseOpaque(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{}`))
 	rec := newDeadlineRecorder()
 
-	f.Handler("/v1/messages", apierror.Anthropic)(rec, req)
+	f.Handler(endpoint.AnthropicMessages())(rec, req)
 
 	if rec.Code != http.StatusPartialContent {
 		t.Errorf("status = %d, want upstream 206", rec.Code)
@@ -1118,7 +1192,7 @@ func TestForwardStoresStreamResultOnRequestHolder(t *testing.T) {
 	ctx := WithStreamResultHolder(req.Context())
 	req = req.WithContext(ctx)
 
-	f.Handler("/v1/messages", apierror.Anthropic)(newDeadlineRecorder(), req)
+	f.Handler(endpoint.AnthropicMessages())(newDeadlineRecorder(), req)
 
 	got, ok := StreamResultFromContext(ctx)
 	if !ok {
@@ -1145,7 +1219,7 @@ func TestForwardReportsDataTypeFallbacks(t *testing.T) {
 	ctx := WithStreamResultHolder(req.Context())
 	req = req.WithContext(ctx)
 
-	f.Handler("/v1/messages", apierror.Anthropic)(newDeadlineRecorder(), req)
+	f.Handler(endpoint.AnthropicMessages())(newDeadlineRecorder(), req)
 
 	if got := f.fallbacks.Count(); got != 1 {
 		t.Errorf("fallback count = %d, want 1 for data-only frame", got)
@@ -1177,7 +1251,7 @@ func TestForwardOpenAITerminalsAreVerbatimAndNeverDoubled(t *testing.T) {
 			req = req.WithContext(ctx)
 			rec := newDeadlineRecorder()
 
-			f.Handler("/responses", apierror.OpenAI)(rec, req)
+			f.Handler(endpoint.OpenAIResponsesHTTP())(rec, req)
 
 			if got := rec.Body.String(); got != raw {
 				t.Errorf("body = %q, want exact terminal %q with no synthesized duplicate", got, raw)
@@ -1207,7 +1281,7 @@ func TestForwardLeavesStreamResultUnsetForBufferedResponse(t *testing.T) {
 	ctx := WithStreamResultHolder(req.Context())
 	req = req.WithContext(ctx)
 
-	f.Handler("/v1/messages", apierror.Anthropic)(newDeadlineRecorder(), req)
+	f.Handler(endpoint.AnthropicMessages())(newDeadlineRecorder(), req)
 
 	if got, ok := StreamResultFromContext(ctx); ok {
 		t.Errorf("buffered response stored stream result %#v, want holder unset", got)
@@ -1228,7 +1302,7 @@ func TestForwardStoresCanonicalOpenAIStreamSurface(t *testing.T) {
 	ctx := WithStreamResultHolder(req.Context())
 	req = req.WithContext(ctx)
 
-	f.Handler("/responses", apierror.OpenAI)(newDeadlineRecorder(), req)
+	f.Handler(endpoint.OpenAIResponsesHTTP())(newDeadlineRecorder(), req)
 
 	got, ok := StreamResultFromContext(ctx)
 	if !ok {
@@ -1288,37 +1362,32 @@ func TestForwardPreservesRawQueryOnCurrentRoutes(t *testing.T) {
 	tests := []struct {
 		name           string
 		inboundTarget  string
-		upstreamPath   string
-		surface        apierror.Surface
+		ep             endpoint.HTTPForward
 		fragment       string
 		wantRequestURI string
 	}{
 		{
 			name:           "Anthropic messages",
 			inboundTarget:  "/anthropic/v1/messages?beta=true",
-			upstreamPath:   "/v1/messages",
-			surface:        apierror.Anthropic,
+			ep:             endpoint.AnthropicMessages(),
 			wantRequestURI: "/v1/messages?beta=true",
 		},
 		{
 			name:           "Anthropic token counting keeps order duplicates escapes and value forms",
 			inboundTarget:  "/anthropic/v1/messages/count_tokens?tag=first&tag=second&escaped=%2f%2F&flag&empty=",
-			upstreamPath:   "/v1/messages/count_tokens",
-			surface:        apierror.Anthropic,
+			ep:             endpoint.AnthropicCountTokens(),
 			wantRequestURI: "/v1/messages/count_tokens?tag=first&tag=second&escaped=%2f%2F&flag&empty=",
 		},
 		{
 			name:           "OpenAI Responses",
 			inboundTarget:  "/openai/v1/responses?include=output%2ftext&include=usage",
-			upstreamPath:   "/responses",
-			surface:        apierror.OpenAI,
+			ep:             endpoint.OpenAIResponsesHTTP(),
 			wantRequestURI: "/responses?include=output%2ftext&include=usage",
 		},
 		{
 			name:           "no query stays absent and fragment is omitted",
 			inboundTarget:  "/openai/v1/responses",
-			upstreamPath:   "/responses",
-			surface:        apierror.OpenAI,
+			ep:             endpoint.OpenAIResponsesHTTP(),
 			fragment:       "client-only",
 			wantRequestURI: "/responses",
 		},
@@ -1331,7 +1400,7 @@ func TestForwardPreservesRawQueryOnCurrentRoutes(t *testing.T) {
 			req.URL.Fragment = tc.fragment
 			rec := newDeadlineRecorder()
 
-			f.Handler(tc.upstreamPath, tc.surface)(rec, req)
+			f.Handler(tc.ep)(rec, req)
 
 			if rec.Code != http.StatusNoContent {
 				t.Fatalf("status = %d, want upstream 204", rec.Code)
@@ -1355,7 +1424,7 @@ func TestForwardPreservesBareQueryMarker(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages?", strings.NewReader(`{}`))
 	rec := newDeadlineRecorder()
 
-	f.Handler("/v1/messages", apierror.Anthropic)(rec, req)
+	f.Handler(endpoint.AnthropicMessages())(rec, req)
 
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("status = %d, want upstream 204", rec.Code)
@@ -1377,35 +1446,30 @@ func TestForwardRequestsIdentityEncodingOnCurrentRoutes(t *testing.T) {
 	tests := []struct {
 		name          string
 		inboundTarget string
-		upstreamPath  string
-		surface       apierror.Surface
+		ep            endpoint.HTTPForward
 		clientValues  []string
 	}{
 		{
 			name:          "Anthropic messages replaces a mixed client value",
 			inboundTarget: "/anthropic/v1/messages",
-			upstreamPath:  "/v1/messages",
-			surface:       apierror.Anthropic,
+			ep:            endpoint.AnthropicMessages(),
 			clientValues:  []string{"gzip, br"},
 		},
 		{
 			name:          "Anthropic token counting replaces repeated client values",
 			inboundTarget: "/anthropic/v1/messages/count_tokens",
-			upstreamPath:  "/v1/messages/count_tokens",
-			surface:       apierror.Anthropic,
+			ep:            endpoint.AnthropicCountTokens(),
 			clientValues:  []string{"gzip", "identity"},
 		},
 		{
 			name:          "OpenAI Responses sets identity when client value is absent",
 			inboundTarget: "/openai/v1/responses",
-			upstreamPath:  "/responses",
-			surface:       apierror.OpenAI,
+			ep:            endpoint.OpenAIResponsesHTTP(),
 		},
 		{
 			name:          "client value is not parsed or rejected",
 			inboundTarget: "/openai/v1/responses",
-			upstreamPath:  "/responses",
-			surface:       apierror.OpenAI,
+			ep:            endpoint.OpenAIResponsesHTTP(),
 			clientValues:  []string{"definitely-not-a-content-coding"},
 		},
 	}
@@ -1419,7 +1483,7 @@ func TestForwardRequestsIdentityEncodingOnCurrentRoutes(t *testing.T) {
 			}
 			rec := newDeadlineRecorder()
 
-			f.Handler(tc.upstreamPath, tc.surface)(rec, req)
+			f.Handler(tc.ep)(rec, req)
 
 			if rec.Code != http.StatusNoContent {
 				t.Fatalf("status = %d, want upstream 204", rec.Code)
@@ -1464,7 +1528,7 @@ func TestForwardVerbatimAndHeaderPolicy(t *testing.T) {
 	req = req.WithContext(logging.WithRequestID(req.Context(), "rid-fwd"))
 
 	rec := newDeadlineRecorder()
-	f.Handler("/v1/messages", apierror.Anthropic)(rec, req)
+	f.Handler(endpoint.AnthropicMessages())(rec, req)
 
 	// Response copied back verbatim.
 	if rec.Code != http.StatusOK {
@@ -1533,7 +1597,7 @@ func TestForwardJSONErrorToStreamRequestUsesBufferedPath(t *testing.T) {
 	f := New(readyStub(upstream.URL), NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{"stream":true}`))
 	rec := newDeadlineRecorder()
-	f.Handler("/v1/messages", apierror.Anthropic)(rec, req)
+	f.Handler(endpoint.AnthropicMessages())(rec, req)
 
 	if rec.Code != http.StatusBadGateway {
 		t.Errorf("status = %d, want upstream 502 verbatim", rec.Code)
@@ -1555,23 +1619,23 @@ func TestForwardSurfacePeek(t *testing.T) {
 	defer upstream.Close()
 	f := New(readyStub(upstream.URL), NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 
-	forward := func(surface apierror.Surface, body string) *deadlineRecorder {
+	forward := func(surface endpoint.Surface, body string) *deadlineRecorder {
 		path := "/anthropic/v1/messages"
-		upstreamPath := "/v1/messages"
-		if surface == apierror.OpenAI {
+		var ep endpoint.HTTPForward = endpoint.AnthropicMessages()
+		if surface == endpoint.OpenAI {
 			path = "/openai/v1/responses"
-			upstreamPath = "/responses"
+			ep = endpoint.OpenAIResponsesHTTP()
 		}
 		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
 		rec := newDeadlineRecorder()
-		f.Handler(upstreamPath, surface)(rec, req)
+		f.Handler(ep)(rec, req)
 		return rec
 	}
 
 	t.Run("Anthropic stream true forwarded verbatim", func(t *testing.T) {
 		hits = 0
 		const body = `{"model":"claude-3-5-sonnet","stream":true}`
-		rec := forward(apierror.Anthropic, body)
+		rec := forward(endpoint.Anthropic, body)
 		if rec.Code != http.StatusAccepted || hits != 1 {
 			t.Errorf("status = %d, hits = %d; want upstream 202 and one hit", rec.Code, hits)
 		}
@@ -1583,7 +1647,7 @@ func TestForwardSurfacePeek(t *testing.T) {
 	t.Run("OpenAI stream true forwarded verbatim", func(t *testing.T) {
 		hits = 0
 		const body = `{"model":"gpt-4.1","stream":true}`
-		rec := forward(apierror.OpenAI, body)
+		rec := forward(endpoint.OpenAI, body)
 		if rec.Code != http.StatusAccepted || hits != 1 {
 			t.Errorf("status = %d, hits = %d; want upstream 202 and one hit", rec.Code, hits)
 		}
@@ -1594,7 +1658,7 @@ func TestForwardSurfacePeek(t *testing.T) {
 
 	t.Run("Anthropic background true forwarded without a peek", func(t *testing.T) {
 		hits = 0
-		rec := forward(apierror.Anthropic, `{"background":true}`)
+		rec := forward(endpoint.Anthropic, `{"background":true}`)
 		if rec.Code != http.StatusAccepted || hits != 1 {
 			t.Errorf("status = %d, hits = %d; want upstream 202 and one hit", rec.Code, hits)
 		}
@@ -1602,7 +1666,7 @@ func TestForwardSurfacePeek(t *testing.T) {
 
 	t.Run("OpenAI background true rejected", func(t *testing.T) {
 		hits = 0
-		rec := forward(apierror.OpenAI, `{"background":true}`)
+		rec := forward(endpoint.OpenAI, `{"background":true}`)
 		if rec.Code != http.StatusBadRequest || hits != 0 {
 			t.Errorf("status = %d, hits = %d; want 400 and no upstream hit", rec.Code, hits)
 		}
@@ -1610,7 +1674,7 @@ func TestForwardSurfacePeek(t *testing.T) {
 
 	t.Run("non-JSON OpenAI body forwarded for upstream validation", func(t *testing.T) {
 		hits = 0
-		rec := forward(apierror.OpenAI, `not json at all`)
+		rec := forward(endpoint.OpenAI, `not json at all`)
 		if rec.Code != http.StatusAccepted || hits != 1 {
 			t.Errorf("status = %d, hits = %d; want upstream 202 and one hit", rec.Code, hits)
 		}
@@ -1628,7 +1692,7 @@ func TestForwardBodyBounding(t *testing.T) {
 	f := New(readyStub(upstream.URL), NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 8, 1<<20, nil) // 8-byte request cap
 	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{"model":"way too long"}`))
 	rec := newDeadlineRecorder()
-	f.Handler("/v1/messages", apierror.Anthropic)(rec, req)
+	f.Handler(endpoint.AnthropicMessages())(rec, req)
 
 	if rec.Code != http.StatusRequestEntityTooLarge {
 		t.Errorf("status = %d, want 413", rec.Code)
@@ -1649,7 +1713,7 @@ func TestForwardProxyOriginErrors(t *testing.T) {
 		f := New(readyStub(upstream.URL), NewClient(50*time.Millisecond), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 		req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{}`))
 		rec := newDeadlineRecorder()
-		f.Handler("/v1/messages", apierror.Anthropic)(rec, req)
+		f.Handler(endpoint.AnthropicMessages())(rec, req)
 		close(releaseUpstream)
 		if rec.Code != http.StatusGatewayTimeout {
 			t.Errorf("status = %d, want 504", rec.Code)
@@ -1664,7 +1728,7 @@ func TestForwardProxyOriginErrors(t *testing.T) {
 		f := New(readyStub("http://127.0.0.1:1"), NewClient(5*time.Second), 2*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 		req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{}`))
 		rec := newDeadlineRecorder()
-		f.Handler("/v1/messages", apierror.Anthropic)(rec, req)
+		f.Handler(endpoint.AnthropicMessages())(rec, req)
 		if rec.Code != http.StatusBadGateway {
 			t.Errorf("status = %d, want 502", rec.Code)
 		}
@@ -1683,7 +1747,7 @@ func TestForwardProxyOriginErrors(t *testing.T) {
 		f := New(readyStub(upstream.URL), NewClient(5*time.Second), 50*time.Millisecond, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 		req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{}`))
 		rec := newDeadlineRecorder()
-		f.Handler("/v1/messages", apierror.Anthropic)(rec, req)
+		f.Handler(endpoint.AnthropicMessages())(rec, req)
 		if rec.Code != http.StatusOK {
 			t.Errorf("status = %d, want already-committed upstream 200", rec.Code)
 		}
@@ -1708,7 +1772,7 @@ func TestOutboundTimeoutIsNotAppliedToEventStream(t *testing.T) {
 	f := New(readyStub(upstream.URL), NewClient(time.Second), 50*time.Millisecond, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 	req := httptest.NewRequest(http.MethodPost, "/openai/v1/responses", strings.NewReader(`{}`))
 	rec := newDeadlineRecorder()
-	f.Handler("/responses", apierror.OpenAI)(rec, req)
+	f.Handler(endpoint.OpenAIResponsesHTTP())(rec, req)
 
 	if got := rec.Body.String(); got != "event: response.completed\ndata: {}\n\n" {
 		t.Errorf("body = %q, want complete event after outbound timeout elapsed", got)
@@ -1739,7 +1803,7 @@ func TestForwardClientCancelPropagates(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		f.Handler("/v1/messages", apierror.Anthropic)(rec, req)
+		f.Handler(endpoint.AnthropicMessages())(rec, req)
 		close(done)
 	}()
 
@@ -1783,7 +1847,7 @@ func TestBufferedCopyAbortsWhenClientStopsDraining(t *testing.T) {
 	handlerReturned := make(chan struct{})
 	downstream := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer close(handlerReturned)
-		f.Handler("/v1/messages", apierror.Anthropic)(w, r)
+		f.Handler(endpoint.AnthropicMessages())(w, r)
 	}))
 	downstream.Config.ConnState = func(conn net.Conn, state http.ConnState) {
 		if state == http.StateNew {

@@ -9,14 +9,38 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/ningw42/copilotd/internal/apierror"
+	"github.com/ningw42/copilotd/internal/endpoint"
 )
 
 type stubFetcher struct {
 	status int
 	body   []byte
 	err    error
-	fetch  func(context.Context) (int, []byte, error)
+	fetch  func(context.Context, endpoint.Route) (int, []byte, error)
+}
+
+type routeRecordingFetcher struct {
+	upstream endpoint.Route
+}
+
+func (f *routeRecordingFetcher) FetchModels(_ context.Context, upstream endpoint.Route) (int, []byte, error) {
+	f.upstream = upstream
+	return http.StatusOK, []byte(`{"data":[]}`), nil
+}
+
+func TestHandlerFetchesTheCatalogContractsUpstreamRoute(t *testing.T) {
+	fetcher := &routeRecordingFetcher{}
+	handler := Handler(endpoint.OpenAICatalog(), Rendering{Render: RenderOpenAI}, fetcher)
+	recorder := httptest.NewRecorder()
+
+	handler(recorder, httptest.NewRequest(http.MethodGet, "/openai/v1/models", nil))
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", recorder.Code, recorder.Body.String())
+	}
+	if got, want := fetcher.upstream, endpoint.OpenAICatalog().Upstream(); got != want {
+		t.Errorf("fetched upstream route = %q, want contract route %q", got, want)
+	}
 }
 
 func TestHandlerNegotiatesCodexShapeOnlyWhenEveryGateIsOpen(t *testing.T) {
@@ -25,7 +49,7 @@ func TestHandlerNegotiatesCodexShapeOnlyWhenEveryGateIsOpen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode fixture: %v", err)
 	}
-	wantOpenAI, err := RenderOpenAI(Filter(models, OpenAIResponsesRoute))
+	wantOpenAI, err := RenderOpenAI(Filter(models, endpoint.RouteOpenAIResponses))
 	if err != nil {
 		t.Fatalf("render expected OpenAI catalog: %v", err)
 	}
@@ -47,10 +71,8 @@ func TestHandlerNegotiatesCodexShapeOnlyWhenEveryGateIsOpen(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			desc := Descriptor{
-				Surface:       apierror.OpenAI,
-				RequiredRoute: OpenAIResponsesRoute,
-				Render:        RenderOpenAI,
+			rendering := Rendering{
+				Render: RenderOpenAI,
 				Codex: CodexDescriptor{
 					Enabled: tc.enabled,
 					RenderConfig: CodexRenderConfig{
@@ -59,7 +81,7 @@ func TestHandlerNegotiatesCodexShapeOnlyWhenEveryGateIsOpen(t *testing.T) {
 					},
 				},
 			}
-			handler := Handler(desc, stubFetcher{status: http.StatusOK, body: upstreamBody})
+			handler := Handler(endpoint.OpenAICatalog(), rendering, stubFetcher{status: http.StatusOK, body: upstreamBody})
 			target := "/openai/v1/models"
 			if tc.rawQuery != "" {
 				target += "?" + tc.rawQuery
@@ -89,10 +111,8 @@ func TestHandlerNegotiatesCodexShapeOnlyWhenEveryGateIsOpen(t *testing.T) {
 
 func TestHandlerCodexHEADMatchesGETHeadersAndSuppressesBody(t *testing.T) {
 	upstreamBody := []byte(`{"data":[{"id":"gpt-5.4","vendor":"OpenAI","model_picker_enabled":true,"supported_endpoints":["/responses"]}]}`)
-	desc := Descriptor{
-		Surface:       apierror.OpenAI,
-		RequiredRoute: OpenAIResponsesRoute,
-		Render:        RenderOpenAI,
+	rendering := Rendering{
+		Render: RenderOpenAI,
 		Codex: CodexDescriptor{
 			Enabled: true,
 			RenderConfig: CodexRenderConfig{
@@ -100,7 +120,7 @@ func TestHandlerCodexHEADMatchesGETHeadersAndSuppressesBody(t *testing.T) {
 			},
 		},
 	}
-	handler := Handler(desc, stubFetcher{status: http.StatusOK, body: upstreamBody})
+	handler := Handler(endpoint.OpenAICatalog(), rendering, stubFetcher{status: http.StatusOK, body: upstreamBody})
 
 	getRecorder := httptest.NewRecorder()
 	handler(getRecorder, httptest.NewRequest(http.MethodGet, "/openai/v1/models?client_version=secret-query-value", nil))
@@ -126,9 +146,9 @@ func TestHandlerCodexHEADMatchesGETHeadersAndSuppressesBody(t *testing.T) {
 	}
 }
 
-func (f stubFetcher) FetchModels(ctx context.Context) (int, []byte, error) {
+func (f stubFetcher) FetchModels(ctx context.Context, upstream endpoint.Route) (int, []byte, error) {
 	if f.fetch != nil {
-		return f.fetch(ctx)
+		return f.fetch(ctx, upstream)
 	}
 	return f.status, f.body, f.err
 }
@@ -158,20 +178,20 @@ func TestHandlerMapsEveryFailureInTheSelectedSurfaceDialect(t *testing.T) {
 		},
 	}
 	surfaces := []struct {
-		name    string
-		surface apierror.Surface
-		body    func(string) string
+		name string
+		ep   endpoint.Catalog
+		body func(string) string
 	}{
 		{
-			name:    "Anthropic",
-			surface: apierror.Anthropic,
+			name: "Anthropic",
+			ep:   endpoint.AnthropicCatalog(),
 			body: func(message string) string {
 				return `{"type":"error","error":{"type":"api_error","message":"` + message + `"}}`
 			},
 		},
 		{
-			name:    "OpenAI",
-			surface: apierror.OpenAI,
+			name: "OpenAI",
+			ep:   endpoint.OpenAICatalog(),
 			body: func(message string) string {
 				return `{"error":{"message":"` + message + `","type":"api_error","code":null,"param":null}}`
 			},
@@ -185,7 +205,7 @@ func TestHandlerMapsEveryFailureInTheSelectedSurfaceDialect(t *testing.T) {
 				if render == nil {
 					render = RenderOpenAI
 				}
-				handler := Handler(Descriptor{Surface: surface.surface, RequiredRoute: OpenAIResponsesRoute, Render: render}, tc.fetcher)
+				handler := Handler(surface.ep, Rendering{Render: render}, tc.fetcher)
 				recorder := httptest.NewRecorder()
 
 				handler(recorder, httptest.NewRequest(http.MethodGet, "/models", nil))
@@ -216,12 +236,12 @@ func (w *writeSpy) Write(body []byte) (int, error) {
 
 func TestHandlerPropagatesCancellationWithoutWritingAReplacementError(t *testing.T) {
 	started := make(chan struct{})
-	fetcher := stubFetcher{fetch: func(ctx context.Context) (int, []byte, error) {
+	fetcher := stubFetcher{fetch: func(ctx context.Context, _ endpoint.Route) (int, []byte, error) {
 		close(started)
 		<-ctx.Done()
 		return 0, nil, fmt.Errorf("%w: %v", ErrUpstreamRead, ctx.Err())
 	}}
-	handler := Handler(Descriptor{Surface: apierror.Anthropic, RequiredRoute: AnthropicMessagesRoute, Render: RenderAnthropic}, fetcher)
+	handler := Handler(endpoint.AnthropicCatalog(), Rendering{Render: RenderAnthropic}, fetcher)
 	ctx, cancel := context.WithCancel(context.Background())
 	request := httptest.NewRequest(http.MethodGet, "/anthropic/v1/models", nil).WithContext(ctx)
 	writer := &writeSpy{header: make(http.Header)}

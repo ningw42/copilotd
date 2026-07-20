@@ -14,9 +14,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ningw42/copilotd/internal/apierror"
 	"github.com/ningw42/copilotd/internal/catalog"
 	"github.com/ningw42/copilotd/internal/config"
+	"github.com/ningw42/copilotd/internal/endpoint"
 	"github.com/ningw42/copilotd/internal/identity"
 	"github.com/ningw42/copilotd/internal/logging"
 	"github.com/ningw42/copilotd/internal/shim"
@@ -24,6 +24,7 @@ import (
 
 func TestFetchModelsReturnsOneCredentialedCatalogResponse(t *testing.T) {
 	const responseBody = `{"data":[{"id":"model-one"}]}`
+	const upstream endpoint.Route = "/contract-models"
 	var calls int
 	var gotRequest *http.Request
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
@@ -47,7 +48,7 @@ func TestFetchModelsReturnsOneCredentialedCatalogResponse(t *testing.T) {
 	f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, time.Second, time.Second, 1<<20, 1<<20, nil)
 	ctx := logging.WithRequestID(context.Background(), "catalog-request-id")
 
-	status, body, err := f.FetchModels(ctx)
+	status, body, err := f.FetchModels(ctx, upstream)
 
 	if err != nil {
 		t.Fatalf("FetchModels() error = %v", err)
@@ -61,8 +62,8 @@ func TestFetchModelsReturnsOneCredentialedCatalogResponse(t *testing.T) {
 	if calls != 1 {
 		t.Fatalf("upstream calls = %d, want exactly 1", calls)
 	}
-	if gotRequest.Method != http.MethodGet || gotRequest.URL.Path != "/models" || gotRequest.URL.RawQuery != "" {
-		t.Errorf("upstream request = %s %q, want GET /models without query", gotRequest.Method, gotRequest.URL.RequestURI())
+	if gotRequest.Method != http.MethodGet || gotRequest.URL.Path != string(upstream) || gotRequest.URL.RawQuery != "" {
+		t.Errorf("upstream request = %s %q, want GET %s without query", gotRequest.Method, gotRequest.URL.RequestURI(), upstream)
 	}
 	for name, want := range (http.Header{
 		"Authorization":          {"Bearer copilot-token"},
@@ -87,7 +88,7 @@ func TestFetchModelsClassifiesMissingCredentialWithoutCallingUpstream(t *testing
 	})}
 	f := New(provider, client, time.Second, time.Second, time.Second, time.Second, 1<<20, 1<<20, nil)
 
-	status, body, err := f.FetchModels(context.Background())
+	status, body, err := f.FetchModels(context.Background(), endpoint.RouteModels)
 
 	if !errors.Is(err, catalog.ErrNoCredential) {
 		t.Fatalf("FetchModels() error = %v, want ErrNoCredential", err)
@@ -108,7 +109,7 @@ func TestFetchModelsClassifiesRequestConstructionFailure(t *testing.T) {
 	})}
 	f := New(readyStub(":"), client, time.Second, time.Second, time.Second, time.Second, 1<<20, 1<<20, nil)
 
-	status, body, err := f.FetchModels(context.Background())
+	status, body, err := f.FetchModels(context.Background(), endpoint.RouteModels)
 
 	if !errors.Is(err, catalog.ErrBuildUpstream) {
 		t.Fatalf("FetchModels() error = %v, want ErrBuildUpstream", err)
@@ -129,7 +130,7 @@ func TestFetchModelsClassifiesUnreachableUpstream(t *testing.T) {
 	})}
 	f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, time.Second, time.Second, 1<<20, 1<<20, nil)
 
-	status, body, err := f.FetchModels(context.Background())
+	status, body, err := f.FetchModels(context.Background(), endpoint.RouteModels)
 
 	if !errors.Is(err, catalog.ErrUpstreamUnreachable) {
 		t.Fatalf("FetchModels() error = %v, want ErrUpstreamUnreachable", err)
@@ -148,7 +149,7 @@ func TestFetchModelsClassifiesUpstreamTimeout(t *testing.T) {
 	})}
 	f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, time.Second, time.Second, 1<<20, 1<<20, nil)
 
-	status, body, err := f.FetchModels(context.Background())
+	status, body, err := f.FetchModels(context.Background(), endpoint.RouteModels)
 
 	if !errors.Is(err, catalog.ErrUpstreamTimeout) {
 		t.Fatalf("FetchModels() error = %v, want ErrUpstreamTimeout", err)
@@ -165,7 +166,7 @@ func TestFetchModelsUsesConfiguredResponseHeaderTimeout(t *testing.T) {
 	defer upstream.Close()
 	f := New(readyStub(upstream.URL), NewClient(10*time.Millisecond), time.Second, time.Second, time.Second, time.Second, 1<<20, 1<<20, nil)
 
-	status, body, err := f.FetchModels(context.Background())
+	status, body, err := f.FetchModels(context.Background(), endpoint.RouteModels)
 
 	if !errors.Is(err, catalog.ErrUpstreamTimeout) {
 		t.Fatalf("FetchModels() error = %v, want ErrUpstreamTimeout", err)
@@ -179,7 +180,7 @@ func TestFetchModelsClassifiesOutboundBodyTimeout(t *testing.T) {
 	body := &cancelAwareBody{blockAfterChunks: true}
 	f := New(readyStub("https://upstream.invalid"), bodyClient(body, make(http.Header)), 10*time.Millisecond, time.Second, time.Second, time.Second, 1<<20, 1<<20, nil)
 
-	status, responseBody, err := f.FetchModels(context.Background())
+	status, responseBody, err := f.FetchModels(context.Background(), endpoint.RouteModels)
 
 	if !errors.Is(err, catalog.ErrUpstreamTimeout) {
 		t.Fatalf("FetchModels() error = %v, want ErrUpstreamTimeout", err)
@@ -209,7 +210,7 @@ func TestFetchModelsClassifiesResponseReadFailureWithoutPartialBody(t *testing.T
 	})}
 	f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, time.Second, time.Second, 1<<20, 1<<20, nil)
 
-	status, body, err := f.FetchModels(context.Background())
+	status, body, err := f.FetchModels(context.Background(), endpoint.RouteModels)
 
 	if !errors.Is(err, catalog.ErrUpstreamRead) {
 		t.Fatalf("FetchModels() error = %v, want ErrUpstreamRead", err)
@@ -237,7 +238,7 @@ func TestFetchModelsPropagatesCallerCancellationDuringResponseRead(t *testing.T)
 		cancel()
 	}()
 
-	status, body, err := f.FetchModels(ctx)
+	status, body, err := f.FetchModels(ctx, endpoint.RouteModels)
 
 	if !errors.Is(err, catalog.ErrUpstreamRead) {
 		t.Fatalf("FetchModels() error = %v, want ErrUpstreamRead", err)
@@ -264,7 +265,7 @@ func TestFetchModelsRejectsOversizedResponseWithoutReturningTruncatedBody(t *tes
 	const responseLimit = 8
 	f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, time.Second, time.Second, 1<<20, responseLimit, nil)
 
-	status, body, err := f.FetchModels(context.Background())
+	status, body, err := f.FetchModels(context.Background(), endpoint.RouteModels)
 
 	if !errors.Is(err, catalog.ErrUpstreamRead) {
 		t.Fatalf("FetchModels() error = %v, want ErrUpstreamRead", err)
@@ -292,7 +293,7 @@ func TestFetchModelsAcceptsResponseAtSizeBoundary(t *testing.T) {
 	})}
 	f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, time.Second, time.Second, 1<<20, int64(len(responseBody)), nil)
 
-	status, body, err := f.FetchModels(context.Background())
+	status, body, err := f.FetchModels(context.Background(), endpoint.RouteModels)
 
 	if err != nil {
 		t.Fatalf("FetchModels() error = %v", err)
@@ -308,7 +309,7 @@ func TestFetchModelsLeavesSSEAndShimsOutOfCatalogFetch(t *testing.T) {
 	registry := shim.Registry{{
 		Name:    "must-not-run",
 		Enabled: true,
-		New: func(context.Context, apierror.Surface, shim.Route) any {
+		New: func(context.Context, endpoint.Surface, endpoint.Route) any {
 			shimCalls++
 			return struct{}{}
 		},
@@ -323,7 +324,7 @@ func TestFetchModelsLeavesSSEAndShimsOutOfCatalogFetch(t *testing.T) {
 	})}
 	f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, time.Second, time.Second, 1<<20, 1<<20, registry)
 
-	status, body, err := f.FetchModels(context.Background())
+	status, body, err := f.FetchModels(context.Background(), endpoint.RouteModels)
 
 	if err != nil {
 		t.Fatalf("FetchModels() error = %v", err)
@@ -379,8 +380,8 @@ func TestFetchModelsConsecutiveCallsFetchIndependentResponses(t *testing.T) {
 	})}
 	f := New(provider, client, time.Second, time.Second, time.Second, time.Second, 1<<20, 1<<20, nil)
 
-	_, first, firstErr := f.FetchModels(context.Background())
-	_, second, secondErr := f.FetchModels(context.Background())
+	_, first, firstErr := f.FetchModels(context.Background(), endpoint.RouteModels)
+	_, second, secondErr := f.FetchModels(context.Background(), endpoint.RouteModels)
 
 	if firstErr != nil || secondErr != nil {
 		t.Fatalf("FetchModels() errors = %v, %v", firstErr, secondErr)
@@ -411,7 +412,7 @@ func TestFetchModelsDoesNotReplayAfterUpstreamResponseFailure(t *testing.T) {
 	ctx := httptrace.WithClientTrace(context.Background(), trace)
 	f := New(readyStub(upstream.URL), NewClient(time.Second), time.Second, time.Second, time.Second, time.Second, 1<<20, 1<<20, nil)
 
-	status, body, err := f.FetchModels(ctx)
+	status, body, err := f.FetchModels(ctx, endpoint.RouteModels)
 
 	if !errors.Is(err, catalog.ErrUpstreamUnreachable) {
 		t.Fatalf("FetchModels() error = %v, want ErrUpstreamUnreachable", err)
@@ -456,7 +457,7 @@ func TestFetchModelsLogsOnlyDifferentUpstreamRequestID(t *testing.T) {
 			f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, time.Second, time.Second, 1<<20, 1<<20, nil, WithLogger(logger))
 			ctx := logging.WithRequestID(context.Background(), requestID)
 
-			if _, _, err := f.FetchModels(ctx); err != nil {
+			if _, _, err := f.FetchModels(ctx, endpoint.RouteModels); err != nil {
 				t.Fatalf("FetchModels() error = %v", err)
 			}
 

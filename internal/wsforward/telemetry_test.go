@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/ningw42/copilotd/internal/endpoint"
 	"github.com/ningw42/copilotd/internal/identity"
 	"github.com/ningw42/copilotd/internal/logging"
 )
@@ -129,7 +130,7 @@ func TestProxyObservesOnePreUpgradeAcceptOutcome(t *testing.T) {
 			})
 
 			recorder := httptest.NewRecorder()
-			proxy.Handler().ServeHTTP(recorder, test.request)
+			proxy.Handler(endpoint.OpenAIResponsesWS()).ServeHTTP(recorder, test.request)
 
 			if recorder.Code != test.wantStatus {
 				t.Errorf("status = %d, want %d", recorder.Code, test.wantStatus)
@@ -350,7 +351,7 @@ func startTelemetrySession(t *testing.T, logger *slog.Logger, observed *recordin
 	handlerDone := make(chan struct{})
 	downstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := logging.WithRequestID(r.Context(), "request-telemetry")
-		proxy.Handler().ServeHTTP(w, r.WithContext(ctx))
+		proxy.Handler(endpoint.OpenAIResponsesWS()).ServeHTTP(w, r.WithContext(ctx))
 		close(handlerDone)
 	}))
 	clientURL := "ws" + strings.TrimPrefix(downstream.URL, "http") + "/openai/v1/responses"

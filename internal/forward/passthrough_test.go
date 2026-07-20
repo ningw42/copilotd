@@ -16,7 +16,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ningw42/copilotd/internal/apierror"
+	"github.com/ningw42/copilotd/internal/endpoint"
 	"github.com/ningw42/copilotd/internal/identity"
 	"github.com/ningw42/copilotd/internal/logging"
 	"github.com/ningw42/copilotd/internal/shim"
@@ -75,7 +75,7 @@ func TestPassthroughPreservesRawQueryAndForceQuery(t *testing.T) {
 				req := httptest.NewRequest(method, tc.target, nil)
 				rec := newDeadlineRecorder()
 
-				f.PassthroughHandler(method, "/models", apierror.GitHubCopilot)(rec, req)
+				f.PassthroughHandler(endpoint.Models())(rec, req)
 
 				if rec.Code != http.StatusNoContent {
 					t.Fatalf("status = %d, want 204", rec.Code)
@@ -152,7 +152,7 @@ func testPassthroughEnforcesRequestHeaderOwnership(t *testing.T, method string) 
 	req = req.WithContext(logging.WithRequestID(req.Context(), "resolved-request-id"))
 	rec := newDeadlineRecorder()
 
-	f.PassthroughHandler(method, "/models", apierror.GitHubCopilot)(rec, req)
+	f.PassthroughHandler(endpoint.Models())(rec, req)
 
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("status = %d, want 204", rec.Code)
@@ -206,7 +206,7 @@ func TestPassthroughLeavesAbsentAcceptEncodingAbsent(t *testing.T) {
 	})}
 	f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, time.Second, time.Second, 1, 1, nil)
 
-	f.PassthroughHandler(http.MethodGet, "/models", apierror.GitHubCopilot)(newDeadlineRecorder(), httptest.NewRequest(http.MethodGet, "/models", nil))
+	f.PassthroughHandler(endpoint.Models())(newDeadlineRecorder(), httptest.NewRequest(http.MethodGet, "/models", nil))
 
 	if len(gotValues) != 0 {
 		t.Errorf("upstream Accept-Encoding values = %q, want absent", gotValues)
@@ -272,7 +272,7 @@ func TestPassthroughHandlerMapsMethodAndRouteAndCopiesBasicResponse(t *testing.T
 			registry := shim.Registry{{
 				Name:    "must-not-run",
 				Enabled: true,
-				New: func(context.Context, apierror.Surface, shim.Route) any {
+				New: func(context.Context, endpoint.Surface, endpoint.Route) any {
 					panic("passthrough instantiated the shim onion")
 				},
 			}}
@@ -286,7 +286,7 @@ func TestPassthroughHandlerMapsMethodAndRouteAndCopiesBasicResponse(t *testing.T
 			req.Header.Set("X-Api-Key", "inbound-api-key")
 			rec := &commitObservingRecorder{deadlineRecorder: newDeadlineRecorder(), body: upstreamBody}
 
-			f.PassthroughHandler(tc.method, "/models", apierror.GitHubCopilot)(rec, req)
+			f.PassthroughHandler(endpoint.Models())(rec, req)
 
 			if calls != 1 {
 				t.Errorf("upstream calls = %d, want exactly 1", calls)
@@ -316,6 +316,53 @@ func TestPassthroughHandlerMapsMethodAndRouteAndCopiesBasicResponse(t *testing.T
 	}
 }
 
+func TestSingleModelsPassthroughForwardsEachInboundMethodWithoutSSEProcessing(t *testing.T) {
+	const raw = "event: model.future\ndata: {\"opaque\":true}\n\n"
+	var gotMethods []string
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		gotMethods = append(gotMethods, r.Method)
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header: http.Header{
+				"Content-Type":   {"text/event-stream"},
+				"Content-Length": {strconv.Itoa(len(raw))},
+			},
+			Body:    io.NopCloser(strings.NewReader(raw)),
+			Request: r,
+		}, nil
+	})}
+	f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, time.Nanosecond, time.Nanosecond, 1, 1, nil)
+	handler := f.PassthroughHandler(endpoint.Models())
+	tests := []struct {
+		method   string
+		wantBody string
+	}{
+		{method: http.MethodGet, wantBody: raw},
+		{method: http.MethodHead},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.method+" is preserved upstream", func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, "/models", nil)
+			ctx := WithStreamResultHolder(req.Context())
+			req = req.WithContext(ctx)
+			rec := newDeadlineRecorder()
+
+			handler(rec, req)
+
+			if got := gotMethods[len(gotMethods)-1]; got != tc.method {
+				t.Errorf("upstream method = %q, want %q", got, tc.method)
+			}
+			if got := rec.Body.String(); got != tc.wantBody {
+				t.Errorf("body = %q, want raw passthrough body %q", got, tc.wantBody)
+			}
+			if result, ok := StreamResultFromContext(ctx); ok {
+				t.Errorf("raw Models response recorded SSE result %#v", result)
+			}
+		})
+	}
+}
+
 func TestPassthroughCurrentFailureUsesGitHubCopilotRendererWithoutCallingUpstream(t *testing.T) {
 	provider := readyStub("https://upstream.invalid")
 	provider.SetError(errors.New("mint failed"))
@@ -327,7 +374,7 @@ func TestPassthroughCurrentFailureUsesGitHubCopilotRendererWithoutCallingUpstrea
 	f := New(provider, client, time.Second, time.Second, time.Second, time.Second, 1, 1, nil)
 	rec := newDeadlineRecorder()
 
-	f.PassthroughHandler(http.MethodHead, "/models", apierror.GitHubCopilot)(rec, httptest.NewRequest(http.MethodHead, "/models", nil))
+	f.PassthroughHandler(endpoint.Models())(rec, httptest.NewRequest(http.MethodHead, "/models", nil))
 
 	if clientCalls != 0 {
 		t.Errorf("upstream calls = %d, want zero", clientCalls)
@@ -390,7 +437,7 @@ func TestPassthroughPreservesAuthoritativeResponses(t *testing.T) {
 			rec := newDeadlineRecorder()
 			rec.Header().Set("X-Request-Id", "resolved-request-id")
 
-			f.PassthroughHandler(http.MethodGet, "/models", apierror.GitHubCopilot)(rec, httptest.NewRequest(http.MethodGet, "/models", nil))
+			f.PassthroughHandler(endpoint.Models())(rec, httptest.NewRequest(http.MethodGet, "/models", nil))
 
 			if calls != 1 {
 				t.Errorf("upstream calls = %d, want exactly 1", calls)
@@ -446,7 +493,7 @@ func TestPassthroughTransportPreservesEncodedBytesAndFirstRedirect(t *testing.T)
 		req.Header.Set("Accept-Encoding", "gzip")
 		rec := newDeadlineRecorder()
 
-		f.PassthroughHandler(http.MethodGet, "/models", apierror.GitHubCopilot)(rec, req)
+		f.PassthroughHandler(endpoint.Models())(rec, req)
 
 		if got := rec.Header().Get("Content-Encoding"); got != "gzip" {
 			t.Errorf("Content-Encoding = %q, want gzip", got)
@@ -471,7 +518,7 @@ func TestPassthroughTransportPreservesEncodedBytesAndFirstRedirect(t *testing.T)
 
 		f := New(readyStub(upstream.URL), NewClient(time.Second), time.Second, time.Second, time.Second, time.Second, 1, 1, nil)
 		rec := newDeadlineRecorder()
-		f.PassthroughHandler(http.MethodGet, "/models", apierror.GitHubCopilot)(rec, httptest.NewRequest(http.MethodGet, "/models", nil))
+		f.PassthroughHandler(endpoint.Models())(rec, httptest.NewRequest(http.MethodGet, "/models", nil))
 
 		if calls != 1 {
 			t.Errorf("upstream calls = %d, want exactly 1", calls)
@@ -508,7 +555,7 @@ func TestPassthroughDoesNotReplayModelsAfterResponseFailure(t *testing.T) {
 			req := httptest.NewRequest(method, "/models", nil)
 			req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
 			rec := newDeadlineRecorder()
-			f.PassthroughHandler(method, "/models", apierror.GitHubCopilot)(rec, req)
+			f.PassthroughHandler(endpoint.Models())(rec, req)
 
 			if usedCachedConnection.Load() {
 				t.Error("support request used a cached connection, want a fresh single-use connection")
@@ -591,7 +638,7 @@ func TestPassthroughReusesInjectedClientConnectionPool(t *testing.T) {
 			req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
 			f := New(readyStub(upstream.URL), client, time.Second, time.Second, time.Second, time.Second, 1, 1, nil)
 			rec := newDeadlineRecorder()
-			f.PassthroughHandler(http.MethodGet, "/models", apierror.GitHubCopilot)(rec, req)
+			f.PassthroughHandler(endpoint.Models())(rec, req)
 
 			if !usedCachedConnection.Load() {
 				t.Errorf("%s /models request did not reuse the injected client's pooled connection", test.name)
@@ -668,7 +715,7 @@ func TestPassthroughPreHeaderFailuresUseLocalErrorPolicy(t *testing.T) {
 			f := New(provider, client, time.Second, time.Second, time.Second, time.Second, 1, 1, nil)
 			rec := newDeadlineRecorder()
 
-			f.PassthroughHandler(http.MethodHead, "/models", apierror.GitHubCopilot)(rec, httptest.NewRequest(http.MethodHead, "/models", nil))
+			f.PassthroughHandler(endpoint.Models())(rec, httptest.NewRequest(http.MethodHead, "/models", nil))
 
 			if calls != tc.wantCalls {
 				t.Errorf("upstream calls = %d, want %d", calls, tc.wantCalls)
@@ -693,7 +740,7 @@ func TestPassthroughResponseHeaderTimeoutUsesConfiguredClient(t *testing.T) {
 
 	f := New(readyStub(upstream.URL), NewClient(20*time.Millisecond), time.Second, time.Second, time.Second, time.Second, 1, 1, nil)
 	rec := newDeadlineRecorder()
-	f.PassthroughHandler(http.MethodGet, "/models", apierror.GitHubCopilot)(rec, httptest.NewRequest(http.MethodGet, "/models", nil))
+	f.PassthroughHandler(endpoint.Models())(rec, httptest.NewRequest(http.MethodGet, "/models", nil))
 	<-upstreamStarted
 
 	const want = `{"type":"error","error":{"type":"api_error","message":"the upstream request timed out"}}`
@@ -709,7 +756,7 @@ func TestPassthroughPostCommitReadFailureCancelsThenClosesWithoutSynthesis(t *te
 	f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, time.Nanosecond, time.Nanosecond, 1, 1, nil)
 	rec := newDeadlineRecorder()
 
-	f.PassthroughHandler(http.MethodGet, "/models", apierror.GitHubCopilot)(rec, httptest.NewRequest(http.MethodGet, "/models", nil))
+	f.PassthroughHandler(endpoint.Models())(rec, httptest.NewRequest(http.MethodGet, "/models", nil))
 
 	const want = "event: model.future\ndata: {\"opaque\":true}\n\n"
 	if rec.Code != http.StatusOK || rec.Body.String() != want {
@@ -724,7 +771,7 @@ func TestPassthroughOutboundTimeoutStopsCommittedRawBody(t *testing.T) {
 	f := New(readyStub("https://upstream.invalid"), client, 20*time.Millisecond, time.Second, time.Nanosecond, time.Nanosecond, 1, 1, nil)
 	rec := newDeadlineRecorder()
 
-	f.PassthroughHandler(http.MethodGet, "/models", apierror.GitHubCopilot)(rec, httptest.NewRequest(http.MethodGet, "/models", nil))
+	f.PassthroughHandler(endpoint.Models())(rec, httptest.NewRequest(http.MethodGet, "/models", nil))
 
 	if rec.Code != http.StatusOK || rec.Body.String() != "raw-prefix" {
 		t.Errorf("body-timeout response = status %d body %q, want committed 200 raw-prefix only", rec.Code, rec.Body.String())
@@ -739,7 +786,7 @@ func TestPassthroughWriteFailureCancelsAndClosesWithoutReplacement(t *testing.T)
 	w := &failingResponseWriter{header: make(http.Header), writeErr: errors.New("client stopped reading")}
 	started := time.Now()
 
-	f.PassthroughHandler(http.MethodGet, "/models", apierror.GitHubCopilot)(w, httptest.NewRequest(http.MethodGet, "/models", nil))
+	f.PassthroughHandler(endpoint.Models())(w, httptest.NewRequest(http.MethodGet, "/models", nil))
 
 	if w.status != http.StatusOK || len(w.written) != 0 {
 		t.Errorf("write-failure response = status %d body %q, want committed 200 with no replacement", w.status, w.written)
@@ -762,7 +809,7 @@ func TestPassthroughClientCancelStopsCopyAndReleasesBody(t *testing.T) {
 	rec := newDeadlineRecorder()
 	done := make(chan struct{})
 	go func() {
-		f.PassthroughHandler(http.MethodGet, "/models", apierror.GitHubCopilot)(rec, req)
+		f.PassthroughHandler(endpoint.Models())(rec, req)
 		close(done)
 	}()
 
@@ -791,7 +838,7 @@ func TestPassthroughSSELookingBodyDoesNotUseSSETimers(t *testing.T) {
 	f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, time.Millisecond, time.Millisecond, 1, 1, nil)
 	rec := newDeadlineRecorder()
 
-	f.PassthroughHandler(http.MethodGet, "/models", apierror.GitHubCopilot)(rec, httptest.NewRequest(http.MethodGet, "/models", nil))
+	f.PassthroughHandler(endpoint.Models())(rec, httptest.NewRequest(http.MethodGet, "/models", nil))
 
 	if rec.Body.String() != raw {
 		t.Errorf("SSE-looking raw body = %q, want byte-exact %q", rec.Body.String(), raw)

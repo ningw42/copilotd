@@ -16,6 +16,7 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/ningw42/copilotd/internal/apierror"
+	"github.com/ningw42/copilotd/internal/endpoint"
 	"github.com/ningw42/copilotd/internal/identity"
 	"github.com/ningw42/copilotd/internal/logging"
 )
@@ -77,8 +78,10 @@ func New(provider identity.Provider, dialClient *http.Client, dialTimeout, write
 	}
 }
 
-// Handler returns the OpenAI Responses WebSocket forwarding handler.
-func (p *Proxy) Handler() http.HandlerFunc {
+// Handler returns the WebSocket forwarding handler for one endpoint contract.
+func (p *Proxy) Handler(ep endpoint.WSForward) http.HandlerFunc {
+	surface := ep.Surface()
+	upstream := ep.Upstream()
 	return func(w http.ResponseWriter, r *http.Request) {
 		handshakeStart := time.Now()
 		p.wg.Add(1)
@@ -89,27 +92,27 @@ func (p *Proxy) Handler() http.HandlerFunc {
 		defer cancelPhase()
 		requestID, _ := logging.RequestIDFrom(r.Context())
 		if p.draining.Load() {
-			apierror.Write(w, apierror.OpenAI, apierror.NotReady, "the server is shutting down")
+			apierror.Write(w, surface, apierror.NotReady, "the server is shutting down")
 			p.metrics.observeAccept(AcceptRejected)
 			return
 		}
 
 		if !isWebSocketUpgrade(r) {
-			apierror.Write(w, apierror.OpenAI, apierror.NotAWebSocketUpgrade, "request is not a WebSocket upgrade")
+			apierror.Write(w, surface, apierror.NotAWebSocketUpgrade, "request is not a WebSocket upgrade")
 			p.metrics.observeAccept(AcceptRejected)
 			return
 		}
 
 		cred, err := p.provider.Current(phaseCtx)
 		if err != nil {
-			apierror.Write(w, apierror.OpenAI, apierror.NotReady, "no upstream credential available")
+			apierror.Write(w, surface, apierror.NotReady, "no upstream credential available")
 			p.metrics.observeAccept(AcceptRejected)
 			return
 		}
 
-		upstreamURL, err := responsesURL(cred.BaseURL, r.URL.RawQuery, r.URL.ForceQuery)
+		upstreamURL, err := websocketURL(cred.BaseURL, upstream, r.URL.RawQuery, r.URL.ForceQuery)
 		if err != nil {
-			apierror.Write(w, apierror.OpenAI, apierror.BadGateway, "could not build the upstream WebSocket URL")
+			apierror.Write(w, surface, apierror.BadGateway, "could not build the upstream WebSocket URL")
 			p.metrics.observeAccept(AcceptDialFailed)
 			return
 		}
@@ -125,11 +128,11 @@ func (p *Proxy) Handler() http.HandlerFunc {
 				_ = response.Body.Close()
 			}
 			if errors.Is(err, context.DeadlineExceeded) || errors.Is(dialCtx.Err(), context.DeadlineExceeded) {
-				apierror.Write(w, apierror.OpenAI, apierror.GatewayTimeout, "the upstream WebSocket handshake timed out")
+				apierror.Write(w, surface, apierror.GatewayTimeout, "the upstream WebSocket handshake timed out")
 				p.metrics.observeAccept(AcceptDialFailed)
 				return
 			}
-			apierror.Write(w, apierror.OpenAI, apierror.BadGateway, "could not reach the upstream WebSocket")
+			apierror.Write(w, surface, apierror.BadGateway, "could not reach the upstream WebSocket")
 			p.metrics.observeAccept(AcceptDialFailed)
 			return
 		}
@@ -216,7 +219,7 @@ func (p *Proxy) forceCloseSessions() {
 	}
 }
 
-func responsesURL(baseURL, rawQuery string, forceQuery bool) (string, error) {
+func websocketURL(baseURL string, upstream endpoint.Route, rawQuery string, forceQuery bool) (string, error) {
 	u, err := url.Parse(baseURL)
 	if err != nil {
 		return "", fmt.Errorf("parse upstream base URL: %w", err)
@@ -229,7 +232,7 @@ func responsesURL(baseURL, rawQuery string, forceQuery bool) (string, error) {
 	default:
 		return "", fmt.Errorf("unsupported upstream URL scheme %q", u.Scheme)
 	}
-	u.Path = strings.TrimSuffix(u.Path, "/") + "/responses"
+	u.Path = strings.TrimSuffix(u.Path, "/") + string(upstream)
 	u.RawPath = ""
 	u.RawQuery = rawQuery
 	u.ForceQuery = forceQuery

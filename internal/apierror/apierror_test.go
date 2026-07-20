@@ -6,9 +6,11 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"testing"
+
+	"github.com/ningw42/copilotd/internal/endpoint"
 )
 
-// TestWriteShapesAndStatus asserts every (provider, kind) pair emits the right
+// TestWriteShapesAndStatus asserts every (Surface, kind) pair emits the right
 // HTTP status, Content-Type, and JSON body shape from the single mapping table.
 func TestWriteShapesAndStatus(t *testing.T) {
 	tests := []struct {
@@ -32,7 +34,7 @@ func TestWriteShapesAndStatus(t *testing.T) {
 	for _, tc := range tests {
 		t.Run("anthropic", func(t *testing.T) {
 			rec := httptest.NewRecorder()
-			Write(rec, Anthropic, tc.kind, "boom")
+			Write(rec, endpoint.Anthropic, tc.kind, "boom")
 			if rec.Code != tc.wantStatus {
 				t.Errorf("kind %d: status = %d, want %d", tc.kind, rec.Code, tc.wantStatus)
 			}
@@ -62,7 +64,7 @@ func TestWriteShapesAndStatus(t *testing.T) {
 
 		t.Run("openai", func(t *testing.T) {
 			rec := httptest.NewRecorder()
-			Write(rec, OpenAI, tc.kind, "boom")
+			Write(rec, endpoint.OpenAI, tc.kind, "boom")
 			if rec.Code != tc.wantStatus {
 				t.Errorf("kind %d: status = %d, want %d", tc.kind, rec.Code, tc.wantStatus)
 			}
@@ -103,9 +105,9 @@ func TestGitHubCopilotWriteMatchesAnthropicForEveryKind(t *testing.T) {
 	for kind := range table {
 		t.Run(kindName(kind), func(t *testing.T) {
 			anthropic := httptest.NewRecorder()
-			Write(anthropic, Anthropic, kind, "same message")
+			Write(anthropic, endpoint.Anthropic, kind, "same message")
 			githubCopilot := httptest.NewRecorder()
-			Write(githubCopilot, GitHubCopilot, kind, "same message")
+			Write(githubCopilot, endpoint.GitHubCopilot, kind, "same message")
 
 			if githubCopilot.Code != anthropic.Code {
 				t.Errorf("status = %d, want Anthropic status %d", githubCopilot.Code, anthropic.Code)
@@ -147,7 +149,7 @@ func TestRejectCarriesKindAndMessageAsAnError(t *testing.T) {
 func TestWriteStreamErrorAnthropicEnded(t *testing.T) {
 	rec := httptest.NewRecorder()
 
-	WriteStreamError(rec, Anthropic, StreamEnded)
+	WriteStreamError(rec, endpoint.Anthropic, StreamEnded)
 
 	const want = "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"copilotd: upstream stream ended before a terminal event\"}}\n\n"
 	if got := rec.Body.String(); got != want {
@@ -161,7 +163,7 @@ func TestWriteStreamErrorAnthropicEnded(t *testing.T) {
 func TestWriteStreamErrorAnthropicFailed(t *testing.T) {
 	rec := httptest.NewRecorder()
 
-	WriteStreamError(rec, Anthropic, StreamFailed)
+	WriteStreamError(rec, endpoint.Anthropic, StreamFailed)
 
 	const want = "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"copilotd: upstream stream failed\"}}\n\n"
 	if got := rec.Body.String(); got != want {
@@ -175,7 +177,7 @@ func TestWriteStreamErrorAnthropicFailed(t *testing.T) {
 func TestWriteStreamErrorAnthropicStalled(t *testing.T) {
 	rec := httptest.NewRecorder()
 
-	if err := WriteStreamError(rec, Anthropic, StreamStalled); err != nil {
+	if err := WriteStreamError(rec, endpoint.Anthropic, StreamStalled); err != nil {
 		t.Fatalf("WriteStreamError() error = %v", err)
 	}
 
@@ -191,17 +193,17 @@ func TestWriteStreamErrorAnthropicStalled(t *testing.T) {
 func TestWriteStreamErrorShimFailureUsesNativeShape(t *testing.T) {
 	tests := []struct {
 		name    string
-		surface Surface
+		surface endpoint.Surface
 		want    string
 	}{
 		{
 			name:    "Anthropic",
-			surface: Anthropic,
+			surface: endpoint.Anthropic,
 			want:    "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"copilotd: shim failed\"}}\n\n",
 		},
 		{
 			name:    "OpenAI",
-			surface: OpenAI,
+			surface: endpoint.OpenAI,
 			want:    "event: error\ndata: {\"type\":\"error\",\"code\":null,\"message\":\"copilotd: shim failed\",\"param\":null}\n\n",
 		},
 	}
@@ -247,7 +249,7 @@ func TestWriteStreamErrorOpenAIUsesBareNativeShape(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := httptest.NewRecorder()
-			if err := WriteStreamError(rec, OpenAI, tc.reason); err != nil {
+			if err := WriteStreamError(rec, endpoint.OpenAI, tc.reason); err != nil {
 				t.Fatalf("WriteStreamError() error = %v", err)
 			}
 			if got := rec.Body.String(); got != tc.want {

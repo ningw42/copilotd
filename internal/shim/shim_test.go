@@ -7,13 +7,13 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/ningw42/copilotd/internal/apierror"
+	"github.com/ningw42/copilotd/internal/endpoint"
 	"github.com/ningw42/copilotd/internal/sse"
 )
 
-type endpointRecorder struct {
-	surface apierror.Surface
-	route   Route
+type surfaceRouteRecorder struct {
+	surface endpoint.Surface
+	route   endpoint.Route
 	calls   int
 }
 
@@ -41,15 +41,15 @@ func (s *wrappingShim) TransformPrelude(_ context.Context, p *Prelude) error {
 	return nil
 }
 
-func TestChainConstructsEnabledShimsOnceWithEndpointIdentity(t *testing.T) {
+func TestChainConstructsEnabledShimsOnceWithSurfaceAndRoute(t *testing.T) {
 	ctx := context.Background()
 	disabledCalls := 0
-	recorded := endpointRecorder{}
+	recorded := surfaceRouteRecorder{}
 	registry := Registry{
 		{
 			Name:    "disabled",
 			Enabled: false,
-			New: func(context.Context, apierror.Surface, Route) any {
+			New: func(context.Context, endpoint.Surface, endpoint.Route) any {
 				disabledCalls++
 				return NopShim{}
 			},
@@ -57,7 +57,7 @@ func TestChainConstructsEnabledShimsOnceWithEndpointIdentity(t *testing.T) {
 		{
 			Name:    "enabled",
 			Enabled: true,
-			New: func(_ context.Context, surface apierror.Surface, route Route) any {
+			New: func(_ context.Context, surface endpoint.Surface, route endpoint.Route) any {
 				recorded.surface = surface
 				recorded.route = route
 				recorded.calls++
@@ -66,12 +66,12 @@ func TestChainConstructsEnabledShimsOnceWithEndpointIdentity(t *testing.T) {
 		},
 	}
 
-	_ = registry.NewChain(ctx, apierror.OpenAI, Route("/responses"))
+	_ = registry.NewChain(ctx, endpoint.OpenAI, endpoint.RouteOpenAIResponses)
 
 	if disabledCalls != 0 {
 		t.Fatalf("disabled constructor calls = %d, want 0", disabledCalls)
 	}
-	if recorded.calls != 1 || recorded.surface != apierror.OpenAI || recorded.route != "/responses" {
+	if recorded.calls != 1 || recorded.surface != endpoint.OpenAI || recorded.route != "/responses" {
 		t.Fatalf("enabled constructor = %+v, want one call for OpenAI /responses", recorded)
 	}
 }
@@ -85,12 +85,12 @@ func TestChainRunsRequestOutwardAndPreludeInward(t *testing.T) {
 		registry = append(registry, Registration{
 			Name:    name,
 			Enabled: true,
-			New: func(context.Context, apierror.Surface, Route) any {
+			New: func(context.Context, endpoint.Surface, endpoint.Route) any {
 				return &wrappingShim{name: name, events: &events}
 			},
 		})
 	}
-	chain := registry.NewChain(ctx, apierror.Anthropic, Route("/v1/messages"))
+	chain := registry.NewChain(ctx, endpoint.Anthropic, endpoint.RouteAnthropicMessages)
 
 	header, body, err := chain.RunRequest(ctx, "model=x%2Fy", http.Header{"X-Request-Order": {"seed"}}, []byte("seed"))
 	if err != nil {
@@ -140,10 +140,10 @@ func TestRunRequestOwnsCarrierAndReturnsWholeFieldReassignments(t *testing.T) {
 	chain := (Registry{{
 		Name:    "reader",
 		Enabled: true,
-		New: func(context.Context, apierror.Surface, Route) any {
+		New: func(context.Context, endpoint.Surface, endpoint.Route) any {
 			return instance
 		},
-	}}).NewChain(context.Background(), apierror.Anthropic, Route("/v1/messages"))
+	}}).NewChain(context.Background(), endpoint.Anthropic, endpoint.RouteAnthropicMessages)
 
 	header, body, err := chain.RunRequest(context.Background(), "q=a%2Fb", http.Header{"X-Old": {"value"}}, []byte("old"))
 	if err != nil {
@@ -178,12 +178,12 @@ func TestChainRunsBufferedResponseInwardAndOwnsCarrier(t *testing.T) {
 		registry = append(registry, Registration{
 			Name:    name,
 			Enabled: true,
-			New: func(context.Context, apierror.Surface, Route) any {
+			New: func(context.Context, endpoint.Surface, endpoint.Route) any {
 				return &bufferedWrappingShim{name: name, events: &events}
 			},
 		})
 	}
-	chain := registry.NewChain(context.Background(), apierror.Anthropic, Route("/v1/messages"))
+	chain := registry.NewChain(context.Background(), endpoint.Anthropic, endpoint.RouteAnthropicMessages)
 
 	body, err := chain.RunBuffered(context.Background(), []byte("seed"))
 	if err != nil {
@@ -204,17 +204,17 @@ func TestChainBuffersResponseOnlyWhenEnabledInstanceImplementsHook(t *testing.T)
 	withoutHook := (Registry{{
 		Name:    "nop",
 		Enabled: true,
-		New: func(context.Context, apierror.Surface, Route) any {
+		New: func(context.Context, endpoint.Surface, endpoint.Route) any {
 			return NopShim{}
 		},
-	}}).NewChain(ctx, apierror.Anthropic, Route("/v1/messages"))
+	}}).NewChain(ctx, endpoint.Anthropic, endpoint.RouteAnthropicMessages)
 	withHook := (Registry{{
 		Name:    "buffered",
 		Enabled: true,
-		New: func(context.Context, apierror.Surface, Route) any {
+		New: func(context.Context, endpoint.Surface, endpoint.Route) any {
 			return &bufferedWrappingShim{}
 		},
-	}}).NewChain(ctx, apierror.Anthropic, Route("/v1/messages"))
+	}}).NewChain(ctx, endpoint.Anthropic, endpoint.RouteAnthropicMessages)
 
 	if withoutHook.HasBufferedTransformer() {
 		t.Error("nop chain unexpectedly opts into buffering")
@@ -256,8 +256,8 @@ func TestStreamAdapterFoldsInnerToOuterWithFanout(t *testing.T) {
 		}
 	}
 	registry := Registry{
-		{Name: "outer", Enabled: true, New: func(context.Context, apierror.Surface, Route) any { return wrap("outer") }},
-		{Name: "fanout", Enabled: true, New: func(context.Context, apierror.Surface, Route) any {
+		{Name: "outer", Enabled: true, New: func(context.Context, endpoint.Surface, endpoint.Route) any { return wrap("outer") }},
+		{Name: "fanout", Enabled: true, New: func(context.Context, endpoint.Surface, endpoint.Route) any {
 			return eventTransformFunc(func(_ context.Context, frame sse.Frame) ([]sse.Frame, error) {
 				return []sse.Frame{
 					{Type: frame.Type, Raw: []byte("left(" + string(frame.Raw) + ")")},
@@ -265,9 +265,9 @@ func TestStreamAdapterFoldsInnerToOuterWithFanout(t *testing.T) {
 				}, nil
 			})
 		}},
-		{Name: "inner", Enabled: true, New: func(context.Context, apierror.Surface, Route) any { return wrap("inner") }},
+		{Name: "inner", Enabled: true, New: func(context.Context, endpoint.Surface, endpoint.Route) any { return wrap("inner") }},
 	}
-	adapter := registry.NewChain(context.Background(), apierror.Anthropic, Route("/v1/messages")).StreamAdapter()
+	adapter := registry.NewChain(context.Background(), endpoint.Anthropic, endpoint.RouteAnthropicMessages).StreamAdapter()
 
 	frames, err := adapter.Transform(context.Background(), sse.Frame{Type: "delta", Raw: []byte("seed")})
 	if err != nil {
@@ -295,10 +295,10 @@ func TestStreamAdapterRetransformsInnerFinalizeOutputThroughOuterHooks(t *testin
 		return []sse.Frame{{Type: frame.Type, Raw: []byte("altered(" + string(frame.Raw) + ")")}}, nil
 	})
 	registry := Registry{
-		{Name: "outer-alter", Enabled: true, New: func(context.Context, apierror.Surface, Route) any { return outer }},
-		{Name: "inner-hold", Enabled: true, New: func(context.Context, apierror.Surface, Route) any { return inner }},
+		{Name: "outer-alter", Enabled: true, New: func(context.Context, endpoint.Surface, endpoint.Route) any { return outer }},
+		{Name: "inner-hold", Enabled: true, New: func(context.Context, endpoint.Surface, endpoint.Route) any { return inner }},
 	}
-	adapter := registry.NewChain(context.Background(), apierror.Anthropic, Route("/v1/messages")).StreamAdapter()
+	adapter := registry.NewChain(context.Background(), endpoint.Anthropic, endpoint.RouteAnthropicMessages).StreamAdapter()
 
 	frames, err := adapter.Transform(context.Background(), sse.Frame{Type: "message_stop", Raw: []byte("X")})
 	if err != nil || len(frames) != 0 {
@@ -332,9 +332,9 @@ func TestStreamAdapterFinalizeErrorRetainsOnlyFullyComposedFrames(t *testing.T) 
 			finalize: func(context.Context) ([]sse.Frame, error) { return held, nil },
 		}
 		adapter := (Registry{
-			{Name: "outer", Enabled: true, New: func(context.Context, apierror.Surface, Route) any { return outer }},
-			{Name: "inner", Enabled: true, New: func(context.Context, apierror.Surface, Route) any { return inner }},
-		}).NewChain(context.Background(), apierror.Anthropic, Route("/v1/messages")).StreamAdapter()
+			{Name: "outer", Enabled: true, New: func(context.Context, endpoint.Surface, endpoint.Route) any { return outer }},
+			{Name: "inner", Enabled: true, New: func(context.Context, endpoint.Surface, endpoint.Route) any { return inner }},
+		}).NewChain(context.Background(), endpoint.Anthropic, endpoint.RouteAnthropicMessages).StreamAdapter()
 		terminal := sse.Frame{Type: "message_stop", Raw: []byte("terminal")}
 		if frames, err := adapter.Transform(context.Background(), terminal); err != nil || len(frames) != 0 {
 			t.Fatalf("Transform() = %#v, %v, want held terminal", frames, err)
@@ -362,10 +362,10 @@ func TestStreamAdapterFinalizeErrorRetainsOnlyFullyComposedFrames(t *testing.T) 
 		})
 		inner := streamFinalizerFunc(func(context.Context) ([]sse.Frame, error) { return nil, nil })
 		adapter := (Registry{
-			{Name: "outer-A", Enabled: true, New: func(context.Context, apierror.Surface, Route) any { return outer }},
-			{Name: "middle-B", Enabled: true, New: func(context.Context, apierror.Surface, Route) any { return middle }},
-			{Name: "inner-C", Enabled: true, New: func(context.Context, apierror.Surface, Route) any { return inner }},
-		}).NewChain(context.Background(), apierror.Anthropic, Route("/v1/messages")).StreamAdapter()
+			{Name: "outer-A", Enabled: true, New: func(context.Context, endpoint.Surface, endpoint.Route) any { return outer }},
+			{Name: "middle-B", Enabled: true, New: func(context.Context, endpoint.Surface, endpoint.Route) any { return middle }},
+			{Name: "inner-C", Enabled: true, New: func(context.Context, endpoint.Surface, endpoint.Route) any { return inner }},
+		}).NewChain(context.Background(), endpoint.Anthropic, endpoint.RouteAnthropicMessages).StreamAdapter()
 
 		frames, err := adapter.Finalize(context.Background())
 		if !errors.Is(err, shimErr) {
@@ -388,9 +388,9 @@ func TestStreamAdapterFinalizeErrorRetainsOnlyFullyComposedFrames(t *testing.T) 
 			return []sse.Frame{{Type: "delta", Raw: []byte("inner")}}, nil
 		})
 		adapter := (Registry{
-			{Name: "outer", Enabled: true, New: func(context.Context, apierror.Surface, Route) any { return outer }},
-			{Name: "inner", Enabled: true, New: func(context.Context, apierror.Surface, Route) any { return inner }},
-		}).NewChain(context.Background(), apierror.Anthropic, Route("/v1/messages")).StreamAdapter()
+			{Name: "outer", Enabled: true, New: func(context.Context, endpoint.Surface, endpoint.Route) any { return outer }},
+			{Name: "inner", Enabled: true, New: func(context.Context, endpoint.Surface, endpoint.Route) any { return inner }},
+		}).NewChain(context.Background(), endpoint.Anthropic, endpoint.RouteAnthropicMessages).StreamAdapter()
 
 		frames, err := adapter.Finalize(context.Background())
 		if !errors.Is(err, shimErr) {
@@ -405,18 +405,18 @@ func TestStreamAdapterFinalizeErrorRetainsOnlyFullyComposedFrames(t *testing.T) 
 
 func TestStreamAdapterSelectionAndHoldSemantics(t *testing.T) {
 	ctx := context.Background()
-	if adapter := (Registry{{Name: "nop", Enabled: true, New: func(context.Context, apierror.Surface, Route) any { return NopShim{} }}}).
-		NewChain(ctx, apierror.Anthropic, Route("/v1/messages")).StreamAdapter(); adapter != nil {
+	if adapter := (Registry{{Name: "nop", Enabled: true, New: func(context.Context, endpoint.Surface, endpoint.Route) any { return NopShim{} }}}).
+		NewChain(ctx, endpoint.Anthropic, endpoint.RouteAnthropicMessages).StreamAdapter(); adapter != nil {
 		t.Errorf("nop StreamAdapter() = %T, want nil fast path", adapter)
 	}
 	finalizerOnly := Registry{{
 		Name:    "finalizer-only",
 		Enabled: true,
-		New: func(context.Context, apierror.Surface, Route) any {
+		New: func(context.Context, endpoint.Surface, endpoint.Route) any {
 			return streamFinalizerFunc(func(context.Context) ([]sse.Frame, error) { return nil, nil })
 		},
 	}}
-	if adapter := finalizerOnly.NewChain(ctx, apierror.Anthropic, Route("/v1/messages")).StreamAdapter(); adapter == nil {
+	if adapter := finalizerOnly.NewChain(ctx, endpoint.Anthropic, endpoint.RouteAnthropicMessages).StreamAdapter(); adapter == nil {
 		t.Error("finalizer-only StreamAdapter() = nil, want composed transformer")
 	}
 
@@ -427,9 +427,9 @@ func TestStreamAdapterSelectionAndHoldSemantics(t *testing.T) {
 	})
 	hold := eventTransformFunc(func(context.Context, sse.Frame) ([]sse.Frame, error) { return nil, nil })
 	adapter := (Registry{
-		{Name: "outer", Enabled: true, New: func(context.Context, apierror.Surface, Route) any { return outer }},
-		{Name: "inner-hold", Enabled: true, New: func(context.Context, apierror.Surface, Route) any { return hold }},
-	}).NewChain(ctx, apierror.Anthropic, Route("/v1/messages")).StreamAdapter()
+		{Name: "outer", Enabled: true, New: func(context.Context, endpoint.Surface, endpoint.Route) any { return outer }},
+		{Name: "inner-hold", Enabled: true, New: func(context.Context, endpoint.Surface, endpoint.Route) any { return hold }},
+	}).NewChain(ctx, endpoint.Anthropic, endpoint.RouteAnthropicMessages).StreamAdapter()
 	frames, err := adapter.Transform(ctx, sse.Frame{Type: "delta", Raw: []byte("held")})
 	if err != nil || len(frames) != 0 || outerCalls != 0 {
 		t.Errorf("held Transform() = %#v, %v, outer calls %d; want no output/calls", frames, err, outerCalls)

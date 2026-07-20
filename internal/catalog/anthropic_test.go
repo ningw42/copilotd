@@ -5,6 +5,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/ningw42/copilotd/internal/endpoint"
 )
 
 func TestRenderAnthropicEmptyCatalogHasNullBoundaryIDs(t *testing.T) {
@@ -47,7 +49,7 @@ func TestRenderAnthropicMapsOnlyEvidenceBackedOptionalCapabilities(t *testing.T)
 	if err != nil {
 		t.Fatalf("Decode() error = %v", err)
 	}
-	body, err := RenderAnthropic(Filter(models, AnthropicMessagesRoute))
+	body, err := RenderAnthropic(Filter(models, endpoint.RouteAnthropicMessages))
 	if err != nil {
 		t.Fatalf("RenderAnthropic() error = %v", err)
 	}

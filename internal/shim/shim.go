@@ -17,13 +17,9 @@ import (
 	"context"
 	"net/http"
 
-	"github.com/ningw42/copilotd/internal/apierror"
+	"github.com/ningw42/copilotd/internal/endpoint"
 	"github.com/ningw42/copilotd/internal/sse"
 )
-
-// Route is a registered upstream path, unique within a Surface. Together the
-// Surface and Route supplied to a Registration factory identify an endpoint.
-type Route string
 
 // Request carries the mutable inbound payload. Query is deliberately private:
 // hooks may inspect it with Query but cannot replace the core-owned query.
@@ -86,7 +82,7 @@ type StreamFinalizer interface {
 type Registration struct {
 	Name    string
 	Enabled bool
-	New     func(context.Context, apierror.Surface, Route) any
+	New     func(context.Context, endpoint.Surface, endpoint.Route) any
 }
 
 // Registry is an ordered set of shim registrations. Registration order is
@@ -99,7 +95,7 @@ type Chain struct {
 }
 
 // NewChain constructs each enabled shim once in registration order.
-func (r Registry) NewChain(ctx context.Context, surface apierror.Surface, route Route) *Chain {
+func (r Registry) NewChain(ctx context.Context, surface endpoint.Surface, route endpoint.Route) *Chain {
 	chain := &Chain{}
 	for _, registration := range r {
 		if registration.Enabled {
@@ -261,7 +257,7 @@ func CanonicalRegistry() Registry {
 	return Registry{{
 		Name:    "nop",
 		Enabled: false,
-		New: func(context.Context, apierror.Surface, Route) any {
+		New: func(context.Context, endpoint.Surface, endpoint.Route) any {
 			return NopShim{}
 		},
 	}}

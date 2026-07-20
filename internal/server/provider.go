@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/ningw42/copilotd/internal/apierror"
+	"github.com/ningw42/copilotd/internal/endpoint"
 	"github.com/ningw42/copilotd/internal/identity"
 )
 
@@ -33,19 +34,19 @@ func handleReady(provider identity.Provider) http.HandlerFunc {
 	}
 }
 
-// authMW gates a provider route on the inbound API key. The presented key
+// authMW gates a Surface endpoint on the inbound API key. The presented key
 // (Authorization: Bearer <k> or x-api-key: <k>) is compared to the configured key
 // in constant time over their SHA-256 digests — fixed length, so no length leak.
 // A missing, empty, or mismatched key yields a provider-shaped 401; the key is
 // never logged. authMW wraps readinessMW, so an unauthenticated caller always
 // gets 401 — never a 503 that would leak readiness state.
-func authMW(apikey string, tag apierror.Surface, next http.Handler) http.Handler {
+func authMW(apikey string, surface endpoint.Surface, next http.Handler) http.Handler {
 	want := sha256.Sum256([]byte(apikey))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		presented := presentedKey(r)
 		got := sha256.Sum256([]byte(presented))
 		if presented == "" || subtle.ConstantTimeCompare(got[:], want[:]) != 1 {
-			apierror.Write(w, tag, apierror.Unauthorized, "missing or invalid API key")
+			apierror.Write(w, surface, apierror.Unauthorized, "missing or invalid API key")
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -64,13 +65,13 @@ func presentedKey(r *http.Request) string {
 	return strings.TrimSpace(r.Header.Get("X-Api-Key"))
 }
 
-// readinessMW gates a provider route on identity readiness, applied after auth.
+// readinessMW gates a Surface endpoint on identity readiness, applied after auth.
 // When not ready it returns a provider-shaped 503; the next request can
 // transparently re-mint once identity recovers.
-func readinessMW(provider identity.Provider, tag apierror.Surface, next http.Handler) http.Handler {
+func readinessMW(provider identity.Provider, surface endpoint.Surface, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !provider.Ready() {
-			apierror.Write(w, tag, apierror.NotReady, "service not ready")
+			apierror.Write(w, surface, apierror.NotReady, "service not ready")
 			return
 		}
 		next.ServeHTTP(w, r)

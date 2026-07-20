@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"reflect"
 	"testing"
+
+	"github.com/ningw42/copilotd/internal/endpoint"
 )
 
 func TestRenderCodexIntersectsInLiveOrderAndEmitsCompleteEntries(t *testing.T) {
-	models := Filter(capturedModels(t), OpenAIResponsesRoute)
+	models := Filter(capturedModels(t), endpoint.RouteOpenAIResponses)
 	body, outcome, err := RenderCodex(models, CodexRenderConfig{})
 	if err != nil {
 		t.Fatalf("RenderCodex: %v", err)
@@ -57,7 +59,7 @@ func TestRenderCodexIntersectsInLiveOrderAndEmitsCompleteEntries(t *testing.T) {
 }
 
 func TestRenderCodexCopiesSnapshotFieldsVerbatimAndDoesNotAliasThem(t *testing.T) {
-	models := Filter(capturedModels(t), OpenAIResponsesRoute)
+	models := Filter(capturedModels(t), endpoint.RouteOpenAIResponses)
 	body, _, err := RenderCodex(models, CodexRenderConfig{})
 	if err != nil {
 		t.Fatalf("RenderCodex: %v", err)
@@ -88,7 +90,7 @@ func TestRenderCodexCopiesSnapshotFieldsVerbatimAndDoesNotAliasThem(t *testing.T
 }
 
 func TestRenderCodexInjectsOnlyAnEmittedReviewer(t *testing.T) {
-	models := Filter(capturedModels(t), OpenAIResponsesRoute)
+	models := Filter(capturedModels(t), endpoint.RouteOpenAIResponses)
 	tests := []struct {
 		name        string
 		reviewer    string
@@ -127,7 +129,7 @@ func TestRenderCodexInjectsOnlyAnEmittedReviewer(t *testing.T) {
 }
 
 func TestRenderCodexDropsAReviewerCopilotStopsForwarding(t *testing.T) {
-	models := Filter(capturedModels(t), OpenAIResponsesRoute)
+	models := Filter(capturedModels(t), endpoint.RouteOpenAIResponses)
 	withoutReviewer := make([]Model, 0, len(models)-1)
 	for _, model := range models {
 		if model.ID != "gpt-5.4" {
@@ -179,7 +181,7 @@ func TestRenderCodexOverlaysLimitsWithIndependentSnapshotFallbacks(t *testing.T)
 }
 
 func TestRenderCodexFallsBackWhenCapturedCopilotModelsOmitLimits(t *testing.T) {
-	models := Filter(capturedModels(t), OpenAIResponsesRoute)
+	models := Filter(capturedModels(t), endpoint.RouteOpenAIResponses)
 	for _, model := range models {
 		if model.Capabilities.Limits.MaxContextWindowTokens != nil {
 			t.Fatalf("captured %s unexpectedly has max_context_window_tokens", model.ID)

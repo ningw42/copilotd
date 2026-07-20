@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ningw42/copilotd/internal/apierror"
 	"github.com/ningw42/copilotd/internal/config"
+	"github.com/ningw42/copilotd/internal/endpoint"
 	"github.com/ningw42/copilotd/internal/forward"
 	"github.com/ningw42/copilotd/internal/identity"
 	"github.com/ningw42/copilotd/internal/logging"
@@ -71,7 +71,7 @@ func startPhase3CapstoneServerWithObservers(
 		forward.WithLogger(logger),
 	)
 	slog.SetDefault(previousDefault)
-	return startTestServer(t, server.New(cfg, logger, provider, forwarder, nil, outcomes)), forwarder
+	return startTestServer(t, server.New(cfg, logger, provider, forwarder, newTestWSProxy(provider), outcomes)), forwarder
 }
 
 type phase3BufferedTranscript struct {
@@ -288,7 +288,7 @@ func phase3IdentityRegistry(calls *phase3HookCalls) shim.Registry {
 	return shim.Registry{{
 		Name:    "phase3-identity-double",
 		Enabled: true,
-		New: func(context.Context, apierror.Surface, shim.Route) any {
+		New: func(context.Context, endpoint.Surface, endpoint.Route) any {
 			calls.constructed.Add(1)
 			return &phase3IdentityShim{calls: calls}
 		},
@@ -359,7 +359,7 @@ func TestPhase3PostCommitShimFailureIsWarnedCountedAndRedactedEndToEnd(t *testin
 	registry := shim.Registry{{
 		Name:    "phase3-failing-event",
 		Enabled: true,
-		New: func(context.Context, apierror.Surface, shim.Route) any {
+		New: func(context.Context, endpoint.Surface, endpoint.Route) any {
 			return &phase3FailingEventShim{err: errors.New(errorSecret)}
 		},
 	}}
@@ -435,7 +435,7 @@ func TestPhase3SuppressedPostTerminalShimFailureWarnsCountsAndRedactsEndToEnd(t 
 	registry := shim.Registry{{
 		Name:    "phase3-post-terminal-failure",
 		Enabled: true,
-		New: func(context.Context, apierror.Surface, shim.Route) any {
+		New: func(context.Context, endpoint.Surface, endpoint.Route) any {
 			return &phase3PostTerminalFailingShim{err: errors.New(errorSecret)}
 		},
 	}}

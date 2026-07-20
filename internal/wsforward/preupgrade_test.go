@@ -15,6 +15,7 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/ningw42/copilotd/internal/config"
+	"github.com/ningw42/copilotd/internal/endpoint"
 	"github.com/ningw42/copilotd/internal/identity"
 	"github.com/ningw42/copilotd/internal/logging"
 )
@@ -100,7 +101,7 @@ func TestProxyRejectsInvalidUpgradeBeforeCredentialOrDial(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			recorder := httptest.NewRecorder()
-			proxy.Handler().ServeHTTP(recorder, test.request())
+			proxy.Handler(endpoint.OpenAIResponsesWS()).ServeHTTP(recorder, test.request())
 
 			if recorder.Code != http.StatusUpgradeRequired {
 				t.Errorf("status = %d, want 426", recorder.Code)
@@ -128,7 +129,7 @@ func TestProxyReturnsNotReadyForTokenWiseUpgradeWhenCredentialResolutionFails(t 
 	request := validUpgradeRequest()
 	request.Header.Set("Upgrade", "h2c, WebSocket")
 	recorder := httptest.NewRecorder()
-	proxy.Handler().ServeHTTP(recorder, request)
+	proxy.Handler(endpoint.OpenAIResponsesWS()).ServeHTTP(recorder, request)
 
 	if recorder.Code != http.StatusServiceUnavailable {
 		t.Errorf("status = %d, want 503", recorder.Code)
@@ -154,7 +155,7 @@ func TestProxyReturnsBadGatewayBeforeAcceptWhenUpstreamDialIsRefused(t *testing.
 	t.Cleanup(func() { shutdownPreupgradeTestProxy(t, proxy) })
 
 	recorder := httptest.NewRecorder()
-	proxy.Handler().ServeHTTP(recorder, validUpgradeRequest())
+	proxy.Handler(endpoint.OpenAIResponsesWS()).ServeHTTP(recorder, validUpgradeRequest())
 
 	if recorder.Code != http.StatusBadGateway {
 		t.Errorf("status = %d, want 502 before any downstream 101", recorder.Code)
@@ -181,7 +182,7 @@ func TestProxyReturnsGatewayTimeoutBeforeAcceptWhenUpstreamDialTimesOut(t *testi
 	t.Cleanup(func() { shutdownPreupgradeTestProxy(t, proxy) })
 
 	recorder := httptest.NewRecorder()
-	proxy.Handler().ServeHTTP(recorder, validUpgradeRequest())
+	proxy.Handler(endpoint.OpenAIResponsesWS()).ServeHTTP(recorder, validUpgradeRequest())
 
 	if recorder.Code != http.StatusGatewayTimeout {
 		t.Errorf("status = %d, want 504 before any downstream 101", recorder.Code)
@@ -219,7 +220,7 @@ func TestProxyLogsUpstreamRequestIDFromSuccessfulHandshake(t *testing.T) {
 
 	downstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := logging.WithRequestID(r.Context(), "downstream-request-456")
-		proxy.Handler().ServeHTTP(w, r.WithContext(ctx))
+		proxy.Handler(endpoint.OpenAIResponsesWS()).ServeHTTP(w, r.WithContext(ctx))
 	}))
 	t.Cleanup(downstream.Close)
 

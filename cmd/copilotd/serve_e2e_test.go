@@ -164,7 +164,7 @@ func TestServeFirstRealCallEndToEnd(t *testing.T) {
 	}
 
 	fwd := forward.New(mgr, forward.NewClient(cfg.ResponseHeaderTimeout), cfg.OutboundTimeout, cfg.WriteTimeout, cfg.StreamIdleTimeout, cfg.StreamKeepaliveInterval, cfg.MaxRequestBytes, cfg.MaxBufferedResponseBytes, nil, forward.WithLogger(logger))
-	base := startTestServer(t, server.New(cfg, logger, mgr, fwd, nil, server.NewStreamOutcomeCounter()))
+	base := startTestServer(t, server.New(cfg, logger, mgr, fwd, newTestWSProxy(mgr), server.NewStreamOutcomeCounter()))
 
 	assertImpersonation := func(t *testing.T) {
 		t.Helper()
@@ -232,7 +232,7 @@ func TestServeFirstRealCallEndToEnd(t *testing.T) {
 }
 
 // TestServeDegradedWindow proves the readiness gate: before the first mint and
-// after a mint failure, provider routes return 503 and /readyz is not-ready.
+// after a mint failure, Surface endpoints return 503 and /readyz is not-ready.
 func TestServeDegradedWindow(t *testing.T) {
 	t.Run("pre-first-mint window: 503 + not-ready", func(t *testing.T) {
 		copilot := newCopilotStub(t, `{"ok":true}`)
@@ -251,7 +251,7 @@ func TestServeDegradedWindow(t *testing.T) {
 			t.Fatalf("Ready() = true before any mint, want false")
 		}
 		fwd := forward.New(mgr, forward.NewClient(cfg.ResponseHeaderTimeout), cfg.OutboundTimeout, cfg.WriteTimeout, cfg.StreamIdleTimeout, cfg.StreamKeepaliveInterval, cfg.MaxRequestBytes, cfg.MaxBufferedResponseBytes, nil, forward.WithLogger(logger))
-		base := startTestServer(t, server.New(cfg, logger, mgr, fwd, nil, server.NewStreamOutcomeCounter()))
+		base := startTestServer(t, server.New(cfg, logger, mgr, fwd, newTestWSProxy(mgr), server.NewStreamOutcomeCounter()))
 
 		assertNotReady(t, base)
 
@@ -281,7 +281,7 @@ func TestServeDegradedWindow(t *testing.T) {
 			t.Fatalf("Ready() = true after a failed startup mint, want false")
 		}
 		fwd := forward.New(mgr, forward.NewClient(cfg.ResponseHeaderTimeout), cfg.OutboundTimeout, cfg.WriteTimeout, cfg.StreamIdleTimeout, cfg.StreamKeepaliveInterval, cfg.MaxRequestBytes, cfg.MaxBufferedResponseBytes, nil, forward.WithLogger(logger))
-		base := startTestServer(t, server.New(cfg, logger, mgr, fwd, nil, server.NewStreamOutcomeCounter()))
+		base := startTestServer(t, server.New(cfg, logger, mgr, fwd, newTestWSProxy(mgr), server.NewStreamOutcomeCounter()))
 
 		assertNotReady(t, base)
 	})
@@ -353,6 +353,6 @@ func assertNotReady(t *testing.T, base string) {
 	pr, _ := post(t, base+"/anthropic/v1/messages", `{"model":"x"}`)
 	_ = pr.Body.Close()
 	if pr.StatusCode != http.StatusServiceUnavailable {
-		t.Errorf("provider route status = %d, want 503 while degraded", pr.StatusCode)
+		t.Errorf("Surface endpoint status = %d, want 503 while degraded", pr.StatusCode)
 	}
 }

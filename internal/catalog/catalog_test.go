@@ -5,6 +5,8 @@ import (
 	"os"
 	"reflect"
 	"testing"
+
+	"github.com/ningw42/copilotd/internal/endpoint"
 )
 
 func capturedModels(t *testing.T) []Model {
@@ -53,15 +55,15 @@ func TestFilterSelectsModelsForwardableOnEachSurfaceInCaptureOrder(t *testing.T)
 	// forwardable Route and no websocket-only model, so keep those two defensive
 	// cases explicit without presenting them as captured data.
 	models = append(models,
-		Model{ID: "future-hidden-response", SupportedRoutes: []Route{OpenAIResponsesRoute}},
-		Model{ID: "websocket-only", ModelPickerEnabled: true, SupportedRoutes: []Route{"ws:/responses"}},
+		Model{ID: "future-hidden-response", SupportedRoutes: []endpoint.Route{endpoint.RouteOpenAIResponses}},
+		Model{ID: "websocket-only", ModelPickerEnabled: true, SupportedRoutes: []endpoint.Route{"ws:/responses"}},
 	)
 
 	wantAnthropic := []string{
 		"claude-opus-4.6", "claude-opus-4.7", "claude-opus-4.8",
 		"claude-sonnet-4.6", "claude-sonnet-5", "claude-sonnet-4.5", "claude-haiku-4.5",
 	}
-	if got := modelIDs(Filter(models, AnthropicMessagesRoute)); !reflect.DeepEqual(got, wantAnthropic) {
+	if got := modelIDs(Filter(models, endpoint.RouteAnthropicMessages)); !reflect.DeepEqual(got, wantAnthropic) {
 		t.Errorf("Anthropic catalog IDs = %q, want %q", got, wantAnthropic)
 	}
 
@@ -70,13 +72,13 @@ func TestFilterSelectsModelsForwardableOnEachSurfaceInCaptureOrder(t *testing.T)
 		"gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra",
 		"mai-code-1-flash-picker", "gpt-5-mini",
 	}
-	if got := modelIDs(Filter(models, OpenAIResponsesRoute)); !reflect.DeepEqual(got, wantOpenAI) {
+	if got := modelIDs(Filter(models, endpoint.RouteOpenAIResponses)); !reflect.DeepEqual(got, wantOpenAI) {
 		t.Errorf("OpenAI catalog IDs = %q, want %q", got, wantOpenAI)
 	}
 }
 
 func TestRenderOpenAIUsesProviderSchemaAndCopilotValues(t *testing.T) {
-	models := Filter(capturedModels(t), OpenAIResponsesRoute)
+	models := Filter(capturedModels(t), endpoint.RouteOpenAIResponses)
 	body, err := RenderOpenAI(models)
 	if err != nil {
 		t.Fatalf("render OpenAI catalog: %v", err)
@@ -142,7 +144,7 @@ func TestRenderersRejectModelsWithoutRequiredIdentity(t *testing.T) {
 }
 
 func TestRenderAnthropicEnrichesFromCopilotSignals(t *testing.T) {
-	models := Filter(capturedModels(t), AnthropicMessagesRoute)
+	models := Filter(capturedModels(t), endpoint.RouteAnthropicMessages)
 	body, err := RenderAnthropic(models)
 	if err != nil {
 		t.Fatalf("render Anthropic catalog: %v", err)

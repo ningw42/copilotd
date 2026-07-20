@@ -5,9 +5,9 @@ import (
 	"log/slog"
 	"net/http"
 
-	"github.com/ningw42/copilotd/internal/apierror"
 	"github.com/ningw42/copilotd/internal/catalog"
 	"github.com/ningw42/copilotd/internal/config"
+	"github.com/ningw42/copilotd/internal/endpoint"
 	"github.com/ningw42/copilotd/internal/forward"
 	"github.com/ningw42/copilotd/internal/identity"
 	"github.com/ningw42/copilotd/internal/wsforward"
@@ -23,64 +23,48 @@ const (
 // outermost so its context is visible to the inner two; recover is innermost so
 // the 500 it produces is what the access log records.
 //
-// The provider routes carry two additional inner wrappers — auth then readiness —
+// Surface endpoints carry two additional inner wrappers — auth then readiness —
 // applied per route, because Go's ServeMux has no subtree middleware. The full
-// order on a provider route is therefore requestID -> accessLog -> recover ->
+// order on a Surface endpoint is therefore requestID -> accessLog -> recover ->
 // auth -> readiness -> forward. /healthz and /readyz are never gated by auth or
 // readiness.
 func newHandler(apikey string, provider identity.Provider, fwd *forward.Forwarder, logger *slog.Logger, streamOutcomes StreamOutcomeObserver, codexConfig config.CodexConfig, wsProxy *wsforward.Proxy) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET "+healthPath, handleHealth)
 	mux.HandleFunc("GET "+readyPath, handleReady(provider))
-
-	// guard applies the provider-route-specific inner wrappers in order: auth
-	// (outer) then readiness (inner), so auth runs first.
-	guard := func(tag apierror.Surface, h http.Handler) http.Handler {
-		return authMW(apikey, tag, readinessMW(provider, tag, h))
-	}
-
-	// Surface routes: the explicit inbound->upstream map (not a blind prefix
-	// strip — note the /v1 asymmetry: Anthropic keeps /v1 upstream, OpenAI drops
-	// it). Anthropic requests are not peeked; the OpenAI peek rejects only
-	// background:true (tag == apierror.OpenAI).
-	mux.Handle("POST /anthropic/v1/messages",
-		guard(apierror.Anthropic, fwd.Handler("/v1/messages", apierror.Anthropic)))
-	mux.Handle("POST /anthropic/v1/messages/count_tokens",
-		guard(apierror.Anthropic, fwd.Handler("/v1/messages/count_tokens", apierror.Anthropic)))
-	mux.Handle("POST /openai/v1/responses",
-		guard(apierror.OpenAI, fwd.Handler("/responses", apierror.OpenAI)))
-	if wsProxy != nil {
-		mux.Handle("GET /openai/v1/responses",
-			guard(apierror.OpenAI, wsProxy.Handler()))
-	}
-	anthropicModels := catalog.Handler(catalog.Descriptor{
-		Surface:       apierror.Anthropic,
-		RequiredRoute: catalog.AnthropicMessagesRoute,
-		Render:        catalog.RenderAnthropic,
-	}, fwd)
-	mux.Handle("GET /anthropic/v1/models", guard(apierror.Anthropic, anthropicModels))
-	mux.Handle("HEAD /anthropic/v1/models", guard(apierror.Anthropic, anthropicModels))
-	openAIModels := catalog.Handler(catalog.Descriptor{
-		Surface:       apierror.OpenAI,
-		RequiredRoute: catalog.OpenAIResponsesRoute,
-		Render:        catalog.RenderOpenAI,
-		Codex: catalog.CodexDescriptor{
-			Enabled: codexConfig.Enabled,
-			RenderConfig: catalog.CodexRenderConfig{
-				AutoReviewModel: codexConfig.AutoReviewModel,
-				OverrideLimits:  codexConfig.OverrideLimits,
-			},
+	codexDesc := catalog.CodexDescriptor{
+		Enabled: codexConfig.Enabled,
+		RenderConfig: catalog.CodexRenderConfig{
+			AutoReviewModel: codexConfig.AutoReviewModel,
+			OverrideLimits:  codexConfig.OverrideLimits,
 		},
-		Logger: logger,
-	}, fwd)
-	mux.Handle("GET /openai/v1/models", guard(apierror.OpenAI, openAIModels))
-	mux.Handle("HEAD /openai/v1/models", guard(apierror.OpenAI, openAIModels))
-	mux.Handle("GET /models",
-		guard(apierror.GitHubCopilot,
-			fwd.PassthroughHandler(http.MethodGet, "/models", apierror.GitHubCopilot)))
-	mux.Handle("HEAD /models",
-		guard(apierror.GitHubCopilot,
-			fwd.PassthroughHandler(http.MethodHead, "/models", apierror.GitHubCopilot)))
+	}
+
+	// guard applies the Surface-endpoint-specific inner wrappers in order: auth
+	// (outer) then readiness (inner), so auth runs first.
+	guard := func(surface endpoint.Surface, h http.Handler) http.Handler {
+		return authMW(apikey, surface, readinessMW(provider, surface, h))
+	}
+	mount := func(ep endpoint.Endpoint, h http.Handler) {
+		guarded := guard(ep.Surface(), h)
+		for _, pattern := range ep.Patterns() {
+			mux.Handle(pattern, guarded)
+		}
+	}
+	registerForward := func(ep endpoint.HTTPForward) { mount(ep.Endpoint(), fwd.Handler(ep)) }
+	registerWS := func(ep endpoint.WSForward) { mount(ep.Endpoint(), wsProxy.Handler(ep)) }
+	registerPassthrough := func(ep endpoint.Passthrough) { mount(ep.Endpoint(), fwd.PassthroughHandler(ep)) }
+	registerCatalog := func(ep endpoint.Catalog, rendering catalog.Rendering) {
+		mount(ep.Endpoint(), catalog.Handler(ep, rendering, fwd))
+	}
+
+	registerForward(endpoint.AnthropicMessages())
+	registerForward(endpoint.AnthropicCountTokens())
+	registerForward(endpoint.OpenAIResponsesHTTP())
+	registerWS(endpoint.OpenAIResponsesWS())
+	registerPassthrough(endpoint.Models())
+	registerCatalog(endpoint.AnthropicCatalog(), catalog.Rendering{Render: catalog.RenderAnthropic})
+	registerCatalog(endpoint.OpenAICatalog(), catalog.Rendering{Render: catalog.RenderOpenAI, Codex: codexDesc, Logger: logger})
 
 	return requestID(accessLog(logger, streamOutcomes, recoverMW(logger, mux)))
 }
