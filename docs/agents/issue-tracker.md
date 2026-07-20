@@ -34,6 +34,9 @@ number. If native dependencies are unavailable, put `Blocked by: #<number>` in
 the blocked issue body. A ticket with no blockers says
 `None — can start immediately`.
 
-Wayfinding maps use a labelled parent issue and GitHub sub-issues where
+Wayfinding maps use an `epic`-labelled parent issue and GitHub sub-issues where
 available; fall back to a task list in the parent body when sub-issues are not
-enabled.
+enabled. The `epic` label marks the parent tracking issue — the one holding the
+overall spec that is decomposed into sub-issues; it is a structural type label,
+orthogonal to the triage roles, so an epic still carries its own triage label
+(for example `ready-for-agent`). See `triage-labels.md`.
