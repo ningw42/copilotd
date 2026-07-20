@@ -117,8 +117,18 @@ identifier; outside code references, call it the **WebSocket forwarder**.
 _Avoid_: proxy (unqualified), router
 
 **Impersonation**:
-Presenting the request to Copilot as the VS Code Copilot client, via a fixed
-header set (integration-id, editor-version, …), so upstream client checks pass.
+Presenting the request to Copilot as the VS Code Copilot client via a header set,
+so upstream client checks pass. The two version-bearing headers (`Editor-Version`;
+`Editor-Plugin-Version` / `User-Agent`) are **discovered at runtime** and kept
+current, with a static **fallback** when discovery has not succeeded;
+`Copilot-Integration-Id` and `X-GitHub-Api-Version` are fixed.
+
+**Discovery**:
+Fetching the current VS Code and Copilot Chat versions at runtime from their
+public Microsoft release endpoints, to keep the impersonated version headers
+current. Best-effort: the static fallback covers failure, and
+`--impersonation-refresh-interval=0` disables it (air-gapped / locked-egress).
+_Avoid_: refresh (reserved for the token-mint sense).
 
 **Shim**:
 A composable middleware layer that closes one specific parity gap (Phase 3+). Not
