@@ -31,7 +31,7 @@ implementation, and never re-derive the facts it already states. The package is 
 leaf — standard library only, and nothing flows back into it.
 
 The four kinds are an **open set**. Adding a served operation that fits an existing
-kind is a new private canonical value, parameterless accessor, and registration
+kind is one new private facts record, parameterless accessor, and registration
 line — no decision record needed. Adding a *new kind* — a genuinely different
 outbound or protocol fact-shape — must amend this ADR (or a successor) to record
 the kind, its distinct fact-shape, and why no existing kind fits, so the
@@ -60,20 +60,23 @@ taxonomy's growth stays auditable in one place.
   the private method, so an external wrapper can override every public fact and
   still satisfy the interface accepted by a behavior factory.
 - **Distinct typed contracts in a dependency-light package, facts only**
-  (chosen): opaque concrete kinds preserve typed consumer boundaries. Private
-  state selects only package-defined fact sets, every externally constructible
-  zero value is canonical, and parameterless accessors expose the seven named
-  contracts without mutable package variables. Consumers supply implementation
-  at registration.
+  (chosen): opaque concrete kinds preserve typed consumer boundaries. Each
+  operation is one private package-level facts record; opaque handles can select
+  only those records, every externally constructible zero value is canonical,
+  and parameterless accessors expose the seven named contracts without mutable
+  package variables. Consumers supply implementation at registration.
 
 ## Consequences
 
 - Invalid `(Surface, upstream)` combinations are unconstructable: complete kinds
-  are opaque concrete values with private state and canonical zero semantics.
-  Consumers cannot construct arbitrary facts, mutate a named contract, or pass an
-  embedding wrapper to a concrete factory parameter. The `Endpoint` value exposed
-  to registration is only the inbound Surface/pattern projection and carries no
-  upstream fact.
+  are opaque concrete handles to package-defined facts records with canonical zero
+  semantics. Consumers cannot construct arbitrary facts, mutate a named contract,
+  or pass an embedding wrapper to a concrete factory parameter. The `Endpoint`
+  interface exposed to registration contains only Surface/pattern projections and
+  carries no upstream fact.
+- Each served operation's binding, upstream dependency, and kind-specific protocol
+  facts live together in one private package record, so adding an operation does
+  not require synchronized switches.
 - The duplicated `Route` types collapse to one `endpoint.Route`, and one route
   constant serves both a forward's upstream path and a catalog's required route.
   `/models` is one upstream path serving three Endpoints — the raw passthrough and

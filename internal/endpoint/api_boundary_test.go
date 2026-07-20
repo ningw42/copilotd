@@ -29,7 +29,6 @@ func TestContractKindsAreOpaqueConcreteValues(t *testing.T) {
 		name   string
 		typeOf reflect.Type
 	}{
-		{name: "Endpoint is an opaque inbound projection", typeOf: reflect.TypeOf(endpoint.Endpoint{})},
 		{name: "HTTPForward is an opaque concrete kind", typeOf: reflect.TypeOf(endpoint.HTTPForward{})},
 		{name: "WSForward is an opaque concrete kind", typeOf: reflect.TypeOf(endpoint.WSForward{})},
 		{name: "Passthrough is an opaque concrete kind", typeOf: reflect.TypeOf(endpoint.Passthrough{})},
@@ -50,17 +49,27 @@ func TestContractKindsAreOpaqueConcreteValues(t *testing.T) {
 	}
 }
 
+func TestEndpointIsAnInboundOnlyInterface(t *testing.T) {
+	typeOf := reflect.TypeOf((*endpoint.Endpoint)(nil)).Elem()
+	if typeOf.Kind() != reflect.Interface {
+		t.Fatalf("Endpoint kind = %v, want interface", typeOf.Kind())
+	}
+
+	got := make([]string, typeOf.NumMethod())
+	for i := range typeOf.NumMethod() {
+		got[i] = typeOf.Method(i).Name
+	}
+	if want := []string{"Patterns", "Surface"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("Endpoint methods = %v, want inbound facts only %v", got, want)
+	}
+}
+
 func TestEveryExternallyConstructibleZeroValueIsCanonical(t *testing.T) {
 	tests := []struct {
 		name string
 		zero any
 		want any
 	}{
-		{
-			name: "Endpoint zero is the Anthropic Messages inbound projection",
-			zero: endpoint.Endpoint{},
-			want: endpoint.AnthropicMessages().Endpoint(),
-		},
 		{
 			name: "HTTPForward zero is Anthropic Messages",
 			zero: endpoint.HTTPForward{},
@@ -121,11 +130,10 @@ func TestContractKindsExposeNoMutatorMethods(t *testing.T) {
 		typeOf      reflect.Type
 		wantMethods []string
 	}{
-		{name: "Endpoint", typeOf: reflect.TypeOf(endpoint.Endpoint{}), wantMethods: []string{"Patterns", "Surface"}},
-		{name: "HTTPForward", typeOf: reflect.TypeOf(endpoint.HTTPForward{}), wantMethods: []string{"AllowsSSE", "Endpoint", "Patterns", "Surface", "Upstream"}},
-		{name: "WSForward", typeOf: reflect.TypeOf(endpoint.WSForward{}), wantMethods: []string{"Endpoint", "Patterns", "Surface", "Upstream"}},
-		{name: "Passthrough", typeOf: reflect.TypeOf(endpoint.Passthrough{}), wantMethods: []string{"Endpoint", "Patterns", "Surface", "Upstream"}},
-		{name: "Catalog", typeOf: reflect.TypeOf(endpoint.Catalog{}), wantMethods: []string{"Endpoint", "Patterns", "RequiredRoute", "Surface", "Upstream"}},
+		{name: "HTTPForward", typeOf: reflect.TypeOf(endpoint.HTTPForward{}), wantMethods: []string{"AllowsSSE", "Patterns", "Surface", "Upstream"}},
+		{name: "WSForward", typeOf: reflect.TypeOf(endpoint.WSForward{}), wantMethods: []string{"Patterns", "Surface", "Upstream"}},
+		{name: "Passthrough", typeOf: reflect.TypeOf(endpoint.Passthrough{}), wantMethods: []string{"Patterns", "Surface", "Upstream"}},
+		{name: "Catalog", typeOf: reflect.TypeOf(endpoint.Catalog{}), wantMethods: []string{"Patterns", "RequiredRoute", "Surface", "Upstream"}},
 	}
 
 	for _, tc := range tests {

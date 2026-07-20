@@ -51,11 +51,11 @@ func newHandler(apikey string, provider identity.Provider, fwd *forward.Forwarde
 			mux.Handle(pattern, guarded)
 		}
 	}
-	registerForward := func(ep endpoint.HTTPForward) { mount(ep.Endpoint(), fwd.Handler(ep)) }
-	registerWS := func(ep endpoint.WSForward) { mount(ep.Endpoint(), wsProxy.Handler(ep)) }
-	registerPassthrough := func(ep endpoint.Passthrough) { mount(ep.Endpoint(), fwd.PassthroughHandler(ep)) }
+	registerForward := func(ep endpoint.HTTPForward) { mount(ep, fwd.Handler(ep)) }
+	registerWS := func(ep endpoint.WSForward) { mount(ep, wsProxy.Handler(ep)) }
+	registerPassthrough := func(ep endpoint.Passthrough) { mount(ep, fwd.PassthroughHandler(ep)) }
 	registerCatalog := func(ep endpoint.Catalog, rendering catalog.Rendering) {
-		mount(ep.Endpoint(), catalog.Handler(ep, rendering, fwd))
+		mount(ep, catalog.Handler(ep, rendering, fwd))
 	}
 
 	registerForward(endpoint.AnthropicMessages())

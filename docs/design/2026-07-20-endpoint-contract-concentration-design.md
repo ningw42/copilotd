@@ -171,33 +171,74 @@ const (
 	JSONorSSE                // may stream when the upstream response is text/event-stream
 )
 
-// Endpoint is the immutable inbound projection shared by every contract kind.
-// It carries no upstream fact and is not accepted by behavior factories.
-type Endpoint struct {
-	id endpointID
+// binding is the inbound half shared by every served contract.
+type binding struct {
+	surface Surface
+	methods []string
+	path    string
 }
 
-func (e Endpoint) Surface() Surface
-func (e Endpoint) Patterns() []string
+func (b binding) Surface() Surface
+func (b binding) Patterns() []string
 
-// The four complete kinds are opaque concrete values. Their private state can
-// only select canonical fact sets defined in this package.
-type HTTPForward struct{ id endpointID }
-type WSForward struct{}
-type Passthrough struct{}
-type Catalog struct{ id endpointID }
+// Endpoint is the inbound projection shared by every complete contract kind.
+// It carries no upstream fact and is not accepted by behavior factories.
+type Endpoint interface {
+	Surface() Surface
+	Patterns() []string
+}
 
-func (h HTTPForward) Endpoint() Endpoint
+// Each kind has a private facts shape, and each operation is one package-level
+// record of that shape.
+type httpForwardFacts struct {
+	binding
+	upstream Route
+	sse      SSEMode
+}
+
+type wsForwardFacts struct {
+	binding
+	upstream Route
+}
+
+type passthroughFacts struct {
+	binding
+	upstream Route
+}
+
+type catalogFacts struct {
+	binding
+	upstream      Route
+	requiredRoute Route
+}
+
+var anthropicMessages = httpForwardFacts{
+	binding:  binding{surface: Anthropic, methods: []string{http.MethodPost}, path: "/anthropic/v1/messages"},
+	upstream: RouteAnthropicMessages,
+	sse:      JSONorSSE,
+}
+
+// The four complete kinds are opaque handles to private canonical facts.
+type HTTPForward struct{ facts *httpForwardFacts }
+type WSForward struct{ facts *wsForwardFacts }
+type Passthrough struct{ facts *passthroughFacts }
+type Catalog struct{ facts *catalogFacts }
+
+func (h HTTPForward) Surface() Surface
+func (h HTTPForward) Patterns() []string
 func (h HTTPForward) Upstream() Route
 func (h HTTPForward) AllowsSSE() bool
 
-func (w WSForward) Endpoint() Endpoint
+func (w WSForward) Surface() Surface
+func (w WSForward) Patterns() []string
 func (w WSForward) Upstream() Route
 
-func (p Passthrough) Endpoint() Endpoint
+func (p Passthrough) Surface() Surface
+func (p Passthrough) Patterns() []string
 func (p Passthrough) Upstream() Route
 
-func (c Catalog) Endpoint() Endpoint
+func (c Catalog) Surface() Surface
+func (c Catalog) Patterns() []string
 func (c Catalog) Upstream() Route
 func (c Catalog) RequiredRoute() Route
 ```
@@ -205,8 +246,9 @@ func (c Catalog) RequiredRoute() Route
 Every externally constructible zero value is canonical: `HTTPForward{}` is
 Anthropic Messages, `WSForward{}` is the OpenAI Responses WebSocket contract,
 `Passthrough{}` is Models, and `Catalog{}` is the Anthropic catalog. Unexported
-discriminants select the remaining canonical fact sets. Parameterless functions,
-not writable package variables, expose all seven values:
+facts pointers select the remaining canonical records. There is one private
+package-level facts record per operation and no synchronized switch lattice.
+Parameterless functions, not writable package variables, expose all seven values:
 
 ```go
 func AnthropicMessages() HTTPForward
@@ -220,7 +262,7 @@ func OpenAICatalog() Catalog
 
 Factories accept the concrete kind they implement, so embedding a kind in a new
 external struct cannot produce a value assignable to that parameter. Registration
-projects the inbound half explicitly with `ep.Endpoint()` before mounting it.
+accepts each kind through the inbound-only `Endpoint` interface it implements.
 
 Three consequences worth naming:
 
@@ -233,12 +275,13 @@ Three consequences worth naming:
   Every one of the three returns `RouteModels` from `Upstream()` — the same
   upstream dependency, three different served contracts.
 - **Invalid pairs are unconstructable.** Complete kinds are opaque concrete
-  values with private state, valid canonical zero semantics, and no mutators or
-  arbitrary constructors. The seven named values are parameterless accessors,
-  not writable variables. An external wrapper — including one that embeds a kind
-  and overrides all its fact methods — is a different concrete type and cannot be
-  passed to a behavior factory. The "invalid combination compiles" hazard is
-  removed by construction, not by convention or runtime validation.
+  handles to seven private package facts records, with valid canonical zero
+  semantics and no mutators or arbitrary constructors. The seven named values
+  are parameterless accessors, not writable variables. An external wrapper —
+  including one that embeds a kind and overrides all its fact methods — is a
+  different concrete type and cannot be passed to a behavior factory. The
+  "invalid combination compiles" hazard is removed by construction, not by
+  convention or runtime validation.
 
 ## Consumer changes and dependency direction
 
@@ -253,7 +296,7 @@ back. This inverts today's direction, in which the served-route identity type
 | `catalog` | Delete `catalog.Route` and the two route constants → `endpoint.Route`. `Model.SupportedRoutes` becomes `[]endpoint.Route`; `Filter` takes `endpoint.Route`. `Fetcher.FetchModels` gains an upstream-`Route` parameter. `Handler` takes the contract plus a rendering bundle (see below). | yes |
 | `forward` | `Handler` and `PassthroughHandler` take contracts; read `Surface()`, `Upstream()`, `AllowsSSE()` off them. `FetchModels` builds its URL from the passed upstream path, not the literal `"/models"`. Delete `streamSurface`; stamp `Surface.String()`. | yes |
 | `wsforward` | `Handler` takes the contract; replace the hardcoded `apierror.OpenAI` values with `ep.Surface()`. | yes |
-| `server` | `handler.go` uses the canonical accessors plus the `mount`/`register*` helpers. Each per-kind helper passes `ep.Endpoint()` to `mount`; `metrics.go` is unchanged and its string labels are sourced from `Surface.String()`. | yes |
+| `server` | `handler.go` uses the canonical accessors plus the `mount`/`register*` helpers. The opaque kinds satisfy the inbound-only `Endpoint` interface passed to `mount`; `metrics.go` is unchanged and its string labels are sourced from `Surface.String()`. | yes |
 
 The `Surface → string → index` round-trip collapses. `forward` stamps
 `StreamResult.Surface = ep.Surface().String()`; `server/metrics.go` keeps mapping
@@ -275,10 +318,10 @@ mount := func(ep endpoint.Endpoint, h http.Handler) {
 		mux.Handle(pattern, guarded)
 	}
 }
-registerForward     := func(ep endpoint.HTTPForward) { mount(ep.Endpoint(), fwd.Handler(ep)) }
-registerWS          := func(ep endpoint.WSForward)   { mount(ep.Endpoint(), wsProxy.Handler(ep)) }
-registerPassthrough := func(ep endpoint.Passthrough) { mount(ep.Endpoint(), fwd.PassthroughHandler(ep)) }
-registerCatalog     := func(ep endpoint.Catalog, r catalog.Rendering) { mount(ep.Endpoint(), catalog.Handler(ep, r, fwd)) }
+registerForward     := func(ep endpoint.HTTPForward) { mount(ep, fwd.Handler(ep)) }
+registerWS          := func(ep endpoint.WSForward)   { mount(ep, wsProxy.Handler(ep)) }
+registerPassthrough := func(ep endpoint.Passthrough) { mount(ep, fwd.PassthroughHandler(ep)) }
+registerCatalog     := func(ep endpoint.Catalog, r catalog.Rendering) { mount(ep, catalog.Handler(ep, r, fwd)) }
 
 registerForward(endpoint.AnthropicMessages())
 registerForward(endpoint.AnthropicCountTokens())
@@ -388,10 +431,11 @@ forwards as HEAD upstream — and is guarded by a new test.
   `Patterns()`, `Surface()`, `Upstream()`, `RequiredRoute()` (catalogs), and SSE
   mode (HTTP-forward). This is the single readable assertion of the whole served
   set — previously scattered across six packages — and the guard against silent
-  drift. External-package API tests also prove the four kinds are opaque concrete
-  values, every constructible zero is canonical, accessors are stable and
-  parameterless, no fields or mutators are exported, and embedding cannot forge
-  a value accepted by a behavior factory.
+  drift. A package test ties every accessor to its one canonical facts record.
+  External-package API tests also prove the four kinds are opaque concrete values,
+  every constructible zero is canonical, accessors are stable and parameterless,
+  no fields or mutators are exported, and embedding cannot forge a value accepted
+  by a behavior factory.
 - **`forward` SSE gate**: `AnthropicCountTokens` with a `text/event-stream`
   upstream response goes buffered/verbatim and synthesizes no terminal;
   `AnthropicMessages` and `OpenAIResponsesHTTP` with `text/event-stream` pump;
@@ -410,8 +454,9 @@ Each step compiles on its own. Large mechanical renames are isolated behind
 temporary type aliases so review lands in slices rather than one flag-day commit.
 
 1. Create `internal/endpoint`: `Surface` (with `String`), `Route` (with
-   constants), `SSEMode`, the concrete inbound `Endpoint` projection, four opaque
-   concrete kinds with canonical zero values, and seven parameterless accessors.
+   constants), `SSEMode`, the inbound-only `Endpoint` interface, four private
+   facts shapes, one package record per operation, four opaque concrete kinds
+   with canonical zero values, and seven parameterless accessors.
 2. Bridge `apierror` with `type Surface = endpoint.Surface` and re-exported
    constants; repoint callers package by package; then delete the alias and the
    original `apierror.Surface`.
@@ -470,9 +515,10 @@ sealed interface accepted by a factory.
 
 **Contract shape — opaque concrete kinds with canonical zero values and
 parameterless accessors.** Chosen: unexported fields prevent arbitrary facts;
-each externally constructible zero resolves to a valid canonical fact set; named
-accessors replace mutable package variables; and an embedding wrapper is a
-different concrete type that a factory rejects at compile time.
+each externally constructible zero resolves to a valid canonical facts record;
+named accessors replace mutable package variables; each operation's facts live
+together in one private package value; and an embedding wrapper is a different
+concrete type that a factory rejects at compile time.
 
 **Catalog outbound — leave the `/models` source implicit in the fetcher.**
 Rejected: naming the source only in the fetcher while the contract states

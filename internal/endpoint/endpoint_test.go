@@ -134,6 +134,30 @@ func TestServedEndpointContracts(t *testing.T) {
 	}
 }
 
+func TestCanonicalAccessorsResolveToOnePackageFactsRecordPerOperation(t *testing.T) {
+	tests := []struct {
+		name string
+		got  any
+		want any
+	}{
+		{name: "Anthropic Messages", got: AnthropicMessages().resolved(), want: &anthropicMessages},
+		{name: "Anthropic Count Tokens", got: AnthropicCountTokens().resolved(), want: &anthropicCountTokens},
+		{name: "OpenAI Responses HTTP", got: OpenAIResponsesHTTP().resolved(), want: &openAIResponsesHTTP},
+		{name: "OpenAI Responses WebSocket", got: OpenAIResponsesWS().resolved(), want: &openAIResponsesWS},
+		{name: "Models", got: Models().resolved(), want: &models},
+		{name: "Anthropic Catalog", got: AnthropicCatalog().resolved(), want: &anthropicCatalog},
+		{name: "OpenAI Catalog", got: OpenAICatalog().resolved(), want: &openAICatalog},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name+" has one canonical facts record", func(t *testing.T) {
+			if tc.got != tc.want {
+				t.Errorf("accessor facts = %p, want package record %p", tc.got, tc.want)
+			}
+		})
+	}
+}
+
 func TestSurfaceStringReturnsCanonicalNames(t *testing.T) {
 	tests := []struct {
 		name    string
