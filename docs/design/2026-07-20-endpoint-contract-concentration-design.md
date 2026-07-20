@@ -24,8 +24,9 @@ no longer be pushed into the SSE path by a mislabeled upstream response.
 
 A "served route" has a small set of facts: which inbound method+path serves it,
 which inbound API dialect (Surface) it speaks, which upstream dependency it uses,
-and what protocol rules apply (may it stream? what ends a stream?). Those facts
-are currently spread across, and partially duplicated between, several packages:
+and what protocol rules apply (whether it may stream; and, through its Surface,
+what ends a stream). Those facts are currently spread across, and partially
+duplicated between, several packages:
 
 - **`internal/server`** restates the raw upstream path and the Surface at every
   registration (`fwd.Handler("/v1/messages", apierror.Anthropic)`), and repeats
@@ -84,10 +85,21 @@ code does not yet enforce that for the forward path.
 
 ## The concept
 
-An **Endpoint** is *how copilotd serves one operation* — a typed served contract
-that binds inbound pattern(s) to a Surface, an upstream dependency, and
-declarative protocol facts. There are four **contract kinds** and seven
-**instances**:
+An **Endpoint** is *how copilotd serves one operation*: an **inbound binding
+paired with an upstream (outbound) dependency**, plus the facts that govern how
+the two are served. A route with an inbound side but no outbound dependency —
+`/healthz`, `/readyz` — is not an Endpoint; it is answered locally.
+
+**Surface** (the inbound API dialect: `/anthropic`, `/openai`, `/models`) is a
+facet of the *inbound* half. An Endpoint *owns* its Surface, so governance runs
+`Endpoint → Surface → dialect-derived facts`: a fact that is uniform across a
+Surface (the event that ends a stream, the error dialect) is reached through the
+owned Surface, while a fact that can differ between two endpoints of the *same*
+Surface — such as whether the endpoint may stream at all — sits directly on the
+contract. That placement rule (*directly on the Endpoint iff it varies within a
+Surface, otherwise on the Surface*) decides where every fact belongs.
+
+There are four **contract kinds** and seven **instances**:
 
 | Instance | Kind | Inbound pattern(s) | Upstream / protocol facts |
 |---|---|---|---|
@@ -96,11 +108,11 @@ declarative protocol facts. There are four **contract kinds** and seven
 | `OpenAIResponsesHTTP` | HTTP forward | `POST /openai/v1/responses` | → `/responses`; JSON or SSE |
 | `OpenAIResponsesWS` | WebSocket forward | `GET /openai/v1/responses` | → `ws:/responses`; opaque |
 | `Models` | raw passthrough | `GET /models`, `HEAD /models` | → `/models`; raw, never SSE |
-| `AnthropicCatalog` | Catalog | `GET /anthropic/v1/models`, `HEAD /anthropic/v1/models` | source Copilot `/models`, required route `/v1/messages`, Anthropic render |
-| `OpenAICatalog` | Catalog | `GET /openai/v1/models`, `HEAD /openai/v1/models` | source Copilot `/models`, required route `/responses`, OpenAI or conditional Codex render |
+| `AnthropicCatalog` | Catalog | `GET /anthropic/v1/models`, `HEAD /anthropic/v1/models` | outbound `/models`, required route `/v1/messages`, Anthropic render |
+| `OpenAICatalog` | Catalog | `GET /openai/v1/models`, `HEAD /openai/v1/models` | outbound `/models`, required route `/responses`, OpenAI or conditional Codex render |
 
-Health (`/healthz`) and readiness (`/readyz`) are local operational routes. They
-have no Endpoint contract and stay registered directly.
+Health (`/healthz`) and readiness (`/readyz`) have no outbound dependency, so they
+are not Endpoints; they stay registered directly.
 
 ## The `internal/endpoint` package
 
@@ -108,7 +120,13 @@ A leaf package that imports only the standard library. It owns the identity type
 and the contract data — no handlers, clients, auth, logging, or rendering.
 
 ```go
+// Package endpoint holds copilotd's served-endpoint contracts as dependency-light
+// typed facts. It imports only the standard library. Patterns() returns strings
+// in net/http ServeMux's "METHOD /path" grammar — the one router-serialization
+// concession in this otherwise router-agnostic package.
 package endpoint
+
+import "net/http"
 
 // Surface identifies the inbound API dialect copilotd speaks on a route.
 type Surface int
@@ -119,8 +137,9 @@ const (
 	GitHubCopilot
 )
 
-// Metric is the canonical low-cardinality name for bounded metric labels.
-func (s Surface) Metric() string {
+// String is Surface's canonical lowercase name — used for metric labels, log
+// fields, and correlation. It is a pure projection of the identity, not rendering.
+func (s Surface) String() string {
 	switch s {
 	case Anthropic:
 		return "anthropic"
@@ -156,7 +175,7 @@ const (
 // are unexported so the package-level instances are immutable to consumers.
 type binding struct {
 	surface Surface
-	methods []string // e.g. {"POST"} or {"GET", "HEAD"}
+	methods []string // e.g. {http.MethodPost} or {http.MethodGet, http.MethodHead}
 	path    string   // inbound path, e.g. "/anthropic/v1/messages"
 }
 
@@ -199,18 +218,22 @@ type Passthrough struct {
 
 func (p Passthrough) Upstream() Route { return p.upstream }
 
-// Catalog serves a provider-shaped model list. Its upstream dependency is fixed
-// (Copilot /models); requiredRoute is the supported_endpoints value a model must
-// advertise to belong in this catalog — a membership predicate, not a forward
-// target.
+// Catalog serves a provider-shaped model list. Its outbound dependency is the
+// Copilot models source (upstream == RouteModels); requiredRoute is the
+// supported_endpoints value a model must advertise to appear in this catalog — a
+// membership filter over that source's results, not a second forward target.
 type Catalog struct {
 	binding
+	upstream      Route
 	requiredRoute Route
 }
 
+func (c Catalog) Upstream() Route      { return c.upstream }
 func (c Catalog) RequiredRoute() Route { return c.requiredRoute }
 
-// Endpoint is the minimal shape the server's register/guard helpers consume.
+// Endpoint is the concept's abstract type. It exposes only what the server's
+// register/guard helpers need today — the inbound half and the owned Surface;
+// consumers that need the outbound half take a concrete kind. It may widen later.
 type Endpoint interface {
 	Surface() Surface
 	Patterns() []string
@@ -222,45 +245,51 @@ The seven instances are package-level values, constructed once:
 ```go
 var (
 	AnthropicMessages = HTTPForward{
-		binding:  binding{surface: Anthropic, methods: []string{"POST"}, path: "/anthropic/v1/messages"},
+		binding:  binding{surface: Anthropic, methods: []string{http.MethodPost}, path: "/anthropic/v1/messages"},
 		upstream: RouteAnthropicMessages,
 		sse:      JSONorSSE,
 	}
 	AnthropicCountTokens = HTTPForward{
-		binding:  binding{surface: Anthropic, methods: []string{"POST"}, path: "/anthropic/v1/messages/count_tokens"},
+		binding:  binding{surface: Anthropic, methods: []string{http.MethodPost}, path: "/anthropic/v1/messages/count_tokens"},
 		upstream: RouteAnthropicCountTokens,
 		sse:      NeverSSE,
 	}
 	OpenAIResponsesHTTP = HTTPForward{
-		binding:  binding{surface: OpenAI, methods: []string{"POST"}, path: "/openai/v1/responses"},
+		binding:  binding{surface: OpenAI, methods: []string{http.MethodPost}, path: "/openai/v1/responses"},
 		upstream: RouteOpenAIResponses,
 		sse:      JSONorSSE,
 	}
 	OpenAIResponsesWS = WSForward{
-		binding:  binding{surface: OpenAI, methods: []string{"GET"}, path: "/openai/v1/responses"},
+		binding:  binding{surface: OpenAI, methods: []string{http.MethodGet}, path: "/openai/v1/responses"},
 		upstream: RouteOpenAIResponses,
 	}
 	Models = Passthrough{
-		binding:  binding{surface: GitHubCopilot, methods: []string{"GET", "HEAD"}, path: "/models"},
+		binding:  binding{surface: GitHubCopilot, methods: []string{http.MethodGet, http.MethodHead}, path: "/models"},
 		upstream: RouteModels,
 	}
 	AnthropicCatalog = Catalog{
-		binding:       binding{surface: Anthropic, methods: []string{"GET", "HEAD"}, path: "/anthropic/v1/models"},
+		binding:       binding{surface: Anthropic, methods: []string{http.MethodGet, http.MethodHead}, path: "/anthropic/v1/models"},
+		upstream:      RouteModels,
 		requiredRoute: RouteAnthropicMessages,
 	}
 	OpenAICatalog = Catalog{
-		binding:       binding{surface: OpenAI, methods: []string{"GET", "HEAD"}, path: "/openai/v1/models"},
+		binding:       binding{surface: OpenAI, methods: []string{http.MethodGet, http.MethodHead}, path: "/openai/v1/models"},
+		upstream:      RouteModels,
 		requiredRoute: RouteOpenAIResponses,
 	}
 )
 ```
 
-Two consequences worth naming:
+Three consequences worth naming:
 
 - **`Route` is defined once.** `RouteAnthropicMessages` is used both as
   `AnthropicMessages`'s upstream path *and* as `AnthropicCatalog`'s required
   route. The forward path and the catalog membership route are the same fact and
   are now the same constant.
+- **`/models` is one path serving three Endpoints.** `Models` passes it through
+  raw; both catalogs fetch it as their outbound source and render the result.
+  Every one of the three declares `upstream: RouteModels` — the same upstream
+  dependency, three different served contracts.
 - **Invalid pairs are unconstructable.** The instances are the only contracts in
   existence and are built in-package. There is no `HTTPForward{OpenAI, "/v1/messages"}`
   to pass anywhere, because no such value is defined. The "invalid combination
@@ -276,47 +305,52 @@ back. This inverts today's direction, in which the served-route identity type
 |---|---|---|
 | `apierror` | Delete `apierror.Surface`. `Write`, `WriteStreamError`, and the middleware helpers take `endpoint.Surface`. Keeps `Kind`, `Error`, `Reject`, `StreamReason`, the render table, and the render functions. | yes |
 | `shim` | Delete `shim.Route` → `endpoint.Route`. `Registration.New` and `NewChain` take `endpoint.Surface, endpoint.Route`. Drops its `apierror` import. | yes |
-| `catalog` | Delete `catalog.Route` and the two route constants → `endpoint.Route`. `Model.SupportedRoutes` becomes `[]endpoint.Route`; `Filter` takes `endpoint.Route`. `Handler` takes the contract plus a rendering bundle (see below). | yes |
-| `forward` | `Handler` and `PassthroughHandler` take contracts; read `Surface()`, `Upstream()`, `AllowsSSE()` off them. Delete `streamSurface`; stamp `Surface.Metric()`. | yes |
+| `catalog` | Delete `catalog.Route` and the two route constants → `endpoint.Route`. `Model.SupportedRoutes` becomes `[]endpoint.Route`; `Filter` takes `endpoint.Route`. `Fetcher.FetchModels` gains an upstream-`Route` parameter. `Handler` takes the contract plus a rendering bundle (see below). | yes |
+| `forward` | `Handler` and `PassthroughHandler` take contracts; read `Surface()`, `Upstream()`, `AllowsSSE()` off them. `FetchModels` builds its URL from the passed upstream path, not the literal `"/models"`. Delete `streamSurface`; stamp `Surface.String()`. | yes |
 | `wsforward` | `Handler` takes the contract; replace the hardcoded `apierror.OpenAI` values with `ep.Surface()`. | yes |
-| `server` | `handler.go` uses the instances plus `register`/`guard`. `metrics.go` is unchanged; its string labels are now sourced from `Surface.Metric()`. | yes |
+| `server` | `handler.go` uses the instances plus the `mount`/`register*` helpers. `metrics.go` is unchanged; its string labels are now sourced from `Surface.String()`. | yes |
 
 The `Surface → string → index` round-trip collapses. `forward` stamps
-`StreamResult.Surface = ep.Surface().Metric()`; `server/metrics.go` keeps mapping
+`StreamResult.Surface = ep.Surface().String()`; `server/metrics.go` keeps mapping
 that string to a bounded index. One conversion, one source of truth, and the
 `streamSurface` panic-switch is deleted.
 
 ## Registration
 
-`server/handler.go` replaces inline reconstruction with two small helpers and one
-explicit line per endpoint:
+`server/handler.go` replaces inline reconstruction with a `mount` helper, one
+per-kind register closure, and one explicit line per endpoint:
 
 ```go
 guard := func(surface endpoint.Surface, h http.Handler) http.Handler {
 	return authMW(apikey, surface, readinessMW(provider, surface, h))
 }
-register := func(ep endpoint.Endpoint, h http.Handler) {
+mount := func(ep endpoint.Endpoint, h http.Handler) {
+	guarded := guard(ep.Surface(), h)
 	for _, pattern := range ep.Patterns() { // "POST /anthropic/v1/messages", ...
-		mux.Handle(pattern, guard(ep.Surface(), h))
+		mux.Handle(pattern, guarded)
 	}
 }
+registerForward     := func(ep endpoint.HTTPForward) { mount(ep, fwd.Handler(ep)) }
+registerWS          := func(ep endpoint.WSForward)   { mount(ep, wsProxy.Handler(ep)) }
+registerPassthrough := func(ep endpoint.Passthrough) { mount(ep, fwd.PassthroughHandler(ep)) }
+registerCatalog     := func(ep endpoint.Catalog, r catalog.Rendering) { mount(ep, catalog.Handler(ep, r, fwd)) }
 
-register(endpoint.AnthropicMessages,    fwd.Handler(endpoint.AnthropicMessages))
-register(endpoint.AnthropicCountTokens, fwd.Handler(endpoint.AnthropicCountTokens))
-register(endpoint.OpenAIResponsesHTTP,  fwd.Handler(endpoint.OpenAIResponsesHTTP))
-register(endpoint.OpenAIResponsesWS,    wsProxy.Handler(endpoint.OpenAIResponsesWS))
-register(endpoint.Models,               fwd.PassthroughHandler(endpoint.Models))
-register(endpoint.AnthropicCatalog, catalog.Handler(endpoint.AnthropicCatalog,
-	catalog.Rendering{Render: catalog.RenderAnthropic}, fwd))
-register(endpoint.OpenAICatalog, catalog.Handler(endpoint.OpenAICatalog,
-	catalog.Rendering{Render: catalog.RenderOpenAI, Codex: codexDesc, Logger: logger}, fwd))
+registerForward(endpoint.AnthropicMessages)
+registerForward(endpoint.AnthropicCountTokens)
+registerForward(endpoint.OpenAIResponsesHTTP)
+registerWS(endpoint.OpenAIResponsesWS)
+registerPassthrough(endpoint.Models)
+registerCatalog(endpoint.AnthropicCatalog, catalog.Rendering{Render: catalog.RenderAnthropic})
+registerCatalog(endpoint.OpenAICatalog,    catalog.Rendering{Render: catalog.RenderOpenAI, Codex: codexDesc, Logger: logger})
 ```
 
-Every served operation is still one greppable line naming its handler factory —
-not a generic dispatch table. Health and readiness stay plain `mux.HandleFunc`
-lines with no contract. The contract instance appears twice per line (once for
-`register`, once for the typed factory); that is the price of a type-checked
-factory signature, and any mismatch is visible on a single line.
+Every served operation is one greppable line naming its contract exactly once; the
+kind is explicit in the helper name, and the factory is one indirection away.
+`mount` is the sole place that applies `guard` and expands `Patterns()`. A
+per-kind closure can only be handed a contract of its kind, so the earlier
+double-reference mismatch — passing one contract to `register` and a different one
+to the factory — can no longer be written. Health and readiness stay plain
+`mux.HandleFunc` lines with no contract; this is not a generic dispatch table.
 
 ## The SSE gate
 
@@ -331,18 +365,19 @@ eventStream := ep.AllowsSSE() && isEventStream(resp.Header.Get("Content-Type"))
 
 `AnthropicCountTokens` (`NeverSSE`) can now never enter the SSE pump, even if
 Copilot mislabels a `count_tokens` response `text/event-stream`; it falls through
-to the buffered/verbatim path and no terminal is synthesized. `streamPolicy`
-continues to select *terminal-event semantics* from `Surface` (Anthropic
-`message_stop` vs OpenAI `response.completed`) — a legitimate dialect fact,
-distinct from the "may this endpoint stream at all" gate the contract now owns.
-This is ADR-0003's stated contract enforced on the forward path.
+to the buffered/verbatim path and no terminal is synthesized. `streamPolicy` is
+fed `ep.Surface()` and continues to select *terminal-event semantics* from it
+(Anthropic `message_stop` vs OpenAI `response.completed`) — a Surface-level fact
+the Endpoint governs through its owned Surface, distinct from the "may this
+endpoint stream at all" fact the contract carries directly. This is ADR-0003's
+stated contract enforced on the forward path.
 
 ## Catalog rendering and the Codex shape
 
-The Catalog contract carries only the facts that are identical across every
-rendering of that catalog: Surface, inbound patterns, and required route. The
-rendering itself stays in the `catalog` package, supplied by the server at
-registration through a small bundle:
+The Catalog contract carries the facts identical across every rendering of that
+catalog: Surface, inbound patterns, the outbound source (`/models`), and the
+required route. The rendering itself stays in the `catalog` package, supplied by
+the server at registration through a small bundle:
 
 ```go
 // package catalog
@@ -354,6 +389,9 @@ type Rendering struct {
 
 func Handler(ep endpoint.Catalog, r Rendering, fetcher Fetcher) http.HandlerFunc
 ```
+
+The handler fetches the outbound source with `fetcher.FetchModels(ctx, ep.Upstream())`,
+so the `/models` path is the contract's, not a literal buried in the fetcher.
 
 The **Codex-shaped catalog is a request-conditional rendering of the single
 `OpenAICatalog` endpoint, not a separate endpoint.** It shares the entire served
@@ -395,22 +433,25 @@ This design makes `wsProxy` a required dependency:
 and `PassthroughHandler(HEAD, ...)`, because the upstream method is baked in per
 registration. With the contract carrying both methods, `PassthroughHandler(ep
 endpoint.Passthrough)` becomes one handler that reads `r.Method` for both the
-outbound method and the HEAD-no-body rule. The `register` loop mounts
-`GET /models` and `HEAD /models` to that single handler. Behavior is preserved —
-a HEAD request forwards as HEAD upstream — and is guarded by a new test.
+outbound method and the HEAD-no-body rule. The `mount` loop maps `GET /models` and
+`HEAD /models` to that single handler. Behavior is preserved — a HEAD request
+forwards as HEAD upstream — and is guarded by a new test.
 
 ## Testing
 
 - **`endpoint`**: a golden table test enumerating every instance and asserting its
-  `Patterns()`, `Surface()`, `Upstream()`/`RequiredRoute()`, and SSE mode. This
-  is the single readable assertion of the whole served set — previously scattered
-  across six packages — and the guard against silent drift.
+  `Patterns()`, `Surface()`, `Upstream()`, `RequiredRoute()` (catalogs), and SSE
+  mode (HTTP-forward). This is the single readable assertion of the whole served
+  set — previously scattered across six packages — and the guard against silent
+  drift.
 - **`forward` SSE gate**: `AnthropicCountTokens` with a `text/event-stream`
   upstream response goes buffered/verbatim and synthesizes no terminal;
   `AnthropicMessages` and `OpenAIResponsesHTTP` with `text/event-stream` pump;
   raw `Models` never pumps.
 - **`forward` passthrough**: `HEAD /models` forwards as HEAD upstream; `GET /models`
   forwards as GET upstream.
+- **`catalog` fetch**: the handler fetches `ep.Upstream()`, so a catalog contract's
+  outbound path drives the fetch URL.
 - **`server` integration**: the existing suites exercise all seven endpoints
   end-to-end and should pass unchanged; WebSocket test call-sites receive a real
   proxy instead of `nil`.
@@ -420,9 +461,10 @@ a HEAD request forwards as HEAD upstream — and is guarded by a new test.
 Each step compiles on its own. Large mechanical renames are isolated behind
 temporary type aliases so review lands in slices rather than one flag-day commit.
 
-1. Create `internal/endpoint`: `Surface` (with `Metric`), `Route` (with
-   constants), `SSEMode`, `binding`, the four contract structs, the `Endpoint`
-   interface, and the seven instances.
+1. Create `internal/endpoint`: `Surface` (with `String`), `Route` (with
+   constants), `SSEMode`, `binding`, the four contract structs (`Catalog` with
+   `upstream` + `requiredRoute`), the `Endpoint` interface, and the seven
+   instances.
 2. Bridge `apierror` with `type Surface = endpoint.Surface` and re-exported
    constants; repoint callers package by package; then delete the alias and the
    original `apierror.Surface`.
@@ -430,10 +472,11 @@ temporary type aliases so review lands in slices rather than one flag-day commit
    duplicate catalog route constants; change `Model.SupportedRoutes` to
    `[]endpoint.Route`.
 4. Change the handler factories (`forward.Handler`/`PassthroughHandler`,
-   `wsforward.Handler`, `catalog.Handler`) to take contracts; make `wsProxy`
-   required.
-5. Rewrite `server` registration with `register`/`guard`; drop the WebSocket nil
-   guards; stamp `Surface.Metric()` in `forward`.
+   `wsforward.Handler`, `catalog.Handler`) to take contracts; add the upstream-
+   `Route` parameter to `Fetcher.FetchModels`; make `wsProxy` required.
+5. Rewrite `server` registration with `mount` and the per-kind register closures;
+   drop the WebSocket nil guards; stamp `Surface.String()` in `forward` and delete
+   `streamSurface`.
 6. Gate SSE on `ep.AllowsSSE()`; add the new tests.
 7. Update the `CONTEXT.md` glossary (exact wording below).
 
@@ -442,12 +485,16 @@ temporary type aliases so review lands in slices rather than one flag-day commit
 Replace the **Endpoint** entry:
 
 > **Endpoint**:
-> How copilotd serves one operation — a typed served *contract* (one of: HTTP
-> forward, WebSocket forward, raw passthrough, or Catalog) that binds inbound
-> pattern(s) to a Surface, an upstream dependency, and declarative protocol facts
-> (may it stream; what ends a stream). Lives in `internal/endpoint` as the
-> concentrated served set; rendering, handlers, authentication, and clients are
-> deliberately kept out. Replaces the earlier `(Surface, Route)`-pair sense.
+> How copilotd serves one operation — an inbound binding paired with an upstream
+> (outbound) dependency, modeled as a typed served *contract* (one of: HTTP
+> forward, WebSocket forward, raw passthrough, or Catalog). A route with an
+> inbound side but no outbound dependency (`/healthz`, `/readyz`) is not an
+> Endpoint. An Endpoint owns its Surface, so Surface-level facts (the terminal
+> event, the error dialect) are governed through it; a fact sits directly on the
+> Endpoint only when it can differ between two endpoints of the same Surface (for
+> example, whether it may stream). Lives in `internal/endpoint`; rendering,
+> handlers, authentication, clients, and logging are kept out. Replaces the
+> earlier `(Surface, Route)`-pair sense.
 > _Avoid_: "valid Endpoint identities", "valid (Surface, Route) pair"
 
 Amend the **Surface** entry by appending a sentence noting its home:
@@ -473,10 +520,26 @@ carrying only its own facts and let the golden test read as a flat list.
 indirection than the problem needs. The contracts are plain data; structs read
 better and make the enumerate-the-whole-set test trivial.
 
+**Catalog outbound — leave the `/models` source implicit in the fetcher.**
+Rejected: naming the source only in the fetcher while the contract states
+`requiredRoute` would split the catalog's outbound fact across two places, and
+the field would restate a value the fetcher already hardcodes. The Catalog
+contract carries an explicit `upstream` (`= /models`) and the fetch consumes
+`ep.Upstream()`, so the source has one authoritative home.
+
+**Registration — a single `register(ep, factory(ep))` helper.** Rejected: naming
+the contract twice per line lets a copy-paste mismatch compile (both arguments are
+the same concrete type). Per-kind register closures name each contract once and
+bind its factory by kind, so a mismatch cannot be written.
+
+**`Surface.Metric()` — a metric-specific accessor.** Rejected: the value is the
+Surface's canonical name, useful in logs and correlation as well as metrics.
+`Surface.String()` serves every consumer as one idiomatic projection.
+
 **Binding ownership — the server keeps both inbound and upstream paths as string
 literals.** Rejected: it leaves the raw upstream-path duplication that motivated
 the work. The chosen split — contract owns Surface, upstream, and protocol facts
-and exposes a merged inbound pattern; server keeps an explicit `register` line per
+and exposes a merged inbound pattern; server keeps an explicit register line per
 endpoint — removes the duplication while keeping registration greppable.
 
 **Binding ownership — the contract owns everything and the server mounts by
