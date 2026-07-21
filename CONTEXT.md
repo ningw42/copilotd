@@ -156,8 +156,17 @@ _Avoid_: model list (unqualified).
 **Reviewer model**:
 The real, forwardable model copilotd routes Codex's guardian auto-review to via
 `auto_review_model_override`, replacing Codex's unforwardable default
-`codex-auto-review`.
+`codex-auto-review`. Chosen per **Main model** — a per-main-model override map over
+a global default — so different main models can route to different reviewers.
 _Avoid_: auto-reviewer, guardian model.
+
+**Main model**:
+The model a Codex turn runs on — the primary model of the session the client is
+conversing with (it can change between turns). Codex reads this model's
+`auto_review_model_override` to pick the **Reviewer model**; copilotd's override map
+is keyed by main-model slug. At any instant there is exactly one (Main, Reviewer)
+pair — the reviewer does not itself get a reviewer.
+_Avoid_: active model, primary model, turn model.
 
 **Command-auth provider**:
 The Codex `[model_providers.NAME.auth]` configuration whose `command` prints

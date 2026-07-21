@@ -1,6 +1,6 @@
 # Per-model `auto_review_model_override` reviewer routing (`ningw42/copilotd#54`) — Design
 
-Status: proposed design (polished via brainstorming), pending final written-spec review
+Status: approved (polished via brainstorming + grilling)
 Date: 2026-07-21
 Tracking issue: `ningw42/copilotd#54`
 Builds on: `docs/design/2026-07-19-phase-6b-codex-model-catalog-auto-review-design.md`
@@ -10,19 +10,19 @@ Builds on: `docs/design/2026-07-19-phase-6b-codex-model-catalog-auto-review-desi
 
 Phase 6b ships **global-only** reviewer routing: a single `codex-auto-review-model`
 slug is injected as `auto_review_model_override` on every advertised Codex-catalog
-model. This design adds the deferred **per-active-model** override — routing
-different *active* models to different reviewer models (e.g. a cheap reviewer for a
-cheap active model, a stronger one for a flagship).
+model. This design adds the deferred **per-main-model** override — routing
+different *main* models to different reviewer models (e.g. a cheap reviewer for a
+cheap main model, a stronger one for a flagship).
 
 A new config key `codex-auto-review-model-overrides` carries a `map[string]string`
-(`active-slug → reviewer-slug`). Reviewer resolution becomes **per advertised
+(`main-slug → reviewer-slug`). Reviewer resolution becomes **per advertised
 model** inside `RenderCodex`: `overrides[slug] ?? global ?? ""`. Everything else
 about the Codex catalog — the vendored snapshot, the live-forwardable intersection,
 verbatim field emission, the limits overlay, and the `?client_version=` content
 negotiation — is unchanged.
 
 **Outcome:** an operator who already runs the Codex catalog can point specific
-active models at specific reviewers, with a small friendly config string, while the
+main models at specific reviewers, with a small friendly config string, while the
 common case (one reviewer for everything) keeps working exactly as before. The
 feature is off by default and inert unless the catalog is enabled and there is
 something to inject.
@@ -38,11 +38,11 @@ The Codex-side facts were verified against `openai/codex` at tag `rust-v0.144.5`
 the Phase 6b design (§1.1) and are unchanged here; the load-bearing ones for this
 design:
 
-- **Reviewer resolution lives on the active model's `ModelInfo`.** Codex computes
+- **Reviewer resolution lives on the main model's `ModelInfo`.** Codex computes
   `review_model_id = turn.model_info.auto_review_model_override
   .unwrap_or(provider.approval_review_preferred_model())`
   (`core/src/guardian/review.rs`). The per-model override we inject is therefore
-  read off the *active* model's entry — exactly what a per-active-model map targets.
+  read off the *main* model's entry — exactly what a per-main-model map targets.
 - **Any forwardable model is a valid reviewer.** The guardian review runs Codex's
   *own* policy (`guardian_policy_config` → reviewer's
   `model_messages.auto_review.policy` → compiled-in default), not the reviewer's
@@ -67,8 +67,9 @@ before the emission loop, and must move **inside** the loop to become per-model.
 - Widening the Codex-shape emission gate so a non-empty overrides map is, on its
   own, "something to inject".
 - **Uniform per-model** skip-with-warning: any advertised model whose resolved
-  reviewer is set but not forwardable is skipped and logged once, naming both the
-  model and the reviewer.
+  reviewer is set but not forwardable has its *reviewer injection* skipped — the
+  model is still emitted, just without an `auto_review_model_override` key — and is
+  logged once, naming both the model and the reviewer.
 - Documentation: the config reference table plus a worked example.
 - Unit, boundary, and config tests covering precedence, malformed parsing,
   resolution precedence, and skip-with-warning.
@@ -80,7 +81,9 @@ before the emission loop, and must move **inside** the loop to become per-model.
 - **Snapshot freshness automation** — tracked separately in `ningw42/copilotd#53`.
 - **A per-model way to *suppress* the global** for one slug. An empty reviewer
   value is a validation error, not an opt-out; per-model disabling is YAGNI until
-  an operator asks for it.
+  an operator asks for it. If exemption is ever wanted, the forward-compatible shape
+  is a **reserved sentinel value** (a literal token), never empty-string — so
+  empty-string stays unambiguously "typo" and the future door is pre-planned.
 - **Config-time validation of reviewer forwardability.** The live catalog is
   unknown until a request; forwardability stays a render-time skip + warning, as in
   Phase 6b.
@@ -95,10 +98,10 @@ before the emission loop, and must move **inside** the loop to become per-model.
 
 | Decision | Choice | Rationale |
 | --- | --- | --- |
-| Config value shape | A single flat string `"active=reviewer,…"` parsed to `map[string]string`, **not** a native TOML table | Keeps "flag name = TOML key" and one flat-string shape across all layers, so the existing precedence machinery is reused unchanged. `fftoml` flattens tables to `key.subkey` string pairs, so a table would take a different shape per layer and fork the precedence engine. |
+| Config value shape | A single flat string `"main=reviewer,…"` parsed to `map[string]string`, **not** a native TOML table | Keeps "flag name = TOML key" and one flat-string shape across all layers, so the existing precedence machinery is reused unchanged. `fftoml` flattens tables to `key.subkey` string pairs, so a table would take a different shape per layer and fork the precedence engine. |
 | Where the map is parsed | Once, in `Resolve`, after precedence layering yields the final string | The issue mandates fail-fast at serve startup. Parsing at resolve catches malformed input before binding, gives the renderer a ready map, and keeps the pure renderer free of parsing/validation. |
 | Precedence semantics | Wholesale replacement per layer (highest-set layer's whole string wins); no cross-layer merge | Identical to every other key; a merge would be copilotd's only key with special precedence semantics. |
-| Reviewer resolution | Per advertised model `M`: `overrides[M.slug] ?? global ?? ""` | A per-active-model map is exactly what routes different active models to different reviewers; the global remains the fallback for slugs with no explicit override. |
+| Reviewer resolution | Per advertised model `M`: `overrides[M.slug] ?? global ?? ""` | A per-main-model map is exactly what routes different main models to different reviewers; the global remains the fallback for slugs with no explicit override. |
 | Present-but-unforwardable override | Skips (no silent fall-back to the global) | A present override is the operator's explicit choice for that slug; silently substituting the global would mask a typo. A bad global still does not taint a model that has a good override. |
 | Skip-with-warning granularity | **Uniform per-model**: one warning per advertised model whose resolved reviewer is unforwardable, naming model + reviewer | The acceptance criterion asks the warning to name the reviewer *and model*; per-model resolution makes the model the natural unit. A single global misconfiguration now logs once per affected model (a deliberate change from Phase 6b — §6). |
 | Emission gate | Widen Phase 6b's `#2` from `global != ""` to `global != "" OR overrides non-empty` | A deployment configured **only** with per-model overrides must still emit the Codex shape; otherwise the overrides would never take effect. |
@@ -113,7 +116,7 @@ and enumerated in `ServeConfig.LogValue`.
 
 | Key (flag / TOML) | Env | Type | Default | Meaning |
 | --- | --- | --- | --- | --- |
-| `codex-auto-review-model-overrides` | `COPILOTD_CODEX_AUTO_REVIEW_MODEL_OVERRIDES` | string `"active=reviewer,…"` → `map[string]string` | `""` | Per-active-model reviewer; wins over the global `codex-auto-review-model` for its slug. |
+| `codex-auto-review-model-overrides` | `COPILOTD_CODEX_AUTO_REVIEW_MODEL_OVERRIDES` | string `"main=reviewer,…"` → `map[string]string` | `""` | Per-main-model reviewer; wins over the global `codex-auto-review-model` for its slug. |
 
 ### 4.1 Parsing and validation (fail-fast at `Resolve`)
 
@@ -164,8 +167,9 @@ inject "auto_review_model_override" = reviewer on M
 ```
 
 - A **present** override is authoritative for its slug: if its reviewer is not in
-  the emitted intersection, `M` is **skipped** (carries no override key) — it does
-  **not** fall back to the global. A model with no override key uses the global; a
+  the emitted intersection, `M`'s *reviewer injection* is **skipped** — `M` is still
+  emitted in the catalog, just carrying no `auto_review_model_override` key — and it
+  does **not** fall back to the global. A model with no override key uses the global; a
   model with neither gets no override key at all.
 - Injection still overwrites any `auto_review_model_override` present in the
   snapshot entry (the overlapping slugs carry none today, but overwrite is the
@@ -185,11 +189,21 @@ the reviewer. A single unforwardable global reviewer therefore logs once for eac
 advertised model that falls back to it; an unforwardable per-model override logs
 once for its model.
 
+A skip event suppresses only the *reviewer injection*: `M` is still emitted in the
+catalog, byte-identical to the snapshot. **A skip never removes a model from
+`data[]`** — the sole visible effect is the absence of an `auto_review_model_override`
+key on that model.
+
 ### 5.3 Non-advertised override keys
 
-An override whose *key* (active slug) is not in the emitted intersection is never
+An override whose *key* (main-model slug) is not in the emitted intersection is never
 consulted — that model is not emitted — and produces no warning. The map is a
 lookup table indexed by the models actually being emitted; unused entries are inert.
+
+Slug matching is **verbatim and case-sensitive** (a plain `map` lookup and set
+membership, exactly as the global reviewer already matches). No normalization is
+applied, so a miscased key like `GPT-5` is simply a special case of a non-advertised
+key — inert, no warning. The operator owns the exactness of what they write.
 
 ### 5.4 Data-structure changes (`internal/catalog`)
 
@@ -212,7 +226,7 @@ unforwardable global now logs **once per advertised model that falls back to it*
 This is a deliberate, recorded change:
 
 - it is confined to an **opt-in, off-by-default** feature;
-- each line is now more informative (it names the affected active model); and
+- each line is now more informative (it names the affected main model); and
 - there is **no wire-format, catalog-content, or fidelity change** — only the log
   volume and the presence of a `model` attribute on the warning.
 
@@ -241,10 +255,13 @@ copilotd/
 
 - **`internal/config`.** Registers `codex-auto-review-model-overrides` as a
   `StringLong`; carries the raw string through the existing overlay/precedence
-  machinery (an unexported staging field on the resolved config is the natural
-  carrier, since only the final layered string should be parsed); after layering,
-  parses+validates it once into `CodexConfig.AutoReviewModelOverrides`; adds the
-  normalized `LogValue` entry.
+  machinery via an **unexported staging field on `CodexConfig`**, co-located with
+  the `AutoReviewModelOverrides` map it feeds (only the final layered string should
+  be parsed, so `overlay` writes the raw string like any other scalar key and no
+  per-layer parsing occurs); after layering, parses+validates it once into
+  `CodexConfig.AutoReviewModelOverrides`; adds the normalized `LogValue` entry. The
+  staging field is unexported, so it never reaches `LogValue` and no request-time
+  consumer can read the un-parsed string.
 - **`internal/server`.** Threads `codexConfig.AutoReviewModelOverrides` into the
   `CodexRenderConfig` it already builds at `newHandler`. No route changes.
 - **`internal/catalog`.** `RenderCodex` resolves the reviewer per emitted model and
@@ -282,9 +299,12 @@ embedded snapshot); none need a GitHub account or network.
 
 - **Precedence:** a slug present in the map is routed to its override; a slug absent
   from the map uses the global; a slug with neither carries no override key.
-- **Present-but-unforwardable override:** the model is skipped (no key) and appears
-  as a `SkippedReviewer{Model, Reviewer}`; it does **not** fall back to a valid
-  global.
+- **Single-hop resolution:** with `{A=B, B=C}` and `A` advertised, `A` is injected
+  with reviewer `B` (never `C`) — the reviewer slug is never itself re-resolved
+  through the map.
+- **Present-but-unforwardable override:** the reviewer injection is skipped (the
+  model is still emitted, without the key) and the model appears as a
+  `SkippedReviewer{Model, Reviewer}`; it does **not** fall back to a valid global.
 - **Unforwardable global:** every advertised model without an override that falls
   back to it produces its own skip event.
 - **Non-advertised override key:** inert — no key change, no skip event.
@@ -296,7 +316,7 @@ embedded snapshot); none need a GitHub account or network.
 - The emission gate fires when **only** the overrides map is set (no global, no
   limits): `?client_version=` + enabled + non-empty map → `{"models":[…]}`.
 - Warnings name model + reviewer for a skipped reviewer.
-- An advertised active model with an override carries that reviewer in its
+- An advertised main model with an override carries that reviewer in its
   `auto_review_model_override`, and that reviewer is itself present in the emitted
   catalog.
 - **Regression:** Phase 6b paths are unchanged — no `client_version`, the OpenAI
@@ -314,16 +334,18 @@ This work is complete when all hold:
    logged non-secret and normalized in `LogValue`.
 2. Reviewer resolution per advertised model is `overrides[slug] ?? global ?? ""`; a
    per-model override wins over the global for its slug; a present-but-unforwardable
-   override skips without falling back to the global; a slug with neither gets no
+   override skips its reviewer injection (the model is still emitted, without the
+   key) without falling back to the global; a slug with neither gets no
    `auto_review_model_override` key.
-3. An unforwardable resolved reviewer is skipped and logged with a **uniform
-   per-model** warning naming the model and the reviewer.
+3. An unforwardable resolved reviewer has its injection skipped (the model stays in
+   the catalog) and is logged with a **uniform per-model** warning naming the model
+   and the reviewer.
 4. The emission gate treats a non-empty overrides map as "something to inject"
    (`global != "" OR overrides non-empty OR limits overlay`).
 5. An override key naming a non-advertised model is inert (no key change, no
    warning).
 6. Unit, boundary, and config tests cover precedence, malformed parsing, resolution
-   precedence, present-but-unforwardable skip, and gate-widening; the suite and race
-   detector pass.
+   precedence, single-hop resolution, present-but-unforwardable skip, and
+   gate-widening; the suite and race detector pass.
 7. Docs updated: the configuration reference gains the new key with a worked
-   `active=reviewer,…` example; the §6 log-cardinality change is recorded.
+   `main=reviewer,…` example; the §6 log-cardinality change is recorded.
