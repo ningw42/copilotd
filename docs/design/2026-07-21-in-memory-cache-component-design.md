@@ -10,7 +10,7 @@ lifetime. Two of them share one shape — a value served from an **embedded
 fallback**, refreshed best-effort from upstream, held **in memory only**:
 
 - the two **impersonation version facts** (`internal/impersonation.versionFact`),
-  discovered from public Microsoft endpoints on a 24h cadence; and
+  discovered from public Microsoft endpoints on a 24h-by-default cadence; and
 - the vendored **Codex `models.json`** snapshot (`internal/catalog`), today a
   static `go:embed` that goes stale relative to upstream `openai/codex`.
 
@@ -23,8 +23,8 @@ observability, and readiness for one cached value, ports impersonation onto it
 with no behavior change, and adds the Codex `models.json` freshness (#53) as a
 second consumer.
 
-The component is memory-only: nothing is written to disk, so the ROADMAP §4
-state-at-rest principle ("no services at rest … state at rest is a single owner-only
+The component is memory-only: nothing is written to disk, so the ROADMAP §2
+state-at-rest principle (principle 4: "no services at rest … state at rest is a single owner-only
 credential file") is honored exactly as it is for the impersonation
 cache and the Copilot token. The Codex consumer tracks `openai/codex`'s **latest
 release tag**, refreshes on a static TTL, and keeps the embedded snapshot as the
@@ -107,15 +107,15 @@ type Cacheable[V any] struct {
 	Version func(context.Context) (string, error)
 	// Fetch retrieves the latest content and the version it corresponds to.
 	Fetch func(context.Context) (value V, version string, err error)
-	// Hash is the AUTHORITATIVE content-identity contract: the engine compares
-	// values by Hash to decide whether content actually changed. A version bump
-	// whose Hash matches what is already served re-keys the label without a
-	// validate/swap; a Hash that matches the Fallback drops back to serving the
-	// floor and releases the fetched copy. nil means "compare with Go ==", which
-	// requires a comparable V (e.g. string); a non-comparable V such as []byte MUST
-	// supply Hash (Codex does, via a content hash). Hash is authoritative, so it
-	// must be collision-resistant enough that distinct content never collides — a
-	// cryptographic content hash suffices.
+	// Hash is the REQUIRED, AUTHORITATIVE content-identity contract: the engine
+	// compares values ONLY by Hash to decide whether content actually changed. A
+	// version bump whose Hash matches what is already served re-keys the label
+	// without a validate/swap; a Hash that matches the Fallback drops back to
+	// serving the floor and releases the fetched copy. Every consumer supplies one
+	// (Codex hashes the models.json bytes; impersonation hashes the version string)
+	// — there is no value-comparison path, so V never needs to be comparable and
+	// there is no nil case. Hash must be collision-resistant enough that distinct
+	// content never collides — a cryptographic content hash suffices.
 	Hash func(V) string
 	// Validate is the accept-gate: it rejects a fetched value that does not meet
 	// the consumer's contract (the required-field-drift gate). A rejected value
@@ -267,8 +267,9 @@ func New(cfg Config, edge Edge, reg *cache.Registry, logger *slog.Logger) *Set {
 			Fetch: func(ctx context.Context) (string, string, error) {
 				v, err := edge.discoverVSCode(ctx); return v, v, err
 			},
+			Hash:     hashVersion, // required content hash of the version string
 			Validate: validateVersion, // the version accept-gate, relocated from discovery.go
-			// Version, Hash nil: the fetch is tiny, so peek==fetch and value==identity.
+			// Version nil: the fetch is tiny, so peek == fetch (no cheap peek to add).
 		}, cache.WithLogger(logger)),
 		plugin: /* … copilot_chat, same shape … */,
 		integrationID: cfg.CopilotIntegrationID, apiVersion: cfg.GithubAPIVersion,
@@ -283,10 +284,11 @@ func (s *Set) Header() http.Header { // unchanged: reads Current() of each fact,
 }
 ```
 
-For impersonation, `Version` and `Hash` are `nil` (the fetch is a tiny payload, so
-there is no cheap peek to add and the value *is* its own identity). The degenerate
-cells fall out of the same engine at no cost — the codex-specific peek does not
-burden impersonation. Validation relocates: `discoverVSCode`/`discoverCopilotChat`
+For impersonation, `Version` is `nil` (the fetch is a tiny payload, so there is no
+cheap peek to add), while `Hash` is a content hash of the version string — supplied
+like every consumer's, since the engine has no value-comparison path. The degenerate
+`Version` cell falls out of the same engine at no cost — the codex-specific peek does
+not burden impersonation. Validation relocates: `discoverVSCode`/`discoverCopilotChat`
 keep their *selection* logic (skip prereleases, take the first stable candidate /
 `releases[0]`) but no longer call `validateVersion` themselves; the cache's
 `Validate` cell is now the single accept-gate, unifying with Codex's
@@ -486,10 +488,12 @@ Copilot's `/models` fresh on every request (`catalog/handler.go`), holding nothi
 Test-first, matching the package layout:
 
 - **`cache.Value`** — injected `Fetch`/`Version`/`Hash`/`Validate` and a fake
-  clock and ticker: cold serves fallback; success swaps; warm failure holds
-  last-good and ages `lastSuccess`; the ladder skips the download when `Version`
-  is unchanged, skips validate/swap when `Hash` matches the served value, drops
-  back to the floor when `Hash` matches the fallback, and rejects (holds
+  clock and ticker: cold serves fallback (`source: fallback`, nil `last_success`); a
+  validated fetch whose hash differs from the floor swaps to `source: fetched`; a
+  floor-identical fetch stays `source: fallback` but advances `last_success`; warm
+  failure holds last-good and ages `last_success`; the ladder skips the download when
+  `Version` is unchanged, skips validate/swap when `Hash` matches the served value,
+  drops back to the floor when `Hash` matches the fallback, and rejects (holds
   last-good) when `Validate` fails; `Current()` is race-clean under `-race`;
   `TTL <= 0` makes `Run` a no-op.
 - **`cache.Registry`** — `Prime` fans out concurrently and honors the 5s bound;
@@ -512,8 +516,10 @@ Test-first, matching the package layout:
 - **`identity.Manager`** — unchanged; still reads impersonation through the
   `Impersonation` interface.
 - **`server` `/readyz`** — the `caches` block carries every registered entry; a
-  fallback entry renders `source: "fallback"` / null `last_success`; the
-  `impersonation.effective_headers` block is retained; `HEAD` writes nothing.
+  cold or disabled entry renders `source: "fallback"` / null `last_success`, while a
+  floor-identical confirmation renders `source: "fallback"` with non-null
+  `last_success`; the `impersonation.effective_headers` block is retained; `HEAD`
+  writes nothing.
 - **e2e `serve`** — inject stub GitHub / Microsoft base URLs (the existing
   injected-base-URL pattern) and assert the Codex catalog serves fetched entries
   when ahead of the floor and that `/readyz` reports every cache.
@@ -537,7 +543,7 @@ Test-first, matching the package layout:
   the six `Cacheable` properties do not apply, and unifying would degrade the token's
   hot-path minting.
 - **Persist the cache to a file**: rejected — durable state at rest violates
-  ROADMAP §4 and the token/impersonation in-memory model. The component is
+  ROADMAP §2 (principle 4) and the token/impersonation in-memory model. The component is
   memory-only.
 - **`Run` on the `Registry` as a single shared loop**: rejected — TTLs are
   per-entity, so the loop is per-entity. The `Registry` only offers `Start`, a
@@ -556,14 +562,14 @@ Test-first, matching the package layout:
   cold read path.
 - **One new outbound dependency** on a Copilot-only-otherwise path: unauthenticated
   `api.github.com` release/`raw` reads for `openai/codex`, hit at startup and every
-  24h. The fetch is deliberately **unauthenticated** — copilotd does not reuse its
+  24h by default. The fetch is deliberately **unauthenticated** — copilotd does not reuse its
   in-memory GitHub OAuth token on this path, keeping the Codex-freshness dependency
   credential-isolated. It carries no credentials and is not the Copilot exchange or
   inference endpoint, so it adds none of the idle-exchange abuse signal ADR-0001
   avoided. `--codex-catalog-enabled=false` (no registration) or
   `--codex-catalog-refresh-interval=0` (pinned to the floor) opts out entirely.
 - This introduces a **runtime cache of external content**. It is **consistent with**
-  the ROADMAP's state-at-rest principle (§4 — "no services at rest … state at rest is a
+  the ROADMAP's state-at-rest principle (§2, principle 4 — "no services at rest … state at rest is a
   single owner-only credential file"), not an exception to it: the cache is
   **memory-only** (nothing at rest) with an embedded floor, exactly as the impersonation
   cache and the Copilot token already are. The considered interpretation — that a
