@@ -1,0 +1,110 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Build
+        run: go build ./...
+      - name: Test
+        run: go test ./...
+
+  build:
+    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: linux,   goarch: amd64, ext: tar.gz }
+          - { goos: windows, goarch: amd64, ext: zip }
+          - { goos: windows, goarch: arm64, ext: zip }
+          - { goos: darwin,  goarch: arm64, ext: tar.gz }
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Build binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: '0'
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME}"
+          commit="${GITHUB_SHA:0:7}"
+          date="$(git log -1 --format=%cI)"
+          binname="copilotd"
+          [ "${GOOS}" = "windows" ] && binname="copilotd.exe"
+          mkdir -p dist
+          go build -trimpath \
+            -ldflags "-s -w \
+              -X github.com/ningw42/copilotd/internal/build.Version=${version} \
+              -X github.com/ningw42/copilotd/internal/build.Commit=${commit} \
+              -X github.com/ningw42/copilotd/internal/build.Date=${date}" \
+            -o "dist/${binname}" ./cmd/copilotd
+      - name: Archive
+        run: |
+          set -euo pipefail
+          asset="copilotd_${GITHUB_REF_NAME}_${{ matrix.goos }}_${{ matrix.goarch }}.${{ matrix.ext }}"
+          mkdir -p out
+          if [ "${{ matrix.ext }}" = "zip" ]; then
+            (cd dist && zip -q -X "../out/${asset}" copilotd.exe)
+          else
+            tar -C dist -czf "out/${asset}" copilotd
+          fi
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: dist-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: out/*
+          retention-days: 1
+
+  release:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Generate checksums
+        run: |
+          set -euo pipefail
+          cd artifacts
+          sha256sum copilotd_* > checksums.txt
+          cat checksums.txt
+      - name: Publish release
+        uses: softprops/action-gh-release@v3.0.2
+        with:
+          files: |
+            artifacts/copilotd_*
+            artifacts/checksums.txt
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          draft: false
