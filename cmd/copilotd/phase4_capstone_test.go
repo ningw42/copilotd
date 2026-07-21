@@ -124,7 +124,7 @@ func TestPhase4ModelsOutcomeEndToEnd(t *testing.T) {
 	cfg.APIKey = phase4APIKey
 	var logs bytes.Buffer
 	logger := newPhase4Logger(t, &logs)
-	provider, err := buildServeProvider(cfg, logger, exchange.URL, exchange.Client())
+	provider, _, err := buildServeProvider(cfg, logger, exchange.URL, exchange.Client(), productionDiscoveryEdge())
 	if err != nil {
 		t.Fatalf("build Phase 4 provider: %v", err)
 	}
@@ -140,7 +140,7 @@ func TestPhase4ModelsOutcomeEndToEnd(t *testing.T) {
 		wantBody   string
 	}{
 		{path: "/healthz", wantStatus: http.StatusOK, wantBody: `{"status":"ok"}`},
-		{path: "/readyz", wantStatus: http.StatusOK, wantBody: `{"status":"ready"}`},
+		{path: "/readyz", wantStatus: http.StatusOK, wantBody: `{"status":"ready",` + testReadyImpersonationJSON + `}`},
 	} {
 		resp, body := doPhase4Request(t, nil, http.MethodGet, base+public.path, nil, nil)
 		if resp.StatusCode != public.wantStatus || string(body) != public.wantBody {

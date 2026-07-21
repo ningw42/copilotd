@@ -34,7 +34,7 @@ func TestPhase4ModelsGatesAndRouterEndToEnd(t *testing.T) {
 		wantBody   string
 	}{
 		{path: "/healthz", wantStatus: http.StatusOK, wantBody: `{"status":"ok"}`},
-		{path: "/readyz", wantStatus: http.StatusServiceUnavailable, wantBody: `{"status":"not ready"}`},
+		{path: "/readyz", wantStatus: http.StatusServiceUnavailable, wantBody: `{"status":"not ready",` + testReadyImpersonationJSON + `}`},
 	} {
 		resp, body := doPhase4Request(t, nil, http.MethodGet, base+public.path, nil, nil)
 		if resp.StatusCode != public.wantStatus || string(body) != public.wantBody {

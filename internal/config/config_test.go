@@ -44,27 +44,27 @@ func loadServe(args []string, lookupEnv func(string) (string, bool)) (ServeConfi
 
 func defaultConfig() ServeConfig {
 	return ServeConfig{
-		Addr:                      "127.0.0.1:8080",
-		LogLevel:                  "info",
-		LogFormat:                 "text",
-		LogFile:                   "",
-		ShutdownTimeout:           10 * time.Second,
-		GithubOAuthTokenFile:      defaultOAuthTokenFile(),
-		APIKey:                    testAPIKey,
-		OutboundTimeout:           600 * time.Second,
-		StreamIdleTimeout:         5 * time.Minute,
-		StreamKeepaliveInterval:   15 * time.Second,
-		WriteTimeout:              90 * time.Second,
-		ResponseHeaderTimeout:     600 * time.Second,
-		WebSocketHandshakeTimeout: 10 * time.Second,
-		MaxRequestBytes:           33554432,
-		MaxBufferedResponseBytes:  33554432,
-		StartupMintRetries:        3,
-		CopilotIntegrationID:      "vscode-chat",
-		EditorVersion:             "vscode/1.104.1",
-		EditorPluginVersion:       "copilot-chat/0.26.7",
-		CopilotUserAgent:          "GitHubCopilotChat/0.26.7",
-		GithubAPIVersion:          "2025-04-01",
+		Addr:                         "127.0.0.1:8080",
+		LogLevel:                     "info",
+		LogFormat:                    "text",
+		LogFile:                      "",
+		ShutdownTimeout:              10 * time.Second,
+		GithubOAuthTokenFile:         defaultOAuthTokenFile(),
+		APIKey:                       testAPIKey,
+		OutboundTimeout:              600 * time.Second,
+		StreamIdleTimeout:            5 * time.Minute,
+		StreamKeepaliveInterval:      15 * time.Second,
+		WriteTimeout:                 90 * time.Second,
+		ResponseHeaderTimeout:        600 * time.Second,
+		WebSocketHandshakeTimeout:    10 * time.Second,
+		MaxRequestBytes:              33554432,
+		MaxBufferedResponseBytes:     33554432,
+		StartupMintRetries:           3,
+		VSCodeVersionFallback:        "1.104.1",
+		PluginVersionFallback:        "0.26.7",
+		CopilotIntegrationID:         "vscode-chat",
+		GithubAPIVersion:             "2025-04-01",
+		ImpersonationRefreshInterval: 24 * time.Hour,
 	}
 }
 
@@ -586,11 +586,11 @@ func TestLoadPrecedence(t *testing.T) {
 		c.WebSocketHandshakeTimeout = 10 * time.Second
 		c.MaxBufferedResponseBytes = 33554432
 		c.StartupMintRetries = 3
+		c.VSCodeVersionFallback = "1.104.1"
+		c.PluginVersionFallback = "0.26.7"
 		c.CopilotIntegrationID = "vscode-chat"
-		c.EditorVersion = "vscode/1.104.1"
-		c.EditorPluginVersion = "copilot-chat/0.26.7"
-		c.CopilotUserAgent = "GitHubCopilotChat/0.26.7"
 		c.GithubAPIVersion = "2025-04-01"
+		c.ImpersonationRefreshInterval = 24 * time.Hour
 		return c
 	}
 
@@ -792,12 +792,12 @@ func TestConfigLogValueEmitsOnlyNonSecretFields(t *testing.T) {
 			AutoReviewModel: "gpt-5.6-luna",
 			OverrideLimits:  true,
 		},
-		StartupMintRetries:   3,
-		CopilotIntegrationID: "vscode-chat",
-		EditorVersion:        "vscode/1.104.1",
-		EditorPluginVersion:  "copilot-chat/0.26.7",
-		CopilotUserAgent:     "GitHubCopilotChat/0.26.7",
-		GithubAPIVersion:     "2025-04-01",
+		StartupMintRetries:           3,
+		VSCodeVersionFallback:        "1.104.1",
+		PluginVersionFallback:        "0.26.7",
+		CopilotIntegrationID:         "vscode-chat",
+		GithubAPIVersion:             "2025-04-01",
+		ImpersonationRefreshInterval: 24 * time.Hour,
 	}
 
 	var buf bytes.Buffer
@@ -822,11 +822,11 @@ func TestConfigLogValueEmitsOnlyNonSecretFields(t *testing.T) {
 		"config.max-buffered-response-bytes=16777216",
 		"config.shim-nop-enabled=true",
 		"config.startup-mint-retries=3",
+		"config.vscode-version=1.104.1",
+		"config.plugin-version=0.26.7",
 		"config.copilot-integration-id=vscode-chat",
-		"config.editor-version=vscode/1.104.1",
-		"config.editor-plugin-version=copilot-chat/0.26.7",
-		"config.copilot-user-agent=GitHubCopilotChat/0.26.7",
 		"config.github-api-version=2025-04-01",
+		"config.impersonation-refresh-interval=24h0m0s",
 		"config.codex-catalog-enabled=true",
 		"config.codex-auto-review-model=gpt-5.6-luna",
 		"config.codex-catalog-override-limits=true",
@@ -851,6 +851,11 @@ func TestConfigLogValueEmitsOnlyNonSecretFields(t *testing.T) {
 	if strings.Contains(out, "upstream-base") {
 		t.Errorf("log output must not contain the removed upstream-base setting\nfull: %s", out)
 	}
+	for _, removed := range []string{"editor-version", "editor-plugin-version", "copilot-user-agent"} {
+		if strings.Contains(out, removed) {
+			t.Errorf("log output must not contain removed %s setting\nfull: %s", removed, out)
+		}
+	}
 }
 
 // TestLoadServeIdentityFields covers the new serve-only identity/impersonation
@@ -869,18 +874,16 @@ func TestLoadServeIdentityFields(t *testing.T) {
 			t.Errorf("StartupMintRetries = %d, want 3", got.StartupMintRetries)
 		}
 		want := map[string]string{
-			"CopilotIntegrationID": "vscode-chat",
-			"EditorVersion":        "vscode/1.104.1",
-			"EditorPluginVersion":  "copilot-chat/0.26.7",
-			"CopilotUserAgent":     "GitHubCopilotChat/0.26.7",
-			"GithubAPIVersion":     "2025-04-01",
+			"VSCodeVersionFallback": "1.104.1",
+			"PluginVersionFallback": "0.26.7",
+			"CopilotIntegrationID":  "vscode-chat",
+			"GithubAPIVersion":      "2025-04-01",
 		}
 		gotm := map[string]string{
-			"CopilotIntegrationID": got.CopilotIntegrationID,
-			"EditorVersion":        got.EditorVersion,
-			"EditorPluginVersion":  got.EditorPluginVersion,
-			"CopilotUserAgent":     got.CopilotUserAgent,
-			"GithubAPIVersion":     got.GithubAPIVersion,
+			"VSCodeVersionFallback": got.VSCodeVersionFallback,
+			"PluginVersionFallback": got.PluginVersionFallback,
+			"CopilotIntegrationID":  got.CopilotIntegrationID,
+			"GithubAPIVersion":      got.GithubAPIVersion,
 		}
 		for k, v := range want {
 			if gotm[k] != v {
@@ -906,7 +909,7 @@ func TestLoadServeIdentityFields(t *testing.T) {
 		got, err := loadServe([]string{"--apikey", testAPIKey}, envFunc(map[string]string{
 			"COPILOTD_STARTUP_MINT_RETRIES":   "5",
 			"COPILOTD_COPILOT_INTEGRATION_ID": "vscode",
-			"COPILOTD_EDITOR_VERSION":         "vscode/9.9.9",
+			"COPILOTD_VSCODE_VERSION":         "9.9.9",
 			"COPILOTD_GITHUB_API_VERSION":     "2099-01-01",
 		}))
 		if err != nil {
@@ -915,7 +918,7 @@ func TestLoadServeIdentityFields(t *testing.T) {
 		if got.StartupMintRetries != 5 {
 			t.Errorf("StartupMintRetries = %d, want 5", got.StartupMintRetries)
 		}
-		if got.CopilotIntegrationID != "vscode" || got.EditorVersion != "vscode/9.9.9" || got.GithubAPIVersion != "2099-01-01" {
+		if got.CopilotIntegrationID != "vscode" || got.VSCodeVersionFallback != "9.9.9" || got.GithubAPIVersion != "2099-01-01" {
 			t.Errorf("knob overrides not applied: %+v", got)
 		}
 	})
@@ -929,6 +932,109 @@ func TestLoadServeIdentityFields(t *testing.T) {
 			t.Errorf("StartupMintRetries = %d, want 0", got.StartupMintRetries)
 		}
 	})
+}
+
+func TestLoadServeImpersonationConfig(t *testing.T) {
+	t.Run("defaults", func(t *testing.T) {
+		got, err := loadServe([]string{"--apikey", testAPIKey}, noEnv())
+		if err != nil {
+			t.Fatalf("loadServe() error = %v", err)
+		}
+		if got.VSCodeVersionFallback != "1.104.1" {
+			t.Errorf("VSCodeVersionFallback = %q, want 1.104.1", got.VSCodeVersionFallback)
+		}
+		if got.PluginVersionFallback != "0.26.7" {
+			t.Errorf("PluginVersionFallback = %q, want 0.26.7", got.PluginVersionFallback)
+		}
+		if got.ImpersonationRefreshInterval != 24*time.Hour {
+			t.Errorf("ImpersonationRefreshInterval = %v, want 24h", got.ImpersonationRefreshInterval)
+		}
+	})
+
+	t.Run("flags override env", func(t *testing.T) {
+		got, err := loadServe([]string{
+			"--apikey", testAPIKey,
+			"--vscode-version", "1.130.0",
+			"--plugin-version", "0.50.0",
+			"--impersonation-refresh-interval", "6h",
+		}, envFunc(map[string]string{
+			"COPILOTD_VSCODE_VERSION":                 "1.129.0",
+			"COPILOTD_PLUGIN_VERSION":                 "0.49.0",
+			"COPILOTD_IMPERSONATION_REFRESH_INTERVAL": "12h",
+		}))
+		if err != nil {
+			t.Fatalf("loadServe() error = %v", err)
+		}
+		if got.VSCodeVersionFallback != "1.130.0" || got.PluginVersionFallback != "0.50.0" || got.ImpersonationRefreshInterval != 6*time.Hour {
+			t.Errorf("impersonation config = %+v, want flag values", got)
+		}
+	})
+
+	t.Run("env overrides defaults", func(t *testing.T) {
+		got, err := loadServe([]string{"--apikey", testAPIKey}, envFunc(map[string]string{
+			"COPILOTD_VSCODE_VERSION":                 "1.129.0",
+			"COPILOTD_PLUGIN_VERSION":                 "0.49.0",
+			"COPILOTD_IMPERSONATION_REFRESH_INTERVAL": "0s",
+		}))
+		if err != nil {
+			t.Fatalf("loadServe() error = %v", err)
+		}
+		if got.VSCodeVersionFallback != "1.129.0" || got.PluginVersionFallback != "0.49.0" || got.ImpersonationRefreshInterval != 0 {
+			t.Errorf("impersonation config = %+v, want env values", got)
+		}
+	})
+
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "empty VS Code fallback", args: []string{"--vscode-version", ""}, want: "vscode-version"},
+		{name: "empty plugin fallback", args: []string{"--plugin-version", ""}, want: "plugin-version"},
+		{name: "prefixed VS Code fallback", args: []string{"--vscode-version", "vscode/1.2.3"}, want: "vscode-version"},
+		{name: "prefixed plugin fallback", args: []string{"--plugin-version", "copilot-chat/1.2.3"}, want: "plugin-version"},
+		{name: "non-version VS Code fallback", args: []string{"--vscode-version", "banana"}, want: "vscode-version"},
+		{name: "non-version plugin fallback", args: []string{"--plugin-version", "banana"}, want: "plugin-version"},
+		{name: "slash suffix in VS Code fallback", args: []string{"--vscode-version", "1.2.3/garbage"}, want: "vscode-version"},
+		{name: "whitespace in plugin fallback", args: []string{"--plugin-version", "1.2.3 beta"}, want: "plugin-version"},
+		{name: "control character in VS Code fallback", args: []string{"--vscode-version", "1.2.3\nInjected: true"}, want: "vscode-version"},
+		{name: "empty prerelease in plugin fallback", args: []string{"--plugin-version", "1.2.3-"}, want: "plugin-version"},
+		{name: "negative refresh interval", args: []string{"--impersonation-refresh-interval", "-1s"}, want: "impersonation-refresh-interval"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			args := append([]string{"--apikey", testAPIKey}, tc.args...)
+			_, err := loadServe(args, noEnv())
+			if err == nil {
+				t.Fatal("loadServe() error = nil, want validation failure")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error = %q, want %q context", err, tc.want)
+			}
+		})
+	}
+
+	t.Run("version suffixes remain accepted", func(t *testing.T) {
+		got, err := loadServe([]string{
+			"--apikey", testAPIKey,
+			"--vscode-version", "1.130.0-insider",
+			"--plugin-version", "0.50.0+build.1",
+		}, noEnv())
+		if err != nil {
+			t.Fatalf("loadServe() error = %v", err)
+		}
+		if got.VSCodeVersionFallback != "1.130.0-insider" || got.PluginVersionFallback != "0.50.0+build.1" {
+			t.Errorf("version fallbacks = (%q, %q), want accepted suffixes", got.VSCodeVersionFallback, got.PluginVersionFallback)
+		}
+	})
+
+	for _, oldFlag := range []string{"editor-version", "editor-plugin-version", "copilot-user-agent"} {
+		t.Run("removed "+oldFlag, func(t *testing.T) {
+			_, err := loadServe([]string{"--apikey", testAPIKey, "--" + oldFlag, "obsolete"}, noEnv())
+			if err == nil {
+				t.Fatalf("loadServe() accepted removed --%s", oldFlag)
+			}
+		})
+	}
 }
 
 // loadLogin builds the login flag set the way the command tree does, parses args,

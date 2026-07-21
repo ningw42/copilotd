@@ -17,11 +17,13 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/ningw42/copilotd/internal/build"
 	"github.com/ningw42/copilotd/internal/config"
 	"github.com/ningw42/copilotd/internal/forward"
 	"github.com/ningw42/copilotd/internal/identity"
+	"github.com/ningw42/copilotd/internal/impersonation"
 	"github.com/ningw42/copilotd/internal/logging"
 	"github.com/ningw42/copilotd/internal/server"
 	"github.com/ningw42/copilotd/internal/shim"
@@ -38,6 +40,11 @@ func main() {
 // structured logger (bind or serve error), so the top-level translator carries
 // the non-zero exit code without printing the error a second time.
 var errServeFailed = errors.New("serve failed")
+
+const (
+	productionVSCodeDiscoveryBaseURL      = "https://update.code.visualstudio.com"
+	productionMarketplaceDiscoveryBaseURL = "https://marketplace.visualstudio.com"
+)
 
 // run builds the command tree, dispatches, and translates the outcome into an
 // exit code. Args, env, and the output streams are injected so dispatch and the
@@ -254,10 +261,11 @@ func rejectSurplusOperands(command string, args []string, allowed int) error {
 // runServe is the serve lifecycle: resolve config, build the logger and set it as
 // the slog default, resolve the GitHub OAuth token and construct the real minting
 // Manager (failing fast, before any bind, when no token source is present), bind
-// the listener, warm readiness with a background startup mint, then run the HTTP
-// server under a signal-aware context whose re-armed handler lets a second signal
-// hard-kill a wedged shutdown. Errors after the logger is up are reported through
-// it and returned as errServeFailed so the caller does not double-report them; a
+// the listener, then run bounded discovery followed by the readiness-warming
+// startup mint in the background while serving. A signal-aware context whose
+// re-armed handler lets a second signal hard-kill a wedged shutdown owns every
+// background task. Errors after the logger is up are reported through it and
+// returned as errServeFailed so the caller does not double-report them; a
 // pre-logger config error is returned raw for the top-level translator to print.
 func runServe(ctx context.Context, flags *config.ServeFlags, lookupEnv func(string) (string, bool)) error {
 	cfg, err := flags.Resolve(lookupEnv)
@@ -287,7 +295,7 @@ func runServe(ctx context.Context, flags *config.ServeFlags, lookupEnv func(stri
 	// ever serving. Production points the exchange at the real GitHub host ("" ⇒
 	// api.github.com) with a dedicated client; the e2e test injects stubs via the
 	// same buildServeProvider seam.
-	mgr, err := buildServeProvider(cfg, logger, "", newExchangeClient())
+	mgr, imp, err := buildServeProvider(cfg, logger, "", newExchangeClient(), productionDiscoveryEdge())
 	if err != nil {
 		// Already carries the "run copilotd login" guidance when no source yields a
 		// token; reported through the logger, then a silent non-zero exit.
@@ -311,12 +319,21 @@ func runServe(ctx context.Context, flags *config.ServeFlags, lookupEnv func(stri
 		stop()
 	}()
 
-	// Warm readiness in the background: the daemon serves immediately and /readyz
-	// flips ready once the first mint succeeds (degraded until then). A failed
-	// startup mint leaves the daemon degraded but recoverable — the next request
-	// mints on demand.
-	go mgr.StartupMint(serveCtx)
+	if err := runBoundServe(serveCtx, cfg, logger, mgr, imp, ln); err != nil {
+		logger.Error("server error", slog.Any("error", err))
+		return errServeFailed
+	}
+	return nil
+}
 
+// runBoundServe starts the background impersonation/mint lifecycle only after
+// its caller has supplied an already-bound listener. That ordering keeps
+// /healthz and degraded /readyz available while bounded startup discovery is in
+// progress. Discovery never gates readiness; only the startup mint changes it.
+func runBoundServe(ctx context.Context, cfg config.ServeConfig, logger *slog.Logger, mgr *identity.Manager, imp *impersonation.Set, ln net.Listener) error {
+	go runServeStartup(ctx, cfg.ImpersonationRefreshInterval, imp, mgr, logger)
+
+	registry := configuredShimRegistry(cfg)
 	fwd := forward.New(mgr, forward.NewClient(cfg.ResponseHeaderTimeout), cfg.OutboundTimeout, cfg.WriteTimeout, cfg.StreamIdleTimeout, cfg.StreamKeepaliveInterval, cfg.MaxRequestBytes, cfg.MaxBufferedResponseBytes, registry, forward.WithLogger(logger))
 	wsDialClient := &http.Client{Transport: &http.Transport{Proxy: http.ProxyFromEnvironment}}
 	wsAccepts := server.NewWsAcceptCounter()
@@ -327,11 +344,31 @@ func runServe(ctx context.Context, flags *config.ServeFlags, lookupEnv func(stri
 	})
 	streamOutcomes := server.NewStreamOutcomeCounter()
 
-	if err := server.New(cfg, logger, mgr, fwd, wsProxy, streamOutcomes).Run(serveCtx, ln); err != nil {
-		logger.Error("server error", slog.Any("error", err))
-		return errServeFailed
+	return server.New(cfg, logger, mgr, imp, fwd, wsProxy, streamOutcomes).Run(ctx, ln)
+}
+
+// runServeStartup performs the ordered background startup sequence. When
+// discovery is enabled, both facts are primed first, the periodic loop is
+// launched only after that bounded wait, and then the startup mint runs with the
+// resulting live (or fallback) headers. Disabling discovery skips only Prime
+// and Run; the startup mint and GitHub exchange still happen.
+func runServeStartup(ctx context.Context, interval time.Duration, imp *impersonation.Set, mgr *identity.Manager, logger *slog.Logger) {
+	discoveryEnabled := interval > 0
+	if discoveryEnabled {
+		imp.Prime(ctx)
 	}
-	return nil
+
+	observed := imp.Observe()
+	logger.Info("startup impersonation discovery outcome",
+		slog.Bool("enabled", discoveryEnabled),
+		slog.String("vscode_source", observed.Discovery.VSCode.Source),
+		slog.String("plugin_source", observed.Discovery.CopilotChat.Source),
+	)
+
+	if discoveryEnabled {
+		go imp.Run(ctx, interval)
+	}
+	mgr.StartupMint(ctx)
 }
 
 func logCodexCatalogStaging(logger *slog.Logger, cfg config.ServeConfig) {
@@ -363,42 +400,39 @@ func logShimChain(logger *slog.Logger, registry shim.Registry) {
 	logger.Info("configured shim chain", slog.Any("enabled_shims", enabled))
 }
 
-// buildServeProvider assembles the real credential Provider for `serve`: it
-// resolves the GitHub OAuth token (§6.5), builds the impersonation header set
-// from the config knobs, and constructs the minting identity.Manager. It returns
-// the resolve error unchanged (e.g. identity.ErrNoOAuthToken) so runServe can
-// fail fast before binding a listener.
+// buildServeProvider assembles the real credential Provider and live
+// impersonation Set for `serve`: it resolves the GitHub OAuth token (§6.5),
+// seeds the Set with configured fallbacks and static identifiers, binds the
+// injected discovery edge, and constructs the minting identity.Manager. It
+// returns the resolve error unchanged (e.g. identity.ErrNoOAuthToken) so
+// runServe can fail fast before binding a listener.
 //
-// githubBaseURL and httpClient are the injected exchange edge: production passes
-// "" (⇒ https://api.github.com) and a dedicated client, while the e2e test points
-// them at a stubbed GitHub. Every other Manager timing/clock knob is left to
-// NewManager's production defaults.
-func buildServeProvider(cfg config.ServeConfig, logger *slog.Logger, githubBaseURL string, httpClient *http.Client) (*identity.Manager, error) {
+// githubBaseURL/httpClient and discoveryEdge are the injected network edges:
+// production uses GitHub plus the two public Microsoft origins with separate
+// plain clients, while tests point them at stubs. Every other Manager
+// timing/clock knob is left to NewManager's production defaults.
+func buildServeProvider(cfg config.ServeConfig, logger *slog.Logger, githubBaseURL string, httpClient *http.Client, discoveryEdge impersonation.Edge) (*identity.Manager, *impersonation.Set, error) {
 	oauthToken, err := identity.ResolveOAuthToken(cfg.GithubOAuthToken, cfg.GithubOAuthTokenFile)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return identity.NewManager(identity.ManagerConfig{
-		OAuthToken:         oauthToken,
-		GitHubBaseURL:      githubBaseURL,
-		HTTPClient:         httpClient,
-		Impersonation:      impersonationHeader(cfg),
+	imp := impersonation.New(impersonation.Config{
+		VSCodeVersionFallback: cfg.VSCodeVersionFallback,
+		PluginVersionFallback: cfg.PluginVersionFallback,
+		CopilotIntegrationID:  cfg.CopilotIntegrationID,
+		GithubAPIVersion:      cfg.GithubAPIVersion,
+	}, discoveryEdge, logger)
+	mgr := identity.NewManager(identity.ManagerConfig{
+		OAuthToken:    oauthToken,
+		GitHubBaseURL: githubBaseURL,
+		HTTPClient:    httpClient,
+		// Direct assignment is the composition-root proof that the live Set
+		// satisfies identity.Impersonation without reversing package dependencies.
+		Impersonation:      imp,
 		StartupMintRetries: cfg.StartupMintRetries,
 		Logger:             logger,
-	}), nil
-}
-
-// impersonationHeader builds the static impersonation set (§6.7) that the Manager
-// applies to both the token exchange and every inference request, from the
-// version-sensitive config knobs.
-func impersonationHeader(cfg config.ServeConfig) http.Header {
-	h := http.Header{}
-	h.Set("Copilot-Integration-Id", cfg.CopilotIntegrationID)
-	h.Set("Editor-Version", cfg.EditorVersion)
-	h.Set("Editor-Plugin-Version", cfg.EditorPluginVersion)
-	h.Set("User-Agent", cfg.CopilotUserAgent)
-	h.Set("X-GitHub-Api-Version", cfg.GithubAPIVersion)
-	return h
+	})
+	return mgr, imp, nil
 }
 
 // newExchangeClient returns the dedicated HTTP client for the GitHub token
@@ -406,6 +440,21 @@ func impersonationHeader(cfg config.ServeConfig) http.Header {
 // and timeouts never interfere. No client-level Timeout is set: the Manager
 // bounds each exchange with its own background-scoped context deadline.
 func newExchangeClient() *http.Client {
+	return &http.Client{}
+}
+
+func productionDiscoveryEdge() impersonation.Edge {
+	return impersonation.Edge{
+		VSCodeBaseURL:      productionVSCodeDiscoveryBaseURL,
+		MarketplaceBaseURL: productionMarketplaceDiscoveryBaseURL,
+		Client:             newDiscoveryClient(),
+	}
+}
+
+// newDiscoveryClient returns a dedicated plain client for the two public
+// Microsoft discovery endpoints. It carries no Copilot credentials or
+// impersonation transport, and each discovery request owns its timeout.
+func newDiscoveryClient() *http.Client {
 	return &http.Client{}
 }
 

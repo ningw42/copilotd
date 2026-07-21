@@ -28,10 +28,10 @@ const (
 // order on a Surface endpoint is therefore requestID -> accessLog -> recover ->
 // auth -> readiness -> forward. /healthz and /readyz are never gated by auth or
 // readiness.
-func newHandler(apikey string, provider identity.Provider, fwd *forward.Forwarder, logger *slog.Logger, streamOutcomes StreamOutcomeObserver, codexConfig config.CodexConfig, wsProxy *wsforward.Proxy) http.Handler {
+func newHandler(apikey string, provider identity.Provider, observer ImpersonationObserver, fwd *forward.Forwarder, logger *slog.Logger, streamOutcomes StreamOutcomeObserver, codexConfig config.CodexConfig, wsProxy *wsforward.Proxy) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET "+healthPath, handleHealth)
-	mux.HandleFunc("GET "+readyPath, handleReady(provider))
+	mux.HandleFunc("GET "+readyPath, handleReady(provider, observer))
 	codexDesc := catalog.CodexDescriptor{
 		Enabled: codexConfig.Enabled,
 		RenderConfig: catalog.CodexRenderConfig{

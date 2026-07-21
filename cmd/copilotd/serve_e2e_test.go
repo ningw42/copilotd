@@ -16,6 +16,7 @@ import (
 
 	"github.com/ningw42/copilotd/internal/config"
 	"github.com/ningw42/copilotd/internal/forward"
+	"github.com/ningw42/copilotd/internal/impersonation"
 	"github.com/ningw42/copilotd/internal/logging"
 	"github.com/ningw42/copilotd/internal/server"
 )
@@ -27,25 +28,25 @@ const testAPIKey = "test-api-key"
 // buildServeProvider, minus the flag/env/file plumbing.
 func e2eConfig(oauthToken string) config.ServeConfig {
 	return config.ServeConfig{
-		Addr:                     "127.0.0.1:0",
-		LogLevel:                 "info",
-		LogFormat:                "text",
-		ShutdownTimeout:          2 * time.Second,
-		APIKey:                   testAPIKey,
-		GithubOAuthToken:         oauthToken,
-		OutboundTimeout:          5 * time.Second,
-		StreamIdleTimeout:        5 * time.Second,
-		StreamKeepaliveInterval:  15 * time.Second,
-		WriteTimeout:             5 * time.Second,
-		ResponseHeaderTimeout:    5 * time.Second,
-		MaxRequestBytes:          1 << 20,
-		MaxBufferedResponseBytes: 1 << 20,
-		StartupMintRetries:       0, // deterministic against stubs; no retries needed
-		CopilotIntegrationID:     "vscode-chat",
-		EditorVersion:            "vscode/1.104.1",
-		EditorPluginVersion:      "copilot-chat/0.26.7",
-		CopilotUserAgent:         "GitHubCopilotChat/0.26.7",
-		GithubAPIVersion:         "2025-04-01",
+		Addr:                         "127.0.0.1:0",
+		LogLevel:                     "info",
+		LogFormat:                    "text",
+		ShutdownTimeout:              2 * time.Second,
+		APIKey:                       testAPIKey,
+		GithubOAuthToken:             oauthToken,
+		OutboundTimeout:              5 * time.Second,
+		StreamIdleTimeout:            5 * time.Second,
+		StreamKeepaliveInterval:      15 * time.Second,
+		WriteTimeout:                 5 * time.Second,
+		ResponseHeaderTimeout:        5 * time.Second,
+		MaxRequestBytes:              1 << 20,
+		MaxBufferedResponseBytes:     1 << 20,
+		StartupMintRetries:           0, // deterministic against stubs; no retries needed
+		VSCodeVersionFallback:        "1.104.1",
+		PluginVersionFallback:        "0.26.7",
+		CopilotIntegrationID:         "vscode-chat",
+		GithubAPIVersion:             "2025-04-01",
+		ImpersonationRefreshInterval: 24 * time.Hour,
 	}
 }
 
@@ -152,7 +153,7 @@ func TestServeFirstRealCallEndToEnd(t *testing.T) {
 	cfg := e2eConfig(oauth)
 	logger := discardLogger(t)
 
-	mgr, err := buildServeProvider(cfg, logger, github.URL, github.Client())
+	mgr, imp, err := buildServeProvider(cfg, logger, github.URL, github.Client(), productionDiscoveryEdge())
 	if err != nil {
 		t.Fatalf("buildServeProvider: %v", err)
 	}
@@ -164,7 +165,7 @@ func TestServeFirstRealCallEndToEnd(t *testing.T) {
 	}
 
 	fwd := forward.New(mgr, forward.NewClient(cfg.ResponseHeaderTimeout), cfg.OutboundTimeout, cfg.WriteTimeout, cfg.StreamIdleTimeout, cfg.StreamKeepaliveInterval, cfg.MaxRequestBytes, cfg.MaxBufferedResponseBytes, nil, forward.WithLogger(logger))
-	base := startTestServer(t, server.New(cfg, logger, mgr, fwd, newTestWSProxy(mgr), server.NewStreamOutcomeCounter()))
+	base := startTestServer(t, server.New(cfg, logger, mgr, imp, fwd, newTestWSProxy(mgr), server.NewStreamOutcomeCounter()))
 
 	assertImpersonation := func(t *testing.T) {
 		t.Helper()
@@ -226,9 +227,96 @@ func TestServeFirstRealCallEndToEnd(t *testing.T) {
 	if exchangeAuth != "token "+oauth {
 		t.Errorf("exchange Authorization = %q, want %q", exchangeAuth, "token "+oauth)
 	}
-	if exchangeUA != cfg.CopilotUserAgent {
-		t.Errorf("exchange User-Agent = %q, want %q", exchangeUA, cfg.CopilotUserAgent)
+	if exchangeUA != "GitHubCopilotChat/"+cfg.PluginVersionFallback {
+		t.Errorf("exchange User-Agent = %q, want %q", exchangeUA, "GitHubCopilotChat/"+cfg.PluginVersionFallback)
 	}
+}
+
+// TestServeDiscoveredVersionsEndToEnd proves the bound serve lifecycle carries
+// successful startup discovery through the first exchange and the first
+// forwarded inference request, and reports the same effective values on
+// /readyz. Every outbound edge is stubbed; no Microsoft or GitHub host is used.
+func TestServeDiscoveredVersionsEndToEnd(t *testing.T) {
+	const (
+		discoveredVSCode = "1.140.2"
+		discoveredPlugin = "0.61.3"
+	)
+	discovery := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/releases/stable":
+			_, _ = io.WriteString(w, `["`+discoveredVSCode+`"]`)
+		case "/_apis/public/gallery/extensionquery":
+			_, _ = io.WriteString(w, `{"results":[{"extensions":[{"versions":[{"version":"`+discoveredPlugin+`","properties":[]}]}]}]}`)
+		default:
+			t.Errorf("unexpected discovery path %q", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(discovery.Close)
+
+	upstream := newCopilotStub(t, `{"ok":true}`)
+	exchangeHeaders := make(chan http.Header, 1)
+	github := lifecycleExchangeStub(t, upstream.server.URL, exchangeHeaders)
+	cfg := e2eConfig("gho-discovery-e2e")
+	// Make fallback values observably different so every assertion below proves
+	// that startup discovery, rather than static configuration, supplied them.
+	cfg.VSCodeVersionFallback = "9.8.7"
+	cfg.PluginVersionFallback = "6.5.4"
+	cfg.ImpersonationRefreshInterval = time.Hour
+	logger := discardLogger(t)
+	mgr, imp, err := buildServeProvider(cfg, logger, github.URL, github.Client(), impersonation.Edge{
+		VSCodeBaseURL:      discovery.URL,
+		MarketplaceBaseURL: discovery.URL,
+		Client:             discovery.Client(),
+	})
+	if err != nil {
+		t.Fatalf("buildServeProvider: %v", err)
+	}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- runBoundServe(ctx, cfg, logger, mgr, imp, ln) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("runBoundServe after cancellation: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Error("bound serve did not stop within the grace period")
+		}
+	})
+
+	base := "http://" + ln.Addr().String()
+	assertHTTPStatusEventually(t, base+"/readyz", http.StatusOK)
+
+	select {
+	case exchange := <-exchangeHeaders:
+		if got, want := exchange.Get("Editor-Version"), "vscode/"+discoveredVSCode; got != want {
+			t.Errorf("exchange Editor-Version = %q, want discovered %q", got, want)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("startup exchange did not run after discovery")
+	}
+
+	resp, _ := post(t, base+"/anthropic/v1/messages", `{"model":"test"}`)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("forward status = %d, want 200", resp.StatusCode)
+	}
+	if got, want := upstream.hdr.Get("Editor-Plugin-Version"), "copilot-chat/"+discoveredPlugin; got != want {
+		t.Errorf("forwarded Editor-Plugin-Version = %q, want discovered %q", got, want)
+	}
+	if got, want := upstream.hdr.Get("User-Agent"), "GitHubCopilotChat/"+discoveredPlugin; got != want {
+		t.Errorf("forwarded User-Agent = %q, want discovered %q", got, want)
+	}
+
+	assertReadyzImpersonation(t, base, discoveredVSCode, discoveredPlugin, "discovered")
 }
 
 // TestServeDegradedWindow proves the readiness gate: before the first mint and
@@ -241,7 +329,7 @@ func TestServeDegradedWindow(t *testing.T) {
 
 		cfg := e2eConfig("gho-secret")
 		logger := discardLogger(t)
-		mgr, err := buildServeProvider(cfg, logger, github.URL, github.Client())
+		mgr, imp, err := buildServeProvider(cfg, logger, github.URL, github.Client(), productionDiscoveryEdge())
 		if err != nil {
 			t.Fatalf("buildServeProvider: %v", err)
 		}
@@ -251,7 +339,7 @@ func TestServeDegradedWindow(t *testing.T) {
 			t.Fatalf("Ready() = true before any mint, want false")
 		}
 		fwd := forward.New(mgr, forward.NewClient(cfg.ResponseHeaderTimeout), cfg.OutboundTimeout, cfg.WriteTimeout, cfg.StreamIdleTimeout, cfg.StreamKeepaliveInterval, cfg.MaxRequestBytes, cfg.MaxBufferedResponseBytes, nil, forward.WithLogger(logger))
-		base := startTestServer(t, server.New(cfg, logger, mgr, fwd, newTestWSProxy(mgr), server.NewStreamOutcomeCounter()))
+		base := startTestServer(t, server.New(cfg, logger, mgr, imp, fwd, newTestWSProxy(mgr), server.NewStreamOutcomeCounter()))
 
 		assertNotReady(t, base)
 
@@ -272,7 +360,7 @@ func TestServeDegradedWindow(t *testing.T) {
 
 		cfg := e2eConfig("gho-secret")
 		logger := discardLogger(t)
-		mgr, err := buildServeProvider(cfg, logger, github.URL, github.Client())
+		mgr, imp, err := buildServeProvider(cfg, logger, github.URL, github.Client(), productionDiscoveryEdge())
 		if err != nil {
 			t.Fatalf("buildServeProvider: %v", err)
 		}
@@ -281,7 +369,7 @@ func TestServeDegradedWindow(t *testing.T) {
 			t.Fatalf("Ready() = true after a failed startup mint, want false")
 		}
 		fwd := forward.New(mgr, forward.NewClient(cfg.ResponseHeaderTimeout), cfg.OutboundTimeout, cfg.WriteTimeout, cfg.StreamIdleTimeout, cfg.StreamKeepaliveInterval, cfg.MaxRequestBytes, cfg.MaxBufferedResponseBytes, nil, forward.WithLogger(logger))
-		base := startTestServer(t, server.New(cfg, logger, mgr, fwd, newTestWSProxy(mgr), server.NewStreamOutcomeCounter()))
+		base := startTestServer(t, server.New(cfg, logger, mgr, imp, fwd, newTestWSProxy(mgr), server.NewStreamOutcomeCounter()))
 
 		assertNotReady(t, base)
 	})

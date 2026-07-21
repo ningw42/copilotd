@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ningw42/copilotd/internal/impersonation"
 	"github.com/peterbourgon/ff/v4"
 	"github.com/peterbourgon/ff/v4/fftoml"
 )
@@ -52,14 +53,15 @@ const (
 	defaultStartupMintRetries = 3
 
 	// Impersonation defaults present copilotd to Copilot as the VS Code Copilot
-	// client so upstream client/user-agent allowlist checks pass. They are knobs
-	// because they are version-sensitive (§6.7); the identity layer applies them to
-	// both the token exchange and every inference request.
-	defaultCopilotIntegrationID = "vscode-chat"
-	defaultEditorVersion        = "vscode/1.104.1"
-	defaultEditorPluginVersion  = "copilot-chat/0.26.7"
-	defaultCopilotUserAgent     = "GitHubCopilotChat/0.26.7"
-	defaultGithubAPIVersion     = "2025-04-01"
+	// client so upstream client/user-agent allowlist checks pass. The two bare
+	// versions are fallbacks for runtime discovery; main derives the exact header
+	// values from them. The discovery interval controls the runtime orchestration
+	// and zero disables discovery.
+	defaultCopilotIntegrationID         = "vscode-chat"
+	defaultVSCodeVersionFallback        = "1.104.1"
+	defaultPluginVersionFallback        = "0.26.7"
+	defaultGithubAPIVersion             = "2025-04-01"
+	defaultImpersonationRefreshInterval = 24 * time.Hour
 
 	// Device-flow defaults for `copilotd login` (§9.3). The client id is the
 	// public VS Code Copilot OAuth app; it is overridable so a GitHub Enterprise
@@ -151,14 +153,14 @@ type ServeConfig struct {
 	// (total attempts = 1 + N). Auth-class failures short-circuit regardless.
 	StartupMintRetries int
 
-	// The impersonation header knobs (§6.7). Non-secret; logged normally. The
-	// identity Manager builds an http.Header from these and applies it to the token
-	// exchange and every inference request.
-	CopilotIntegrationID string
-	EditorVersion        string
-	EditorPluginVersion  string
-	CopilotUserAgent     string
-	GithubAPIVersion     string
+	// The impersonation fallbacks and static identifiers (§6.7). Non-secret;
+	// logged normally. Runtime discovery will replace the bare-version fallbacks
+	// when it succeeds; the cadence is parsed and stored but remains inert here.
+	VSCodeVersionFallback        string
+	PluginVersionFallback        string
+	CopilotIntegrationID         string
+	GithubAPIVersion             string
+	ImpersonationRefreshInterval time.Duration
 }
 
 // LogValue implements slog.LogValuer. It enumerates the non-secret fields
@@ -185,11 +187,11 @@ func (c ServeConfig) LogValue() slog.Value {
 		slog.String("codex-auto-review-model", c.Codex.AutoReviewModel),
 		slog.Bool("codex-catalog-override-limits", c.Codex.OverrideLimits),
 		slog.Int("startup-mint-retries", c.StartupMintRetries),
+		slog.String("vscode-version", c.VSCodeVersionFallback),
+		slog.String("plugin-version", c.PluginVersionFallback),
 		slog.String("copilot-integration-id", c.CopilotIntegrationID),
-		slog.String("editor-version", c.EditorVersion),
-		slog.String("editor-plugin-version", c.EditorPluginVersion),
-		slog.String("copilot-user-agent", c.CopilotUserAgent),
 		slog.String("github-api-version", c.GithubAPIVersion),
+		slog.Duration("impersonation-refresh-interval", c.ImpersonationRefreshInterval),
 	)
 }
 
@@ -256,13 +258,13 @@ type ServeFlags struct {
 	codexAutoReviewModel      *string
 	codexOverrideLimits       *bool
 
-	githubOAuthToken     *string
-	startupMintRetries   *int
-	copilotIntegrationID *string
-	editorVersion        *string
-	editorPluginVersion  *string
-	copilotUserAgent     *string
-	githubAPIVersion     *string
+	githubOAuthToken             *string
+	startupMintRetries           *int
+	vscodeVersion                *string
+	pluginVersion                *string
+	copilotIntegrationID         *string
+	githubAPIVersion             *string
+	impersonationRefreshInterval *time.Duration
 }
 
 // RegisterServe declares the common operational flags first, followed by the
@@ -289,11 +291,11 @@ func RegisterServe(fs *ff.FlagSet) *ServeFlags {
 
 	f.githubOAuthToken = fs.StringLong("github-oauth-token", "", "inline GitHub OAuth token (secret; precedence over the GitHub OAuth token file)")
 	f.startupMintRetries = fs.IntLong("startup-mint-retries", defaultStartupMintRetries, "transient startup-mint retries (total attempts = 1 + N)")
+	f.vscodeVersion = fs.StringLong("vscode-version", defaultVSCodeVersionFallback, "impersonation: bare VS Code version fallback")
+	f.pluginVersion = fs.StringLong("plugin-version", defaultPluginVersionFallback, "impersonation: bare Copilot Chat version fallback")
 	f.copilotIntegrationID = fs.StringLong("copilot-integration-id", defaultCopilotIntegrationID, "impersonation: Copilot-Integration-Id header value")
-	f.editorVersion = fs.StringLong("editor-version", defaultEditorVersion, "impersonation: Editor-Version header value")
-	f.editorPluginVersion = fs.StringLong("editor-plugin-version", defaultEditorPluginVersion, "impersonation: Editor-Plugin-Version header value")
-	f.copilotUserAgent = fs.StringLong("copilot-user-agent", defaultCopilotUserAgent, "impersonation: User-Agent header value")
 	f.githubAPIVersion = fs.StringLong("github-api-version", defaultGithubAPIVersion, "impersonation: X-GitHub-Api-Version header value")
+	f.impersonationRefreshInterval = fs.DurationLong("impersonation-refresh-interval", defaultImpersonationRefreshInterval, "impersonation version re-discovery cadence (0 disables discovery)")
 
 	return f
 }
@@ -330,12 +332,12 @@ func (f *ServeFlags) Resolve(lookupEnv func(string) (string, bool)) (ServeConfig
 			AutoReviewModel: defaultCodexAutoReviewModel,
 			OverrideLimits:  defaultCodexOverrideLimits,
 		},
-		StartupMintRetries:   defaultStartupMintRetries,
-		CopilotIntegrationID: defaultCopilotIntegrationID,
-		EditorVersion:        defaultEditorVersion,
-		EditorPluginVersion:  defaultEditorPluginVersion,
-		CopilotUserAgent:     defaultCopilotUserAgent,
-		GithubAPIVersion:     defaultGithubAPIVersion,
+		StartupMintRetries:           defaultStartupMintRetries,
+		VSCodeVersionFallback:        defaultVSCodeVersionFallback,
+		PluginVersionFallback:        defaultPluginVersionFallback,
+		CopilotIntegrationID:         defaultCopilotIntegrationID,
+		GithubAPIVersion:             defaultGithubAPIVersion,
+		ImpersonationRefreshInterval: defaultImpersonationRefreshInterval,
 	}
 
 	// file layer (lowest precedence above defaults)
@@ -401,20 +403,20 @@ func (f *ServeFlags) Resolve(lookupEnv func(string) (string, bool)) (ServeConfig
 	if set["startup-mint-retries"] {
 		cfg.StartupMintRetries = *f.startupMintRetries
 	}
+	if set["vscode-version"] {
+		cfg.VSCodeVersionFallback = *f.vscodeVersion
+	}
+	if set["plugin-version"] {
+		cfg.PluginVersionFallback = *f.pluginVersion
+	}
 	if set["copilot-integration-id"] {
 		cfg.CopilotIntegrationID = *f.copilotIntegrationID
 	}
-	if set["editor-version"] {
-		cfg.EditorVersion = *f.editorVersion
-	}
-	if set["editor-plugin-version"] {
-		cfg.EditorPluginVersion = *f.editorPluginVersion
-	}
-	if set["copilot-user-agent"] {
-		cfg.CopilotUserAgent = *f.copilotUserAgent
-	}
 	if set["github-api-version"] {
 		cfg.GithubAPIVersion = *f.githubAPIVersion
+	}
+	if set["impersonation-refresh-interval"] {
+		cfg.ImpersonationRefreshInterval = *f.impersonationRefreshInterval
 	}
 
 	if err := cfg.validate(); err != nil {
@@ -484,20 +486,24 @@ func overlay(cfg *ServeConfig, source string, get func(key string) (string, bool
 	if v, ok := get("github-oauth-token"); ok {
 		cfg.GithubOAuthToken = v
 	}
+	if v, ok := get("vscode-version"); ok {
+		cfg.VSCodeVersionFallback = v
+	}
+	if v, ok := get("plugin-version"); ok {
+		cfg.PluginVersionFallback = v
+	}
 	if v, ok := get("copilot-integration-id"); ok {
 		cfg.CopilotIntegrationID = v
 	}
-	if v, ok := get("editor-version"); ok {
-		cfg.EditorVersion = v
-	}
-	if v, ok := get("editor-plugin-version"); ok {
-		cfg.EditorPluginVersion = v
-	}
-	if v, ok := get("copilot-user-agent"); ok {
-		cfg.CopilotUserAgent = v
-	}
 	if v, ok := get("github-api-version"); ok {
 		cfg.GithubAPIVersion = v
+	}
+	if v, ok := get("impersonation-refresh-interval"); ok {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return fmt.Errorf("invalid impersonation-refresh-interval %q from %s: %w", v, source, err)
+		}
+		cfg.ImpersonationRefreshInterval = d
 	}
 	if v, ok := get("shutdown-timeout"); ok {
 		d, err := time.ParseDuration(v)
@@ -673,6 +679,15 @@ func (c ServeConfig) validate() error {
 	}
 	if c.StartupMintRetries < 0 {
 		return fmt.Errorf("invalid startup-mint-retries %d: must be >= 0", c.StartupMintRetries)
+	}
+	if !impersonation.IsBareVersion(c.VSCodeVersionFallback) {
+		return fmt.Errorf("invalid vscode-version %q: must be major.minor.patch with optional prerelease or build suffixes", c.VSCodeVersionFallback)
+	}
+	if !impersonation.IsBareVersion(c.PluginVersionFallback) {
+		return fmt.Errorf("invalid plugin-version %q: must be major.minor.patch with optional prerelease or build suffixes", c.PluginVersionFallback)
+	}
+	if c.ImpersonationRefreshInterval < 0 {
+		return fmt.Errorf("invalid impersonation-refresh-interval %v: must be >= 0", c.ImpersonationRefreshInterval)
 	}
 	return nil
 }

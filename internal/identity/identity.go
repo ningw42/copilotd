@@ -1,5 +1,5 @@
 // Package identity owns copilotd's outbound GitHub Copilot credential — the
-// short-lived Copilot token, its upstream base URL, and the static impersonation
+// short-lived Copilot token, its upstream base URL, and the impersonation
 // header set the forwarder applies to every upstream call. It exposes a narrow
 // seam (the Credential snapshot and the Provider interface) that the forwarder
 // and server consume without any Copilot-specific knowledge.
@@ -18,15 +18,36 @@ import (
 )
 
 // Credential is an immutable snapshot the forwarder applies to one outbound
-// request: the upstream base URL, the Copilot bearer token, and the static
-// impersonation header set. The forwarder treats Headers as opaque and never
+// request: the upstream base URL, the Copilot bearer token, and an impersonation
+// header snapshot. The forwarder treats Headers as opaque and never
 // mutates it (it copies onto a fresh outbound header map), so a snapshot taken
 // during a concurrent mint is race-free.
 type Credential struct {
 	BaseURL string      // upstream scheme+host, e.g. "https://api.githubcopilot.com"
 	Token   string      // short-lived Copilot bearer token (secret)
-	Headers http.Header // static impersonation set; opaque to the forwarder
+	Headers http.Header // impersonation set; opaque to the forwarder
 }
+
+// Impersonation provides the current headers used for the GitHub exchange and
+// outbound Copilot requests. Implementations may return a live, changing set.
+type Impersonation interface {
+	Header() http.Header
+}
+
+type staticImpersonation struct {
+	header http.Header
+}
+
+// StaticImpersonation adapts a fixed header set to the Impersonation seam. The
+// input is cloned so later caller mutations do not change the fixed set.
+func StaticImpersonation(header http.Header) Impersonation {
+	if header == nil {
+		header = http.Header{}
+	}
+	return staticImpersonation{header: header.Clone()}
+}
+
+func (i staticImpersonation) Header() http.Header { return i.header }
 
 // Provider hands the forwarder a current Credential and reports readiness. The
 // real Manager mints on demand inside Current; the Static stub returns a fixed

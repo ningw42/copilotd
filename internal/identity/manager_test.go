@@ -78,13 +78,30 @@ func (c *fakeClock) advance(d time.Duration) {
 	c.mu.Unlock()
 }
 
-func testImpersonation() http.Header {
-	return http.Header{
+func testImpersonation() Impersonation {
+	return StaticImpersonation(http.Header{
 		"Copilot-Integration-Id": {"vscode-chat"},
 		"Editor-Version":         {"vscode/1.104.1"},
 		"User-Agent":             {"GitHubCopilotChat/0.26.7"},
 		"X-Github-Api-Version":   {"2025-04-01"},
-	}
+	})
+}
+
+type liveImpersonation struct {
+	mu     sync.Mutex
+	header http.Header
+}
+
+func (i *liveImpersonation) Header() http.Header {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	return i.header.Clone()
+}
+
+func (i *liveImpersonation) set(header http.Header) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.header = header.Clone()
 }
 
 // bufLogger returns a debug-level text logger writing to the returned buffer.
@@ -148,6 +165,52 @@ func TestManagerCurrentMintsCredential(t *testing.T) {
 		}
 	})
 
+}
+
+func TestManagerReadsLiveImpersonationForEachMintAndCredential(t *testing.T) {
+	base := time.Unix(1_700_000_000, 0)
+	clk := &fakeClock{t: base}
+	impersonation := &liveImpersonation{}
+	impersonation.set(http.Header{"Editor-Version": {"vscode/1.104.1"}})
+
+	s := newStub(t)
+	s.handler = func(w http.ResponseWriter, r *http.Request) {
+		writeToken(w, "copilot-token", clk.now().Add(25*time.Minute), 1500, "https://api.githubcopilot.com")
+	}
+	m := NewManager(ManagerConfig{
+		OAuthToken:    "gho",
+		GitHubBaseURL: s.server.URL,
+		HTTPClient:    s.server.Client(),
+		Impersonation: impersonation,
+		SafetyMargin:  2 * time.Minute,
+		Clock:         clk.now,
+		Logger:        slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+	})
+
+	first, err := m.Current(context.Background())
+	if err != nil {
+		t.Fatalf("first Current() error = %v", err)
+	}
+	if got := s.header().Get("Editor-Version"); got != "vscode/1.104.1" {
+		t.Fatalf("first exchange Editor-Version = %q, want fallback version", got)
+	}
+	if got := first.Headers.Get("Editor-Version"); got != "vscode/1.104.1" {
+		t.Fatalf("first credential Editor-Version = %q, want fallback version", got)
+	}
+
+	impersonation.set(http.Header{"Editor-Version": {"vscode/1.129.1"}})
+	clk.advance(24 * time.Minute)
+
+	second, err := m.Current(context.Background())
+	if err != nil {
+		t.Fatalf("second Current() error = %v", err)
+	}
+	if got := s.header().Get("Editor-Version"); got != "vscode/1.129.1" {
+		t.Errorf("second exchange Editor-Version = %q, want live version", got)
+	}
+	if got := second.Headers.Get("Editor-Version"); got != "vscode/1.129.1" {
+		t.Errorf("second credential Editor-Version = %q, want live version", got)
+	}
 }
 
 func TestManagerUsesBuiltInOriginWhenExchangeOmitsIt(t *testing.T) {

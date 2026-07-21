@@ -116,9 +116,9 @@ type ManagerConfig struct {
 	GitHubBaseURL string
 	// HTTPClient performs the exchange (default http.DefaultClient).
 	HTTPClient *http.Client
-	// Impersonation is the header set applied to the exchange request and carried
-	// on Credential.Headers for inference requests. Cloned on construction.
-	Impersonation http.Header
+	// Impersonation supplies the current header set applied to the exchange
+	// request and carried on Credential.Headers for inference requests.
+	Impersonation Impersonation
 	// StartupMintRetries bounds transient-failure retries of the startup mint
 	// (total attempts = 1 + N). Auth-class failures short-circuit regardless.
 	StartupMintRetries int
@@ -146,7 +146,7 @@ type Manager struct {
 	oauthToken      string
 	githubBaseURL   string
 	httpClient      *http.Client
-	impersonation   http.Header
+	impersonation   Impersonation
 	startupRetries  int
 	exchangeTimeout time.Duration
 	safetyMargin    time.Duration
@@ -175,7 +175,7 @@ func NewManager(cfg ManagerConfig) *Manager {
 		oauthToken:      cfg.OAuthToken,
 		githubBaseURL:   cfg.GitHubBaseURL,
 		httpClient:      cfg.HTTPClient,
-		impersonation:   cfg.Impersonation.Clone(),
+		impersonation:   cfg.Impersonation,
 		startupRetries:  cfg.StartupMintRetries,
 		exchangeTimeout: cfg.ExchangeTimeout,
 		safetyMargin:    cfg.SafetyMargin,
@@ -190,7 +190,7 @@ func NewManager(cfg ManagerConfig) *Manager {
 		m.httpClient = http.DefaultClient
 	}
 	if m.impersonation == nil {
-		m.impersonation = http.Header{}
+		m.impersonation = StaticImpersonation(nil)
 	}
 	if m.exchangeTimeout <= 0 {
 		m.exchangeTimeout = defaultExchangeTimeout
@@ -301,7 +301,7 @@ func (m *Manager) exchange(ctx context.Context) (copilotToken, error) {
 	if err != nil {
 		return copilotToken{}, &exchangeError{transient: false, err: err}
 	}
-	for k, vs := range m.impersonation {
+	for k, vs := range m.impersonation.Header() {
 		for _, v := range vs {
 			req.Header.Set(k, v)
 		}
@@ -442,7 +442,7 @@ func (m *Manager) credentialFrom(tok copilotToken) Credential {
 	return Credential{
 		BaseURL: base,
 		Token:   tok.raw,
-		Headers: m.impersonation,
+		Headers: m.impersonation.Header(),
 	}
 }
 

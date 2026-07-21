@@ -53,13 +53,13 @@ type websocketDrainer interface {
 }
 
 // New builds the server from cfg and logger. The identity Provider supplies the
-// outbound Copilot credential (and readiness), fwd drives the Surface endpoints,
-// and streamOutcomes receives the bounded stream terminal-outcome metric. The
-// listener is supplied later to Run, so main owns bind and the server owns
-// serve/shutdown.
-func New(cfg config.ServeConfig, logger *slog.Logger, provider identity.Provider, fwd *forward.Forwarder, wsProxy *wsforward.Proxy, streamOutcomes StreamOutcomeObserver) *Server {
+// outbound Copilot credential (and readiness), observer supplies the non-secret
+// impersonation snapshot, fwd drives the Surface endpoints, and streamOutcomes
+// receives the bounded stream terminal-outcome metric. The listener is supplied
+// later to Run, so main owns bind and the server owns serve/shutdown.
+func New(cfg config.ServeConfig, logger *slog.Logger, provider identity.Provider, observer ImpersonationObserver, fwd *forward.Forwarder, wsProxy *wsforward.Proxy, streamOutcomes StreamOutcomeObserver) *Server {
 	httpServer := &http.Server{
-		Handler:           newHandler(cfg.APIKey, provider, fwd, logger, streamOutcomes, cfg.Codex, wsProxy),
+		Handler:           newHandler(cfg.APIKey, provider, observer, fwd, logger, streamOutcomes, cfg.Codex, wsProxy),
 		ReadHeaderTimeout: readHeaderTimeout,
 		ReadTimeout:       readTimeout,
 		WriteTimeout:      writeTimeout,

@@ -3,34 +3,102 @@ package server
 import (
 	"crypto/sha256"
 	"crypto/subtle"
-	"io"
+	"encoding/json"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/ningw42/copilotd/internal/apierror"
 	"github.com/ningw42/copilotd/internal/endpoint"
 	"github.com/ningw42/copilotd/internal/identity"
+	"github.com/ningw42/copilotd/internal/impersonation"
 )
 
+// ImpersonationObserver supplies the non-secret snapshot rendered by /readyz.
+// The interface lives at the consuming HTTP boundary; impersonation owns only
+// the observed state and remains unaware of handlers and JSON rendering.
+type ImpersonationObserver interface {
+	Observe() impersonation.Observed
+}
+
+type readyResponse struct {
+	Status        string                     `json:"status"`
+	Impersonation readyImpersonationResponse `json:"impersonation"`
+}
+
+type readyImpersonationResponse struct {
+	EffectiveHeaders readyEffectiveHeaders `json:"effective_headers"`
+	Discovery        readyDiscovery        `json:"discovery"`
+}
+
+// readyEffectiveHeaders is deliberately an allowlist. Even if an observer is
+// accidentally handed a broader header map, /readyz cannot render a credential
+// or another unexpected value from it.
+type readyEffectiveHeaders struct {
+	EditorVersion        string `json:"Editor-Version"`
+	EditorPluginVersion  string `json:"Editor-Plugin-Version"`
+	UserAgent            string `json:"User-Agent"`
+	CopilotIntegrationID string `json:"Copilot-Integration-Id"`
+	GithubAPIVersion     string `json:"X-GitHub-Api-Version"`
+}
+
+type readyDiscovery struct {
+	VSCode      readyDiscoveryFact `json:"vscode"`
+	CopilotChat readyDiscoveryFact `json:"copilot_chat"`
+}
+
+type readyDiscoveryFact struct {
+	Source      string     `json:"source"`
+	LastSuccess *time.Time `json:"last_success"`
+}
+
 // handleReady reports readiness — identity's last mint outcome, distinct from
-// /healthz liveness: 200 {"status":"ready"} when ready, else 503
-// {"status":"not ready"}. It is unauthenticated by design (it leaks no secret and
-// exposes only a coarse ready bit). The GET pattern also serves HEAD, for which
-// no body is written.
-func handleReady(provider identity.Provider) http.HandlerFunc {
+// /healthz liveness: 200 when ready, else 503. Its unauthenticated body includes
+// only the allowlisted effective impersonation headers and per-fact discovery
+// source/last-success. The GET pattern also serves HEAD, for which no body is
+// written.
+func handleReady(provider identity.Provider, observer ImpersonationObserver) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		status := "not ready"
+		statusCode := http.StatusServiceUnavailable
 		if provider.Ready() {
-			w.WriteHeader(http.StatusOK)
-			if r.Method != http.MethodHead {
-				_, _ = io.WriteString(w, `{"status":"ready"}`)
-			}
+			status = "ready"
+			statusCode = http.StatusOK
+		}
+		w.WriteHeader(statusCode)
+		if r.Method == http.MethodHead {
 			return
 		}
-		w.WriteHeader(http.StatusServiceUnavailable)
-		if r.Method != http.MethodHead {
-			_, _ = io.WriteString(w, `{"status":"not ready"}`)
-		}
+
+		body, _ := json.Marshal(newReadyResponse(status, observer.Observe()))
+		_, _ = w.Write(body)
+	}
+}
+
+func newReadyResponse(status string, observed impersonation.Observed) readyResponse {
+	headers := observed.EffectiveHeaders
+	return readyResponse{
+		Status: status,
+		Impersonation: readyImpersonationResponse{
+			EffectiveHeaders: readyEffectiveHeaders{
+				EditorVersion:        headers.Get("Editor-Version"),
+				EditorPluginVersion:  headers.Get("Editor-Plugin-Version"),
+				UserAgent:            headers.Get("User-Agent"),
+				CopilotIntegrationID: headers.Get("Copilot-Integration-Id"),
+				GithubAPIVersion:     headers.Get("X-GitHub-Api-Version"),
+			},
+			Discovery: readyDiscovery{
+				VSCode: readyDiscoveryFact{
+					Source:      observed.Discovery.VSCode.Source,
+					LastSuccess: observed.Discovery.VSCode.LastSuccess,
+				},
+				CopilotChat: readyDiscoveryFact{
+					Source:      observed.Discovery.CopilotChat.Source,
+					LastSuccess: observed.Discovery.CopilotChat.LastSuccess,
+				},
+			},
+		},
 	}
 }
 

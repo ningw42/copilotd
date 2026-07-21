@@ -17,6 +17,7 @@ import (
 	"github.com/ningw42/copilotd/internal/config"
 	"github.com/ningw42/copilotd/internal/forward"
 	"github.com/ningw42/copilotd/internal/identity"
+	"github.com/ningw42/copilotd/internal/impersonation"
 	"github.com/ningw42/copilotd/internal/sse"
 )
 
@@ -33,7 +34,7 @@ func stack(t *testing.T, upstreamURL string, ready bool) (http.Handler, *identit
 		},
 	}, ready)
 	fwd := forward.New(prov, forward.NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
-	return newHandler(testAPIKey, prov, fwd, discardLogger(t), NewStreamOutcomeCounter(), config.CodexConfig{}, newTestWSProxy(prov)), prov
+	return newHandler(testAPIKey, prov, newTestImpersonationObserver(), fwd, discardLogger(t), NewStreamOutcomeCounter(), config.CodexConfig{}, newTestWSProxy(prov)), prov
 }
 
 type controllerRecorder struct {
@@ -193,8 +194,25 @@ func openaiErrorType(t *testing.T, body []byte) string {
 	return e.Error.Type
 }
 
-func TestReadyzReflectsReadiness(t *testing.T) {
-	h, prov := stack(t, "", true)
+func TestReadyzReflectsReadinessAndImpersonation(t *testing.T) {
+	prov := identity.NewStatic(identity.Credential{}, true)
+	lastSuccess := time.Date(2026, time.July, 20, 12, 0, 0, 0, time.UTC)
+	observer := staticImpersonationObserver{observed: impersonation.Observed{
+		EffectiveHeaders: http.Header{
+			"Authorization":          {"secret-that-must-not-render"},
+			"Copilot-Integration-Id": {"vscode-chat"},
+			"Editor-Plugin-Version":  {"copilot-chat/0.48.1"},
+			"Editor-Version":         {"vscode/1.129.1"},
+			"User-Agent":             {"GitHubCopilotChat/0.48.1"},
+			"X-Github-Api-Version":   {"2025-04-01"},
+		},
+		Discovery: impersonation.ObservedDiscovery{
+			VSCode:      impersonation.ObservedFact{Source: "discovered", LastSuccess: &lastSuccess},
+			CopilotChat: impersonation.ObservedFact{Source: "fallback"},
+		},
+	}}
+	h := handleReady(prov, observer)
+	wantImpersonation := `"impersonation":{"effective_headers":{"Editor-Version":"vscode/1.129.1","Editor-Plugin-Version":"copilot-chat/0.48.1","User-Agent":"GitHubCopilotChat/0.48.1","Copilot-Integration-Id":"vscode-chat","X-GitHub-Api-Version":"2025-04-01"},"discovery":{"vscode":{"source":"discovered","last_success":"2026-07-20T12:00:00Z"},"copilot_chat":{"source":"fallback","last_success":null}}}`
 
 	t.Run("ready", func(t *testing.T) {
 		rec := newControllerRecorder()
@@ -202,8 +220,11 @@ func TestReadyzReflectsReadiness(t *testing.T) {
 		if rec.Code != http.StatusOK {
 			t.Errorf("status = %d, want 200", rec.Code)
 		}
-		if rec.Body.String() != `{"status":"ready"}` {
-			t.Errorf("body = %q, want ready", rec.Body.String())
+		if want := `{"status":"ready",` + wantImpersonation + `}`; rec.Body.String() != want {
+			t.Errorf("body = %q, want %q", rec.Body.String(), want)
+		}
+		if strings.Contains(rec.Body.String(), "secret-that-must-not-render") {
+			t.Errorf("body leaked a non-impersonation header: %s", rec.Body.String())
 		}
 	})
 
@@ -215,8 +236,28 @@ func TestReadyzReflectsReadiness(t *testing.T) {
 		if rec.Code != http.StatusServiceUnavailable {
 			t.Errorf("status = %d, want 503", rec.Code)
 		}
-		if rec.Body.String() != `{"status":"not ready"}` {
-			t.Errorf("body = %q, want not ready", rec.Body.String())
+		if want := `{"status":"not ready",` + wantImpersonation + `}`; rec.Body.String() != want {
+			t.Errorf("body = %q, want %q", rec.Body.String(), want)
+		}
+
+		head := newControllerRecorder()
+		h.ServeHTTP(head, httptest.NewRequest(http.MethodHead, "/readyz", nil))
+		if head.Code != http.StatusServiceUnavailable {
+			t.Errorf("HEAD status = %d, want 503", head.Code)
+		}
+		if head.Body.Len() != 0 {
+			t.Errorf("HEAD body = %q, want empty", head.Body.String())
+		}
+	})
+
+	t.Run("ready HEAD has no body", func(t *testing.T) {
+		rec := newControllerRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodHead, "/readyz", nil))
+		if rec.Code != http.StatusOK {
+			t.Errorf("status = %d, want 200", rec.Code)
+		}
+		if rec.Body.Len() != 0 {
+			t.Errorf("body = %q, want empty", rec.Body.String())
 		}
 	})
 }
@@ -430,10 +471,10 @@ func TestModelsRequestOwnershipAndIdentityBoundariesAtAssembledServer(t *testing
 		OAuthToken:    githubOAuthTokenSentinel,
 		GitHubBaseURL: exchange.URL,
 		HTTPClient:    exchange.Client(),
-		Impersonation: http.Header{
+		Impersonation: identity.StaticImpersonation(http.Header{
 			"Copilot-Integration-Id": {"vscode-chat"},
 			"Editor-Version":         {"vscode/1.104.1"},
-		},
+		}),
 		Logger: logger,
 	})
 	provider.StartupMint(context.Background())
@@ -443,7 +484,7 @@ func TestModelsRequestOwnershipAndIdentityBoundariesAtAssembledServer(t *testing
 	}
 
 	fwd := forward.New(provider, forward.NewClient(time.Second), time.Second, time.Second, time.Second, time.Second, 1, 1, nil)
-	h := newHandler(apiKeySentinel, provider, fwd, logger, NewStreamOutcomeCounter(), config.CodexConfig{}, newTestWSProxy(provider))
+	h := newHandler(apiKeySentinel, provider, newTestImpersonationObserver(), fwd, logger, NewStreamOutcomeCounter(), config.CodexConfig{}, newTestWSProxy(provider))
 	req := httptest.NewRequest(http.MethodGet, requestTarget, nil)
 	req.Body = io.NopCloser(strings.NewReader(requestBodySentinel))
 	req.ContentLength = int64(len(requestBodySentinel))
@@ -602,7 +643,7 @@ func TestModelsHEADPreservesRequestAndResponseContractAtRealListener(t *testing.
 	}, true)
 	fwd := forward.New(provider, forward.NewClient(time.Second), time.Second, time.Second, time.Second, time.Second, 1, 1, nil)
 	logger, logs := bufferLogger(t, "info")
-	server := httptest.NewServer(newHandler(testAPIKey, provider, fwd, logger, NewStreamOutcomeCounter(), config.CodexConfig{}, newTestWSProxy(provider)))
+	server := httptest.NewServer(newHandler(testAPIKey, provider, newTestImpersonationObserver(), fwd, logger, NewStreamOutcomeCounter(), config.CodexConfig{}, newTestWSProxy(provider)))
 	defer server.Close()
 
 	req, err := http.NewRequest(http.MethodHead, server.URL+requestTarget, strings.NewReader(requestBody))
@@ -712,7 +753,7 @@ func TestModelsAuthoritativeResponseAtAssembledBoundaryOmitsResponseDataFromLogs
 	provider := identity.NewStatic(identity.Credential{BaseURL: upstream.URL, Token: "copilot-token"}, true)
 	fwd := forward.New(provider, forward.NewClient(time.Second), time.Second, time.Second, time.Nanosecond, time.Nanosecond, 1, 1, nil)
 	logger, logs := bufferLogger(t, "info")
-	h := newHandler(testAPIKey, provider, fwd, logger, NewStreamOutcomeCounter(), config.CodexConfig{}, newTestWSProxy(provider))
+	h := newHandler(testAPIKey, provider, newTestImpersonationObserver(), fwd, logger, NewStreamOutcomeCounter(), config.CodexConfig{}, newTestWSProxy(provider))
 	req := httptest.NewRequest(http.MethodGet, "/models", nil)
 	req.Header.Set("Authorization", "Bearer "+testAPIKey)
 	req.Header.Set("X-Request-Id", requestID)
@@ -904,7 +945,7 @@ func TestModelsHEADLocalFailuresHaveNoWireBody(t *testing.T) {
 			})}
 			fwd := forward.New(provider, client, time.Second, time.Second, time.Second, time.Second, 1, 1, nil)
 			logger, logs := bufferLogger(t, "info")
-			server := httptest.NewServer(newHandler(testAPIKey, provider, fwd, logger, NewStreamOutcomeCounter(), config.CodexConfig{}, newTestWSProxy(provider)))
+			server := httptest.NewServer(newHandler(testAPIKey, provider, newTestImpersonationObserver(), fwd, logger, NewStreamOutcomeCounter(), config.CodexConfig{}, newTestWSProxy(provider)))
 			defer server.Close()
 
 			req, err := http.NewRequest(http.MethodHead, server.URL+"/models", nil)
@@ -956,7 +997,7 @@ func TestModelsExplicitPatternsReachAccessLog(t *testing.T) {
 	}, true)
 	fwd := forward.New(provider, forward.NewClient(time.Second), time.Second, time.Second, time.Second, time.Second, 1, 1, nil)
 	logger, logs := bufferLogger(t, "info")
-	h := newHandler(testAPIKey, provider, fwd, logger, NewStreamOutcomeCounter(), config.CodexConfig{}, newTestWSProxy(provider))
+	h := newHandler(testAPIKey, provider, newTestImpersonationObserver(), fwd, logger, NewStreamOutcomeCounter(), config.CodexConfig{}, newTestWSProxy(provider))
 
 	for _, method := range []string{http.MethodGet, http.MethodHead} {
 		req := httptest.NewRequest(method, "/models", nil)
@@ -1143,7 +1184,7 @@ func TestEndToEndForwardViaRun(t *testing.T) {
 		},
 	}, true)
 	fwd := forward.New(prov, forward.NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
-	base := startServer(t, New(testConfig(), discardLogger(t), prov, fwd, newTestWSProxy(prov), NewStreamOutcomeCounter()))
+	base := startServer(t, New(testConfig(), discardLogger(t), prov, newTestImpersonationObserver(), fwd, newTestWSProxy(prov), NewStreamOutcomeCounter()))
 
 	const reqBody = `{"model":"claude-3-5-sonnet","messages":[{"role":"user","content":"hi"}]}`
 
@@ -1237,7 +1278,7 @@ func TestOpenAIResponsesForwardVerbatim(t *testing.T) {
 		},
 	}, true)
 	fwd := forward.New(prov, forward.NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
-	base := startServer(t, New(testConfig(), discardLogger(t), prov, fwd, newTestWSProxy(prov), NewStreamOutcomeCounter()))
+	base := startServer(t, New(testConfig(), discardLogger(t), prov, newTestImpersonationObserver(), fwd, newTestWSProxy(prov), NewStreamOutcomeCounter()))
 
 	const reqBody = `{"model":"gpt-4o","input":"hi"}`
 	req, _ := http.NewRequest(http.MethodPost, base+"/openai/v1/responses", strings.NewReader(reqBody))
@@ -1387,7 +1428,7 @@ func TestOpenAIBodyCapAndUpstreamPassthrough(t *testing.T) {
 	t.Run("over cap -> OpenAI-shaped 413", func(t *testing.T) {
 		prov := identity.NewStatic(identity.Credential{BaseURL: "http://127.0.0.1:1", Token: "t"}, true)
 		fwd := forward.New(prov, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 8, 1<<20, nil) // 8-byte request cap
-		h := newHandler(testAPIKey, prov, fwd, discardLogger(t), NewStreamOutcomeCounter(), config.CodexConfig{}, newTestWSProxy(prov))
+		h := newHandler(testAPIKey, prov, newTestImpersonationObserver(), fwd, discardLogger(t), NewStreamOutcomeCounter(), config.CodexConfig{}, newTestWSProxy(prov))
 		req := httptest.NewRequest(http.MethodPost, "/openai/v1/responses", strings.NewReader(`{"model":"way too long"}`))
 		req.Header.Set("Authorization", "Bearer "+testAPIKey)
 		rec := newControllerRecorder()
@@ -1435,7 +1476,7 @@ func TestAnthropicStreamingEndToEnd(t *testing.T) {
 			Headers: http.Header{"Copilot-Integration-Id": {"vscode-chat"}},
 		}, true)
 		fwd := forward.New(prov, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
-		return startServer(t, New(testConfig(), discardLogger(t), prov, fwd, newTestWSProxy(prov), NewStreamOutcomeCounter()))
+		return startServer(t, New(testConfig(), discardLogger(t), prov, newTestImpersonationObserver(), fwd, newTestWSProxy(prov), NewStreamOutcomeCounter()))
 	}
 
 	request := func(t *testing.T, base string) *http.Response {
@@ -1546,7 +1587,7 @@ func TestOpenAIStreamingEndToEnd(t *testing.T) {
 		}, true)
 		fwd := forward.New(prov, forward.NewClient(time.Second), time.Second, time.Second, 2*time.Second, keepalive, 1<<20, 1<<20, nil)
 		outcomes := NewStreamOutcomeCounter()
-		return startServer(t, New(testConfig(), discardLogger(t), prov, fwd, newTestWSProxy(prov), outcomes)), outcomes
+		return startServer(t, New(testConfig(), discardLogger(t), prov, newTestImpersonationObserver(), fwd, newTestWSProxy(prov), outcomes)), outcomes
 	}
 
 	request := func(t *testing.T, base string) *http.Response {
@@ -1702,7 +1743,7 @@ func TestStreamingClientHangupCancelsCopilotEndToEnd(t *testing.T) {
 	}, true)
 	fwd := forward.New(prov, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 	outcomes := NewStreamOutcomeCounter()
-	base := startServer(t, New(testConfig(), discardLogger(t), prov, fwd, newTestWSProxy(prov), outcomes))
+	base := startServer(t, New(testConfig(), discardLogger(t), prov, newTestImpersonationObserver(), fwd, newTestWSProxy(prov), outcomes))
 	req, err := http.NewRequest(http.MethodPost, base+"/anthropic/v1/messages", strings.NewReader(`{"stream":true}`))
 	if err != nil {
 		t.Fatalf("build stream request: %v", err)
