@@ -193,7 +193,7 @@ Two discovery functions, each bound into a version fact as its `discover`:
   version strings newest-first; take element `[0]`.
 - **Copilot Chat** — `POST {MarketplaceBaseURL}/_apis/public/gallery/extensionquery`
   with header `Accept: application/json;api-version=7.2-preview.1` and a body
-  filtering `filterType 7` = `GitHub.copilot-chat`, with `flags = 0x101`
+  filtering `filterType 7` = `GitHub.copilot-chat`, with `flags = 0x11`
   (`IncludeVersions | IncludeVersionProperties` — the full version list *with*
   properties, deliberately **not** `IncludeLatestVersionOnly`, which would return
   only the newest version and could hand back a pre-release). Walk

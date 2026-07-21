@@ -77,8 +77,8 @@ func TestDiscoverCopilotChat(t *testing.T) {
 		if criterion.FilterType != 7 || criterion.Value != "GitHub.copilot-chat" {
 			t.Errorf("criterion = %#v, want filterType 7 for GitHub.copilot-chat", criterion)
 		}
-		if query.Flags != 0x101 {
-			t.Errorf("flags = %#x, want %#x", query.Flags, 0x101)
+		if query.Flags != 0x11 {
+			t.Errorf("flags = %#x, want %#x", query.Flags, 0x11)
 		}
 
 		_, _ = io.WriteString(w, `{

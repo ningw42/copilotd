@@ -15,13 +15,15 @@ import (
 const (
 	discoveryTimeout = 5 * time.Second
 
-	vscodeStableReleasesPath = "/api/releases/stable"
-	marketplaceQueryPath     = "/_apis/public/gallery/extensionquery"
-	marketplaceAccept        = "application/json;api-version=7.2-preview.1"
-	marketplaceExtensionID   = "GitHub.copilot-chat"
-	marketplaceFilterType    = 7
-	marketplaceQueryFlags    = 0x101
-	marketplacePrereleaseKey = "Microsoft.VisualStudio.Code.PreRelease"
+	vscodeStableReleasesPath            = "/api/releases/stable"
+	marketplaceQueryPath                = "/_apis/public/gallery/extensionquery"
+	marketplaceAccept                   = "application/json;api-version=7.2-preview.1"
+	marketplaceExtensionID              = "GitHub.copilot-chat"
+	marketplaceFilterType               = 7
+	marketplaceIncludeVersions          = 0x1
+	marketplaceIncludeVersionProperties = 0x10
+	marketplaceQueryFlags               = marketplaceIncludeVersions | marketplaceIncludeVersionProperties
+	marketplacePrereleaseKey            = "Microsoft.VisualStudio.Code.PreRelease"
 )
 
 // Edge is the public, unauthenticated HTTP edge used for version discovery.
