@@ -261,9 +261,12 @@ A cold `Prime` miss is not retried before the next 24h tick — the fallback (to
 working value) covers the gap, so the single fixed cadence needs no cold-start
 special case.
 
-**Disabling discovery.** When `ImpersonationRefreshInterval == 0`, the block above
-is skipped entirely — no `Prime`, no `Run`, no outbound calls — and both facts stay
-on their fallback for the process lifetime. This is the supported air-gapped /
+**Disabling discovery.** When `ImpersonationRefreshInterval == 0`, the discovery
+orchestration is skipped — no `Prime`, no `Run`, and no outbound **discovery** calls to
+the Microsoft endpoints — and both facts stay on their fallback for the process
+lifetime. `StartupMint` still runs (carrying fallback headers) and its GitHub
+**exchange** call is unaffected, so readiness behaves exactly as today. This is the
+supported air-gapped /
 locked-egress mode; combined with the two fallback flags it is also the one honest
 way to pin a version by hand (discovery is off, so there is nothing to override).
 
@@ -369,7 +372,7 @@ Test-first, matching the package layout:
 - **`impersonation.Set`** — assembler correctness across all four states (both
   discovered, VS-Code-only, Copilot-only, neither → exact fallback strings);
   `Observe()` exposes only the non-secret shape.
-- **lifecycle** — `interval == 0` skips `Prime`/`Run` and makes no outbound call
+- **lifecycle** — `interval == 0` skips `Prime`/`Run` and makes no outbound discovery call
   (wired against a discovery edge that fails the test if hit); a cold `Prime` miss
   leaves the fact on its fallback and does not retry before the next tick.
 - **`identity.Manager`** — interface-based impersonation; `exchange` and
