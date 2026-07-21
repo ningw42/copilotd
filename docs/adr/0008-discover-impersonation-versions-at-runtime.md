@@ -38,7 +38,7 @@ the prior stance — recorded in `config.go` §6.7 — that these were operator-
   between mints. A separate 24h loop is decoupled and far cheaper.
 - **Discovery gates `/readyz`**: rejected — coupling uptime to a cosmetic version
   string when the fallback already works would make copilotd refuse traffic it could
-  serve. Readiness stays "last mint outcome"; discovery is best-effort and only
+  serve. Readiness reports local serving prerequisites; discovery is best-effort and only
   *observed* on `/readyz`.
 - **Persist the cache to a file**: rejected — durable state at rest violates
   ROADMAP §2 and the Copilot token's in-memory model. The cache is memory-only.
@@ -66,10 +66,10 @@ the prior stance — recorded in `config.go` §6.7 — that these were operator-
   (≤5s) so the first exchange already presents current versions — but it is a wait,
   not a gate: a slow or failed discovery leaves the fact on its fallback and the
   mint proceeds, so discovery outcome never gates readiness. The listener is bound
-  first, so `/healthz` and a degraded `/readyz` serve throughout.
+  first, so `/healthz` and the locally-ready `/readyz` serve throughout.
 - `/readyz` gains a non-secret `impersonation` block (effective headers + per-fact
-  source and last-success), present in both ready and degraded responses; its
-  `status` field is unchanged.
+  source and last-success), without making discovery or mint outcomes admission
+  gates; its `status` field remains the local-prerequisite signal.
 - The flag surface changes: `--editor-version`, `--editor-plugin-version`, and
   `--copilot-user-agent` are removed in favor of the bare-version fallbacks
   `--vscode-version` and `--plugin-version`; `--impersonation-refresh-interval`

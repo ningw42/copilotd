@@ -4,7 +4,7 @@
 // table, so no other package hand-rolls an error body. Upstream (Copilot) error
 // responses are passed through verbatim by the forwarder and never routed
 // through here; apierror covers only the errors copilotd itself originates: auth
-// (401), readiness (503), the unsupported
+// (401), unavailable credentials/readiness (503), the unsupported
 // background-mode and shim rejects (400), body bounding (413), unexpected shim
 // failures (500), copilotd-originated 502/504, and native terminal SSE errors
 // after a streaming response is committed.
@@ -53,7 +53,7 @@ type Kind int
 
 const (
 	Unauthorized          Kind = iota // 401 — missing or invalid API key
-	NotReady                          // 503 — identity has no working credential yet
+	NotReady                          // 503 — identity cannot supply a credential or local prerequisites are absent
 	BackgroundUnsupported             // 400 — background:true (OpenAI surface only)
 	NotAWebSocketUpgrade              // 426 — OpenAI Responses Route called without a WebSocket upgrade
 	PayloadTooLarge                   // 413 — inbound body over the cap

@@ -23,11 +23,11 @@ const (
 // outermost so its context is visible to the inner two; recover is innermost so
 // the 500 it produces is what the access log records.
 //
-// Surface endpoints carry two additional inner wrappers — auth then readiness —
-// applied per route, because Go's ServeMux has no subtree middleware. The full
-// order on a Surface endpoint is therefore requestID -> accessLog -> recover ->
-// auth -> readiness -> forward. /healthz and /readyz are never gated by auth or
-// readiness.
+// Surface endpoints carry two additional inner wrappers — auth then local
+// readiness — applied per route, because Go's ServeMux has no subtree
+// middleware. The full order on a Surface endpoint is therefore requestID ->
+// accessLog -> recover -> auth -> local readiness -> forward. /healthz and
+// /readyz are never gated by auth or readiness.
 func newHandler(apikey string, provider identity.Provider, observer ImpersonationObserver, fwd *forward.Forwarder, logger *slog.Logger, streamOutcomes StreamOutcomeObserver, codexConfig config.CodexConfig, wsProxy *wsforward.Proxy) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET "+healthPath, handleHealth)
@@ -41,7 +41,7 @@ func newHandler(apikey string, provider identity.Provider, observer Impersonatio
 	}
 
 	// guard applies the Surface-endpoint-specific inner wrappers in order: auth
-	// (outer) then readiness (inner), so auth runs first.
+	// (outer) then local readiness (inner), so auth runs first.
 	guard := func(surface endpoint.Surface, h http.Handler) http.Handler {
 		return authMW(apikey, surface, readinessMW(provider, surface, h))
 	}

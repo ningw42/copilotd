@@ -261,8 +261,8 @@ func rejectSurplusOperands(command string, args []string, allowed int) error {
 // runServe is the serve lifecycle: resolve config, build the logger and set it as
 // the slog default, resolve the GitHub OAuth token and construct the real minting
 // Manager (failing fast, before any bind, when no token source is present), bind
-// the listener, then run bounded discovery followed by the readiness-warming
-// startup mint in the background while serving. A signal-aware context whose
+// the listener, then run bounded discovery followed by the cache-warming startup
+// mint in the background while serving. A signal-aware context whose
 // re-armed handler lets a second signal hard-kill a wedged shutdown owns every
 // background task. Errors after the logger is up are reported through it and
 // returned as errServeFailed so the caller does not double-report them; a
@@ -328,8 +328,9 @@ func runServe(ctx context.Context, flags *config.ServeFlags, lookupEnv func(stri
 
 // runBoundServe starts the background impersonation/mint lifecycle only after
 // its caller has supplied an already-bound listener. That ordering keeps
-// /healthz and degraded /readyz available while bounded startup discovery is in
-// progress. Discovery never gates readiness; only the startup mint changes it.
+// /healthz and the locally-ready /readyz available while bounded startup
+// discovery is in progress. Neither discovery nor startup mint outcomes gate
+// readiness or request admission.
 func runBoundServe(ctx context.Context, cfg config.ServeConfig, logger *slog.Logger, mgr *identity.Manager, imp *impersonation.Set, ln net.Listener) error {
 	go runServeStartup(ctx, cfg.ImpersonationRefreshInterval, imp, mgr, logger)
 

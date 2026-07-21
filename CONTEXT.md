@@ -44,7 +44,8 @@ To produce a Copilot token via a successful exchange.
 
 **Startup mint**:
 The single mint at boot — asynchronous, retried a bounded number of times on
-transient failure — that warms readiness and surfaces a bad credential early.
+transient failure — that warms the Copilot token cache and surfaces a bad
+credential early. Its outcome never gates readiness or later requests.
 
 **On-demand mint**:
 Minting a Copilot token inside a request's path when the cached one is missing or
@@ -198,11 +199,15 @@ _Avoid_: fake terminal, injected error (unqualified)
 ### Runtime state
 
 **Ready / Not-ready**:
-copilotd is *ready* when its last mint attempt succeeded — it stays ready across
-idle token expiry (the next request re-mints) and flips *not-ready* only when a
-mint fails. Surfaced at `/readyz`; when not-ready, Surface endpoints return `503`.
+copilotd is *ready* when the local prerequisites required to attempt traffic are
+resolved, chiefly valid configuration and a present GitHub OAuth token. Copilot
+token mint outcomes and cached-token expiry do not change readiness. The real
+serve lifecycle fails before binding when a local prerequisite is missing, so a
+bound production server normally remains ready. Surfaced at `/readyz`.
 _Avoid_: healthy (that is liveness, `/healthz`)
 
-**Degraded**:
-Running but not-ready — serving `/healthz` and refusing Surface endpoints with
-`503` — because no mint has yet succeeded (or the last one failed).
+**Request-scoped mint failure**:
+A Copilot token exchange failure affects only the request whose on-demand mint
+failed. That request receives a Surface-shaped `503`; a later authenticated
+request performs a new on-demand mint and may recover without a restart.
+_Avoid_: degraded, not-ready (those imply a service-wide admission state)

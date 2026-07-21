@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -135,6 +136,47 @@ func newGitHubExchangeStub(t *testing.T, copilotToken, apiURL string, gotAuth, g
 	return s
 }
 
+// newSequencedGitHubExchangeStub returns the supplied statuses in order, then
+// succeeds on every later exchange. The call count lets assembled-server tests
+// prove which inbound requests reached credential acquisition.
+func newSequencedGitHubExchangeStub(t *testing.T, apiURL string, statuses ...int) (*httptest.Server, *atomic.Int64) {
+	t.Helper()
+	var calls atomic.Int64
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempt := int(calls.Add(1))
+		status := http.StatusOK
+		if attempt <= len(statuses) {
+			status = statuses[attempt-1]
+		}
+		if status != http.StatusOK {
+			w.WriteHeader(status)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"token":      "copilot-recovery-token",
+			"expires_at": time.Now().Add(25 * time.Minute).Unix(),
+			"refresh_in": 1500,
+			"endpoints":  map[string]any{"api": apiURL},
+		})
+	}))
+	t.Cleanup(s.Close)
+	return s, &calls
+}
+
+func startManagerBackedE2EServer(t *testing.T, cfg config.ServeConfig, logger *slog.Logger, github *httptest.Server, runStartupMint bool) string {
+	t.Helper()
+	mgr, imp, err := buildServeProvider(cfg, logger, github.URL, github.Client(), productionDiscoveryEdge())
+	if err != nil {
+		t.Fatalf("buildServeProvider: %v", err)
+	}
+	if runStartupMint {
+		mgr.StartupMint(context.Background())
+	}
+	fwd := forward.New(mgr, forward.NewClient(cfg.ResponseHeaderTimeout), cfg.OutboundTimeout, cfg.WriteTimeout, cfg.StreamIdleTimeout, cfg.StreamKeepaliveInterval, cfg.MaxRequestBytes, cfg.MaxBufferedResponseBytes, nil, forward.WithLogger(logger))
+	return startTestServer(t, server.New(cfg, logger, mgr, imp, fwd, newTestWSProxy(mgr), server.NewStreamOutcomeCounter()))
+}
+
 // TestServeFirstRealCallEndToEnd is Phase 1.5's outcome: the REAL identity.Manager
 // does a REAL token exchange against a stubbed GitHub, then the REAL forward path
 // round-trips a non-streaming JSON request END TO END on BOTH surfaces against a
@@ -157,12 +199,9 @@ func TestServeFirstRealCallEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildServeProvider: %v", err)
 	}
-	// Mint synchronously so readiness is warm before the first request (production
-	// does this in a goroutine; here we want determinism).
+	// Mint synchronously so the credential cache is warm before the first request
+	// (production does this in a goroutine; here we want determinism).
 	mgr.StartupMint(context.Background())
-	if !mgr.Ready() {
-		t.Fatalf("manager not ready after a successful startup mint")
-	}
 
 	fwd := forward.New(mgr, forward.NewClient(cfg.ResponseHeaderTimeout), cfg.OutboundTimeout, cfg.WriteTimeout, cfg.StreamIdleTimeout, cfg.StreamKeepaliveInterval, cfg.MaxRequestBytes, cfg.MaxBufferedResponseBytes, nil, forward.WithLogger(logger))
 	base := startTestServer(t, server.New(cfg, logger, mgr, imp, fwd, newTestWSProxy(mgr), server.NewStreamOutcomeCounter()))
@@ -319,60 +358,103 @@ func TestServeDiscoveredVersionsEndToEnd(t *testing.T) {
 	assertReadyzImpersonation(t, base, discoveredVSCode, discoveredPlugin, "discovered")
 }
 
-// TestServeDegradedWindow proves the readiness gate: before the first mint and
-// after a mint failure, Surface endpoints return 503 and /readyz is not-ready.
-func TestServeDegradedWindow(t *testing.T) {
-	t.Run("pre-first-mint window: 503 + not-ready", func(t *testing.T) {
+// TestServeRequestDrivenMintRecoveryEndToEnd proves that readiness and request
+// admission depend only on the local prerequisites already resolved before the
+// server binds. Every authenticated request can therefore reach the real
+// identity manager, including before startup warm-up and after either class of
+// exchange failure.
+func TestServeRequestDrivenMintRecoveryEndToEnd(t *testing.T) {
+	t.Run("request before startup warm-up mints and forwards", func(t *testing.T) {
 		copilot := newCopilotStub(t, `{"ok":true}`)
-		var a, u string
-		github := newGitHubExchangeStub(t, "copilot-token", copilot.server.URL, &a, &u)
+		github, exchanges := newSequencedGitHubExchangeStub(t, copilot.server.URL)
 
 		cfg := e2eConfig("gho-secret")
 		logger := discardLogger(t)
-		mgr, imp, err := buildServeProvider(cfg, logger, github.URL, github.Client(), productionDiscoveryEdge())
-		if err != nil {
-			t.Fatalf("buildServeProvider: %v", err)
-		}
-		// Deliberately do NOT run StartupMint: the daemon is in its pre-first-mint
-		// window, so Ready() is false.
-		if mgr.Ready() {
-			t.Fatalf("Ready() = true before any mint, want false")
-		}
-		fwd := forward.New(mgr, forward.NewClient(cfg.ResponseHeaderTimeout), cfg.OutboundTimeout, cfg.WriteTimeout, cfg.StreamIdleTimeout, cfg.StreamKeepaliveInterval, cfg.MaxRequestBytes, cfg.MaxBufferedResponseBytes, nil, forward.WithLogger(logger))
-		base := startTestServer(t, server.New(cfg, logger, mgr, imp, fwd, newTestWSProxy(mgr), server.NewStreamOutcomeCounter()))
+		// Deliberately do not run StartupMint. The first authenticated request is
+		// allowed to perform the on-demand mint itself.
+		base := startManagerBackedE2EServer(t, cfg, logger, github, false)
 
-		assertNotReady(t, base)
-
-		// The readiness gate short-circuits before the forwarder, so no exchange
-		// fires and no request reaches Copilot.
-		if copilot.path != "" {
-			t.Errorf("Copilot was reached %q while degraded; readiness gate leaked", copilot.path)
+		assertReadyzImpersonation(t, base, cfg.VSCodeVersionFallback, cfg.PluginVersionFallback, "fallback")
+		resp, _ := post(t, base+"/anthropic/v1/messages", `{"model":"x"}`)
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("Surface endpoint status = %d, want 200", resp.StatusCode)
+		}
+		if got := exchanges.Load(); got != 1 {
+			t.Errorf("exchange calls = %d, want 1 on-demand mint", got)
 		}
 	})
 
-	t.Run("after a mint failure: 503 + not-ready", func(t *testing.T) {
-		// GitHub returns 401 (auth-class): the startup mint short-circuits and the
-		// daemon stays degraded.
-		github := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusUnauthorized)
-		}))
-		t.Cleanup(github.Close)
-
+	t.Run("failed startup warm-up does not block a request mint", func(t *testing.T) {
+		copilot := newCopilotStub(t, `{"ok":true}`)
+		github, exchanges := newSequencedGitHubExchangeStub(t, copilot.server.URL, http.StatusUnauthorized, http.StatusOK)
 		cfg := e2eConfig("gho-secret")
 		logger := discardLogger(t)
-		mgr, imp, err := buildServeProvider(cfg, logger, github.URL, github.Client(), productionDiscoveryEdge())
-		if err != nil {
-			t.Fatalf("buildServeProvider: %v", err)
-		}
-		mgr.StartupMint(context.Background()) // fails, short-circuits on auth-class
-		if mgr.Ready() {
-			t.Fatalf("Ready() = true after a failed startup mint, want false")
-		}
-		fwd := forward.New(mgr, forward.NewClient(cfg.ResponseHeaderTimeout), cfg.OutboundTimeout, cfg.WriteTimeout, cfg.StreamIdleTimeout, cfg.StreamKeepaliveInterval, cfg.MaxRequestBytes, cfg.MaxBufferedResponseBytes, nil, forward.WithLogger(logger))
-		base := startTestServer(t, server.New(cfg, logger, mgr, imp, fwd, newTestWSProxy(mgr), server.NewStreamOutcomeCounter()))
+		base := startManagerBackedE2EServer(t, cfg, logger, github, true)
 
-		assertNotReady(t, base)
+		assertReadyzImpersonation(t, base, cfg.VSCodeVersionFallback, cfg.PluginVersionFallback, "fallback")
+		resp, _ := post(t, base+"/anthropic/v1/messages", `{"model":"x"}`)
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("Surface endpoint status = %d, want 200 after startup failure", resp.StatusCode)
+		}
+		if got := exchanges.Load(); got != 2 {
+			t.Errorf("exchange calls = %d, want failed startup + successful on-demand", got)
+		}
 	})
+
+	for _, firstFailure := range []struct {
+		name   string
+		status int
+	}{
+		{name: "transient", status: http.StatusInternalServerError},
+		{name: "auth-class", status: http.StatusUnauthorized},
+	} {
+		t.Run(firstFailure.name+" on-demand failure is request-scoped", func(t *testing.T) {
+			copilot := newCopilotStub(t, `{"ok":true}`)
+			github, exchanges := newSequencedGitHubExchangeStub(t, copilot.server.URL, firstFailure.status, http.StatusOK)
+			cfg := e2eConfig("gho-secret")
+			logger := discardLogger(t)
+			base := startManagerBackedE2EServer(t, cfg, logger, github, false)
+
+			unauthenticated, err := http.Post(base+"/anthropic/v1/messages", "application/json", strings.NewReader(`{"model":"x"}`)) //nolint:noctx // local test server
+			if err != nil {
+				t.Fatalf("unauthenticated request: %v", err)
+			}
+			_ = unauthenticated.Body.Close()
+			if unauthenticated.StatusCode != http.StatusUnauthorized {
+				t.Errorf("unauthenticated status = %d, want 401", unauthenticated.StatusCode)
+			}
+			if got := exchanges.Load(); got != 0 {
+				t.Fatalf("unauthenticated request caused %d exchanges, want 0", got)
+			}
+
+			failed, failedBody := post(t, base+"/anthropic/v1/messages", `{"model":"x"}`)
+			_ = failed.Body.Close()
+			if failed.StatusCode != http.StatusServiceUnavailable {
+				t.Fatalf("failed-mint request status = %d, want 503", failed.StatusCode)
+			}
+			if want := `{"type":"error","error":{"type":"api_error","message":"no upstream credential available"}}`; failedBody != want {
+				t.Errorf("failed-mint response = %q, want %q", failedBody, want)
+			}
+			if copilot.path != "" {
+				t.Errorf("failed-mint request reached Copilot path %q", copilot.path)
+			}
+			if got := exchanges.Load(); got != 1 {
+				t.Fatalf("exchange calls after failed request = %d, want 1", got)
+			}
+			assertReadyzImpersonation(t, base, cfg.VSCodeVersionFallback, cfg.PluginVersionFallback, "fallback")
+
+			recovered, _ := post(t, base+"/anthropic/v1/messages", `{"model":"x"}`)
+			_ = recovered.Body.Close()
+			if recovered.StatusCode != http.StatusOK {
+				t.Fatalf("recovery request status = %d, want 200", recovered.StatusCode)
+			}
+			if got := exchanges.Load(); got != 2 {
+				t.Errorf("exchange calls after recovery = %d, want 2", got)
+			}
+		})
+	}
 }
 
 // TestRunServeFailsFastWithoutOAuthToken drives the CLI: with a valid config but
@@ -419,28 +501,4 @@ func post(t *testing.T, url, body string) (*http.Response, string) {
 	}
 	b, _ := io.ReadAll(resp.Body)
 	return resp, string(b)
-}
-
-// assertNotReady checks /readyz reports not-ready (503) and an authenticated
-// provider request is refused with 503.
-func assertNotReady(t *testing.T, base string) {
-	t.Helper()
-	resp, err := http.Get(base + "/readyz") //nolint:noctx // test poll
-	if err != nil {
-		t.Fatalf("/readyz: %v", err)
-	}
-	rb, _ := io.ReadAll(resp.Body)
-	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusServiceUnavailable {
-		t.Errorf("/readyz status = %d, want 503", resp.StatusCode)
-	}
-	if !strings.Contains(string(rb), "not ready") {
-		t.Errorf("/readyz body = %q, want not-ready", rb)
-	}
-
-	pr, _ := post(t, base+"/anthropic/v1/messages", `{"model":"x"}`)
-	_ = pr.Body.Close()
-	if pr.StatusCode != http.StatusServiceUnavailable {
-		t.Errorf("Surface endpoint status = %d, want 503 while degraded", pr.StatusCode)
-	}
 }

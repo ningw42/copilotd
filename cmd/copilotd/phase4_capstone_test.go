@@ -129,9 +129,6 @@ func TestPhase4ModelsOutcomeEndToEnd(t *testing.T) {
 		t.Fatalf("build Phase 4 provider: %v", err)
 	}
 	provider.StartupMint(context.Background())
-	if !provider.Ready() {
-		t.Fatal("provider is not ready after the stub startup mint")
-	}
 	base := startPhase4Server(t, cfg, provider, logger)
 
 	for _, public := range []struct {

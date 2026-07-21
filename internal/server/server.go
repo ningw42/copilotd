@@ -53,7 +53,7 @@ type websocketDrainer interface {
 }
 
 // New builds the server from cfg and logger. The identity Provider supplies the
-// outbound Copilot credential (and readiness), observer supplies the non-secret
+// outbound Copilot credential and local readiness, observer supplies the non-secret
 // impersonation snapshot, fwd drives the Surface endpoints, and streamOutcomes
 // receives the bounded stream terminal-outcome metric. The listener is supplied
 // later to Run, so main owns bind and the server owns serve/shutdown.

@@ -114,6 +114,10 @@ func bufLogger() (*slog.Logger, *bytes.Buffer) {
 // zeroBackoff makes startup-mint retries instant and deterministic.
 func zeroBackoff(int) time.Duration { return 0 }
 
+type managerRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f managerRoundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
 // --- AC #1: exchange builds a credential; request carries auth + headers -----
 
 func TestManagerCurrentMintsCredential(t *testing.T) {
@@ -293,8 +297,8 @@ func TestManagerRejectsInvalidExchangeOriginsBeforePublishingCredential(t *testi
 			if cred.BaseURL != "" || cred.Token != "" || cred.Headers != nil {
 				t.Errorf("Current() credential = %+v, want no published credential", cred)
 			}
-			if m.Ready() {
-				t.Error("Ready() = true after an invalid exchange origin, want false")
+			if !m.Ready() {
+				t.Error("Ready() = false after an invalid exchange origin despite resolved local prerequisites")
 			}
 		})
 	}
@@ -488,6 +492,64 @@ func TestManagerCacheReuseAndSingleAttempt(t *testing.T) {
 	}
 }
 
+func TestManagerExchangeIsOneWireAttempt(t *testing.T) {
+	t.Run("request is not replayable", func(t *testing.T) {
+		var calls atomic.Int32
+		client := &http.Client{Transport: managerRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+			calls.Add(1)
+			if r.Body == nil {
+				t.Error("exchange request Body is nil, so Transport may replay it")
+			}
+			if r.GetBody != nil {
+				t.Error("exchange request GetBody is non-nil, so Transport may replay it")
+			}
+			return &http.Response{
+				StatusCode: http.StatusInternalServerError,
+				Header:     make(http.Header),
+				Body:       http.NoBody,
+				Request:    r,
+			}, nil
+		})}
+		m := NewManager(ManagerConfig{
+			OAuthToken: "gho",
+			HTTPClient: client,
+			Logger:     slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+		})
+
+		if _, err := m.Current(context.Background()); err == nil {
+			t.Fatal("Current() error = nil, want the stubbed 500")
+		}
+		if got := calls.Load(); got != 1 {
+			t.Errorf("RoundTrip calls = %d, want 1", got)
+		}
+	})
+
+	t.Run("redirect response is not followed", func(t *testing.T) {
+		s := newStub(t)
+		s.handler = func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == exchangePath {
+				w.Header().Set("Location", s.server.URL+"/redirected")
+				w.WriteHeader(http.StatusTemporaryRedirect)
+				return
+			}
+			writeToken(w, "redirected-token", time.Now().Add(25*time.Minute), 1500, "https://api.githubcopilot.com")
+		}
+		m := NewManager(ManagerConfig{
+			OAuthToken:    "gho",
+			GitHubBaseURL: s.server.URL,
+			HTTPClient:    s.server.Client(),
+			Logger:        slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+		})
+
+		if _, err := m.Current(context.Background()); err == nil {
+			t.Fatal("Current() error = nil after redirect, want one failed exchange")
+		}
+		if got := s.hits.Load(); got != 1 {
+			t.Errorf("exchange wire requests = %d, want 1", got)
+		}
+	})
+}
+
 // --- AC #4a: startup mint retries transient, short-circuits auth-class -------
 
 func TestStartupMintRetryAndShortCircuit(t *testing.T) {
@@ -509,8 +571,8 @@ func TestStartupMintRetryAndShortCircuit(t *testing.T) {
 		if got := s.hits.Load(); got != 4 {
 			t.Errorf("exchange hits = %d, want 4 (1 + 3 retries)", got)
 		}
-		if m.Ready() {
-			t.Errorf("Ready() = true after exhausted startup mint, want false")
+		if !m.Ready() {
+			t.Errorf("Ready() = false after exhausted startup mint, want local readiness to remain true")
 		}
 	})
 
@@ -532,8 +594,8 @@ func TestStartupMintRetryAndShortCircuit(t *testing.T) {
 		if got := s.hits.Load(); got != 1 {
 			t.Errorf("exchange hits = %d, want 1 (auth-class short-circuit)", got)
 		}
-		if m.Ready() {
-			t.Errorf("Ready() = true after auth-class failure, want false")
+		if !m.Ready() {
+			t.Errorf("Ready() = false after auth-class failure, want local readiness to remain true")
 		}
 	})
 
@@ -542,6 +604,7 @@ func TestStartupMintRetryAndShortCircuit(t *testing.T) {
 		s.handler = func(w http.ResponseWriter, r *http.Request) {
 			writeToken(w, "copilot-token", time.Now().Add(25*time.Minute), 1500, "https://api.githubcopilot.com")
 		}
+		var logs bytes.Buffer
 		m := NewManager(ManagerConfig{
 			OAuthToken:         "gho",
 			GitHubBaseURL:      s.server.URL,
@@ -549,7 +612,7 @@ func TestStartupMintRetryAndShortCircuit(t *testing.T) {
 			Impersonation:      testImpersonation(),
 			StartupMintRetries: 3,
 			Backoff:            zeroBackoff,
-			Logger:             slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+			Logger:             slog.New(slog.NewTextHandler(&logs, nil)),
 		})
 		m.StartupMint(context.Background())
 		if got := s.hits.Load(); got != 1 {
@@ -558,12 +621,20 @@ func TestStartupMintRetryAndShortCircuit(t *testing.T) {
 		if !m.Ready() {
 			t.Errorf("Ready() = false after successful startup mint, want true")
 		}
+		if !bytes.Contains(logs.Bytes(), []byte("trigger=startup")) {
+			t.Errorf("startup mint log does not identify the trigger: %s", logs.String())
+		}
 	})
 }
 
-// --- AC #4b: Ready() tracks the last mint OUTCOME, not token expiry ----------
+// --- AC #4b: Ready() tracks local prerequisites, not mint outcomes -----------
 
-func TestReadyTracksLastMintOutcome(t *testing.T) {
+func TestReadyTracksLocalPrerequisitesNotMintOutcome(t *testing.T) {
+	missing := NewManager(ManagerConfig{})
+	if missing.Ready() {
+		t.Fatal("Ready() = true without a resolved GitHub OAuth token, want false")
+	}
+
 	base := time.Unix(1_700_000_000, 0)
 	clk := &fakeClock{t: base}
 	s := newStub(t)
@@ -586,8 +657,8 @@ func TestReadyTracksLastMintOutcome(t *testing.T) {
 	})
 	ctx := context.Background()
 
-	if m.Ready() {
-		t.Fatalf("Ready() = true before any mint, want false")
+	if !m.Ready() {
+		t.Fatalf("Ready() = false before any mint despite resolved local prerequisites")
 	}
 
 	if _, err := m.Current(ctx); err != nil {
@@ -603,16 +674,17 @@ func TestReadyTracksLastMintOutcome(t *testing.T) {
 		t.Fatalf("Ready() = false across idle token expiry, want it to stay true")
 	}
 
-	// A failing on-demand mint flips readiness to false.
+	// A failing on-demand mint is request-scoped and does not change readiness.
 	failMode.Store(true)
 	if _, err := m.Current(ctx); err == nil {
 		t.Fatalf("expected failing mint error, got nil")
 	}
-	if m.Ready() {
-		t.Fatalf("Ready() = true after a failed mint, want false")
+	if !m.Ready() {
+		t.Fatalf("Ready() = false after a failed mint, want local readiness to remain true")
 	}
 
-	// The next successful mint flips it back to true.
+	// The next successful mint recovers the request path without changing the
+	// already-true readiness signal.
 	failMode.Store(false)
 	if _, err := m.Current(ctx); err != nil {
 		t.Fatalf("recovery mint error = %v", err)
@@ -650,6 +722,9 @@ func TestExchangeClassificationAndSecretRedaction(t *testing.T) {
 		if !bytes.Contains(buf.Bytes(), []byte("minted copilot token")) {
 			t.Errorf("expected a mint-success log line, got: %s", out)
 		}
+		if !bytes.Contains(buf.Bytes(), []byte("trigger=on-demand")) {
+			t.Errorf("mint-success log does not identify the trigger: %s", out)
+		}
 		assertNoSecret(t, out, oauth, copilot)
 	})
 
@@ -657,6 +732,7 @@ func TestExchangeClassificationAndSecretRedaction(t *testing.T) {
 		s := newStub(t)
 		s.handler = func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusBadGateway) // 502: transient
+			_, _ = w.Write([]byte(oauth + " " + copilot))
 		}
 		logger, buf := bufLogger()
 		m := NewManager(ManagerConfig{
@@ -680,7 +756,7 @@ func TestExchangeClassificationAndSecretRedaction(t *testing.T) {
 		s := newStub(t)
 		s.handler = func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusForbidden) // 403: auth-class
-			_, _ = w.Write([]byte(`{"message":"forbidden"}`))
+			_, _ = w.Write([]byte(oauth + " " + copilot))
 		}
 		logger, buf := bufLogger()
 		m := NewManager(ManagerConfig{
@@ -696,6 +772,30 @@ func TestExchangeClassificationAndSecretRedaction(t *testing.T) {
 		out := buf.String()
 		if !bytes.Contains(buf.Bytes(), []byte("check the Copilot subscription")) {
 			t.Errorf("expected the distinct auth-class log line, got: %s", out)
+		}
+		assertNoSecret(t, out, oauth, copilot)
+	})
+
+	t.Run("non-auth permanent failure logged distinctly", func(t *testing.T) {
+		s := newStub(t)
+		s.handler = func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(oauth + " " + copilot))
+		}
+		logger, buf := bufLogger()
+		m := NewManager(ManagerConfig{
+			OAuthToken:    oauth,
+			GitHubBaseURL: s.server.URL,
+			HTTPClient:    s.server.Client(),
+			Impersonation: testImpersonation(),
+			Logger:        logger,
+		})
+		if _, err := m.Current(context.Background()); err == nil {
+			t.Fatal("expected error, got nil")
+		}
+		out := buf.String()
+		if !bytes.Contains(buf.Bytes(), []byte("permanent")) || bytes.Contains(buf.Bytes(), []byte("transient")) {
+			t.Errorf("expected a permanent-failure log line, got: %s", out)
 		}
 		assertNoSecret(t, out, oauth, copilot)
 	})

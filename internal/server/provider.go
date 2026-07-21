@@ -52,11 +52,11 @@ type readyDiscoveryFact struct {
 	LastSuccess *time.Time `json:"last_success"`
 }
 
-// handleReady reports readiness — identity's last mint outcome, distinct from
-// /healthz liveness: 200 when ready, else 503. Its unauthenticated body includes
-// only the allowlisted effective impersonation headers and per-fact discovery
-// source/last-success. The GET pattern also serves HEAD, for which no body is
-// written.
+// handleReady reports whether identity has the local prerequisites needed to
+// attempt service, distinct from /healthz liveness and independent of Copilot
+// token mint outcomes. Its unauthenticated body includes only the allowlisted
+// effective impersonation headers and per-fact discovery source/last-success.
+// The GET pattern also serves HEAD, for which no body is written.
 func handleReady(provider identity.Provider, observer ImpersonationObserver) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -133,9 +133,9 @@ func presentedKey(r *http.Request) string {
 	return strings.TrimSpace(r.Header.Get("X-Api-Key"))
 }
 
-// readinessMW gates a Surface endpoint on identity readiness, applied after auth.
-// When not ready it returns a provider-shaped 503; the next request can
-// transparently re-mint once identity recovers.
+// readinessMW gates a Surface endpoint on local identity prerequisites, applied
+// after auth. Remote mint outcomes never change this signal, so authenticated
+// requests continue to credential acquisition after an exchange failure.
 func readinessMW(provider identity.Provider, surface endpoint.Surface, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !provider.Ready() {

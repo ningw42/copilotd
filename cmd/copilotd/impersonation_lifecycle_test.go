@@ -36,7 +36,7 @@ func TestProductionDiscoveryEdgeUsesMicrosoftOriginsAndPlainDedicatedClient(t *t
 	}
 }
 
-func TestRunBoundServeServesHealthAndDegradedReadinessWhilePrimeWaits(t *testing.T) {
+func TestRunBoundServeIsReadyWhilePrimeWaits(t *testing.T) {
 	started := make(chan string, 2)
 	cancelled := make(chan string, 2)
 	// Never let a failed cancellation assertion strand the blocking stub.
@@ -90,7 +90,7 @@ func TestRunBoundServeServesHealthAndDegradedReadinessWhilePrimeWaits(t *testing
 
 	base := "http://" + ln.Addr().String()
 	assertHTTPStatusEventually(t, base+"/healthz", http.StatusOK)
-	assertHTTPStatusEventually(t, base+"/readyz", http.StatusServiceUnavailable)
+	assertHTTPStatusEventually(t, base+"/readyz", http.StatusOK)
 
 	cancel()
 	cancelledPaths := make(map[string]bool, 2)
@@ -195,9 +195,6 @@ func TestServeLifecycleCarriesFallbackAndDiscoveredVersionsOnWire(t *testing.T) 
 			ctx, cancel := context.WithCancel(context.Background())
 			t.Cleanup(cancel)
 			runServeStartup(ctx, tc.interval, imp, mgr, logger)
-			if !mgr.Ready() {
-				t.Fatal("manager not ready after successful startup exchange")
-			}
 
 			var exchange http.Header
 			select {

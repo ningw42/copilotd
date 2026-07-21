@@ -553,8 +553,9 @@ the embedded snapshot.
 - `?client_version` + enabled + reviewer set → `{"models":[…]}`; `?client_version`
   + enabled but nothing to inject → OpenAI list; absent `client_version` → OpenAI
   list; `client_version` + disabled → OpenAI list.
-- Both API-key forms authorize; invalid auth → 401 before readiness; not-ready →
-  OpenAI-shaped 503; upstream non-2xx / malformed → OpenAI-shaped 502.
+- Both API-key forms authorize; invalid auth → 401 before local readiness; a
+  static identity lacking local prerequisites → OpenAI-shaped 503; upstream
+  non-2xx / malformed → OpenAI-shaped 502.
 - `HEAD` returns headers (incl. `Content-Length`) with no body over a real
   listener; two calls → two upstream fetches; single-correlation-ID invariant
   holds.

@@ -198,8 +198,9 @@ For either registered route:
 2. Access logging and panic recovery wrap the request as they do every route.
 3. API-key auth accepts either `Authorization: Bearer` or `X-Api-Key` and rejects
    an invalid caller before exposing readiness.
-4. The readiness gate rejects the authenticated request if the last mint failed
-   or no mint has yet succeeded.
+4. The local-readiness gate rejects the authenticated request only if local
+   prerequisites are absent. The real serve lifecycle fails before binding in
+   that state; remote mint outcomes never change the gate.
 5. The passthrough handler asks `identity.Provider.Current` for the current
    Copilot credential. The provider may perform its normal on-demand mint.
 6. The handler builds one outbound request using the registered GET or HEAD
@@ -292,7 +293,7 @@ Only registered-endpoint failures for which no upstream response exists use the
 | Failure | Status | Existing kind / message |
 | --- | ---: | --- |
 | Missing or invalid API key | 401 | `Unauthorized` / `missing or invalid API key` |
-| Readiness gate rejects | 503 | `NotReady` / `service not ready` |
+| Local-readiness gate rejects | 503 | `NotReady` / `service not ready` |
 | `Provider.Current` cannot supply a credential | 503 | `NotReady` / `no upstream credential available` |
 | Outbound request construction fails | 502 | `BadGateway` / `could not build the upstream request` |
 | Copilot cannot be reached before headers | 502 | `BadGateway` / `could not reach the upstream` |
@@ -376,8 +377,8 @@ account or network access.
 ### 9.2 Server boundary and real-listener tests
 
 - Both API-key forms authorize GET and HEAD.
-- Invalid auth returns 401 before a not-ready identity can return 503.
-- Authenticated GET calls against a not-ready identity return the
+- Invalid auth returns 401 before a locally not-ready identity can return 503.
+- Authenticated GET calls against a static identity lacking local prerequisites return the
   `GitHubCopilot` renderer's approved Anthropic-shaped 503. HEAD returns the same
   status and headers with no wire body, as required by HEAD semantics.
 - The explicit patterns are visible to access logging as `GET /models` and

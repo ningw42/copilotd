@@ -48,7 +48,7 @@ genuine provider is enumerated in §5.5 and recorded in ADR 0004.
   registration:
   - `GET/HEAD /anthropic/v1/models` → Anthropic `GET /v1/models` shape.
   - `GET/HEAD /openai/v1/models` → OpenAI `GET /v1/models` shape.
-- The existing API-key gate followed by the existing readiness gate (the same
+- The existing API-key gate followed by the existing local-readiness gate (the same
   `guard` order as every provider route).
 - One credentialed upstream `GET /models` fetch per request, buffered and decoded.
 - **Endpoint-based filtering**: list only models whose Copilot capabilities show
@@ -528,8 +528,8 @@ Copilot (the Phase 4 `/models` passthrough).
 ### 10.3 Server boundary and real-listener tests
 
 - Both API-key forms authorize all four routes; invalid auth → 401 before a
-  not-ready identity can return 503.
-- Not-ready identity → the route's Surface-shaped 503.
+  locally not-ready identity can return 503.
+- A static identity lacking local prerequisites → the route's Surface-shaped 503.
 - Upstream non-2xx and malformed-JSON both → the route's Surface-shaped 502; the
   Anthropic route emits the Anthropic error envelope and the OpenAI route the
   OpenAI envelope.

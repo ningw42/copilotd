@@ -241,7 +241,7 @@ first exchange already looks current — but it is a *wait, not a gate*: a slow 
 failed `Prime` leaves the fact on its fallback and the mint proceeds regardless.
 Discovery *outcome* never gates readiness; `Prime` only spends up to 5s of boot
 time trying. The HTTP listener is bound before this runs, so `/healthz` and a
-degraded `/readyz` serve throughout.
+locally-ready `/readyz` serve throughout.
 
 ```go
 go func() {
@@ -265,13 +265,13 @@ special case.
 orchestration is skipped — no `Prime`, no `Run`, and no outbound **discovery** calls to
 the Microsoft endpoints — and both facts stay on their fallback for the process
 lifetime. `StartupMint` still runs (carrying fallback headers) and its GitHub
-**exchange** call is unaffected, so readiness behaves exactly as today. This is the
+**exchange** call is unaffected, so request-driven minting behaves exactly as today. This is the
 supported air-gapped /
 locked-egress mode; combined with the two fallback flags it is also the one honest
 way to pin a version by hand (discovery is off, so there is nothing to override).
 
-Readiness is unchanged: `/readyz` reports the **last mint outcome** only. Discovery
-never gates it.
+Readiness reports resolved local serving prerequisites. Neither discovery nor a
+startup/on-demand mint outcome changes `/readyz` or gates a later request.
 
 ### Configuration (fallbacks 5 → 4, no overrides)
 
@@ -310,9 +310,8 @@ fallbacks, the two static ids, and the interval.
 
 `/readyz` stays unauthenticated and keeps its coarse `status` bit, so existing
 consumers are unaffected. It gains an `impersonation` block reporting the effective
-headers and per-fact freshness. The block is present in both the ready (`200`) and
-degraded (`503`) responses — impersonation freshness is independent of mint
-readiness — and `HEAD` still writes no body.
+headers and per-fact freshness. Impersonation freshness and mint outcomes are
+independent of local readiness, and `HEAD` still writes no body.
 
 ```json
 {
@@ -378,8 +377,8 @@ Test-first, matching the package layout:
 - **`identity.Manager`** — interface-based impersonation; `exchange` and
   `credentialFrom` read the *current* header; a swap between calls is reflected on
   the next call. Existing tests wrap their static header via `StaticImpersonation`.
-- **`server` `/readyz`** — ready and degraded bodies both carry the block; `HEAD`
-  writes nothing; a fallback fact renders `source: "fallback"` with null
+- **`server` `/readyz`** — the ready body carries the block; `HEAD` writes
+  nothing; a fallback fact renders `source: "fallback"` with null
   `last_success` and no error text.
 - **e2e `serve`** — inject stub discovery base URLs (same pattern as the injected
   GitHub exchange base URL) and assert the exchange/forward requests carry the

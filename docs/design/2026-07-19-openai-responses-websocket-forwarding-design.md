@@ -228,7 +228,7 @@ Behavior splits on whether the downstream 101 has been sent.
 
 | Situation | Pre-upgrade (no 101) | Post-upgrade (101 sent) |
 |---|---|---|
-| Draining / not ready | `apierror` 503 `NotReady` | close `1001` (going away) |
+| Draining / local prerequisites absent | `apierror` 503 `NotReady` | close `1001` (going away) |
 | Not a WebSocket upgrade | `apierror` 426 `NotAWebSocketUpgrade` | — |
 | Missing/invalid local key | `apierror` 401 (existing auth MW) | — |
 | Credential failure | `apierror` 503 `NotReady` | — |

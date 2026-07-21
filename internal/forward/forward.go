@@ -326,8 +326,9 @@ func (f *Forwarder) forward(w http.ResponseWriter, r *http.Request, header http.
 	cred, err := f.provider.Current(r.Context())
 	if err != nil {
 		// A request-time credential failure (the real Manager's on-demand mint
-		// failing, #11) leaves nothing to forward; surface it as not-ready. The
-		// static stub never errors here.
+		// failing, #11) leaves nothing to forward; surface the temporary absence
+		// without changing service-wide readiness. The static stub normally does
+		// not error here.
 		apierror.Write(w, surface, apierror.NotReady, "no upstream credential available")
 		return
 	}

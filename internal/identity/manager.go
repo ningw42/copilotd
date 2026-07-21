@@ -11,7 +11,6 @@ import (
 	"net/url"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"golang.org/x/sync/singleflight"
@@ -72,23 +71,16 @@ type exchangeResponse struct {
 // retries and signal the operator to check the Copilot subscription.
 type exchangeError struct {
 	transient bool
-	authClass bool   // true for 401/403/404 — used only to shape the log message
-	status    int    // HTTP status, or 0 for a transport-level failure
-	body      string // upstream response body (bounded); never contains our secrets
-	err       error  // underlying transport/decode error, if any
+	authClass bool  // true for 401/403/404 — used only to shape the log message
+	status    int   // HTTP status, or 0 for a transport-level failure
+	err       error // underlying transport/decode error, if any
 }
 
 func (e *exchangeError) Error() string {
 	if e.status != 0 {
-		if e.body != "" {
-			return fmt.Sprintf("copilot token exchange: status %d: %s", e.status, e.body)
-		}
-		if e.err != nil {
-			return fmt.Sprintf("copilot token exchange: status %d: %v", e.status, e.err)
-		}
 		return fmt.Sprintf("copilot token exchange: status %d", e.status)
 	}
-	return fmt.Sprintf("copilot token exchange: %v", e.err)
+	return "copilot token exchange failed"
 }
 
 func (e *exchangeError) Unwrap() error { return e.err }
@@ -114,7 +106,8 @@ type ManagerConfig struct {
 	// GitHubBaseURL is the scheme+host the exchange targets (default
 	// https://api.github.com); injected in tests to point at an httptest server.
 	GitHubBaseURL string
-	// HTTPClient performs the exchange (default http.DefaultClient).
+	// HTTPClient performs the exchange (default http.DefaultClient). NewManager
+	// shallow-copies it and disables redirects so one exchange is one wire request.
 	HTTPClient *http.Client
 	// Impersonation supplies the current header set applied to the exchange
 	// request and carried on Credential.Headers for inference requests.
@@ -133,8 +126,8 @@ type ManagerConfig struct {
 	// default is capped exponential. Injected as a constant zero in tests to keep
 	// startup-retry tests fast and deterministic.
 	Backoff func(attempt int) time.Duration
-	// Logger records mint outcomes and degraded/ready transitions (default
-	// slog.Default()). Secrets are never passed to it.
+	// Logger records mint triggers, outcomes, and startup retry lifecycle
+	// (default slog.Default()). Secrets are never passed to it.
 	Logger *slog.Logger
 }
 
@@ -160,10 +153,10 @@ type Manager struct {
 	cached    copilotToken
 	hasCached bool
 
-	// ready tracks the last mint OUTCOME (not token expiry): false until the first
-	// success, then stays true across idle expiry, flipping false only on a failed
-	// mint. Atomic so Ready() reads it without contending the cache mutex.
-	ready atomic.Bool
+	// localReady records whether construction received the locally resolved
+	// GitHub OAuth token. Network exchange outcomes never change it: they are
+	// request-scoped and remain observable through mint logs.
+	localReady bool
 }
 
 // Verify Manager is a drop-in for the Provider seam the forwarder/server use.
@@ -182,6 +175,7 @@ func NewManager(cfg ManagerConfig) *Manager {
 		clock:           cfg.Clock,
 		backoff:         cfg.Backoff,
 		logger:          cfg.Logger,
+		localReady:      strings.TrimSpace(cfg.OAuthToken) != "",
 	}
 	if m.githubBaseURL == "" {
 		m.githubBaseURL = defaultGitHubBaseURL
@@ -189,6 +183,11 @@ func NewManager(cfg ManagerConfig) *Manager {
 	if m.httpClient == nil {
 		m.httpClient = http.DefaultClient
 	}
+	exchangeClient := *m.httpClient
+	exchangeClient.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	m.httpClient = &exchangeClient
 	if m.impersonation == nil {
 		m.impersonation = StaticImpersonation(nil)
 	}
@@ -225,14 +224,15 @@ func (m *Manager) Current(ctx context.Context) (Credential, error) {
 	return m.mint(ctx, "on-demand")
 }
 
-// Ready reports the last mint outcome (see the ready field). It is false until
-// the first successful mint and flips false only when a mint fails.
-func (m *Manager) Ready() bool { return m.ready.Load() }
+// Ready reports whether the Manager has the local prerequisite needed to
+// attempt an exchange: a resolved GitHub OAuth token. Mint success, failure,
+// and cached-token expiry do not change readiness or request admission.
+func (m *Manager) Ready() bool { return m.localReady }
 
 // StartupMint performs the boot warm-up mint. It runs once, retrying transient
 // failures with capped backoff up to StartupMintRetries and short-circuiting on
-// an auth-class failure. On exhaustion the daemon stays degraded — recoverable,
-// because the next request mints on demand. Intended to be run in a goroutine.
+// an auth-class failure. Its outcome never gates requests: the next request can
+// always mint on demand. Intended to be run in a goroutine.
 func (m *Manager) StartupMint(ctx context.Context) {
 	attempts := m.startupRetries + 1
 	for attempt := 0; attempt < attempts; attempt++ {
@@ -243,7 +243,7 @@ func (m *Manager) StartupMint(ctx context.Context) {
 		}
 		_, err := m.mint(ctx, "startup")
 		if err == nil {
-			return // success; the closure recorded Ready()=true and logged it
+			return // success; the closure cached and logged the token
 		}
 		if ctx.Err() != nil {
 			return // caller cancelled; the background exchange (if any) runs on
@@ -251,13 +251,13 @@ func (m *Manager) StartupMint(ctx context.Context) {
 		if !isTransient(err) {
 			// Auth-class / permanent: retrying cannot help. The closure already
 			// logged the distinct "check the Copilot subscription" error.
-			m.logger.Warn("startup mint short-circuited on a permanent failure; serving degraded")
+			m.logger.Warn("startup mint short-circuited on a permanent failure; on-demand mint remains available")
 			return
 		}
 		m.logger.Debug("startup mint attempt failed (transient), will retry",
 			slog.Int("attempt", attempt+1), slog.Int("attempts", attempts))
 	}
-	m.logger.Warn("startup mint exhausted its retries; serving degraded until a request mints on demand",
+	m.logger.Warn("startup mint exhausted its retries; a later request can mint on demand",
 		slog.Int("attempts", attempts))
 }
 
@@ -275,7 +275,6 @@ func (m *Manager) mint(ctx context.Context, trigger string) (Credential, error) 
 		if err == nil {
 			m.store(tok)
 		}
-		m.ready.Store(err == nil)
 		m.logMint(trigger, tok, err)
 		return tok, err
 	})
@@ -297,7 +296,7 @@ func (m *Manager) mint(ctx context.Context, trigger string) (Credential, error) 
 // endpoint's client/user-agent allowlist requires even for the exchange itself.
 func (m *Manager) exchange(ctx context.Context) (copilotToken, error) {
 	exchangeURL := strings.TrimRight(m.githubBaseURL, "/") + exchangePath
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, exchangeURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, exchangeURL, &singleAttemptExchangeBody{ReadCloser: http.NoBody})
 	if err != nil {
 		return copilotToken{}, &exchangeError{transient: false, err: err}
 	}
@@ -339,13 +338,20 @@ func (m *Manager) exchange(ctx context.Context) (copilotToken, error) {
 	case resp.StatusCode == http.StatusUnauthorized,
 		resp.StatusCode == http.StatusForbidden,
 		resp.StatusCode == http.StatusNotFound:
-		return copilotToken{}, &exchangeError{transient: false, authClass: true, status: resp.StatusCode, body: string(body)}
+		return copilotToken{}, &exchangeError{transient: false, authClass: true, status: resp.StatusCode}
 	case resp.StatusCode == http.StatusTooManyRequests, resp.StatusCode >= 500:
-		return copilotToken{}, &exchangeError{transient: true, status: resp.StatusCode, body: string(body)}
+		return copilotToken{}, &exchangeError{transient: true, status: resp.StatusCode}
 	default:
 		// Any other status (e.g. an unexpected 4xx): retrying will not help.
-		return copilotToken{}, &exchangeError{transient: false, status: resp.StatusCode, body: string(body)}
+		return copilotToken{}, &exchangeError{transient: false, status: resp.StatusCode}
 	}
+}
+
+// singleAttemptExchangeBody differs from http.NoBody only in identity. Its
+// non-nil Body and nil GetBody make Go's Transport treat the otherwise bodyless
+// GET as non-replayable; Transport's empty-body probe still emits no wire body.
+type singleAttemptExchangeBody struct {
+	io.ReadCloser
 }
 
 // normalizeCopilotOrigin validates an exchange-provided endpoints.api value and
@@ -387,7 +393,8 @@ func normalizeCopilotOrigin(raw string) (string, error) {
 
 // logMint records the single mint outcome, with a distinct auth-class message so
 // a permanent credential problem is not mistaken for a flaky exchange. Tokens
-// (OAuth and Copilot) are never included.
+// (OAuth and Copilot), raw response bodies, and underlying errors are never
+// included.
 func (m *Manager) logMint(trigger string, tok copilotToken, err error) {
 	if err == nil {
 		m.logger.Info("minted copilot token",
@@ -397,19 +404,26 @@ func (m *Manager) logMint(trigger string, tok copilotToken, err error) {
 		return
 	}
 	var ee *exchangeError
-	if errors.As(err, &ee) && ee.authClass {
-		m.logger.Error("copilot token exchange failed: not transient — check the Copilot subscription",
-			slog.String("trigger", trigger),
-			slog.Int("status", ee.status),
-			slog.String("body", ee.body))
+	if !errors.As(err, &ee) {
+		m.logger.Warn("copilot token exchange failed",
+			slog.String("trigger", trigger))
 		return
 	}
-	attrs := []any{slog.String("trigger", trigger)}
-	if errors.As(err, &ee) {
-		attrs = append(attrs, slog.Int("status", ee.status))
+	if ee.authClass {
+		m.logger.Error("copilot token exchange failed: not transient — check the Copilot subscription",
+			slog.String("trigger", trigger),
+			slog.Int("status", ee.status))
+		return
 	}
-	attrs = append(attrs, slog.String("error", err.Error()))
-	m.logger.Warn("copilot token exchange failed (transient)", attrs...)
+	attrs := []any{
+		slog.String("trigger", trigger),
+		slog.Int("status", ee.status),
+	}
+	if ee.transient {
+		m.logger.Warn("copilot token exchange failed (transient)", attrs...)
+		return
+	}
+	m.logger.Error("copilot token exchange failed (permanent)", attrs...)
 }
 
 // freshCached returns the cached token if present and still fresh at clock().

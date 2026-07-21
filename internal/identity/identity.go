@@ -4,11 +4,8 @@
 // seam (the Credential snapshot and the Provider interface) that the forwarder
 // and server consume without any Copilot-specific knowledge.
 //
-// This slice ships only a static stub Provider (Static), enough to wire and test
-// the forward path end to end. The real Manager — which mints a Copilot token on
-// demand via the GitHub token exchange and tracks the last mint outcome in
-// Ready() — arrives in a later slice (#11) and implements this same interface, so
-// it drops in without touching the forwarder or server.
+// Static provides a fixed test implementation of the same Provider seam as the
+// real Manager, which mints Copilot tokens on demand.
 package identity
 
 import (
@@ -49,24 +46,23 @@ func StaticImpersonation(header http.Header) Impersonation {
 
 func (i staticImpersonation) Header() http.Header { return i.header }
 
-// Provider hands the forwarder a current Credential and reports readiness. The
-// real Manager mints on demand inside Current; the Static stub returns a fixed
-// value. The interface is intentionally minimal (Current + Ready) so #11's
-// Manager is a drop-in replacement.
+// Provider hands the forwarder a current Credential and separately reports
+// local readiness. The real Manager mints on demand inside Current; the Static
+// stub returns a fixed value.
 type Provider interface {
 	// Current returns the credential to use for an outbound request, minting one
 	// on demand if the cached token is missing or stale (a no-op for the stub).
 	Current(ctx context.Context) (Credential, error)
-	// Ready reports the last mint outcome: false until the first successful mint,
-	// then true across idle expiry, flipping false only when a mint fails.
+	// Ready reports whether local prerequisites are present to attempt serving.
+	// A remote mint outcome must never change it or latch request admission.
 	Ready() bool
 }
 
 // Static is a fixed-value Provider used to wire the forward path before the real
 // minting Manager exists, and as a test double. Its Credential is constant; its
-// readiness and an optional Current error are settable so tests can exercise the
-// readiness gate and the request-time credential-failure path. It is safe for
-// concurrent use.
+// local readiness and an optional Current error are settable so tests can
+// exercise the readiness gate and request-time credential-failure path. It is
+// safe for concurrent use.
 type Static struct {
 	mu    sync.RWMutex
 	cred  Credential
