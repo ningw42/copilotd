@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -19,6 +20,23 @@ import (
 	"github.com/ningw42/copilotd/internal/identity"
 	"github.com/ningw42/copilotd/internal/logging"
 )
+
+func TestRawNetworkConnUnwrapsNestedTransports(t *testing.T) {
+	raw, peer := net.Pipe()
+	t.Cleanup(func() { _ = raw.Close() })
+	t.Cleanup(func() { _ = peer.Close() })
+
+	wrapped := testNetConnWrapper{Conn: testNetConnWrapper{Conn: raw}}
+	if got := rawNetworkConn(wrapped); got != raw {
+		t.Fatalf("raw network connection = %T, want %T", got, raw)
+	}
+}
+
+type testNetConnWrapper struct {
+	net.Conn
+}
+
+func (c testNetConnWrapper) NetConn() net.Conn { return c.Conn }
 
 func TestProxyShutdownRefusesNewUpgradesWith503(t *testing.T) {
 	proxy := newTestProxy(identity.NewStatic(identity.Credential{}, true))
@@ -85,9 +103,18 @@ func TestProxyShutdownDrainsActiveSessionWithGoingAway(t *testing.T) {
 }
 
 func TestProxyShutdownForceClosesSessionThatOverrunsDeadline(t *testing.T) {
+	testProxyShutdownForceClosesSessionThatOverrunsDeadline(t, false)
+}
+
+func TestProxyShutdownForceClosesTLSSessionThatOverrunsDeadline(t *testing.T) {
+	testProxyShutdownForceClosesSessionThatOverrunsDeadline(t, true)
+}
+
+func testProxyShutdownForceClosesSessionThatOverrunsDeadline(t *testing.T, tlsUpstream bool) {
+	t.Helper()
 	upstreamAccepted := make(chan struct{})
 	releaseUpstream := make(chan struct{})
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstreamHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := websocket.Accept(w, r, nil)
 		if err != nil {
 			t.Errorf("accept upstream WebSocket: %v", err)
@@ -96,16 +123,34 @@ func TestProxyShutdownForceClosesSessionThatOverrunsDeadline(t *testing.T) {
 		defer func() { _ = conn.CloseNow() }()
 		close(upstreamAccepted)
 		<-releaseUpstream
-	}))
+	})
+	var upstream *httptest.Server
+	if tlsUpstream {
+		upstream = httptest.NewTLSServer(upstreamHandler)
+	} else {
+		upstream = httptest.NewServer(upstreamHandler)
+	}
 	t.Cleanup(func() {
 		close(releaseUpstream)
 		upstream.Close()
 	})
 
-	proxy := newTestProxy(identity.NewStatic(identity.Credential{
-		BaseURL: upstream.URL,
-		Token:   "copilot-token",
-	}, true))
+	dialClient := &http.Client{Transport: http.DefaultTransport}
+	if tlsUpstream {
+		dialClient = upstream.Client()
+	}
+	proxy := New(
+		identity.NewStatic(identity.Credential{
+			BaseURL: upstream.URL,
+			Token:   "copilot-token",
+		}, true),
+		dialClient,
+		time.Second,
+		time.Second,
+		1<<20,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		WsMetrics{},
+	)
 	client, handlerDone, downstream := dialProxy(t, proxy)
 	t.Cleanup(downstream.Close)
 	t.Cleanup(func() { _ = client.CloseNow() })

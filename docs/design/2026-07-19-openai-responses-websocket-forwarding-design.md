@@ -400,9 +400,10 @@ transport exists, but no WS-only model is currently hidden). No
      non-hijacked requests (it returns without waiting for hijacked WS conns).
   3. `wsProxy.Shutdown(shutdownCtx)` — `cancel()` the base context (each session's
      pumps unblock, sending a `1001` going-away close), then `wg.Wait()` bounded
-     by `shutdownCtx`; on deadline, force-close survivors via their `CloseNow`
-     backstops. Because `wg.Add` is at the top of the handler (§3.1), `Wait`
-     covers sessions still in dial/handshake, not just established ones.
+     by `shutdownCtx`; on deadline, close the captured upgraded transports so an
+     in-progress library close handshake is interrupted rather than serialized
+     behind. Because `wg.Add` is at the top of the handler (§3.1), `Wait` covers
+     sessions still in dial/handshake, not just established ones.
   4. Existing hard `s.http.Close()` fallback remains.
 - **`cmd/copilotd/main.go`** builds the dial client, the two WS counters, and the
   `Proxy` (passing `cfg.WebSocketHandshakeTimeout`, `cfg.WriteTimeout`,

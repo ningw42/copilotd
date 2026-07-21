@@ -3,11 +3,14 @@
 package wsforward
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"strings"
 	"sync"
@@ -46,15 +49,55 @@ type Proxy struct {
 }
 
 type activeSession struct {
-	client   *websocket.Conn
-	upstream *websocket.Conn
+	client            *websocket.Conn
+	upstream          *websocket.Conn
+	clientTransport   net.Conn
+	upstreamTransport net.Conn
 }
 
 func (s *activeSession) forceClose() {
-	// CloseNow is an explicit backstop, but do not make an already-expired
-	// shutdown caller wait on the library's internal close serialization.
-	go func() { _ = s.client.CloseNow() }()
-	go func() { _ = s.upstream.CloseNow() }()
+	forceCloseConnection(s.client, s.clientTransport)
+	forceCloseConnection(s.upstream, s.upstreamTransport)
+}
+
+func forceCloseConnection(conn *websocket.Conn, transport net.Conn) {
+	// coder/websocket serializes CloseNow behind an in-progress graceful Close,
+	// so only the upgraded transport can interrupt a stuck close handshake.
+	if transport != nil {
+		go func() { _ = transport.Close() }()
+		return
+	}
+	go func() { _ = conn.CloseNow() }()
+}
+
+func rawNetworkConn(conn net.Conn) net.Conn {
+	// tls.Conn.Close may spend five seconds writing close_notify. Its bottom
+	// NetConn is the force boundary; repeated unwrapping also covers TLS through
+	// a TLS proxy.
+	for {
+		wrapper, ok := conn.(interface{ NetConn() net.Conn })
+		if !ok {
+			return conn
+		}
+		raw := wrapper.NetConn()
+		if raw == nil {
+			return conn
+		}
+		conn = raw
+	}
+}
+
+type capturingResponseWriter struct {
+	http.ResponseWriter
+	transport net.Conn
+}
+
+func (w *capturingResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	conn, readWriter, err := http.NewResponseController(w.ResponseWriter).Hijack()
+	if err == nil {
+		w.transport = conn
+	}
+	return conn, readWriter, err
 }
 
 // New returns a WebSocket Proxy with an independently cancellable session
@@ -117,6 +160,12 @@ func (p *Proxy) Handler(ep endpoint.WSForward) http.HandlerFunc {
 			return
 		}
 		dialCtx, cancelDial := context.WithTimeout(phaseCtx, p.dialTimeout)
+		var upstreamTransport net.Conn
+		dialCtx = httptrace.WithClientTrace(dialCtx, &httptrace.ClientTrace{
+			GotConn: func(info httptrace.GotConnInfo) {
+				upstreamTransport = rawNetworkConn(info.Conn)
+			},
+		})
 		upstream, response, err := websocket.Dial(dialCtx, upstreamURL, &websocket.DialOptions{
 			HTTPClient:      p.dialClient,
 			HTTPHeader:      upstreamHeaders(cred, r.Context()),
@@ -139,7 +188,8 @@ func (p *Proxy) Handler(ep endpoint.WSForward) http.HandlerFunc {
 		p.logUpstreamRequestID(r.Context(), response.Header)
 		defer func() { _ = upstream.CloseNow() }()
 
-		client, err := websocket.Accept(w, r, &websocket.AcceptOptions{
+		clientResponseWriter := &capturingResponseWriter{ResponseWriter: w}
+		client, err := websocket.Accept(clientResponseWriter, r, &websocket.AcceptOptions{
 			InsecureSkipVerify: true,
 			CompressionMode:    websocket.CompressionDisabled,
 		})
@@ -163,7 +213,12 @@ func (p *Proxy) Handler(ep endpoint.WSForward) http.HandlerFunc {
 		)
 		p.metrics.observeAccept(AcceptEstablished)
 
-		session := &activeSession{client: client, upstream: upstream}
+		session := &activeSession{
+			client:            client,
+			upstream:          upstream,
+			clientTransport:   clientResponseWriter.transport,
+			upstreamTransport: upstreamTransport,
+		}
 		p.trackSession(session)
 		defer p.untrackSession(session)
 
