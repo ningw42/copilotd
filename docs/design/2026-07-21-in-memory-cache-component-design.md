@@ -23,8 +23,9 @@ observability, and readiness for one cached value, ports impersonation onto it
 with no behavior change, and adds the Codex `models.json` freshness (#53) as a
 second consumer.
 
-The component is memory-only: nothing is written to disk, so the ROADMAP §2 "no
-state at rest" principle is preserved exactly as it is for the impersonation
+The component is memory-only: nothing is written to disk, so the ROADMAP §4
+state-at-rest principle ("no services at rest … state at rest is a single owner-only
+credential file") is honored exactly as it is for the impersonation
 cache and the Copilot token. The Codex consumer tracks `openai/codex`'s **latest
 release tag**, refreshes on a static TTL, and keeps the embedded snapshot as the
 guaranteed-parseable floor. A `--codex-catalog-refresh-interval=0` disables the
@@ -110,7 +111,11 @@ type Cacheable[V any] struct {
 	// values by Hash to decide whether content actually changed. A version bump
 	// whose Hash matches what is already served re-keys the label without a
 	// validate/swap; a Hash that matches the Fallback drops back to serving the
-	// floor and releases the fetched copy. nil means "compare by value".
+	// floor and releases the fetched copy. nil means "compare with Go ==", which
+	// requires a comparable V (e.g. string); a non-comparable V such as []byte MUST
+	// supply Hash (Codex does, via a content hash). Hash is authoritative, so it
+	// must be collision-resistant enough that distinct content never collides — a
+	// cryptographic content hash suffices.
 	Hash func(V) string
 	// Validate is the accept-gate: it rejects a fetched value that does not meet
 	// the consumer's contract (the required-field-drift gate). A rejected value
@@ -153,8 +158,8 @@ attempt(ctx):
   h := Hash(value)                     // (3) authoritative content identity
   if h == current.hash:                              //     content identical across a version bump…
       setVersion(v); touch(); return                 //     …re-key the label, no validate/swap
-  if h == floor.hash:                                //     content reverted to the embedded floor…
-      swapToFallback(v); return                      //     …serve the floor, release the fetched copy
+  if h == floor.hash:                                //     content equals the embedded floor…
+      swapToFallback(v); touch(); return             //     …serve the embed, release the copy; source=fallback, last_success advances
   if err := Validate(value); err != nil:             //     accept-gate: never poison the cache
       holdLastGood(); recordErr(err); return
   swap(value, v, h)                    // (4) new good value in
@@ -217,9 +222,9 @@ func (r *Registry) Observe() []Status         // collect the snapshot of every e
 ```go
 type Status struct {
 	Name        string     // "vscode", "copilot_chat", "codex_models"
-	Source      string     // "fetched" (a fetch succeeded, or a prior one did) | "fallback"
+	Source      string     // provenance of the value served NOW: "fetched" (a distinct fetched value) | "fallback" (the embedded floor)
 	Version     string     // effective version label, e.g. "rust-v0.145.0" or "1.129.1"
-	LastSuccess *time.Time // nil while the fallback is in use
+	LastSuccess *time.Time // time of the last successful, validated fetch; nil only until the first-ever success
 }
 
 // entry is the unexported, type-erased view the Registry drives.
@@ -234,6 +239,17 @@ This is precisely the split settled during design: `Current`/`Run` are inherentl
 per-entity (one is typed, one is a per-TTL loop); `Prime`/`Observe` are aggregates
 the `Registry` folds over the per-entity `prime`/`observe`. Readiness stays purely
 local-prerequisite (ADR-0008); no cached value gates `/readyz`.
+
+`Source` and `LastSuccess` are **independent**. `Source` names the provenance of
+the value served *now*: `"fetched"` when a distinct fetched value is served,
+`"fallback"` whenever the embedded floor is served — which includes a successful
+fetch that proved byte-identical to the floor (the floor-revert releases the
+fetched copy for the memory win, so the served bytes are the embed). `LastSuccess`
+names *when upstream last confirmed us*: it advances on **every** successful,
+validated fetch, including a floor-identical one, and is nil only until the
+first-ever success. A cold cache (`source: "fallback"`, nil `LastSuccess`) is thus
+distinguishable from one confirmed current-to-floor (`source: "fallback"`,
+non-nil `LastSuccess`).
 
 ### Consumer: `internal/impersonation` (behavior-equivalent port)
 
@@ -411,12 +427,18 @@ fact, so it does not belong in the `caches` view).
 ```
 
 Only non-secret state appears: each cache's `source`, effective `version`, and
-`last_success`, plus the already-non-secret effective headers. No token, no raw
-fetch-error text — a failure is conveyed by `source: "fallback"` (never fetched) or
-an aging `last_success` (fetched before), never by an error string that could leak
-an upstream URL to an unauthenticated caller. `HEAD` still writes no body. When a
-consumer's refresh is disabled (`TTL == 0`), its entry still renders, at
-`source: "fallback"` with null `last_success`.
+`last_success`, plus the already-non-secret effective headers. `source` and
+`last_success` are independent (see §`Status`): `source` names the provenance of the
+value served now (`"fetched"` = a distinct fetched value; `"fallback"` = the embedded
+floor, which includes a fetch proved byte-identical to the floor), while
+`last_success` advances on every successful validated fetch and is null only until the
+first-ever success. So a cold cache (`source: "fallback"`, null `last_success`) is
+distinguishable from one confirmed current-to-floor (`source: "fallback"`, non-null
+`last_success`). No token, no raw fetch-error text — a failure is conveyed by a null or
+aging `last_success`, never by an error string that could leak an upstream URL to an
+unauthenticated caller. `HEAD` still writes no body. When a consumer's refresh is
+disabled (`TTL == 0`), its entry still renders, at `source: "fallback"` with null
+`last_success` (it never fetches).
 
 This is a deliberate, backward-compatible-on-`status` evolution of ADR-0008's
 `/readyz` shape (the per-fact freshness relocates; `effective_headers` is retained;
@@ -425,16 +447,24 @@ sub-issue, not a silent side effect.
 
 ### Error handling and resilience
 
-- Each fetch is individually bounded; `Prime` caps the combined startup wait at 5s.
+- Each fetch is individually bounded **by its consumer edge**: impersonation's
+  `discoverVSCode`/`discoverCopilotChat` wrap a 5s `discoveryTimeout`, and the Codex
+  peek and blob read wrap a 5s per-call timeout too, so a hung upstream stalls neither
+  that consumer's refresh loop nor any other consumer. The HTTP clients stay
+  timeout-less by repo convention (the caller owns the context, as `newExchangeClient`
+  / `newDiscoveryClient` already do). `Prime` additionally caps the combined startup
+  wait across all entries at 5s.
 - Failures never touch readiness (for the current `false` consumers) and never
   overwrite a good value — cold failures hold the fallback, warm failures hold the
   last-good.
 - A malformed / unparseable fetch (impersonation shape-check, Codex
   `decodeCodexModels`) is a failure, not a poison-write — the accept-gate rejects
   it before the swap.
-- Every `Run` stops on context cancellation at shutdown.
-- Logging: startup outcome at info; each refresh success at debug; refresh failure
-  at warn (naturally rate-limited by the TTL cadence).
+- Every `Run` stops on context cancellation at shutdown; `Prime` returns early on
+  cancellation and skips entries whose `TTL <= 0` (no outbound).
+- Logging: the engine logs each refresh success at debug and each refresh failure at
+  warn (naturally rate-limited by the TTL cadence); `main`'s startup sequence logs the
+  startup outcome at info.
 
 ## Scope
 
@@ -507,7 +537,7 @@ Test-first, matching the package layout:
   the six `Cacheable` properties do not apply, and unifying would degrade the token's
   hot-path minting.
 - **Persist the cache to a file**: rejected — durable state at rest violates
-  ROADMAP §2 and the token/impersonation in-memory model. The component is
+  ROADMAP §4 and the token/impersonation in-memory model. The component is
   memory-only.
 - **`Run` on the `Registry` as a single shared loop**: rejected — TTLs are
   per-entity, so the loop is per-entity. The `Registry` only offers `Start`, a
@@ -532,34 +562,45 @@ Test-first, matching the package layout:
   inference endpoint, so it adds none of the idle-exchange abuse signal ADR-0001
   avoided. `--codex-catalog-enabled=false` (no registration) or
   `--codex-catalog-refresh-interval=0` (pinned to the floor) opts out entirely.
-- This introduces a **runtime cache of external content**, which is a considered
-  exception to ROADMAP §2's "no runtime cache" phrasing — reconciled by the cache
-  being **memory-only** (nothing at rest) with an embedded floor, exactly as the
-  impersonation cache already is. Recorded as **ADR-0009** and noted in the ROADMAP.
+- This introduces a **runtime cache of external content**. It is **consistent with**
+  the ROADMAP's state-at-rest principle (§4 — "no services at rest … state at rest is a
+  single owner-only credential file"), not an exception to it: the cache is
+  **memory-only** (nothing at rest) with an embedded floor, exactly as the impersonation
+  cache and the Copilot token already are. The considered interpretation — that a
+  memory-only, best-effort refresh with an embedded floor honors "no state at rest" — is
+  recorded as **ADR-0009** and noted in the ROADMAP.
 - `/readyz` gains a uniform `caches` block and relocates impersonation's per-fact
   freshness into it; `status` is unchanged and backward-compatible.
 
 ## Epic decomposition
 
-This design anchors an `epic`. It is delivered as two sub-issues; the extraction
-lands first as the correct, behavior-equivalent baseline, and the Codex freshness
-builds on it.
+This design anchors an `epic` (tracked as **#92**). As delivered it is decomposed into
+**three** native sub-issues — a refinement of the two conceptual items below: the first
+item (extract `internal/cache`; port impersonation) was split into an engine ticket and
+a port ticket so each fits a single implementation context. The native chain is
+**#93 → #94 → #95**.
 
-1. **Extract `internal/cache`; port impersonation.** Introduce `Cacheable[V]`,
-   `Value[V]`, `Registry`, `Status`, and the refresh ladder; delete `versionFact`;
-   port the two impersonation facts (relocating version validation into the
-   `Validate` accept-gate — behavior-equivalent at the boundary); relocate
-   `/readyz` freshness into the `caches` block; ratify the `CONTEXT.md` glossary
-   terms and the `refresh` disambiguation (canonized with this design).
-   *Blocks (2). Can start immediately.*
-2. **Codex `models.json` freshness as a `cache` consumer.** Add the
+1. **Extract `internal/cache`; port impersonation** — delivered as two tickets:
+   - **#93 — build the engine.** Introduce `Cacheable[V]`, `*Value[V]`, `Registry`,
+     `Status`, and the refresh ladder (engine + tests only, no consumers).
+     *Can start immediately.*
+   - **#94 — port impersonation.** Port the two impersonation facts onto the engine
+     (relocating version validation into the `Validate` accept-gate —
+     behavior-equivalent at the boundary, the existing discovery wire contract and its
+     tests preserved); relocate `/readyz` freshness into the `caches` block; ratify the
+     `CONTEXT.md` glossary terms and the `refresh` disambiguation (canonized with this
+     design). *Blocked by #93.*
+2. **#95 — Codex `models.json` freshness as a `cache` consumer.** Add the
    `*cache.Value[[]byte]` (registered only when `--codex-catalog-enabled`),
    latest-release-tag tracking, the version/hash ladder with floor-revert, the
    `decodeCodexModels` accept-gate, parse-on-read (remove the package-level parsed
-   global), the unauthenticated `openai/codex` fetch,
+   global), the unauthenticated `openai/codex` fetch (5s per-call bound),
    `--codex-catalog-refresh-interval`, and the `codex_models` `/readyz` entry;
-   author **ADR-0009** and update `CONFIGURATION.md` and the ROADMAP.
-   *Blocked by (1).*
+   author **ADR-0009** and update `CONFIGURATION.md` and the ROADMAP. *Blocked by #94.*
+
+Issue **#53** (the original "commit-based caching/refresh for the vendored Codex
+`models.json` snapshot") is superseded by this epic and closed as not-planned; its
+scope lives in #95.
 
 ## Glossary additions (`CONTEXT.md`)
 
