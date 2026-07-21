@@ -2,7 +2,7 @@
 
 Status: approved (polished via brainstorming + grilling)
 Date: 2026-07-21
-Tracking issue: `ningw42/copilotd#54`
+Tracking issue: `ningw42/copilotd#54` → closed and superseded by epic `ningw42/copilotd#88`
 Builds on: `docs/design/2026-07-19-phase-6b-codex-model-catalog-auto-review-design.md`
 (the global-only reviewer; this design was split out of that one during grilling — Phase 6b §2.2).
 
