@@ -231,7 +231,7 @@ func StaticImpersonation(h http.Header) Impersonation
 ```
 
 `*impersonation.Set` satisfies `Impersonation` directly. No import cycle: `identity`
-defines the interface; `impersonation` imports `refresh` but not `identity`; `main`
+defines the interface; `impersonation` does not import `identity`; `main`
 wires the concrete `Set` into the `Manager`.
 
 ### Startup and refresh lifecycle
