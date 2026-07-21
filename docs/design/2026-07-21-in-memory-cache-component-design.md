@@ -42,7 +42,7 @@ animal (see §Scope).
 | Cache | Where | Shape |
 | --- | --- | --- |
 | Copilot token | `identity/manager.go` | TTL from the exchange payload (`expires_at` + safety margin), `singleflight`-collapsed, minted **on demand in the request path** plus startup, **no fallback** (hard secret), tracks the mint outcome as readiness |
-| Impersonation version facts (×2) | `impersonation/version_fact.go` | embedded **fallback** + fetched value, startup `Prime` (≤5s) + periodic `Run` (24h), **holds last-good** on failure, best-effort, non-secret observability snapshot |
+| Impersonation version facts (×2) | `impersonation/version_fact.go` | embedded **fallback** + fetched value, startup `Prime` (≤5s) + periodic `Run` (24h by default), **holds last-good** on failure, best-effort, non-secret observability snapshot |
 | Codex `models.json` | `catalog/codex_snapshot.go` | today a static `go:embed` decoded once at init — #53's target |
 
 The impersonation fact and the Codex snapshot are the same shape: *a vendored
@@ -114,8 +114,9 @@ type Cacheable[V any] struct {
 	// serving the floor and releases the fetched copy. Every consumer supplies one
 	// (Codex hashes the models.json bytes; impersonation hashes the version string)
 	// — there is no value-comparison path, so V never needs to be comparable and
-	// there is no nil case. Hash must be collision-resistant enough that distinct
-	// content never collides — a cryptographic content hash suffices.
+	// there is no nil case: New panics on a nil Hash (or Fetch), a fail-fast wiring
+	// check. Hash must be collision-resistant enough that distinct content never
+	// collides — a cryptographic content hash suffices.
 	Hash func(V) string
 	// Validate is the accept-gate: it rejects a fetched value that does not meet
 	// the consumer's contract (the required-field-drift gate). A rejected value
@@ -495,7 +496,7 @@ Test-first, matching the package layout:
   `Version` is unchanged, skips validate/swap when `Hash` matches the served value,
   drops back to the floor when `Hash` matches the fallback, and rejects (holds
   last-good) when `Validate` fails; `Current()` is race-clean under `-race`;
-  `TTL <= 0` makes `Run` a no-op.
+  `TTL <= 0` makes `Run` a no-op; `New` panics on a nil `Hash`/`Fetch`.
 - **`cache.Registry`** — `Prime` fans out concurrently and honors the 5s bound;
   `Start` launches one loop per entry on its own TTL; `Observe` collects only
   publishing entries.
