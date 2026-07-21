@@ -1,6 +1,6 @@
 # Unify in-memory cached values into one component (and Codex `models.json` freshness)
 
-**Status:** proposed
+**Status:** approved
 **Date:** 2026-07-21
 
 ## Summary
@@ -77,21 +77,21 @@ extraction is warranted and is exactly what #53 asked to own.
 
 ### `internal/cache`: one engine, N consumers
 
-A new standard-library-only package. A consumer declares a **`Source[V]`** — the
-static recipe for one cached value — and receives a **`Value[V]`**, the live,
+A new standard-library-only package. A consumer declares a **`Cacheable[V]`** —
+the static recipe for one cached value — and receives a **`Value[V]`**, the live,
 concurrency-safe object that runs it. A process-wide **`Registry`** aggregates the
-operations that are genuinely collective (startup fan-out, observation,
-readiness); everything type-specific stays on the per-entity `Value`.
+operations that are genuinely collective (startup fan-out and observation);
+everything type-specific stays on the per-entity `Value`.
 
-#### `Source[V]` — the recipe
+#### `Cacheable[V]` — the recipe
 
 ```go
 package cache
 
-// Source is the static, declarative recipe for one cached value. It does nothing
-// on its own; a Value runs it. V is the served type — string for a version, []byte
-// for a snapshot.
-type Source[V any] struct {
+// Cacheable is the static, declarative recipe for one cached value. It does
+// nothing on its own; a Value runs it. V is the served type — string for a
+// version, []byte for a snapshot.
+type Cacheable[V any] struct {
 	// Fallback is the embedded floor, served until (and unless) a fetch succeeds.
 	Fallback V
 	// FallbackVersion identifies the floor, e.g. "rust-v0.144.5".
@@ -99,23 +99,23 @@ type Source[V any] struct {
 	// TTL is the refresh cadence. Static. TTL <= 0 disables refresh (air-gapped).
 	TTL time.Duration
 
-	// Version cheaply fetches the latest version identity WITHOUT the full content,
-	// so an unchanged version short-circuits the download. Optional: nil means
-	// "no cheap peek — always Fetch and compare by Hash".
+	// Version is the cheap, OPTIONAL peek: it fetches the latest version identity
+	// without the full content, so an unchanged identity short-circuits the
+	// download. It may be stale or coarse; it is a hint, never the contract. nil
+	// means "no cheap peek — always Fetch, then compare by Hash".
 	Version func(context.Context) (string, error)
 	// Fetch retrieves the latest content and the version it corresponds to.
 	Fetch func(context.Context) (value V, version string, err error)
-	// Hash derives a content identity for a value, so a version bump whose content
-	// is unchanged skips the validate/swap. Optional: nil means "compare by value".
+	// Hash is the AUTHORITATIVE content-identity contract: the engine compares
+	// values by Hash to decide whether content actually changed. A version bump
+	// whose Hash matches what is already served re-keys the label without a
+	// validate/swap; a Hash that matches the Fallback drops back to serving the
+	// floor and releases the fetched copy. nil means "compare by value".
 	Hash func(V) string
-	// Validate rejects a fetched value that does not meet the consumer's contract
-	// (the required-field-drift gate). A rejected value never enters the cache.
-	// Optional: nil means "accept any successful fetch".
+	// Validate is the accept-gate: it rejects a fetched value that does not meet
+	// the consumer's contract (the required-field-drift gate). A rejected value
+	// never enters the cache. nil means "accept any successful fetch".
 	Validate func(V) error
-
-	// RequiredForReadiness gates /readyz: when true, the Registry reports not-ready
-	// until this value's first successful fetch. Both current consumers set false.
-	RequiredForReadiness bool
 
 	// Name is the stable key this value reports under in /readyz.
 	Name string
@@ -130,16 +130,16 @@ and it runs the **refresh ladder**. The type-specific read, `Current`, lives her
 because only the typed `Value` knows its `V`.
 
 ```go
-func New[V any](src Source[V], opts ...Option) *Value[V]
+func New[V any](src Cacheable[V], opts ...Option) *Value[V]
 
 func (v *Value[V]) Current() (V, Status) // effective value (fetched, else fallback) + snapshot
 func (v *Value[V]) Run(ctx context.Context) // its own refresh loop on its OWN TTL
 ```
 
 `Value[V]` also satisfies an unexported `entry` interface — `prime`, `run`,
-`observe`, `satisfied` — through which the `Registry` drives it without knowing
-`V`. Consumers keep the typed `*Value[V]` handle for `Current`; the `Registry`
-holds the erased `entry`.
+`observe` — through which the `Registry` drives it without knowing `V`. Consumers
+keep the typed `*Value[V]` handle for `Current`; the `Registry` holds the erased
+`entry`.
 
 **The refresh ladder** (one `attempt`, run by `Prime` and by each `Run` tick) is
 the two-level short-circuit that the version/hash split buys:
@@ -147,14 +147,17 @@ the two-level short-circuit that the version/hash split buys:
 ```
 attempt(ctx):
   v := Version(ctx)                    // (1) cheap peek — identity only, no content
-  if v == current.version:  touch(); return          // ← unchanged ref: no download at all
+  if v == current.version:  touch(); return          // ← unchanged identity: no download at all
 
-  value, v := Fetch(ctx)               // (3) only now the full read
-  if Hash(value) == current.hash:                    // (5) content identical across a version bump…
-      setVersion(v); touch(); return                 //     …re-key the label, skip validate/swap
+  value, v := Fetch(ctx)               // (2) only now the full read
+  h := Hash(value)                     // (3) authoritative content identity
+  if h == current.hash:                              //     content identical across a version bump…
+      setVersion(v); touch(); return                 //     …re-key the label, no validate/swap
+  if h == floor.hash:                                //     content reverted to the embedded floor…
+      swapToFallback(v); return                      //     …serve the floor, release the fetched copy
   if err := Validate(value); err != nil:             //     accept-gate: never poison the cache
       holdLastGood(); recordErr(err); return
-  swap(value, v, Hash(value))          // new good value in
+  swap(value, v, h)                    // (4) new good value in
 ```
 
 Semantics carried over verbatim from `versionFact` (ADR-0008):
@@ -187,7 +190,7 @@ func (v *Value[V]) Run(ctx context.Context) {
 
 #### `Registry` — the aggregate
 
-The `Registry` holds every registered `entry` and owns exactly the three
+The `Registry` holds every registered `entry` and owns exactly the two
 operations that are collective, plus a launcher for the per-entity loops:
 
 ```go
@@ -198,7 +201,6 @@ func (r *Registry) Register(e entry)          // impersonation and catalog regis
 func (r *Registry) Prime(ctx context.Context) // fan-out the bounded startup fetch across all entries
 func (r *Registry) Start(ctx context.Context) // launch each entry's own Run(ctx) goroutine (per-TTL)
 func (r *Registry) Observe() []Status         // collect the snapshot of every entry that publishes one
-func (r *Registry) Ready() bool               // AND over every entry's Satisfied()
 ```
 
 - `Prime` runs every entry's startup attempt **concurrently**, bounded by one
@@ -209,8 +211,6 @@ func (r *Registry) Ready() bool               // AND over every entry's Satisfie
   has one call site instead of N.
 - `Observe` collects each entry's `Status`; an entry may decline to publish (the
   bool below), so a value with nothing useful to show adds no `/readyz` noise.
-- `Ready` folds each entry's `Satisfied()` — `true` when the entry is not
-  required, or is required and has succeeded at least once.
 
 `Status` is the type-erased, **non-secret** freshness record:
 
@@ -227,15 +227,15 @@ type entry interface {
 	prime(context.Context) error
 	run(context.Context)
 	observe() (Status, bool) // bool == "publish me in /readyz"
-	satisfied() bool
 }
 ```
 
 This is precisely the split settled during design: `Current`/`Run` are inherently
-per-entity (one is typed, one is a per-TTL loop); `Prime`/`Observe`/`Ready` are
-aggregates the `Registry` folds over the per-entity `prime`/`observe`/`satisfied`.
+per-entity (one is typed, one is a per-TTL loop); `Prime`/`Observe` are aggregates
+the `Registry` folds over the per-entity `prime`/`observe`. Readiness stays purely
+local-prerequisite (ADR-0008); no cached value gates `/readyz`.
 
-### Consumer: `internal/impersonation` (behavior-preserving port)
+### Consumer: `internal/impersonation` (behavior-equivalent port)
 
 `versionFact` is deleted. `Set` keeps its two facts as `*cache.Value[string]` and
 its domain composition (`Header()` assembling two versions into five headers) —
@@ -245,15 +245,14 @@ that stays in `impersonation`, since it is not generic. `Set.Prime`/`Set.Run`/
 ```go
 func New(cfg Config, edge Edge, reg *cache.Registry, logger *slog.Logger) *Set {
 	s := &Set{
-		vscode: cache.New(cache.Source[string]{
+		vscode: cache.New(cache.Cacheable[string]{
 			Name: "vscode", FallbackVersion: cfg.VSCodeVersionFallback,
 			Fallback: cfg.VSCodeVersionFallback, TTL: cfg.RefreshInterval,
 			Fetch: func(ctx context.Context) (string, string, error) {
 				v, err := edge.discoverVSCode(ctx); return v, v, err
 			},
-			Validate: validateBareVersion, // required-field-drift analogue for a version
+			Validate: validateVersion, // the version accept-gate, relocated from discovery.go
 			// Version, Hash nil: the fetch is tiny, so peek==fetch and value==identity.
-			// RequiredForReadiness false: discovery never gates readiness (ADR-0008).
 		}, cache.WithLogger(logger)),
 		plugin: /* … copilot_chat, same shape … */,
 		integrationID: cfg.CopilotIntegrationID, apiVersion: cfg.GithubAPIVersion,
@@ -269,17 +268,21 @@ func (s *Set) Header() http.Header { // unchanged: reads Current() of each fact,
 ```
 
 For impersonation, `Version` and `Hash` are `nil` (the fetch is a tiny payload, so
-there is no cheap peek to add and the value *is* its own identity), and
-`RequiredForReadiness` is `false`. The degenerate cells fall out of the same
-engine at no cost — the codex-specific peek does not burden impersonation. Behavior
-is identical to ADR-0008; `source` renders as `"fetched"` rather than
-`"discovered"` (see §Observability).
+there is no cheap peek to add and the value *is* its own identity). The degenerate
+cells fall out of the same engine at no cost — the codex-specific peek does not
+burden impersonation. Validation relocates: `discoverVSCode`/`discoverCopilotChat`
+keep their *selection* logic (skip prereleases, take the first stable candidate /
+`releases[0]`) but no longer call `validateVersion` themselves; the cache's
+`Validate` cell is now the single accept-gate, unifying with Codex's
+`decodeCodexModels`. Behavior is equivalent at the boundary to ADR-0008 — a value
+that fails the gate is held back as last-good/fallback exactly as before; only
+`source` renders as `"fetched"` rather than `"discovered"` (see §Observability).
 
 ### The Codex `models.json` consumer (#53)
 
 A single `*cache.Value[[]byte]`, wired in `internal/catalog`:
 
-| `Source[[]byte]` field | Codex value |
+| `Cacheable[[]byte]` field | Codex value |
 | --- | --- |
 | `Fallback` | the `go:embed` snapshot bytes (the guaranteed-parseable floor) |
 | `FallbackVersion` | the vendored tag, `rust-v0.144.5` |
@@ -288,7 +291,6 @@ A single `*cache.Value[[]byte]`, wired in `internal/catalog`:
 | `Fetch` | GET `models.json` at that tag → `([]byte, tag, err)` |
 | `Hash` | content hash of the bytes |
 | `Validate` | `decodeCodexModels` parses cleanly — **the required-field-drift gate** |
-| `RequiredForReadiness` | `false` (the floor always serves) |
 | `Name` | `codex_models` |
 
 **Latest release tag as the version identity.** The tracked ref is
@@ -300,13 +302,16 @@ compare. The ladder for Codex:
 1. **Peek** `releases/latest` → tag. Tag unchanged → touch, done (no 291 KB
    download). Most ticks stop here.
 2. **Fetch** `models.json` at the tag. Compute its content hash.
-3. **Hash unchanged** (a release that didn't touch `models.json`) → re-key the
-   version label to the new tag, skip validate/swap.
-4. **Validate** with `decodeCodexModels`; a blob that does not parse into the
+3. **Hash unchanged** vs the served value (a release that didn't touch
+   `models.json`) → re-key the version label to the new tag, no validate/swap.
+4. **Hash matches the embedded floor** (a release whose `models.json` equals the
+   vendored snapshot) → serve the floor and release any fetched copy, so we never
+   hold 291 KB byte-identical to the embed we already have for free.
+5. **Validate** with `decodeCodexModels`; a blob that does not parse into the
    expected `ModelInfo` shape is **rejected** — we hold last-good (or the floor)
    and log. This is the drift protection #53 calls out: a newer `models.json` that
    our renderer can't honor never displaces a good value.
-5. **Swap** the bytes + tag + hash in.
+6. **Swap** the bytes + tag + hash in.
 
 **Parse on the read path; validate on accept.** The package-level
 `var codexModels = mustDecodeCodexModels(...)` is removed. The catalog render path
@@ -330,7 +335,9 @@ the existing startup mint — the generalization of today's impersonation block:
 ```go
 reg := cache.NewRegistry()
 imp := impersonation.New(impCfg, edge, reg, logger) // registers its 2 facts
-catalog.NewModelsCache(codexCfg, reg, logger)       // registers codex_models
+if codexCfg.Enabled {                               // gated: no outbound when the catalog is off
+	catalog.NewModelsCache(codexCfg, reg, logger)   // registers codex_models
+}
 
 go func() {
 	reg.Prime(serveCtx)        // all entries' startup fetch, concurrent, ≤5s overall
@@ -341,15 +348,20 @@ go func() {
 
 `Prime` is a **wait, not a gate**: a slow or failed startup fetch leaves that entry
 on its fallback and startup proceeds. Neither a fetch outcome nor the mint gates
-`/readyz` for the current consumers (both `RequiredForReadiness == false`). The
-listener is bound before this runs, so `/healthz` and a locally-ready `/readyz`
-serve throughout. On `serveCtx` cancellation at shutdown, `Prime` returns early and
-every `Run` exits cleanly.
+`/readyz` — readiness is purely local (ADR-0008). The listener is bound before this
+runs, so `/healthz` and a locally-ready `/readyz` serve throughout. A Codex prime
+that misses the 5s bound (or fails outright) simply holds the embedded floor until
+the first `Run` tick one TTL later; because the floor is the guaranteed-parseable
+snapshot, this is never worse than shipping today's static embed. On `serveCtx`
+cancellation at shutdown, `Prime` returns early and every `Run` exits cleanly.
 
 **Disabling refresh.** `TTL <= 0` makes `Value.Run` a no-op and `Prime` skip that
 entry's outbound fetch, pinning it to the fallback for the process lifetime — the
 air-gapped / locked-egress mode, per consumer. `--impersonation-refresh-interval=0`
-and `--codex-catalog-refresh-interval=0` are independent.
+and `--codex-catalog-refresh-interval=0` are independent. For Codex there are two
+independent opt-outs: `--codex-catalog-enabled=false` skips registration entirely
+(no entry, no outbound, no `/readyz` row), while `--codex-catalog-refresh-interval=0`
+keeps the entry but pins it to the embedded floor.
 
 ### Configuration
 
@@ -361,10 +373,12 @@ One new flag, following the `--codex-catalog-*` family and the
 | `--codex-catalog-refresh-interval` / `COPILOTD_CODEX_CATALOG_REFRESH_INTERVAL` | `24h` | Codex `models.json` refresh cadence; must be `>= 0`. `0` disables the outbound refresh (pins to the embedded snapshot). |
 
 `ServeConfig` gains `CodexCatalogRefreshInterval`; the startup config log lists it
-beside the existing `codex-catalog-*` fields. No change to
-`--codex-catalog-enabled`, `--codex-auto-review-model`, or
-`--codex-catalog-override-limits`; the freshness cache sits underneath them and is
-inert whenever the Codex catalog is not served.
+beside the existing `codex-catalog-*` fields. `--codex-catalog-enabled=false` skips
+the freshness cache entirely: it is registered only when the Codex catalog is
+served, so a disabled catalog makes no outbound `openai/codex` request and shows no
+`codex_models` entry on `/readyz`. `--codex-auto-review-model` and
+`--codex-catalog-override-limits` are unaffected; the freshness cache sits
+underneath them and is inert whenever the Codex catalog is not served.
 
 ### Observability (`/readyz`)
 
@@ -424,15 +438,15 @@ sub-issue, not a silent side effect.
 
 ## Scope
 
-**The Copilot token Manager stays a separate component.** The `Source[V]` lens
+**The Copilot token Manager stays a separate component.** The `Cacheable[V]` lens
 proves the mismatch: the token has **no static TTL** (its lifetime comes from the
 exchange payload's `expires_at`), **no fallback** (it is a hard secret — an expired
 token cannot be "held last-good"), and **no version/hash**. Four of the six
 properties do not apply. It also mints **on demand in the request hot path** under
-`singleflight`, and its success *is* the readiness signal rather than a
-`RequiredForReadiness` flag. Folding it in would either bloat the generic engine or
-strip the token's carefully tuned behavior. It remains in `internal/identity`,
-unchanged.
+`singleflight`, and its success is what a request needs rather than anything the
+cache engine models — a cached value never gates readiness at all. Folding it in
+would either bloat the generic engine or strip the token's carefully tuned
+behavior. It remains in `internal/identity`, unchanged.
 
 **The provider-shaped Catalog is not a cache** and is untouched: it fetches
 Copilot's `/models` fresh on every request (`catalog/handler.go`), holding nothing.
@@ -444,23 +458,27 @@ Test-first, matching the package layout:
 - **`cache.Value`** — injected `Fetch`/`Version`/`Hash`/`Validate` and a fake
   clock and ticker: cold serves fallback; success swaps; warm failure holds
   last-good and ages `lastSuccess`; the ladder skips the download when `Version`
-  is unchanged, skips validate/swap when `Hash` is unchanged, and rejects (holds
+  is unchanged, skips validate/swap when `Hash` matches the served value, drops
+  back to the floor when `Hash` matches the fallback, and rejects (holds
   last-good) when `Validate` fails; `Current()` is race-clean under `-race`;
   `TTL <= 0` makes `Run` a no-op.
 - **`cache.Registry`** — `Prime` fans out concurrently and honors the 5s bound;
   `Start` launches one loop per entry on its own TTL; `Observe` collects only
-  publishing entries; `Ready` is the AND of `Satisfied()`, exercising a
-  `RequiredForReadiness=true` entry that is unsatisfied until its first success
-  (dead in production, covered here so the gating path is real).
+  publishing entries.
 - **impersonation port** — assembler correctness across all four fallback/fetched
   states → exact fallback strings; the two facts register and drive through the
-  `Registry`; `Header()` reflects a mid-flight swap on the next call; existing
-  discovery-function and `httptest` tests are unchanged.
+  `Registry`; `Header()` reflects a mid-flight swap on the next call; validation
+  now lives in the `Validate` cell, so the discovery functions no longer reject an
+  invalid version themselves — a value failing the gate holds last-good/fallback
+  as before; existing `httptest` discovery tests are updated for that relocation.
 - **Codex `models.json` consumer** — `httptest` GitHub edge: peek returns an
   unchanged tag → no blob fetched; a new tag with identical content → re-key, no
-  re-validate; a new tag with a good blob → swap; a new tag with a blob that fails
-  `decodeCodexModels` → rejected, floor/last-good retained; the render path parses
-  `Current()` and never a package-level global; disabled TTL never calls the edge.
+  re-validate; a new tag whose content equals the embedded floor → serve the
+  floor, hold no fetched copy; a new tag with a good blob → swap; a new tag with a
+  blob that fails `decodeCodexModels` → rejected, floor/last-good retained; the
+  render path parses `Current()` and never a package-level global; disabled TTL
+  never calls the edge; a disabled catalog (`--codex-catalog-enabled=false`)
+  registers nothing and never calls the edge.
 - **`identity.Manager`** — unchanged; still reads impersonation through the
   `Impersonation` interface.
 - **`server` `/readyz`** — the `caches` block carries every registered entry; a
@@ -486,7 +504,7 @@ Test-first, matching the package layout:
   cold read path that re-parses 8 models trivially. The cache holds bytes +
   provenance; the read path owns parsing.
 - **Fold the Copilot token into the component**: rejected — see §Scope; four of
-  the six `Source` properties do not apply, and unifying would degrade the token's
+  the six `Cacheable` properties do not apply, and unifying would degrade the token's
   hot-path minting.
 - **Persist the cache to a file**: rejected — durable state at rest violates
   ROADMAP §2 and the token/impersonation in-memory model. The component is
@@ -508,39 +526,44 @@ Test-first, matching the package layout:
   cold read path.
 - **One new outbound dependency** on a Copilot-only-otherwise path: unauthenticated
   `api.github.com` release/`raw` reads for `openai/codex`, hit at startup and every
-  24h. It carries no credentials and is not the Copilot exchange or inference
-  endpoint, so it adds none of the idle-exchange abuse signal ADR-0001 avoided.
-  `--codex-catalog-refresh-interval=0` opts out entirely.
+  24h. The fetch is deliberately **unauthenticated** — copilotd does not reuse its
+  in-memory GitHub OAuth token on this path, keeping the Codex-freshness dependency
+  credential-isolated. It carries no credentials and is not the Copilot exchange or
+  inference endpoint, so it adds none of the idle-exchange abuse signal ADR-0001
+  avoided. `--codex-catalog-enabled=false` (no registration) or
+  `--codex-catalog-refresh-interval=0` (pinned to the floor) opts out entirely.
 - This introduces a **runtime cache of external content**, which is a considered
   exception to ROADMAP §2's "no runtime cache" phrasing — reconciled by the cache
   being **memory-only** (nothing at rest) with an embedded floor, exactly as the
   impersonation cache already is. Recorded as **ADR-0009** and noted in the ROADMAP.
 - `/readyz` gains a uniform `caches` block and relocates impersonation's per-fact
   freshness into it; `status` is unchanged and backward-compatible.
-- The readiness-gating path exists (`RequiredForReadiness`) though no current
-  consumer uses it — built now per the maintainer's direction, covered by tests.
 
 ## Epic decomposition
 
 This design anchors an `epic`. It is delivered as two sub-issues; the extraction
-lands first as the correct, behavior-preserving baseline, and the Codex freshness
+lands first as the correct, behavior-equivalent baseline, and the Codex freshness
 builds on it.
 
-1. **Extract `internal/cache`; port impersonation.** Introduce `Source[V]`,
-   `Value[V]`, `Registry`, `Status`, the refresh ladder, and the readiness gating;
-   delete `versionFact`; port the two impersonation facts with no behavior change;
-   relocate `/readyz` freshness into the `caches` block; add the `CONTEXT.md`
-   glossary terms. *Blocks (2). Can start immediately.*
+1. **Extract `internal/cache`; port impersonation.** Introduce `Cacheable[V]`,
+   `Value[V]`, `Registry`, `Status`, and the refresh ladder; delete `versionFact`;
+   port the two impersonation facts (relocating version validation into the
+   `Validate` accept-gate — behavior-equivalent at the boundary); relocate
+   `/readyz` freshness into the `caches` block; ratify the `CONTEXT.md` glossary
+   terms and the `refresh` disambiguation (canonized with this design).
+   *Blocks (2). Can start immediately.*
 2. **Codex `models.json` freshness as a `cache` consumer.** Add the
-   `*cache.Value[[]byte]`, latest-release-tag tracking, version/hash ladder,
+   `*cache.Value[[]byte]` (registered only when `--codex-catalog-enabled`),
+   latest-release-tag tracking, the version/hash ladder with floor-revert, the
    `decodeCodexModels` accept-gate, parse-on-read (remove the package-level parsed
-   global), `--codex-catalog-refresh-interval`, and the `codex_models` `/readyz`
-   entry; author **ADR-0009** and update `CONFIGURATION.md` and the ROADMAP.
+   global), the unauthenticated `openai/codex` fetch,
+   `--codex-catalog-refresh-interval`, and the `codex_models` `/readyz` entry;
+   author **ADR-0009** and update `CONFIGURATION.md` and the ROADMAP.
    *Blocked by (1).*
 
 ## Glossary additions (`CONTEXT.md`)
 
-New canonical terms, added in sub-issue (1):
+New canonical terms, canonized in `CONTEXT.md` with this design:
 
 - **Cached value** — an in-memory value served from an embedded **fallback** and
   refreshed best-effort from upstream on a static TTL, holding last-good on
@@ -548,20 +571,24 @@ New canonical terms, added in sub-issue (1):
   `models.json` snapshot are cached values. *Avoid*: cache (unqualified), which is
   also used loosely for the Copilot token.
 - **Refresh ladder** — the version → hash → validate short-circuit a cached value
-  runs on each attempt: an unchanged **version** skips the download; an unchanged
-  content **hash** skips validate/swap; a failed **validate** (the accept-gate)
-  rejects the fetch and holds last-good.
-- **Cache registry** — the process-wide aggregate that primes, launches, observes,
-  and reports readiness across all cached values.
+  runs on each attempt: an unchanged **version** skips the download; a content
+  **hash** equal to the served value skips validate/swap (equal to the embedded
+  floor drops back to serving it); a failed **validate** (the accept-gate) rejects
+  the fetch and holds last-good.
+- **Cache registry** — the process-wide aggregate that primes, launches, and
+  observes all cached values.
 
-The existing reserved terms are unaffected: **refresh** stays reserved for the
-token-mint sense — the component deliberately avoids the word in its API, which
-*attempts* and *fetches* — and **discovery** stays impersonation's edge-specific
-term for its Microsoft-endpoint fetch.
+**refresh** is disambiguated, not globally reserved: as the *token-mint verb* it
+stays avoided (use **mint**); as the *cadence and mechanism of re-fetching a cached
+value* it is the sanctioned term (`--*-refresh-interval`, the **refresh ladder**).
+The engine's Go method names still prefer `attempt`/`fetch`, but the domain word
+for what a cached value does is *refresh*. **discovery** stays impersonation's
+edge-specific term for its Microsoft-endpoint fetch.
 
 ## ADR
 
 The runtime-cache decision (memory-only, embedded floor, latest-release-tag,
-outbound `openai/codex` dependency, disable-able) is recorded as **ADR-0009**,
-authored in sub-issue (2). ADR-0008 remains the record for the impersonation
-discovery decision; this design fulfils its deferred extraction.
+unauthenticated/credential-isolated outbound `openai/codex` dependency,
+disable-able) is recorded as **ADR-0009**, authored in sub-issue (2). ADR-0008
+remains the record for the impersonation discovery decision; this design fulfils
+its deferred extraction.

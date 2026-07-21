@@ -129,7 +129,10 @@ Fetching the current VS Code and Copilot Chat versions at runtime from their
 public Microsoft release endpoints, to keep the impersonated version headers
 current. Best-effort: the static fallback covers failure, and
 `--impersonation-refresh-interval=0` disables it (air-gapped / locked-egress).
-_Avoid_: refresh (reserved for the token-mint sense).
+_Avoid_: refresh — discovery is impersonation's own word for this fetch.
+(*Refresh* is governed, not forbidden: avoided for the token **mint**, but the
+sanctioned term for a **cached value**'s re-fetch cadence, e.g.
+`--impersonation-refresh-interval`.)
 
 **Shim**:
 A composable middleware layer that closes one specific parity gap (Phase 3+). Not
@@ -204,6 +207,24 @@ never hangs; a raw passthrough Route does not acquire SSE semantics from a
 `Content-Type` value alone. It is a copilotd-originated signal, never conflated
 with a forwarded upstream terminal.
 _Avoid_: fake terminal, injected error (unqualified)
+
+### Caching
+
+**Cached value**:
+An in-memory value served from an embedded **fallback** and refreshed best-effort
+from upstream on a static TTL, holding last-good on failure; never persisted. The
+impersonation version facts and the Codex `models.json` snapshot are cached values.
+_Avoid_: cache (unqualified), which is also used loosely for the Copilot token.
+
+**Refresh ladder**:
+The version → hash → validate short-circuit a cached value runs on each attempt: an
+unchanged **version** skips the download; a content **hash** equal to the served
+value skips validate/swap (equal to the embedded floor drops back to serving it); a
+failed **validate** (the accept-gate) rejects the fetch and holds last-good.
+
+**Cache registry**:
+The process-wide aggregate that primes, launches, and observes all cached values.
+_Avoid_: cache (unqualified).
 
 ### Runtime state
 
