@@ -35,8 +35,9 @@ func newHandler(apikey string, provider identity.Provider, observer Impersonatio
 	codexDesc := catalog.CodexDescriptor{
 		Enabled: codexConfig.Enabled,
 		RenderConfig: catalog.CodexRenderConfig{
-			AutoReviewModel: codexConfig.AutoReviewModel,
-			OverrideLimits:  codexConfig.OverrideLimits,
+			AutoReviewModel:          codexConfig.AutoReviewModel,
+			AutoReviewModelOverrides: codexConfig.AutoReviewModelOverrides,
+			OverrideLimits:           codexConfig.OverrideLimits,
 		},
 	}
 

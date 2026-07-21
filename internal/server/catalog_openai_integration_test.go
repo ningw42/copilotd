@@ -20,6 +20,71 @@ import (
 	"github.com/ningw42/copilotd/internal/identity"
 )
 
+func TestCodexCatalogPerModelReviewerOverRealListener(t *testing.T) {
+	const (
+		mainModel = "gpt-5.6-sol"
+		reviewer  = "gpt-5.4-mini"
+	)
+	captured, err := os.ReadFile("../catalog/testdata/copilot-models-2026-07-18.json")
+	if err != nil {
+		t.Fatalf("read captured catalog: %v", err)
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(captured)
+	}))
+	defer upstream.Close()
+
+	cfg := testConfig()
+	cfg.Codex = config.CodexConfig{
+		Enabled: true,
+		AutoReviewModelOverrides: map[string]string{
+			mainModel: reviewer,
+		},
+	}
+	provider := identity.NewStatic(identity.Credential{BaseURL: upstream.URL, Token: "copilot-token"}, true)
+	forwarder := forward.New(provider, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
+	base := startServer(t, New(cfg, discardLogger(t), provider, newTestImpersonationObserver(), forwarder, newTestWSProxy(provider), NewStreamOutcomeCounter()))
+	req, err := http.NewRequest(http.MethodGet, base+"/openai/v1/models?client_version=0.144.5", nil)
+	if err != nil {
+		t.Fatalf("build catalog request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+testAPIKey)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET catalog: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read catalog: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("catalog status = %d %s, want 200", resp.StatusCode, body)
+	}
+
+	var envelope struct {
+		Models []struct {
+			Slug     string `json:"slug"`
+			Reviewer string `json:"auto_review_model_override"`
+		} `json:"models"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil || len(envelope.Models) == 0 {
+		t.Fatalf("overrides-only response is not a non-empty Codex catalog: %v\n%s", err, body)
+	}
+	var mainHasReviewer, reviewerAdvertised bool
+	for _, model := range envelope.Models {
+		if model.Slug == mainModel && model.Reviewer == reviewer {
+			mainHasReviewer = true
+		}
+		if model.Slug == reviewer {
+			reviewerAdvertised = true
+		}
+	}
+	if !mainHasReviewer || !reviewerAdvertised {
+		t.Errorf("per-model routing = main override %v, reviewer advertised %v", mainHasReviewer, reviewerAdvertised)
+	}
+}
+
 func TestCodexCatalogOverRealListener(t *testing.T) {
 	const (
 		reviewer                 = "gpt-5.4"
@@ -231,19 +296,25 @@ func TestCodexCatalogConfigWiringWarningAndAccessLogConfidentiality(t *testing.T
 		modelBodySecret = "model-body-secret-59"
 		vendorSecret    = "vendor-body-secret-59"
 		copilotToken    = "copilot-token-secret-59"
+		mainModel       = "gpt-5.4-mini"
 		reviewer        = "configured-missing-reviewer"
 	)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet || r.URL.RequestURI() != "/models" {
 			t.Errorf("upstream request = %s %s, want GET /models", r.Method, r.URL.RequestURI())
 		}
-		_, _ = io.WriteString(w, `{"data":[{"id":"`+modelBodySecret+`","vendor":"`+vendorSecret+`","model_picker_enabled":true,"supported_endpoints":["/responses"]}]}`)
+		_, _ = io.WriteString(w, `{"data":[{"id":"`+mainModel+`","vendor":"`+vendorSecret+`","secret":"`+modelBodySecret+`","model_picker_enabled":true,"supported_endpoints":["/responses"]}]}`)
 	}))
 	defer upstream.Close()
 
 	logger, logs := bufferLogger(t, "info")
 	cfg := testConfig()
-	cfg.Codex = config.CodexConfig{Enabled: true, AutoReviewModel: reviewer}
+	cfg.Codex = config.CodexConfig{
+		Enabled: true,
+		AutoReviewModelOverrides: map[string]string{
+			mainModel: reviewer,
+		},
+	}
 	provider := identity.NewStatic(identity.Credential{BaseURL: upstream.URL, Token: copilotToken}, true)
 	forwarder := forward.New(provider, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 	base := startServer(t, New(cfg, logger, provider, newTestImpersonationObserver(), forwarder, newTestWSProxy(provider), NewStreamOutcomeCounter()))
@@ -269,8 +340,8 @@ func TestCodexCatalogConfigWiringWarningAndAccessLogConfidentiality(t *testing.T
 
 	codexResponse, codexBody := requestCatalog("/openai/v1/models?client_version=" + querySecret)
 	openAIResponse, openAIBody := requestCatalog("/openai/v1/models")
-	if codexResponse.StatusCode != http.StatusOK || string(codexBody) != `{"models":[]}` {
-		t.Fatalf("Codex response = %d %s, want 200 client-shaped empty intersection", codexResponse.StatusCode, codexBody)
+	if codexResponse.StatusCode != http.StatusOK || !strings.HasPrefix(string(codexBody), `{"models":[{`) {
+		t.Fatalf("Codex response = %d %s, want 200 non-empty client-shaped catalog", codexResponse.StatusCode, codexBody)
 	}
 	if openAIResponse.StatusCode != http.StatusOK || !strings.HasPrefix(string(openAIBody), `{"object":"list","data":[`) {
 		t.Fatalf("OpenAI fallback response = %d %s, want unchanged provider shape", openAIResponse.StatusCode, openAIBody)
@@ -286,7 +357,7 @@ func TestCodexCatalogConfigWiringWarningAndAccessLogConfidentiality(t *testing.T
 		t.Errorf("reviewer-skip warning count = %d, want exactly 1:\n%s", got, output)
 	}
 	for _, want := range []string{
-		"level=WARN", "reviewer=" + reviewer,
+		"level=WARN", "model=" + mainModel, "reviewer=" + reviewer,
 		"catalog_shape=codex", "catalog_shape=openai",
 		`route="GET /openai/v1/models"`,
 	} {

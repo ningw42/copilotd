@@ -7,17 +7,26 @@ import (
 	"sort"
 )
 
-// CodexRenderConfig contains the two mutations the pure Codex renderer may
-// apply. Whether to emit the Codex catalog at all is a handler concern.
+// CodexRenderConfig contains the reviewer and limits mutations the pure Codex
+// renderer may apply. Whether to emit the Codex catalog at all is a handler
+// concern.
 type CodexRenderConfig struct {
-	AutoReviewModel string
-	OverrideLimits  bool
+	AutoReviewModel          string
+	AutoReviewModelOverrides map[string]string
+	OverrideLimits           bool
 }
 
-// CodexRenderOutcome reports a configured reviewer that could not safely be
-// injected. Callers can turn this pure outcome into one warning per render.
+// SkippedReviewer identifies one emitted main model whose resolved reviewer
+// could not safely be injected.
+type SkippedReviewer struct {
+	Model    string
+	Reviewer string
+}
+
+// CodexRenderOutcome reports configured reviewers that could not safely be
+// injected. Callers can turn each pure outcome event into one warning.
 type CodexRenderOutcome struct {
-	SkippedReviewer string
+	SkippedReviewers []SkippedReviewer
 }
 
 // RenderCodex intersects Responses-forwardable Copilot models with the
@@ -33,13 +42,6 @@ func RenderCodex(forwardable []Model, cfg CodexRenderConfig) ([]byte, CodexRende
 	}
 
 	var outcome CodexRenderOutcome
-	injectReviewer := false
-	if cfg.AutoReviewModel != "" {
-		_, injectReviewer = emitted[cfg.AutoReviewModel]
-		if !injectReviewer {
-			outcome.SkippedReviewer = cfg.AutoReviewModel
-		}
-	}
 
 	entries := make([]map[string]json.RawMessage, 0, len(emitted))
 	for _, model := range forwardable {
@@ -52,12 +54,22 @@ func RenderCodex(forwardable []Model, cfg CodexRenderConfig) ([]byte, CodexRende
 		// The snapshot's value is not authoritative for this deployment. Omit
 		// it unless the configured reviewer is itself safe to advertise.
 		delete(fields, "auto_review_model_override")
-		if injectReviewer {
-			rawReviewer, err := json.Marshal(cfg.AutoReviewModel)
+		reviewer, overridden := cfg.AutoReviewModelOverrides[model.ID]
+		if !overridden {
+			reviewer = cfg.AutoReviewModel
+		}
+		_, injectReviewer := emitted[reviewer]
+		if reviewer != "" && injectReviewer {
+			rawReviewer, err := json.Marshal(reviewer)
 			if err != nil {
 				return nil, outcome, fmt.Errorf("encode Codex reviewer: %w", err)
 			}
 			fields["auto_review_model_override"] = rawReviewer
+		} else if reviewer != "" {
+			outcome.SkippedReviewers = append(outcome.SkippedReviewers, SkippedReviewer{
+				Model:    model.ID,
+				Reviewer: reviewer,
+			})
 		}
 		if cfg.OverrideLimits {
 			if limit := model.Capabilities.Limits.MaxPromptTokens; limit != nil {

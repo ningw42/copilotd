@@ -55,9 +55,12 @@ func Handler(ep endpoint.Catalog, rendering Rendering, fetcher Fetcher) http.Han
 			shape = CatalogShapeCodex
 			var outcome CodexRenderOutcome
 			representation, outcome, err = RenderCodex(filtered, rendering.Codex.RenderConfig)
-			if err == nil && outcome.SkippedReviewer != "" && rendering.Logger != nil {
-				rendering.Logger.WarnContext(r.Context(), "Codex catalog reviewer was skipped",
-					slog.String("reviewer", outcome.SkippedReviewer))
+			if err == nil && rendering.Logger != nil {
+				for _, skipped := range outcome.SkippedReviewers {
+					rendering.Logger.WarnContext(r.Context(), "Codex catalog reviewer was skipped",
+						slog.String("model", skipped.Model),
+						slog.String("reviewer", skipped.Reviewer))
+				}
 			}
 		} else {
 			representation, err = rendering.Render(filtered)
@@ -83,7 +86,9 @@ func servesCodexShape(ep endpoint.Catalog, rendering Rendering, r *http.Request)
 	return ep.Surface() == endpoint.OpenAI &&
 		r.URL.Query().Has("client_version") &&
 		rendering.Codex.Enabled &&
-		(rendering.Codex.RenderConfig.AutoReviewModel != "" || rendering.Codex.RenderConfig.OverrideLimits)
+		(rendering.Codex.RenderConfig.AutoReviewModel != "" ||
+			len(rendering.Codex.RenderConfig.AutoReviewModelOverrides) > 0 ||
+			rendering.Codex.RenderConfig.OverrideLimits)
 }
 
 func writeFetchError(w http.ResponseWriter, surface endpoint.Surface, err error) {

@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -73,8 +74,154 @@ func TestLoadDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadServe() error = %v", err)
 	}
-	if got != defaultConfig() {
+	if !reflect.DeepEqual(got, defaultConfig()) {
 		t.Errorf("loadServe() = %+v, want %+v", got, defaultConfig())
+	}
+}
+
+func TestCodexAutoReviewModelOverridesDefaultsToEmptyMap(t *testing.T) {
+	got, err := loadServe([]string{"--apikey", testAPIKey}, noEnv())
+	if err != nil {
+		t.Fatalf("loadServe() error = %v", err)
+	}
+	if len(got.Codex.AutoReviewModelOverrides) != 0 {
+		t.Errorf("AutoReviewModelOverrides = %v, want empty map", got.Codex.AutoReviewModelOverrides)
+	}
+}
+
+func TestCodexAutoReviewModelOverridesResolvesFlag(t *testing.T) {
+	got, err := loadServe([]string{
+		"--apikey", testAPIKey,
+		"--codex-auto-review-model-overrides", "gpt-5=reviewer-mini",
+	}, noEnv())
+	if err != nil {
+		t.Fatalf("loadServe() error = %v", err)
+	}
+	want := map[string]string{"gpt-5": "reviewer-mini"}
+	if !reflect.DeepEqual(got.Codex.AutoReviewModelOverrides, want) {
+		t.Errorf("AutoReviewModelOverrides = %v, want %v", got.Codex.AutoReviewModelOverrides, want)
+	}
+}
+
+func TestCodexAutoReviewModelOverridesNormalizesPairs(t *testing.T) {
+	got, err := loadServe([]string{
+		"--apikey", testAPIKey,
+		"--codex-auto-review-model-overrides", "  gpt-5 = reviewer=variant ,, mini = fast ,  ",
+	}, noEnv())
+	if err != nil {
+		t.Fatalf("loadServe() error = %v", err)
+	}
+	want := map[string]string{
+		"gpt-5": "reviewer=variant",
+		"mini":  "fast",
+	}
+	if !reflect.DeepEqual(got.Codex.AutoReviewModelOverrides, want) {
+		t.Errorf("AutoReviewModelOverrides = %v, want %v", got.Codex.AutoReviewModelOverrides, want)
+	}
+}
+
+func TestCodexAutoReviewModelOverridesRejectsMalformedPairs(t *testing.T) {
+	tests := map[string]string{
+		"missing equals": "gpt-5-reviewer",
+		"empty key":      "=reviewer",
+		"empty value":    "gpt-5=",
+		"duplicate key":  "gpt-5=first,gpt-5=second",
+	}
+
+	for name, value := range tests {
+		t.Run(name, func(t *testing.T) {
+			_, err := loadServe([]string{
+				"--apikey", testAPIKey,
+				"--codex-auto-review-model-overrides", value,
+			}, noEnv())
+			if err == nil {
+				t.Fatalf("loadServe() error = nil, want %q rejected", value)
+			}
+			if !strings.Contains(err.Error(), "codex-auto-review-model-overrides") {
+				t.Errorf("error = %q, want key context", err)
+			}
+		})
+	}
+}
+
+func TestCodexAutoReviewModelOverridesUsesWholesalePrecedence(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "copilotd.toml")
+	if err := os.WriteFile(path, []byte(`codex-auto-review-model-overrides = "file-main=file-reviewer"`+"\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	tests := []struct {
+		name string
+		args []string
+		env  map[string]string
+		want map[string]string
+	}{
+		{
+			name: "TOML overrides default",
+			args: []string{"--config", path},
+			want: map[string]string{"file-main": "file-reviewer"},
+		},
+		{
+			name: "env replaces TOML wholesale",
+			args: []string{"--config", path},
+			env: map[string]string{
+				"COPILOTD_CODEX_AUTO_REVIEW_MODEL_OVERRIDES": "env-main=env-reviewer",
+			},
+			want: map[string]string{"env-main": "env-reviewer"},
+		},
+		{
+			name: "flag replaces env wholesale",
+			args: []string{
+				"--config", path,
+				"--codex-auto-review-model-overrides", "flag-main=flag-reviewer",
+			},
+			env: map[string]string{
+				"COPILOTD_CODEX_AUTO_REVIEW_MODEL_OVERRIDES": "env-main=env-reviewer",
+			},
+			want: map[string]string{"flag-main": "flag-reviewer"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			env := map[string]string{"COPILOTD_APIKEY": testAPIKey}
+			for key, value := range tc.env {
+				env[key] = value
+			}
+			got, err := loadServe(tc.args, envFunc(env))
+			if err != nil {
+				t.Fatalf("loadServe() error = %v", err)
+			}
+			if !reflect.DeepEqual(got.Codex.AutoReviewModelOverrides, tc.want) {
+				t.Errorf("AutoReviewModelOverrides = %v, want %v", got.Codex.AutoReviewModelOverrides, tc.want)
+			}
+		})
+	}
+}
+
+func TestCodexAutoReviewModelOverridesIsLoggedNormalizedWhenCatalogDisabled(t *testing.T) {
+	got, err := loadServe([]string{
+		"--apikey", testAPIKey,
+		"--codex-catalog-enabled=false",
+		"--codex-auto-review-model-overrides", " z-main = z-reviewer , a-main=a-reviewer ",
+	}, noEnv())
+	if err != nil {
+		t.Fatalf("loadServe() error = %v, want staged disabled config accepted", err)
+	}
+	if got.Codex.Enabled {
+		t.Fatal("Codex.Enabled = true, want catalog disabled")
+	}
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	logger.Info("effective config", "config", got)
+	out := buf.String()
+	want := `config.codex-auto-review-model-overrides="a-main=a-reviewer,z-main=z-reviewer"`
+	if !strings.Contains(out, want) {
+		t.Errorf("log output missing %q\nfull: %s", want, out)
+	}
+	if strings.Contains(out, " z-main = z-reviewer ") {
+		t.Errorf("log output contains unparsed staging value\nfull: %s", out)
 	}
 }
 
@@ -138,7 +285,7 @@ func TestCodexConfigPrecedence(t *testing.T) {
 			if err != nil {
 				t.Fatalf("loadServe() error = %v", err)
 			}
-			if got.Codex != tc.want {
+			if !reflect.DeepEqual(got.Codex, tc.want) {
 				t.Errorf("Codex = %+v, want %+v", got.Codex, tc.want)
 			}
 		})
@@ -193,7 +340,7 @@ func TestCodexConfigIsInertWhenDisabled(t *testing.T) {
 		t.Fatalf("loadServe() error = %v, want staged disabled config accepted", err)
 	}
 	want := CodexConfig{AutoReviewModel: "staged-reviewer", OverrideLimits: true}
-	if got.Codex != want {
+	if !reflect.DeepEqual(got.Codex, want) {
 		t.Errorf("Codex = %+v, want inert staged config %+v", got.Codex, want)
 	}
 }
@@ -356,7 +503,7 @@ func TestRemovedUpstreamBaseSettingsHaveNoEffect(t *testing.T) {
 		if err != nil {
 			t.Fatalf("loadServe() error = %v", err)
 		}
-		if got != defaultConfig() {
+		if !reflect.DeepEqual(got, defaultConfig()) {
 			t.Errorf("loadServe() = %+v, want the default config; removed environment setting must be ignored", got)
 		}
 	})
@@ -370,7 +517,7 @@ func TestRemovedUpstreamBaseSettingsHaveNoEffect(t *testing.T) {
 		if err != nil {
 			t.Fatalf("loadServe() error = %v", err)
 		}
-		if got != defaultConfig() {
+		if !reflect.DeepEqual(got, defaultConfig()) {
 			t.Errorf("loadServe() = %+v, want the default config; removed TOML setting must be ignored", got)
 		}
 	})
@@ -687,7 +834,7 @@ func TestLoadPrecedence(t *testing.T) {
 			if err != nil {
 				t.Fatalf("loadServe() error = %v", err)
 			}
-			if got != tc.want {
+			if !reflect.DeepEqual(got, tc.want) {
 				t.Errorf("loadServe() = %+v, want %+v", got, tc.want)
 			}
 		})

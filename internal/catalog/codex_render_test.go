@@ -15,8 +15,8 @@ func TestRenderCodexIntersectsInLiveOrderAndEmitsCompleteEntries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RenderCodex: %v", err)
 	}
-	if outcome.SkippedReviewer != "" {
-		t.Errorf("skipped reviewer = %q, want empty", outcome.SkippedReviewer)
+	if len(outcome.SkippedReviewers) != 0 {
+		t.Errorf("skipped reviewers = %v, want none", outcome.SkippedReviewers)
 	}
 
 	entries := decodeRenderedCodex(t, body)
@@ -60,7 +60,9 @@ func TestRenderCodexIntersectsInLiveOrderAndEmitsCompleteEntries(t *testing.T) {
 
 func TestRenderCodexCopiesSnapshotFieldsVerbatimAndDoesNotAliasThem(t *testing.T) {
 	models := Filter(capturedModels(t), endpoint.RouteOpenAIResponses)
-	body, _, err := RenderCodex(models, CodexRenderConfig{})
+	body, _, err := RenderCodex(models, CodexRenderConfig{
+		AutoReviewModelOverrides: map[string]string{"gpt-5.4": "gpt-5.4-mini"},
+	})
 	if err != nil {
 		t.Fatalf("RenderCodex: %v", err)
 	}
@@ -77,8 +79,13 @@ func TestRenderCodexCopiesSnapshotFieldsVerbatimAndDoesNotAliasThem(t *testing.T
 				t.Errorf("%s.%s changed:\n got: %s\nwant: %s", slug, field, got, want)
 			}
 		}
-		if _, ok := entry["auto_review_model_override"]; ok {
-			t.Errorf("%s retained auto_review_model_override without a reviewer", slug)
+		rawReviewer, hasReviewer := entry["auto_review_model_override"]
+		if slug == "gpt-5.4" {
+			if got := decodeStringField(t, entry, "auto_review_model_override"); got != "gpt-5.4-mini" {
+				t.Errorf("%s reviewer = %q, want gpt-5.4-mini", slug, got)
+			}
+		} else if hasReviewer {
+			t.Errorf("%s retained auto_review_model_override without a reviewer: %s", slug, rawReviewer)
 		}
 	}
 
@@ -92,15 +99,15 @@ func TestRenderCodexCopiesSnapshotFieldsVerbatimAndDoesNotAliasThem(t *testing.T
 func TestRenderCodexInjectsOnlyAnEmittedReviewer(t *testing.T) {
 	models := Filter(capturedModels(t), endpoint.RouteOpenAIResponses)
 	tests := []struct {
-		name        string
-		reviewer    string
-		wantValue   string
-		wantSkipped string
+		name      string
+		reviewer  string
+		wantValue string
+		wantSkips bool
 	}{
 		{name: "empty reviewer"},
 		{name: "emitted reviewer overwrites snapshot value", reviewer: "gpt-5.4-mini", wantValue: "gpt-5.4-mini"},
-		{name: "snapshot-only reviewer is skipped", reviewer: "codex-auto-review", wantSkipped: "codex-auto-review"},
-		{name: "Copilot-only reviewer is skipped", reviewer: "gpt-5.3-codex", wantSkipped: "gpt-5.3-codex"},
+		{name: "snapshot-only reviewer is skipped", reviewer: "codex-auto-review", wantSkips: true},
+		{name: "Copilot-only reviewer is skipped", reviewer: "gpt-5.3-codex", wantSkips: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -108,10 +115,20 @@ func TestRenderCodexInjectsOnlyAnEmittedReviewer(t *testing.T) {
 			if err != nil {
 				t.Fatalf("RenderCodex: %v", err)
 			}
-			if outcome.SkippedReviewer != tc.wantSkipped {
-				t.Errorf("skipped reviewer = %q, want %q", outcome.SkippedReviewer, tc.wantSkipped)
+			entries := decodeRenderedCodex(t, body)
+			wantSkipCount := 0
+			if tc.wantSkips {
+				wantSkipCount = len(entries)
 			}
-			for i, entry := range decodeRenderedCodex(t, body) {
+			if len(outcome.SkippedReviewers) != wantSkipCount {
+				t.Errorf("skipped reviewers = %#v, want %d", outcome.SkippedReviewers, wantSkipCount)
+			}
+			for _, skipped := range outcome.SkippedReviewers {
+				if skipped.Reviewer != tc.reviewer {
+					t.Errorf("skipped reviewer = %q, want %q", skipped.Reviewer, tc.reviewer)
+				}
+			}
+			for i, entry := range entries {
 				raw, ok := entry["auto_review_model_override"]
 				if tc.wantValue == "" {
 					if ok {
@@ -128,6 +145,147 @@ func TestRenderCodexInjectsOnlyAnEmittedReviewer(t *testing.T) {
 	}
 }
 
+func TestRenderCodexResolvesPerModelReviewerBeforeGlobalFallback(t *testing.T) {
+	models := []Model{{ID: "gpt-5.4-mini"}, {ID: "gpt-5.4"}, {ID: "gpt-5.5"}}
+	body, outcome, err := RenderCodex(models, CodexRenderConfig{
+		AutoReviewModel: "gpt-5.5",
+		AutoReviewModelOverrides: map[string]string{
+			"gpt-5.4-mini": "gpt-5.4",
+		},
+	})
+	if err != nil {
+		t.Fatalf("RenderCodex: %v", err)
+	}
+	if len(outcome.SkippedReviewers) != 0 {
+		t.Errorf("skipped reviewers = %v, want none", outcome.SkippedReviewers)
+	}
+
+	entries := decodeRenderedCodex(t, body)
+	if got := decodeStringField(t, entries[0], "auto_review_model_override"); got != "gpt-5.4" {
+		t.Errorf("gpt-5.4-mini reviewer = %q, want per-model gpt-5.4", got)
+	}
+	for _, entry := range entries[1:] {
+		if got := decodeStringField(t, entry, "auto_review_model_override"); got != "gpt-5.5" {
+			t.Errorf("%s reviewer = %q, want global gpt-5.5", decodeStringField(t, entry, "slug"), got)
+		}
+	}
+}
+
+func TestRenderCodexResolvesReviewerOverridesSingleHop(t *testing.T) {
+	models := []Model{{ID: "gpt-5.4-mini"}, {ID: "gpt-5.4"}, {ID: "gpt-5.5"}}
+	body, _, err := RenderCodex(models, CodexRenderConfig{
+		AutoReviewModelOverrides: map[string]string{
+			"gpt-5.4-mini": "gpt-5.4",
+			"gpt-5.4":      "gpt-5.5",
+		},
+	})
+	if err != nil {
+		t.Fatalf("RenderCodex: %v", err)
+	}
+
+	entries := decodeRenderedCodex(t, body)
+	if got := decodeStringField(t, entries[0], "auto_review_model_override"); got != "gpt-5.4" {
+		t.Errorf("gpt-5.4-mini reviewer = %q, want single-hop gpt-5.4", got)
+	}
+	if got := decodeStringField(t, entries[1], "auto_review_model_override"); got != "gpt-5.5" {
+		t.Errorf("gpt-5.4 reviewer = %q, want gpt-5.5", got)
+	}
+	if _, ok := entries[2]["auto_review_model_override"]; ok {
+		t.Error("gpt-5.5 has an override without an explicit or global reviewer")
+	}
+}
+
+func TestRenderCodexSkipsBadExplicitReviewerWithoutGlobalFallback(t *testing.T) {
+	const missingReviewer = "missing-reviewer"
+	limit := 123
+	models := []Model{
+		{ID: "gpt-5.4-mini", Capabilities: Capabilities{Limits: Limits{MaxPromptTokens: &limit}}},
+		{ID: "gpt-5.4"},
+		{ID: "gpt-5.5"},
+	}
+	body, outcome, err := RenderCodex(models, CodexRenderConfig{
+		AutoReviewModel: "gpt-5.5",
+		AutoReviewModelOverrides: map[string]string{
+			"gpt-5.4-mini": missingReviewer,
+		},
+		OverrideLimits: true,
+	})
+	if err != nil {
+		t.Fatalf("RenderCodex: %v", err)
+	}
+	wantSkipped := []SkippedReviewer{{Model: "gpt-5.4-mini", Reviewer: missingReviewer}}
+	if !reflect.DeepEqual(outcome.SkippedReviewers, wantSkipped) {
+		t.Errorf("skipped reviewers = %#v, want %#v", outcome.SkippedReviewers, wantSkipped)
+	}
+
+	entries := decodeRenderedCodex(t, body)
+	if got := renderedSlugs(t, entries); !contains(got, "gpt-5.4-mini") {
+		t.Fatalf("rendered slugs %q dropped the main model", got)
+	}
+	if _, ok := entries[0]["auto_review_model_override"]; ok {
+		t.Error("main model fell back to the valid global reviewer")
+	}
+	assertJSONInt(t, entries[0], "context_window", limit)
+	for _, entry := range entries[1:] {
+		if got := decodeStringField(t, entry, "auto_review_model_override"); got != "gpt-5.5" {
+			t.Errorf("%s reviewer = %q, want global gpt-5.5", decodeStringField(t, entry, "slug"), got)
+		}
+	}
+}
+
+func TestRenderCodexReportsBadGlobalPerAffectedModelInEmissionOrder(t *testing.T) {
+	const missingReviewer = "missing-global-reviewer"
+	models := []Model{{ID: "gpt-5.4-mini"}, {ID: "gpt-5.4"}, {ID: "gpt-5.5"}}
+	body, outcome, err := RenderCodex(models, CodexRenderConfig{
+		AutoReviewModel: missingReviewer,
+		AutoReviewModelOverrides: map[string]string{
+			"gpt-5.4": "gpt-5.4-mini",
+		},
+	})
+	if err != nil {
+		t.Fatalf("RenderCodex: %v", err)
+	}
+	wantSkipped := []SkippedReviewer{
+		{Model: "gpt-5.4-mini", Reviewer: missingReviewer},
+		{Model: "gpt-5.5", Reviewer: missingReviewer},
+	}
+	if !reflect.DeepEqual(outcome.SkippedReviewers, wantSkipped) {
+		t.Errorf("skipped reviewers = %#v, want emission-ordered %#v", outcome.SkippedReviewers, wantSkipped)
+	}
+
+	entries := decodeRenderedCodex(t, body)
+	if _, ok := entries[0]["auto_review_model_override"]; ok {
+		t.Error("gpt-5.4-mini injected an unforwardable global reviewer")
+	}
+	if got := decodeStringField(t, entries[1], "auto_review_model_override"); got != "gpt-5.4-mini" {
+		t.Errorf("gpt-5.4 reviewer = %q, want valid explicit reviewer", got)
+	}
+	if _, ok := entries[2]["auto_review_model_override"]; ok {
+		t.Error("gpt-5.5 injected an unforwardable global reviewer")
+	}
+}
+
+func TestRenderCodexIgnoresNonAdvertisedAndMiscasedOverrideKeys(t *testing.T) {
+	models := []Model{{ID: "gpt-5.4-mini"}, {ID: "gpt-5.4"}}
+	body, outcome, err := RenderCodex(models, CodexRenderConfig{
+		AutoReviewModelOverrides: map[string]string{
+			"gpt-5.5":      "missing-reviewer",
+			"GPT-5.4-MINI": "missing-reviewer",
+		},
+	})
+	if err != nil {
+		t.Fatalf("RenderCodex: %v", err)
+	}
+	if len(outcome.SkippedReviewers) != 0 {
+		t.Errorf("skipped reviewers = %#v, want none for inert keys", outcome.SkippedReviewers)
+	}
+	for _, entry := range decodeRenderedCodex(t, body) {
+		if _, ok := entry["auto_review_model_override"]; ok {
+			t.Errorf("%s gained a reviewer from an inert key", decodeStringField(t, entry, "slug"))
+		}
+	}
+}
+
 func TestRenderCodexDropsAReviewerCopilotStopsForwarding(t *testing.T) {
 	models := Filter(capturedModels(t), endpoint.RouteOpenAIResponses)
 	withoutReviewer := make([]Model, 0, len(models)-1)
@@ -141,10 +299,17 @@ func TestRenderCodexDropsAReviewerCopilotStopsForwarding(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RenderCodex: %v", err)
 	}
-	if outcome.SkippedReviewer != "gpt-5.4" {
-		t.Errorf("skipped reviewer = %q, want gpt-5.4", outcome.SkippedReviewer)
+	entries := decodeRenderedCodex(t, body)
+	slugs := renderedSlugs(t, entries)
+	if len(outcome.SkippedReviewers) != len(slugs) {
+		t.Errorf("skipped reviewers = %#v, want one per emitted model", outcome.SkippedReviewers)
 	}
-	if slugs := renderedSlugs(t, decodeRenderedCodex(t, body)); contains(slugs, "gpt-5.4") {
+	for i, skipped := range outcome.SkippedReviewers {
+		if skipped.Model != slugs[i] || skipped.Reviewer != "gpt-5.4" {
+			t.Errorf("skipped reviewers[%d] = %#v, want model %q reviewer gpt-5.4", i, skipped, slugs[i])
+		}
+	}
+	if contains(slugs, "gpt-5.4") {
 		t.Errorf("rendered slugs %q retained model Copilot stopped forwarding", slugs)
 	}
 }

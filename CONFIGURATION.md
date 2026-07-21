@@ -30,6 +30,7 @@ uses the flat TOML keys shown below. Durations use Go duration syntax such as
 | [`--shim-nop-enabled=<BOOL>`](#--shim-nop-enabled) | `COPILOTD_SHIM_NOP_ENABLED` | `shim-nop-enabled` | `false` | `serve` |
 | [`--codex-catalog-enabled=<BOOL>`](#--codex-catalog-enabled) | `COPILOTD_CODEX_CATALOG_ENABLED` | `codex-catalog-enabled` | `false` | `serve` |
 | [`--codex-auto-review-model <SLUG>`](#--codex-auto-review-model) | `COPILOTD_CODEX_AUTO_REVIEW_MODEL` | `codex-auto-review-model` | Empty | `serve` |
+| [`--codex-auto-review-model-overrides <MAP>`](#--codex-auto-review-model-overrides) | `COPILOTD_CODEX_AUTO_REVIEW_MODEL_OVERRIDES` | `codex-auto-review-model-overrides` | Empty | `serve` |
 | [`--codex-catalog-override-limits=<BOOL>`](#--codex-catalog-override-limits) | `COPILOTD_CODEX_CATALOG_OVERRIDE_LIMITS` | `codex-catalog-override-limits` | `false` | `serve` |
 | [`--github-oauth-token <TOKEN>`](#--github-oauth-token) | `COPILOTD_GITHUB_OAUTH_TOKEN` | `github-oauth-token` | Empty | `serve` |
 | [`--startup-mint-retries <COUNT>`](#--startup-mint-retries) | `COPILOTD_STARTUP_MINT_RETRIES` | `startup-mint-retries` | `3` | `serve` |
@@ -126,6 +127,32 @@ auto-review model or live-limit override is configured.
 
 Injects the model slug as Codex's auto-review model when it is present in both
 the vendored Codex catalog and the live Copilot catalog.
+
+### `--codex-auto-review-model-overrides`
+
+Sets per-main-model reviewers as a comma-separated string of `MAIN=REVIEWER`
+pairs. The default is the empty string. For example:
+
+```sh
+copilotd serve --codex-auto-review-model-overrides \
+  'gpt-5.4=gpt-5.4-mini,gpt-5.6-sol=gpt-5.4'
+```
+
+For each advertised main model, its per-model override wins; models without an
+override fall back to `--codex-auto-review-model`. A configured per-model entry
+is authoritative: if its reviewer cannot be advertised, copilotd skips that
+injection and warns instead of silently using the global reviewer.
+
+The exact configuration precedence is flag > environment variable > TOML file >
+default. The highest-precedence layer supplies the complete string; maps are
+replaced wholesale rather than merged across layers. The environment variable is
+`COPILOTD_CODEX_AUTO_REVIEW_MODEL_OVERRIDES`, and the flat TOML string key is
+`codex-auto-review-model-overrides`.
+
+Surrounding whitespace is ignored, and empty comma-separated segments are
+tolerated, including a trailing or doubled comma. Any non-empty segment with a
+missing `=`, empty main-model slug, or empty reviewer slug fails configuration
+resolution before the server binds; duplicate main-model slugs also fail fast.
 
 ### `--codex-catalog-override-limits`
 

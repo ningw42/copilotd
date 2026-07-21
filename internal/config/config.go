@@ -84,9 +84,14 @@ var (
 // settings, while this value gives the server one cohesive value to thread to
 // the catalog renderer.
 type CodexConfig struct {
-	Enabled         bool
-	AutoReviewModel string
-	OverrideLimits  bool
+	Enabled                  bool
+	AutoReviewModel          string
+	AutoReviewModelOverrides map[string]string
+	OverrideLimits           bool
+
+	// autoReviewModelOverridesRaw carries the winning scalar config value until
+	// Resolve parses it into AutoReviewModelOverrides after all layers apply.
+	autoReviewModelOverridesRaw string
 }
 
 // ServeConfig is the resolved, validated configuration for `copilotd serve`. It
@@ -185,6 +190,7 @@ func (c ServeConfig) LogValue() slog.Value {
 		slog.Bool("shim-nop-enabled", c.ShimNopEnabled),
 		slog.Bool("codex-catalog-enabled", c.Codex.Enabled),
 		slog.String("codex-auto-review-model", c.Codex.AutoReviewModel),
+		slog.String("codex-auto-review-model-overrides", formatAutoReviewModelOverrides(c.Codex.AutoReviewModelOverrides)),
 		slog.Bool("codex-catalog-override-limits", c.Codex.OverrideLimits),
 		slog.Int("startup-mint-retries", c.StartupMintRetries),
 		slog.String("vscode-version", c.VSCodeVersionFallback),
@@ -193,6 +199,20 @@ func (c ServeConfig) LogValue() slog.Value {
 		slog.String("github-api-version", c.GithubAPIVersion),
 		slog.Duration("impersonation-refresh-interval", c.ImpersonationRefreshInterval),
 	)
+}
+
+func formatAutoReviewModelOverrides(overrides map[string]string) string {
+	keys := make([]string, 0, len(overrides))
+	for key := range overrides {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+
+	pairs := make([]string, 0, len(keys))
+	for _, key := range keys {
+		pairs = append(pairs, key+"="+overrides[key])
+	}
+	return strings.Join(pairs, ",")
 }
 
 // commonFlags is a command-local registration of the five operational settings
@@ -256,6 +276,7 @@ type ServeFlags struct {
 	shimNopEnabled            *bool
 	codexCatalogEnabled       *bool
 	codexAutoReviewModel      *string
+	codexAutoReviewOverrides  *string
 	codexOverrideLimits       *bool
 
 	githubOAuthToken             *string
@@ -287,6 +308,7 @@ func RegisterServe(fs *ff.FlagSet) *ServeFlags {
 	f.shimNopEnabled = fs.BoolLongDefault("shim-nop-enabled", defaultShimNopEnabled, "enable the canonical no-op shim")
 	f.codexCatalogEnabled = fs.BoolLongDefault("codex-catalog-enabled", defaultCodexCatalogEnabled, "enable the Codex client-shaped catalog")
 	f.codexAutoReviewModel = fs.StringLong("codex-auto-review-model", defaultCodexAutoReviewModel, "reviewer model injected into the Codex catalog")
+	f.codexAutoReviewOverrides = fs.StringLong("codex-auto-review-model-overrides", "", "per-main-model reviewer overrides (main=reviewer,...)")
 	f.codexOverrideLimits = fs.BoolLongDefault("codex-catalog-override-limits", defaultCodexOverrideLimits, "override Codex catalog limits with live Copilot limits")
 
 	f.githubOAuthToken = fs.StringLong("github-oauth-token", "", "inline GitHub OAuth token (secret; precedence over the GitHub OAuth token file)")
@@ -394,6 +416,9 @@ func (f *ServeFlags) Resolve(lookupEnv func(string) (string, bool)) (ServeConfig
 	if set["codex-auto-review-model"] {
 		cfg.Codex.AutoReviewModel = *f.codexAutoReviewModel
 	}
+	if set["codex-auto-review-model-overrides"] {
+		cfg.Codex.autoReviewModelOverridesRaw = *f.codexAutoReviewOverrides
+	}
 	if set["codex-catalog-override-limits"] {
 		cfg.Codex.OverrideLimits = *f.codexOverrideLimits
 	}
@@ -419,10 +444,46 @@ func (f *ServeFlags) Resolve(lookupEnv func(string) (string, bool)) (ServeConfig
 		cfg.ImpersonationRefreshInterval = *f.impersonationRefreshInterval
 	}
 
+	overrides, err := parseAutoReviewModelOverrides(cfg.Codex.autoReviewModelOverridesRaw)
+	if err != nil {
+		return ServeConfig{}, err
+	}
+	cfg.Codex.AutoReviewModelOverrides = overrides
+
 	if err := cfg.validate(); err != nil {
 		return ServeConfig{}, err
 	}
 	return cfg, nil
+}
+
+func parseAutoReviewModelOverrides(raw string) (map[string]string, error) {
+	if raw == "" {
+		return nil, nil
+	}
+	overrides := make(map[string]string)
+	for _, segment := range strings.Split(raw, ",") {
+		segment = strings.TrimSpace(segment)
+		if segment == "" {
+			continue
+		}
+		pair := strings.SplitN(segment, "=", 2)
+		if len(pair) != 2 {
+			return nil, fmt.Errorf("invalid codex-auto-review-model-overrides segment %q: expected main=reviewer", segment)
+		}
+		mainModel := strings.TrimSpace(pair[0])
+		reviewerModel := strings.TrimSpace(pair[1])
+		if mainModel == "" {
+			return nil, fmt.Errorf("invalid codex-auto-review-model-overrides segment %q: main model is empty", segment)
+		}
+		if reviewerModel == "" {
+			return nil, fmt.Errorf("invalid codex-auto-review-model-overrides segment %q: reviewer model is empty", segment)
+		}
+		if _, exists := overrides[mainModel]; exists {
+			return nil, fmt.Errorf("invalid codex-auto-review-model-overrides: duplicate main model %q", mainModel)
+		}
+		overrides[mainModel] = reviewerModel
+	}
+	return overrides, nil
 }
 
 // defaultOAuthTokenFile is the default path to the GitHub OAuth token file:
@@ -584,6 +645,9 @@ func overlay(cfg *ServeConfig, source string, get func(key string) (string, bool
 	}
 	if v, ok := get("codex-auto-review-model"); ok {
 		cfg.Codex.AutoReviewModel = v
+	}
+	if v, ok := get("codex-auto-review-model-overrides"); ok {
+		cfg.Codex.autoReviewModelOverridesRaw = v
 	}
 	if v, ok := get("codex-catalog-override-limits"); ok {
 		enabled, err := strconv.ParseBool(v)

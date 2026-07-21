@@ -6,9 +6,11 @@ The Codex client-shaped catalog (Phase 6b), served on
 `GET /openai/v1/models?client_version=…`, re-emits a vendored snapshot of Codex's
 own `models.json` (pinned to `rust-v0.144.5`) **field-for-field per slug**,
 overwriting only an enumerated set of keys — `auto_review_model_override` (injected
-from `codex-auto-review-model`) and, under the opt-in `codex-catalog-override-limits`,
-`context_window` / `max_context_window`. We do this because Codex, under command
-auth, merges a fetched catalog **wholesale per slug** (`apply_remote_models`:
+from a per-main-model `codex-auto-review-model-overrides` entry or the global
+`codex-auto-review-model` fallback) and, under the opt-in
+`codex-catalog-override-limits`, `context_window` / `max_context_window`. We do
+this because Codex, under command auth, merges a fetched catalog **wholesale per
+slug** (`apply_remote_models`:
 `existing_models[i] = model`) with no field-merge, and required `ModelInfo` fields
 have no fallback — an empty `base_instructions` reaches the wire as
 `instructions: ""` and degrades the active model. Re-emitting Codex's own complete
@@ -42,3 +44,11 @@ model; limits are Codex's numbers unless the operator opts into the overlay;
 coverage is the intersection of Copilot-forwardable and snapshot slugs; and
 auto-review requires operator config. Recorded in
 `docs/design/2026-07-19-phase-6b-codex-model-catalog-auto-review-design.md` §13.
+
+The per-model routing extension deliberately changes the existing opt-in log
+behavior: an unforwardable global reviewer now logs once per affected advertised
+main model, and each warning names both the main model and the reviewer. This
+change is confined to the off-by-default Codex catalog and has no wire-format,
+catalog-content, or catalog-fidelity impact. Its rationale and boundary are
+recorded in
+`docs/design/2026-07-21-codex-per-model-auto-review-overrides-design.md` §6.
