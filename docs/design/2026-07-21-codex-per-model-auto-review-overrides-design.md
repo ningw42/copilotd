@@ -190,9 +190,9 @@ advertised model that falls back to it; an unforwardable per-model override logs
 once for its model.
 
 A skip event suppresses only the *reviewer injection*: `M` is still emitted in the
-catalog, byte-identical to the snapshot. **A skip never removes a model from
-`data[]`** — the sole visible effect is the absence of an `auto_review_model_override`
-key on that model.
+catalog, byte-identical to the snapshot apart from any independently-configured limits
+overlay (§5.4). **A skip never removes a model from `data[]`** — the sole visible effect
+*of the skip* is the absence of an `auto_review_model_override` key on that model.
 
 ### 5.3 Non-advertised override keys
 
@@ -308,8 +308,9 @@ embedded snapshot); none need a GitHub account or network.
 - **Unforwardable global:** every advertised model without an override that falls
   back to it produces its own skip event.
 - **Non-advertised override key:** inert — no key change, no skip event.
-- **Fidelity:** all non-injected fields remain byte-identical to the snapshot
-  (round-trip through `map[string]json.RawMessage`), as in Phase 6b.
+- **Fidelity:** every field other than the two defined mutations (reviewer injection and
+  limits overlay) remains byte-identical to the snapshot (round-trip through
+  `map[string]json.RawMessage`), as in Phase 6b.
 
 ### 9.3 Server boundary / real listener
 
