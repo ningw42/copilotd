@@ -448,6 +448,7 @@ func (f *ServeFlags) Resolve(lookupEnv func(string) (string, bool)) (ServeConfig
 	if err != nil {
 		return ServeConfig{}, err
 	}
+	cfg.Codex.autoReviewModelOverridesRaw = ""
 	cfg.Codex.AutoReviewModelOverrides = overrides
 
 	if err := cfg.validate(); err != nil {
@@ -482,6 +483,9 @@ func parseAutoReviewModelOverrides(raw string) (map[string]string, error) {
 			return nil, fmt.Errorf("invalid codex-auto-review-model-overrides: duplicate main model %q", mainModel)
 		}
 		overrides[mainModel] = reviewerModel
+	}
+	if len(overrides) == 0 {
+		return nil, nil
 	}
 	return overrides, nil
 }

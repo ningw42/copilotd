@@ -79,13 +79,28 @@ func TestLoadDefaults(t *testing.T) {
 	}
 }
 
-func TestCodexAutoReviewModelOverridesDefaultsToEmptyMap(t *testing.T) {
-	got, err := loadServe([]string{"--apikey", testAPIKey}, noEnv())
-	if err != nil {
-		t.Fatalf("loadServe() error = %v", err)
+func TestCodexAutoReviewModelOverridesNormalizesEmptyInputs(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		env  map[string]string
+	}{
+		{name: "default"},
+		{name: "explicit empty", env: map[string]string{"COPILOTD_CODEX_AUTO_REVIEW_MODEL_OVERRIDES": ""}},
+		{name: "empty segments", args: []string{"--codex-auto-review-model-overrides", " , , "}},
 	}
-	if len(got.Codex.AutoReviewModelOverrides) != 0 {
-		t.Errorf("AutoReviewModelOverrides = %v, want empty map", got.Codex.AutoReviewModelOverrides)
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			args := append([]string{"--apikey", testAPIKey}, tc.args...)
+			got, err := loadServe(args, envFunc(tc.env))
+			if err != nil {
+				t.Fatalf("loadServe() error = %v", err)
+			}
+			if got.Codex.AutoReviewModelOverrides != nil {
+				t.Errorf("AutoReviewModelOverrides = %#v, want canonical nil map", got.Codex.AutoReviewModelOverrides)
+			}
+		})
 	}
 }
 
@@ -97,9 +112,9 @@ func TestCodexAutoReviewModelOverridesResolvesFlag(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadServe() error = %v", err)
 	}
-	want := map[string]string{"gpt-5": "reviewer-mini"}
-	if !reflect.DeepEqual(got.Codex.AutoReviewModelOverrides, want) {
-		t.Errorf("AutoReviewModelOverrides = %v, want %v", got.Codex.AutoReviewModelOverrides, want)
+	want := CodexConfig{AutoReviewModelOverrides: map[string]string{"gpt-5": "reviewer-mini"}}
+	if !reflect.DeepEqual(got.Codex, want) {
+		t.Errorf("Codex = %+v, want resolved config %+v", got.Codex, want)
 	}
 }
 
@@ -937,7 +952,11 @@ func TestConfigLogValueEmitsOnlyNonSecretFields(t *testing.T) {
 		Codex: CodexConfig{
 			Enabled:         true,
 			AutoReviewModel: "gpt-5.6-luna",
-			OverrideLimits:  true,
+			AutoReviewModelOverrides: map[string]string{
+				"gpt-5.6-sol": "gpt-5.4",
+				"gpt-5.4":     "gpt-5.4-mini",
+			},
+			OverrideLimits: true,
 		},
 		StartupMintRetries:           3,
 		VSCodeVersionFallback:        "1.104.1",
@@ -976,6 +995,7 @@ func TestConfigLogValueEmitsOnlyNonSecretFields(t *testing.T) {
 		"config.impersonation-refresh-interval=24h0m0s",
 		"config.codex-catalog-enabled=true",
 		"config.codex-auto-review-model=gpt-5.6-luna",
+		`config.codex-auto-review-model-overrides="gpt-5.4=gpt-5.4-mini,gpt-5.6-sol=gpt-5.4"`,
 		"config.codex-catalog-override-limits=true",
 	} {
 		if !strings.Contains(out, want) {

@@ -11,7 +11,10 @@ import (
 // renderer may apply. Whether to emit the Codex catalog at all is a handler
 // concern.
 type CodexRenderConfig struct {
-	AutoReviewModel          string
+	AutoReviewModel string
+	// AutoReviewModelOverrides must contain non-empty reviewer slugs from
+	// validated configuration. A present main-model key is authoritative, so
+	// RenderCodex does not fall back to AutoReviewModel for that model.
 	AutoReviewModelOverrides map[string]string
 	OverrideLimits           bool
 }
