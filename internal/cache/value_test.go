@@ -443,6 +443,7 @@ func TestValueRefreshLadderRekeysThenDropsFetchedValueBackToFloor(t *testing.T) 
 	t.Parallel()
 
 	floor := []byte("floor")
+	now := time.Date(2026, 7, 22, 11, 0, 0, 0, time.UTC)
 	fetches := []struct {
 		value   []byte
 		version string
@@ -467,11 +468,12 @@ func TestValueRefreshLadderRekeysThenDropsFetchedValueBackToFloor(t *testing.T) 
 			validated++
 			return nil
 		},
-	})
+	}, cache.WithClock(func() time.Time { return now }))
 	registry := cache.NewRegistry()
 	registry.Register(value)
 
 	registry.Prime(context.Background())
+	now = now.Add(time.Hour)
 	registry.Prime(context.Background())
 	got, status := value.Current()
 	if string(got) != "ahead" || status.Source != "fetched" || status.Version != "v3" {
@@ -480,7 +482,9 @@ func TestValueRefreshLadderRekeysThenDropsFetchedValueBackToFloor(t *testing.T) 
 	if validated != 1 {
 		t.Fatalf("validate calls after same-hash re-key = %d, want 1", validated)
 	}
+	assertAttempt(t, status, now, cache.AttemptSuccess)
 
+	now = now.Add(time.Hour)
 	registry.Prime(context.Background())
 	got, status = value.Current()
 	if string(got) != "floor" || status.Source != "fallback" || status.Version != "v4" {
@@ -489,6 +493,7 @@ func TestValueRefreshLadderRekeysThenDropsFetchedValueBackToFloor(t *testing.T) 
 	if validated != 1 {
 		t.Fatalf("validate calls after floor-hash return = %d, want 1", validated)
 	}
+	assertAttempt(t, status, now, cache.AttemptSuccess)
 }
 
 func TestValueRejectedFetchKeepsLastGood(t *testing.T) {
