@@ -231,10 +231,12 @@ func (r *Registry) Observe() []Status         // collect the snapshot of every e
 
 ```go
 type Status struct {
-	Name        string     // "vscode", "copilot_chat", "codex_models"
-	Source      string     // provenance of the value served NOW: "fetched" (a distinct fetched value) | "fallback" (the embedded floor)
-	Version     string     // effective version label, e.g. "rust-v0.145.0" or "1.129.1"
-	LastSuccess *time.Time // last successful content fetch; a version-only peek does not advance it
+	Name              string         // "vscode", "copilot_chat", "codex_models"
+	Source            string         // provenance of the value served NOW: "fetched" (a distinct fetched value) | "fallback" (the embedded floor)
+	Version           string         // effective version label, e.g. "rust-v0.145.0" or "1.129.1"
+	LastSuccess       *time.Time     // last successful content fetch; a version-only peek does not advance it
+	LastAttempt       *time.Time     // completion time of the latest refresh attempt; nil before one completes
+	LastAttemptResult *AttemptResult // closed "success" | "failure" outcome; nil before an attempt completes
 }
 
 // entry is the unexported, type-erased view the Registry drives.
@@ -425,6 +427,10 @@ catalog is not served.
 
 ### Observability (`/readyz`)
 
+> **Post-#96 note:** every published cached-value observation also carries the completion
+> time and non-secret success/failure result of its latest refresh attempt. These
+> attempt fields do not redefine content freshness or affect readiness.
+
 `/readyz` stays unauthenticated and keeps its coarse `status` bit. The per-fact
 freshness that ADR-0008 nested under `impersonation.discovery` moves into a uniform
 `caches` view fed by `Registry.Observe()`, so every cached value — impersonation
@@ -437,9 +443,9 @@ fact, so it does not belong in the `caches` view).
 {
   "status": "ready",
   "caches": {
-    "vscode":       { "source": "fetched",  "version": "1.129.1",        "last_success": "2026-07-21T12:00:00Z" },
-    "copilot_chat": { "source": "fallback", "version": "0.26.7",         "last_success": null },
-    "codex_models": { "source": "fetched",  "version": "rust-v0.145.0",  "last_success": "2026-07-21T11:00:00Z" }
+    "vscode":       { "source": "fetched",  "version": "1.129.1",       "last_success": "2026-07-21T12:00:00Z", "last_attempt": "2026-07-22T05:00:00Z", "last_attempt_result": "success" },
+    "copilot_chat": { "source": "fallback", "version": "0.26.7",        "last_success": null,                   "last_attempt": null,                   "last_attempt_result": null },
+    "codex_models": { "source": "fetched",  "version": "rust-v0.145.0", "last_success": "2026-07-21T11:00:00Z", "last_attempt": "2026-07-22T05:00:00Z", "last_attempt_result": "failure" }
   },
   "impersonation": {
     "effective_headers": {
@@ -453,10 +459,19 @@ fact, so it does not belong in the `caches` view).
 }
 ```
 
-Only non-secret state appears: each cache's `source`, effective `version`, and
-`last_success`, plus the already-non-secret effective headers. `source` and
-`last_success` are independent (see §`Status`): `source` names the provenance of the
-value served now (`"fetched"` = a distinct fetched value; `"fallback"` = the embedded
+Only non-secret state appears: each cached value's `source`, effective `version`,
+`last_success`, `last_attempt`, and `last_attempt_result`, plus the
+already-non-secret effective headers. `last_attempt` is the completion time of the
+latest real refresh attempt. Its paired result is `"success"` for an unchanged
+`Version` short-circuit or any successful content fetch (including current-hash and
+floor-hash matches), and `"failure"` for a `Version`, `Fetch`, or `Validate` error.
+Both are null before any attempt and remain null for a disabled (`TTL <= 0`) entry.
+The result is deliberately closed and never carries the raw error, upstream URL,
+response status/body, or other detail.
+
+`source` and `last_success` are independent (see §`Status`): `source` names the
+provenance of the value served now (`"fetched"` = a distinct fetched value;
+`"fallback"` = the embedded
 floor, which includes a fetch proved byte-identical to the floor), while
 `last_success` advances on every successful content fetch whose identity passes
 the hash/validate ladder. A version-only peek records an attempt but leaves it
@@ -467,8 +482,9 @@ fetched content was confirmed current-to-floor (`source: "fallback"`, non-null
 content-freshness definition. No token and no raw fetch-error text are exposed: a
 cache with no successful content fetch has null `last_success`, while a failure
 after success leaves an aging value. `HEAD` still writes no body. When a
-consumer's refresh is disabled (`TTL == 0`), its entry still renders with
-`source: "fallback"` and null `last_success` because it never fetches content.
+consumer's refresh is disabled (`TTL <= 0`), its entry still renders with
+`source: "fallback"` and null `last_success`, `last_attempt`, and
+`last_attempt_result` because it performs no refresh attempt.
 
 This is a deliberate, backward-compatible-on-`status` evolution of ADR-0008's
 `/readyz` shape (the per-fact freshness relocates; `effective_headers` is retained;

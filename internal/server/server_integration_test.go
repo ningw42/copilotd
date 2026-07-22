@@ -197,6 +197,9 @@ func openaiErrorType(t *testing.T, body []byte) string {
 func TestReadyzReflectsReadinessAndImpersonation(t *testing.T) {
 	prov := identity.NewStatic(identity.Credential{}, true)
 	lastSuccess := time.Date(2026, time.July, 20, 12, 0, 0, 0, time.UTC)
+	lastAttempt := time.Date(2026, time.July, 22, 5, 0, 0, 0, time.UTC)
+	attemptSuccess := cache.AttemptSuccess
+	attemptFailure := cache.AttemptFailure
 	impersonationObserver := staticImpersonationObserver{header: http.Header{
 		"Authorization":          {"secret-that-must-not-render"},
 		"Copilot-Integration-Id": {"vscode-chat"},
@@ -206,12 +209,12 @@ func TestReadyzReflectsReadinessAndImpersonation(t *testing.T) {
 		"X-Github-Api-Version":   {"2025-04-01"},
 	}}
 	cacheObserver := staticCacheObserver{statuses: []cache.Status{
-		{Name: "vscode", Source: "fallback", Version: "1.129.1", LastSuccess: &lastSuccess},
-		{Name: "copilot_chat", Source: "fetched", Version: "0.48.1", LastSuccess: &lastSuccess},
+		{Name: "vscode", Source: "fallback", Version: "1.129.1", LastSuccess: &lastSuccess, LastAttempt: &lastAttempt, LastAttemptResult: &attemptSuccess},
+		{Name: "copilot_chat", Source: "fetched", Version: "0.48.1", LastSuccess: &lastSuccess, LastAttempt: &lastAttempt, LastAttemptResult: &attemptFailure},
 		{Name: "disabled", Source: "fallback", Version: "floor"},
 	}}
 	h := handleReady(prov, impersonationObserver, cacheObserver)
-	wantCaches := `"caches":{"copilot_chat":{"source":"fetched","version":"0.48.1","last_success":"2026-07-20T12:00:00Z"},"disabled":{"source":"fallback","version":"floor","last_success":null},"vscode":{"source":"fallback","version":"1.129.1","last_success":"2026-07-20T12:00:00Z"}}`
+	wantCaches := `"caches":{"copilot_chat":{"source":"fetched","version":"0.48.1","last_success":"2026-07-20T12:00:00Z","last_attempt":"2026-07-22T05:00:00Z","last_attempt_result":"failure"},"disabled":{"source":"fallback","version":"floor","last_success":null,"last_attempt":null,"last_attempt_result":null},"vscode":{"source":"fallback","version":"1.129.1","last_success":"2026-07-20T12:00:00Z","last_attempt":"2026-07-22T05:00:00Z","last_attempt_result":"success"}}`
 	wantImpersonation := `"impersonation":{"effective_headers":{"Editor-Version":"vscode/1.129.1","Editor-Plugin-Version":"copilot-chat/0.48.1","User-Agent":"GitHubCopilotChat/0.48.1","Copilot-Integration-Id":"vscode-chat","X-GitHub-Api-Version":"2025-04-01"}}`
 
 	t.Run("ready", func(t *testing.T) {

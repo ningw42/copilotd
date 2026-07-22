@@ -44,6 +44,30 @@ func TestValueColdServesFallback(t *testing.T) {
 	if status.LastSuccess != nil {
 		t.Fatalf("status last success = %v, want nil", status.LastSuccess)
 	}
+	if status.LastAttempt != nil || status.LastAttemptResult != nil {
+		t.Fatalf("status attempt = (%v, %v), want (nil, nil)", status.LastAttempt, status.LastAttemptResult)
+	}
+}
+
+func TestValueAttemptAtZeroTimeIsNotNeverAttempted(t *testing.T) {
+	t.Parallel()
+
+	value := cache.New(cache.Cacheable[string]{
+		Fallback:        "embedded",
+		FallbackVersion: "v1",
+		TTL:             time.Hour,
+		Fetch: func(context.Context) (string, string, error) {
+			return "downloaded", "v2", nil
+		},
+		Hash: func(value string) string { return value },
+	}, cache.WithClock(func() time.Time { return time.Time{} }))
+	registry := cache.NewRegistry()
+	registry.Register(value)
+
+	registry.Prime(context.Background())
+
+	_, status := value.Current()
+	assertAttempt(t, status, time.Time{}, cache.AttemptSuccess)
 }
 
 func TestValueRefreshLogsSuccessAndFailureLevels(t *testing.T) {
@@ -186,6 +210,9 @@ func TestValueDisabledTTLDoesNotPrimeOrRun(t *testing.T) {
 	if got != "embedded" || status.Source != "fallback" || status.LastSuccess != nil {
 		t.Fatalf("Current = %q, %#v; want untouched cold fallback", got, status)
 	}
+	if status.LastAttempt != nil || status.LastAttemptResult != nil {
+		t.Fatalf("status attempt = (%v, %v), want (nil, nil)", status.LastAttempt, status.LastAttemptResult)
+	}
 }
 
 func TestValueConcurrentCurrentAndRefresh(t *testing.T) {
@@ -281,11 +308,13 @@ func TestValueWarmFetchFailureKeepsLastGood(t *testing.T) {
 	if status.LastSuccess == nil || !status.LastSuccess.Equal(firstSuccess) {
 		t.Fatalf("status last success = %v, want original success %v", status.LastSuccess, firstSuccess)
 	}
+	assertAttempt(t, status, now, cache.AttemptFailure)
 }
 
 func TestValueUnchangedVersionSkipsFetchAndRecordsAttempt(t *testing.T) {
 	t.Parallel()
 
+	attemptCompleted := time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)
 	versionCalls := 0
 	clockCalls := 0
 	value := cache.New(cache.Cacheable[string]{
@@ -303,7 +332,7 @@ func TestValueUnchangedVersionSkipsFetchAndRecordsAttempt(t *testing.T) {
 		Hash: func(value string) string { return value },
 	}, cache.WithClock(func() time.Time {
 		clockCalls++
-		return time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)
+		return attemptCompleted
 	}))
 	registry := cache.NewRegistry()
 	registry.Register(value)
@@ -317,6 +346,7 @@ func TestValueUnchangedVersionSkipsFetchAndRecordsAttempt(t *testing.T) {
 	if status.LastSuccess != nil {
 		t.Fatalf("status last success = %v, want nil without a validated fetch", status.LastSuccess)
 	}
+	assertAttempt(t, status, attemptCompleted, cache.AttemptSuccess)
 	if versionCalls != 1 {
 		t.Fatalf("Version calls = %d, want 1", versionCalls)
 	}
@@ -328,10 +358,14 @@ func TestValueUnchangedVersionSkipsFetchAndRecordsAttempt(t *testing.T) {
 func TestValueChangedVersionContinuesThroughFetchHashAndValidate(t *testing.T) {
 	t.Parallel()
 
+	attemptCompleted := time.Date(2026, 7, 22, 10, 15, 0, 0, time.UTC)
 	versionCalls := 0
 	fetchCalls := 0
 	hashCalls := 0
 	validateCalls := 0
+	fetchCompleted := false
+	validateCompleted := false
+	clockObservedCompletion := false
 	value := cache.New(cache.Cacheable[string]{
 		Fallback:        "embedded",
 		FallbackVersion: "v1",
@@ -342,6 +376,7 @@ func TestValueChangedVersionContinuesThroughFetchHashAndValidate(t *testing.T) {
 		},
 		Fetch: func(context.Context) (string, string, error) {
 			fetchCalls++
+			fetchCompleted = true
 			return "downloaded", "v2", nil
 		},
 		Hash: func(value string) string {
@@ -350,9 +385,13 @@ func TestValueChangedVersionContinuesThroughFetchHashAndValidate(t *testing.T) {
 		},
 		Validate: func(string) error {
 			validateCalls++
+			validateCompleted = true
 			return nil
 		},
-	})
+	}, cache.WithClock(func() time.Time {
+		clockObservedCompletion = fetchCompleted && validateCompleted
+		return attemptCompleted
+	}))
 	registry := cache.NewRegistry()
 	registry.Register(value)
 
@@ -362,6 +401,10 @@ func TestValueChangedVersionContinuesThroughFetchHashAndValidate(t *testing.T) {
 	if got != "downloaded" || status.Source != "fetched" || status.Version != "v2" || status.LastSuccess == nil {
 		t.Fatalf("Current = %q, %#v; want validated fetched v2", got, status)
 	}
+	assertAttempt(t, status, attemptCompleted, cache.AttemptSuccess)
+	if !clockObservedCompletion {
+		t.Fatal("attempt timestamp recorded before fetch and validation completed")
+	}
 	if versionCalls != 1 || fetchCalls != 1 || hashCalls != 2 || validateCalls != 1 {
 		t.Fatalf("calls: Version=%d Fetch=%d Hash=%d Validate=%d; want 1, 1, 2, 1", versionCalls, fetchCalls, hashCalls, validateCalls)
 	}
@@ -370,6 +413,7 @@ func TestValueChangedVersionContinuesThroughFetchHashAndValidate(t *testing.T) {
 func TestValueVersionFailureSkipsFetchAndKeepsLastGood(t *testing.T) {
 	t.Parallel()
 
+	attemptCompleted := time.Date(2026, 7, 22, 10, 20, 0, 0, time.UTC)
 	value := cache.New(cache.Cacheable[string]{
 		Fallback:        "embedded",
 		FallbackVersion: "v1",
@@ -382,7 +426,7 @@ func TestValueVersionFailureSkipsFetchAndKeepsLastGood(t *testing.T) {
 			return "", "", nil
 		},
 		Hash: func(value string) string { return value },
-	})
+	}, cache.WithClock(func() time.Time { return attemptCompleted }))
 	registry := cache.NewRegistry()
 	registry.Register(value)
 
@@ -392,6 +436,7 @@ func TestValueVersionFailureSkipsFetchAndKeepsLastGood(t *testing.T) {
 	if got != "embedded" || status.Source != "fallback" || status.Version != "v1" || status.LastSuccess != nil {
 		t.Fatalf("Current = %q, %#v; want untouched cold fallback", got, status)
 	}
+	assertAttempt(t, status, attemptCompleted, cache.AttemptFailure)
 }
 
 func TestValueRefreshLadderRekeysThenDropsFetchedValueBackToFloor(t *testing.T) {
@@ -484,6 +529,17 @@ func TestValueRejectedFetchKeepsLastGood(t *testing.T) {
 	}
 	if status.LastSuccess == nil || !status.LastSuccess.Equal(firstSuccess) {
 		t.Fatalf("status last success = %v, want original success %v", status.LastSuccess, firstSuccess)
+	}
+	assertAttempt(t, status, now, cache.AttemptFailure)
+}
+
+func assertAttempt(t *testing.T, status cache.Status, completed time.Time, result cache.AttemptResult) {
+	t.Helper()
+	if status.LastAttempt == nil || !status.LastAttempt.Equal(completed) {
+		t.Fatalf("status last attempt = %v, want %v", status.LastAttempt, completed)
+	}
+	if status.LastAttemptResult == nil || *status.LastAttemptResult != result {
+		t.Fatalf("status last attempt result = %v, want %q", status.LastAttemptResult, result)
 	}
 }
 

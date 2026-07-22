@@ -15,6 +15,14 @@ const (
 	sourceFetched  source = "fetched"
 )
 
+// AttemptResult is the non-secret outcome of a completed refresh attempt.
+type AttemptResult string
+
+const (
+	AttemptSuccess AttemptResult = "success"
+	AttemptFailure AttemptResult = "failure"
+)
+
 // Cacheable is the static recipe for one cached value.
 type Cacheable[V any] struct {
 	Fallback        V
@@ -35,6 +43,12 @@ type Status struct {
 	// LastSuccess is the last successful content fetch. A Version-only peek
 	// records an attempt but does not advance content freshness.
 	LastSuccess *time.Time
+	// LastAttempt is the completion time of the latest refresh attempt. It is
+	// nil before an attempt completes.
+	LastAttempt *time.Time
+	// LastAttemptResult is the closed, non-secret outcome paired with
+	// LastAttempt. It is nil before an attempt completes.
+	LastAttemptResult *AttemptResult
 }
 
 // Option customizes a Value's runtime seams.
@@ -100,6 +114,7 @@ type Value[V any] struct {
 	currentVersion string
 	// Attempt details stay internal: raw errors may contain upstream URLs and
 	// must never enter Status or the unauthenticated readiness response.
+	attempted   bool
 	lastAttempt time.Time
 	lastErr     error
 	lastSuccess time.Time
@@ -148,6 +163,15 @@ func (v *Value[V]) Current() (V, Status) {
 	if !v.lastSuccess.IsZero() {
 		lastSuccess := v.lastSuccess
 		status.LastSuccess = &lastSuccess
+	}
+	if v.attempted {
+		lastAttempt := v.lastAttempt
+		status.LastAttempt = &lastAttempt
+		result := AttemptSuccess
+		if v.lastErr != nil {
+			result = AttemptFailure
+		}
+		status.LastAttemptResult = &result
 	}
 	return value, status
 }
@@ -246,6 +270,7 @@ func (v *Value[V]) failed(ctx context.Context, err error) error {
 }
 
 func (v *Value[V]) recordAttemptLocked(at time.Time, err error) {
+	v.attempted = true
 	v.lastAttempt = at
 	v.lastErr = err
 }

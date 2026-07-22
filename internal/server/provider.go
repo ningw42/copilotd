@@ -54,9 +54,11 @@ type readyEffectiveHeaders struct {
 }
 
 type readyCache struct {
-	Source      string     `json:"source"`
-	Version     string     `json:"version"`
-	LastSuccess *time.Time `json:"last_success"`
+	Source            string               `json:"source"`
+	Version           string               `json:"version"`
+	LastSuccess       *time.Time           `json:"last_success"`
+	LastAttempt       *time.Time           `json:"last_attempt"`
+	LastAttemptResult *cache.AttemptResult `json:"last_attempt_result"`
 }
 
 // handleReady reports whether identity has the local prerequisites needed to
@@ -99,9 +101,11 @@ func newReadyResponse(status string, headers http.Header, statuses []cache.Statu
 	}
 	for _, status := range statuses {
 		response.Caches[status.Name] = readyCache{
-			Source:      status.Source,
-			Version:     status.Version,
-			LastSuccess: status.LastSuccess,
+			Source:            status.Source,
+			Version:           status.Version,
+			LastSuccess:       status.LastSuccess,
+			LastAttempt:       status.LastAttempt,
+			LastAttemptResult: status.LastAttemptResult,
 		}
 	}
 	return response
