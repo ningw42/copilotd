@@ -353,9 +353,9 @@ validator are unchanged; the snapshot's role shifts from "the served value" to
 > `SkippedReviewers []SkippedReviewer`. `RenderCodex` still reads the package-level
 > `codexModels` global directly (`internal/catalog/codex_render.go`), so the
 > parse-on-read change is unchanged in intent — remove the global and thread the
-> parsed `decodeCodexModels(Current())` snapshot through `RenderCodex`'s signature,
-> the `Rendering` struct, and the `handler.go` call site into that now per-model,
-> override-aware loop.
+> decoded model map from `decodeCodexModels(Current())` through `RenderCodex`'s
+> signature, the `Rendering` struct, and the `handler.go` call site into that now
+> per-model, override-aware loop.
 
 ### Startup and refresh lifecycle
 
