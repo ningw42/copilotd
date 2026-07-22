@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/ningw42/copilotd/internal/shim"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -24,6 +25,7 @@ type pumpOperation int
 const (
 	readOperation pumpOperation = iota
 	writeOperation
+	transformOperation
 )
 
 type pumpStats struct {
@@ -49,7 +51,7 @@ type sessionResult struct {
 // runSession pumps messages in both directions until either peer fails. Pump
 // goroutines rendezvous here before returning so the terminal close frames are
 // sent before errgroup cancellation tears down the sibling connection.
-func runSession(drainCtx, baseCtx context.Context, client, upstream *websocket.Conn, writeTimeout time.Duration, maxMessageBytes int64) sessionResult {
+func runSession(drainCtx, baseCtx context.Context, client, upstream *websocket.Conn, writeTimeout time.Duration, maxMessageBytes int64, clientToUpstreamTransform, upstreamToClientTransform shim.MessageTransform) sessionResult {
 	client.SetReadLimit(maxMessageBytes)
 	upstream.SetReadLimit(maxMessageBytes)
 
@@ -60,17 +62,17 @@ func runSession(drainCtx, baseCtx context.Context, client, upstream *websocket.C
 	terminal := make(chan pumpFailure, 2)
 	release := make(chan struct{})
 	var clientToUpstream, upstreamToClient pumpStats
-	startPump := func(source, destination *websocket.Conn, sourcePeer, destinationPeer sessionPeer, stats *pumpStats) {
+	startPump := func(source, destination *websocket.Conn, sourcePeer, destinationPeer sessionPeer, stats *pumpStats, transform shim.MessageTransform) {
 		group.Go(func() error {
-			observed, failure := pump(pumpCtx, source, destination, sourcePeer, destinationPeer, writeTimeout)
+			observed, failure := pump(pumpCtx, source, destination, sourcePeer, destinationPeer, writeTimeout, transform)
 			*stats = observed
 			terminal <- failure
 			<-release
 			return failure.err
 		})
 	}
-	startPump(client, upstream, clientPeer, upstreamPeer, &clientToUpstream)
-	startPump(upstream, client, upstreamPeer, clientPeer, &upstreamToClient)
+	startPump(client, upstream, clientPeer, upstreamPeer, &clientToUpstream, clientToUpstreamTransform)
+	startPump(upstream, client, upstreamPeer, clientPeer, &upstreamToClient, upstreamToClientTransform)
 
 	var failure pumpFailure
 	shutdown := false
@@ -104,12 +106,23 @@ func resultFrom(clientToUpstream, upstreamToClient pumpStats, code websocket.Sta
 	}
 }
 
-func pump(ctx context.Context, source, destination *websocket.Conn, sourcePeer, destinationPeer sessionPeer, writeTimeout time.Duration) (pumpStats, pumpFailure) {
+func pump(ctx context.Context, source, destination *websocket.Conn, sourcePeer, destinationPeer sessionPeer, writeTimeout time.Duration, transform shim.MessageTransform) (pumpStats, pumpFailure) {
 	var stats pumpStats
 	for {
 		messageType, payload, err := source.Read(ctx)
 		if err != nil {
 			return stats, pumpFailure{peer: sourcePeer, operation: readOperation, err: err}
+		}
+		if transform != nil {
+			message := shim.Message{Kind: kindFromType(messageType), Data: payload}
+			emit, transformErr := transform(ctx, &message)
+			if transformErr != nil {
+				return stats, pumpFailure{peer: sourcePeer, operation: transformOperation, err: transformErr}
+			}
+			if !emit {
+				continue
+			}
+			messageType, payload = typeFromKind(message.Kind), message.Data
 		}
 
 		writeCtx, cancel := context.WithTimeout(ctx, writeTimeout)
@@ -125,6 +138,20 @@ func pump(ctx context.Context, source, destination *websocket.Conn, sourcePeer, 
 		stats.messages++
 		stats.bytes += int64(len(payload))
 	}
+}
+
+func kindFromType(messageType websocket.MessageType) shim.MessageKind {
+	if messageType == websocket.MessageBinary {
+		return shim.MessageBinary
+	}
+	return shim.MessageText
+}
+
+func typeFromKind(kind shim.MessageKind) websocket.MessageType {
+	if kind == shim.MessageBinary {
+		return websocket.MessageBinary
+	}
+	return websocket.MessageText
 }
 
 func terminalClose(failure pumpFailure, shutdown bool) (websocket.StatusCode, string) {

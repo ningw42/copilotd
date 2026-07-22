@@ -22,6 +22,7 @@ import (
 	"github.com/ningw42/copilotd/internal/endpoint"
 	"github.com/ningw42/copilotd/internal/identity"
 	"github.com/ningw42/copilotd/internal/logging"
+	"github.com/ningw42/copilotd/internal/shim"
 )
 
 const requestIDHeader = "X-Request-Id"
@@ -36,6 +37,7 @@ type Proxy struct {
 	maxMessageBytes int64
 	logger          *slog.Logger
 	metrics         WsMetrics
+	registry        shim.Registry
 
 	baseCtx     context.Context
 	cancel      context.CancelFunc
@@ -102,7 +104,7 @@ func (w *capturingResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) 
 
 // New returns a WebSocket Proxy with an independently cancellable session
 // context. dialClient must not impose a total client timeout.
-func New(provider identity.Provider, dialClient *http.Client, dialTimeout, writeTimeout time.Duration, maxMessageBytes int64, logger *slog.Logger, metrics WsMetrics) *Proxy {
+func New(provider identity.Provider, dialClient *http.Client, dialTimeout, writeTimeout time.Duration, maxMessageBytes int64, registry shim.Registry, logger *slog.Logger, metrics WsMetrics) *Proxy {
 	baseCtx, cancel := context.WithCancel(context.Background())
 	drainCtx, cancelDrain := context.WithCancel(context.Background())
 	return &Proxy{
@@ -113,6 +115,7 @@ func New(provider identity.Provider, dialClient *http.Client, dialTimeout, write
 		maxMessageBytes: maxMessageBytes,
 		logger:          logger,
 		metrics:         metrics,
+		registry:        append(shim.Registry(nil), registry...),
 		baseCtx:         baseCtx,
 		cancel:          cancel,
 		drainCtx:        drainCtx,
@@ -124,7 +127,7 @@ func New(provider identity.Provider, dialClient *http.Client, dialTimeout, write
 // Handler returns the WebSocket forwarding handler for one endpoint contract.
 func (p *Proxy) Handler(ep endpoint.WSForward) http.HandlerFunc {
 	surface := ep.Surface()
-	upstream := ep.Upstream()
+	upstreamRoute := ep.Upstream()
 	return func(w http.ResponseWriter, r *http.Request) {
 		handshakeStart := time.Now()
 		p.wg.Add(1)
@@ -153,7 +156,7 @@ func (p *Proxy) Handler(ep endpoint.WSForward) http.HandlerFunc {
 			return
 		}
 
-		upstreamURL, err := websocketURL(cred.BaseURL, upstream, r.URL.RawQuery, r.URL.ForceQuery)
+		upstreamURL, err := websocketURL(cred.BaseURL, upstreamRoute, r.URL.RawQuery, r.URL.ForceQuery)
 		if err != nil {
 			apierror.Write(w, surface, apierror.BadGateway, "could not build the upstream WebSocket URL")
 			p.metrics.observeAccept(AcceptDialFailed)
@@ -198,6 +201,7 @@ func (p *Proxy) Handler(ep endpoint.WSForward) http.HandlerFunc {
 			return
 		}
 		defer func() { _ = client.CloseNow() }()
+		chain := p.registry.NewChain(r.Context(), surface, upstreamRoute)
 		sessionStart := time.Now()
 		route := r.Pattern
 		if route == "" {
@@ -222,7 +226,7 @@ func (p *Proxy) Handler(ep endpoint.WSForward) http.HandlerFunc {
 		p.trackSession(session)
 		defer p.untrackSession(session)
 
-		result := runSession(p.drainCtx, p.baseCtx, client, upstream, p.writeTimeout, p.maxMessageBytes)
+		result := runSession(p.drainCtx, p.baseCtx, client, upstream, p.writeTimeout, p.maxMessageBytes, chain.WSClientAdapter(), chain.WSServerAdapter())
 		p.logSession(requestID, time.Since(sessionStart), result)
 		p.metrics.observeSessionTerminal(result.terminal)
 	}

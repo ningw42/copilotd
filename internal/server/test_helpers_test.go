@@ -40,6 +40,7 @@ func newTestWSProxy(provider identity.Provider) *wsforward.Proxy {
 		time.Second,
 		time.Second,
 		1<<20,
+		nil,
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 		wsforward.WsMetrics{},
 	)

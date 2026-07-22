@@ -1,8 +1,8 @@
 # Forward OpenAI Responses WebSocket messages payload-opaquely
 
-**Status:** accepted; message-transform seam proposed by ADR-0010 (not yet accepted)
+**Status:** accepted; message-transform seam added by ADR-0010
 
-**Amendment (proposed):** ADR-0010 proposes an opt-in, bidirectional message-transform
+**Amendment:** ADR-0010 adds an opt-in, bidirectional message-transform
 seam for this transport, reversing the "introduce WebSocket message hooks" non-goal
 recorded below. The seam does not reuse the SSE pump, and the payload-opaque forwarding
 decision is unchanged: with the canonical no-op registry the transport is

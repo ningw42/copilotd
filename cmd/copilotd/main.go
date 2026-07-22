@@ -343,7 +343,7 @@ func runBoundServe(ctx context.Context, cfg config.ServeConfig, logger *slog.Log
 	wsDialClient := &http.Client{Transport: &http.Transport{Proxy: http.ProxyFromEnvironment}}
 	wsAccepts := server.NewWsAcceptCounter()
 	wsTerminals := server.NewWsSessionTerminalCounter()
-	wsProxy := wsforward.New(mgr, wsDialClient, cfg.WebSocketHandshakeTimeout, cfg.WriteTimeout, cfg.MaxRequestBytes, logger, wsforward.WsMetrics{
+	wsProxy := wsforward.New(mgr, wsDialClient, cfg.WebSocketHandshakeTimeout, cfg.WriteTimeout, cfg.MaxRequestBytes, registry, logger, wsforward.WsMetrics{
 		Accept:          wsAccepts,
 		SessionTerminal: wsTerminals,
 	})

@@ -3,7 +3,9 @@ package wsforward
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +18,7 @@ import (
 	"github.com/ningw42/copilotd/internal/endpoint"
 	"github.com/ningw42/copilotd/internal/identity"
 	"github.com/ningw42/copilotd/internal/logging"
+	"github.com/ningw42/copilotd/internal/shim"
 )
 
 type recordingWsMetrics struct {
@@ -118,6 +121,7 @@ func TestProxyObservesOnePreUpgradeAcceptOutcome(t *testing.T) {
 				dialTimeout,
 				time.Second,
 				1<<20,
+				nil,
 				slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
 				WsMetrics{Accept: observed, SessionTerminal: observed},
 			)
@@ -218,6 +222,285 @@ func TestProxyLogsClientClosedSessionWithDirectionalCounts(t *testing.T) {
 		if strings.Contains(out, secret) {
 			t.Errorf("session log leaked %q:\n%s", secret, out)
 		}
+	}
+}
+
+func TestProxyDroppedClientMessageIsNotForwardedOrCounted(t *testing.T) {
+	observed := &recordingWsMetrics{}
+	var logs bytes.Buffer
+	registry := shim.Registry{{
+		Name:    "drop-client-message",
+		Enabled: true,
+		New: func(context.Context, endpoint.Surface, endpoint.Route) any {
+			return clientMessageTransformFunc(func(_ context.Context, message *shim.Message) (bool, error) {
+				return string(message.Data) != "drop", nil
+			})
+		},
+	}}
+	received := make(chan string, 1)
+	client, handlerDone, cleanup := startTelemetrySessionWithRegistry(
+		t,
+		slog.New(slog.NewTextHandler(&logs, nil)),
+		observed,
+		1<<20,
+		registry,
+		func(conn *websocket.Conn) {
+			kind, data, err := conn.Read(context.Background())
+			if err != nil {
+				return
+			}
+			received <- string(data)
+			_ = conn.Write(context.Background(), kind, []byte("ack"))
+			_, _, _ = conn.Read(context.Background())
+		},
+	)
+	defer cleanup()
+
+	for _, data := range []string{"drop", "keep"} {
+		if err := client.Write(context.Background(), websocket.MessageText, []byte(data)); err != nil {
+			t.Fatalf("write %q: %v", data, err)
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if _, _, err := client.Read(ctx); err != nil {
+		t.Fatalf("read upstream acknowledgment: %v", err)
+	}
+	select {
+	case got := <-received:
+		if got != "keep" {
+			t.Errorf("upstream message = %q, want keep", got)
+		}
+	case <-ctx.Done():
+		t.Fatal("kept message was not forwarded")
+	}
+	if err := client.Close(websocket.StatusNormalClosure, "done"); err != nil {
+		t.Fatalf("close client: %v", err)
+	}
+	waitForHandler(t, handlerDone)
+
+	for _, want := range []string{"msgs_c2u=1", "bytes_c2u=4"} {
+		if !strings.Contains(logs.String(), want) {
+			t.Errorf("session log missing %q:\n%s", want, logs.String())
+		}
+	}
+}
+
+func TestProxyDroppedServerMessageIsNotForwardedOrCounted(t *testing.T) {
+	observed := &recordingWsMetrics{}
+	var logs bytes.Buffer
+	registry := shim.Registry{{
+		Name:    "drop-server-message",
+		Enabled: true,
+		New: func(context.Context, endpoint.Surface, endpoint.Route) any {
+			return serverMessageTransformFunc(func(_ context.Context, message *shim.Message) (bool, error) {
+				return string(message.Data) != "drop", nil
+			})
+		},
+	}}
+	client, handlerDone, cleanup := startTelemetrySessionWithRegistry(
+		t,
+		slog.New(slog.NewTextHandler(&logs, nil)),
+		observed,
+		1<<20,
+		registry,
+		func(conn *websocket.Conn) {
+			_ = conn.Write(context.Background(), websocket.MessageText, []byte("drop"))
+			_ = conn.Write(context.Background(), websocket.MessageText, []byte("keep"))
+			_, _, _ = conn.Read(context.Background())
+		},
+	)
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_, data, err := client.Read(ctx)
+	if err != nil {
+		t.Fatalf("read kept server message: %v", err)
+	}
+	if string(data) != "keep" {
+		t.Errorf("server message = %q, want keep", data)
+	}
+	if err := client.Close(websocket.StatusNormalClosure, "done"); err != nil {
+		t.Fatalf("close client: %v", err)
+	}
+	waitForHandler(t, handlerDone)
+
+	for _, want := range []string{"msgs_u2c=1", "bytes_u2c=4"} {
+		if !strings.Contains(logs.String(), want) {
+			t.Errorf("session log missing %q:\n%s", want, logs.String())
+		}
+	}
+}
+
+func TestProxyClientTransformErrorClosesBothPeersWith1011AndRecordsErrorTerminal(t *testing.T) {
+	observed := &recordingWsMetrics{}
+	var logs bytes.Buffer
+	registry := shim.Registry{{
+		Name:    "failing-client-message",
+		Enabled: true,
+		New: func(context.Context, endpoint.Surface, endpoint.Route) any {
+			return clientMessageTransformFunc(func(context.Context, *shim.Message) (bool, error) {
+				return false, errors.New("transform failed")
+			})
+		},
+	}}
+	upstreamClosed := make(chan websocket.StatusCode, 1)
+	client, handlerDone, cleanup := startTelemetrySessionWithRegistry(
+		t,
+		slog.New(slog.NewTextHandler(&logs, nil)),
+		observed,
+		1<<20,
+		registry,
+		func(conn *websocket.Conn) {
+			_, _, err := conn.Read(context.Background())
+			upstreamClosed <- websocket.CloseStatus(err)
+		},
+	)
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	if err := client.Write(ctx, websocket.MessageText, []byte("trigger")); err != nil {
+		t.Fatalf("write trigger message: %v", err)
+	}
+	_, _, err := client.Read(ctx)
+	if got := websocket.CloseStatus(err); got != websocket.StatusInternalError {
+		t.Errorf("client close status = %v, want 1011 (err: %v)", got, err)
+		_ = client.CloseNow()
+	}
+	select {
+	case got := <-upstreamClosed:
+		if got != websocket.StatusInternalError {
+			t.Errorf("upstream close status = %v, want 1011", got)
+		}
+	case <-time.After(time.Second):
+		t.Error("sibling upstream pump was not torn down")
+	}
+	waitForHandler(t, handlerDone)
+
+	_, terminals := observed.snapshot()
+	if len(terminals) != 1 || terminals[0] != SessionError {
+		t.Errorf("terminal observations = %v, want [error]", terminals)
+	}
+	for _, want := range []string{"level=WARN", "msgs_c2u=0", "close_code=1011", "terminal_reason=error"} {
+		if !strings.Contains(logs.String(), want) {
+			t.Errorf("session log missing %q:\n%s", want, logs.String())
+		}
+	}
+}
+
+func TestProxyServerTransformErrorClosesBothPeersWith1011AndRecordsErrorTerminal(t *testing.T) {
+	observed := &recordingWsMetrics{}
+	var logs bytes.Buffer
+	registry := shim.Registry{{
+		Name:    "failing-server-message",
+		Enabled: true,
+		New: func(context.Context, endpoint.Surface, endpoint.Route) any {
+			return serverMessageTransformFunc(func(context.Context, *shim.Message) (bool, error) {
+				return false, errors.New("transform failed")
+			})
+		},
+	}}
+	upstreamClosed := make(chan websocket.StatusCode, 1)
+	client, handlerDone, cleanup := startTelemetrySessionWithRegistry(
+		t,
+		slog.New(slog.NewTextHandler(&logs, nil)),
+		observed,
+		1<<20,
+		registry,
+		func(conn *websocket.Conn) {
+			if err := conn.Write(context.Background(), websocket.MessageText, []byte("trigger")); err != nil {
+				upstreamClosed <- websocket.CloseStatus(err)
+				return
+			}
+			_, _, err := conn.Read(context.Background())
+			upstreamClosed <- websocket.CloseStatus(err)
+		},
+	)
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_, _, err := client.Read(ctx)
+	if got := websocket.CloseStatus(err); got != websocket.StatusInternalError {
+		t.Errorf("client close status = %v, want 1011 (err: %v)", got, err)
+		_ = client.CloseNow()
+	}
+	select {
+	case got := <-upstreamClosed:
+		if got != websocket.StatusInternalError {
+			t.Errorf("upstream close status = %v, want 1011", got)
+		}
+	case <-time.After(time.Second):
+		t.Error("upstream peer did not receive the fatal transform close")
+	}
+	waitForHandler(t, handlerDone)
+
+	_, terminals := observed.snapshot()
+	if len(terminals) != 1 || terminals[0] != SessionError {
+		t.Errorf("terminal observations = %v, want [error]", terminals)
+	}
+	for _, want := range []string{"level=WARN", "msgs_u2c=0", "bytes_u2c=0", "close_code=1011", "terminal_reason=error"} {
+		if !strings.Contains(logs.String(), want) {
+			t.Errorf("session log missing %q:\n%s", want, logs.String())
+		}
+	}
+}
+
+func TestProxyClientDisconnectRacingTransformErrorUsesValidTerminalAndTearsDown(t *testing.T) {
+	observed := &recordingWsMetrics{}
+	transformEntered := make(chan struct{})
+	raceStart := make(chan struct{})
+	registry := shim.Registry{{
+		Name:    "racing-client-message",
+		Enabled: true,
+		New: func(context.Context, endpoint.Surface, endpoint.Route) any {
+			return clientMessageTransformFunc(func(context.Context, *shim.Message) (bool, error) {
+				close(transformEntered)
+				<-raceStart
+				return false, errors.New("transform failed during disconnect")
+			})
+		},
+	}}
+	upstreamDone := make(chan struct{})
+	client, handlerDone, cleanup := startTelemetrySessionWithRegistry(
+		t,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		observed,
+		1<<20,
+		registry,
+		func(conn *websocket.Conn) {
+			defer close(upstreamDone)
+			<-raceStart
+			_ = conn.Write(context.Background(), websocket.MessageText, []byte("concurrent-server-message"))
+			_, _, _ = conn.Read(context.Background())
+		},
+	)
+	defer cleanup()
+
+	if err := client.Write(context.Background(), websocket.MessageText, []byte("trigger")); err != nil {
+		t.Fatalf("write trigger message: %v", err)
+	}
+	select {
+	case <-transformEntered:
+	case <-time.After(time.Second):
+		t.Fatal("transform did not start")
+	}
+	if err := client.CloseNow(); err != nil {
+		t.Fatalf("disconnect client: %v", err)
+	}
+	close(raceStart)
+	waitForHandler(t, handlerDone)
+	select {
+	case <-upstreamDone:
+	case <-time.After(time.Second):
+		t.Error("upstream peer did not unwind after race")
+	}
+
+	_, terminals := observed.snapshot()
+	if len(terminals) != 1 || (terminals[0] != SessionClientClosed && terminals[0] != SessionError) {
+		t.Errorf("terminal observations = %v, want [client_closed] or [error]", terminals)
 	}
 }
 
@@ -325,6 +608,11 @@ func TestProxyLogsOversizeAsAbnormalTerminal(t *testing.T) {
 
 func startTelemetrySession(t *testing.T, logger *slog.Logger, observed *recordingWsMetrics, maxMessageBytes int64, serveUpstream func(*websocket.Conn)) (*websocket.Conn, <-chan struct{}, func()) {
 	t.Helper()
+	return startTelemetrySessionWithRegistry(t, logger, observed, maxMessageBytes, nil, serveUpstream)
+}
+
+func startTelemetrySessionWithRegistry(t *testing.T, logger *slog.Logger, observed *recordingWsMetrics, maxMessageBytes int64, registry shim.Registry, serveUpstream func(*websocket.Conn)) (*websocket.Conn, <-chan struct{}, func()) {
+	t.Helper()
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := websocket.Accept(w, r, nil)
@@ -345,6 +633,7 @@ func startTelemetrySession(t *testing.T, logger *slog.Logger, observed *recordin
 		time.Second,
 		time.Second,
 		maxMessageBytes,
+		registry,
 		logger,
 		WsMetrics{Accept: observed, SessionTerminal: observed},
 	)

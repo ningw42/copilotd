@@ -1,6 +1,6 @@
 # Add an opt-in bidirectional WebSocket message-transform seam
 
-**Status:** proposed
+**Status:** accepted
 
 copilotd extends its composable shim contract to the OpenAI Responses WebSocket
 transport. A shim gains two opt-in, per-direction hooks — `ClientMessageTransformer`

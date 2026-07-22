@@ -48,7 +48,7 @@ func TestOpenAIWebSocketAuthAndReadinessRejectBeforeUpgrade(t *testing.T) {
 			}, test.ready)
 			logger := discardLogger(t)
 			forwarder := forward.New(provider, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
-			proxy := wsforward.New(provider, http.DefaultClient, time.Second, time.Second, 1<<20, logger, wsforward.WsMetrics{})
+			proxy := wsforward.New(provider, http.DefaultClient, time.Second, time.Second, 1<<20, nil, logger, wsforward.WsMetrics{})
 			t.Cleanup(func() {
 				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 				defer cancel()

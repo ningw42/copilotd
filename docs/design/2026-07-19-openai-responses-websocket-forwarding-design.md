@@ -34,13 +34,17 @@ them.
 
 ### Explicit non-goals (YAGNI)
 
-- **No shim / extensibility.** Messages are forwarded opaquely. No
-  client-message or server-event hooks are introduced. The existing
-  `shim.Registry` is not consulted on this path. (Research slice 9: the canonical
-  registry is a disabled no-op today, so opaque pass-through is sufficient.)
-  Notably, no `initiator` field is injected: the HTTP `/responses` path is
-  already payload-opaque, omits `initiator`, and is accepted by Copilot, so the
-  WS path mirrors it.
+- **No built-in payload interpretation.** The opt-in bidirectional WebSocket
+  message-transform seam now allows `ClientMessageTransformer` and
+  `ServerMessageTransformer` hooks through the shared `shim.Registry`, as
+  specified in the
+  [2026-07-22 design](2026-07-22-websocket-shim-message-transform-design.md).
+  The canonical no-op registry yields nil adapters, so the default remains
+  payload-opaque, byte-for-byte, kind-preserving forwarding; only an opted-in
+  shim interprets a message. No concrete shim is added here: notably, no
+  `initiator` field is injected. The HTTP `/responses` path is already
+  payload-opaque, omits `initiator`, and is accepted by Copilot, so the WS path
+  mirrors it.
 - **No catalog change.** `/openai/v1/models` keeps filtering on the exact
   `/responses` route (see §8). WebSocket-only models remain intentionally
   excluded until a future revisit.

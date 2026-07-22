@@ -5,12 +5,22 @@
 // basis. A hook must not access Copilot or drive an upstream retry. Both rules
 // are policy invariants enforced by review rather than by the type system.
 //
-// Stream hooks run synchronously in the SSE pump and therefore must be prompt
-// and non-blocking: CPU-bound transformation only, with no I/O or waiting. A
-// shim that holds content must also hold its terminal and release both together
-// in order at Finalize. Terminal position is an author obligation; the
-// framework prevents a second synthesized terminal but does not police content
-// emitted after a terminal.
+// SSE stream hooks run synchronously in the SSE pump and therefore must be
+// prompt and non-blocking: CPU-bound transformation only, with no I/O or
+// waiting. A shim that holds content must also hold its terminal and release
+// both together in order at Finalize. Terminal position is an author
+// obligation; the framework prevents a second synthesized terminal but does
+// not police content emitted after a terminal.
+//
+// WebSocket message hooks are opt-in through ClientMessageTransformer and
+// ServerMessageTransformer. They run synchronously in their respective pumps
+// and carry the same prompt, non-blocking obligation. A transform maps one
+// message to at most one message, or drops it; the framework never holds an
+// emission for later release.
+//
+// A shim instance is per-request on the HTTP path but per-session on the
+// long-lived, multi-turn WebSocket path. A shim that spans both transports must
+// not assume a request-scoped lifetime and must bound any per-turn accumulation.
 package shim
 
 import (
@@ -43,6 +53,21 @@ type Body struct {
 	Bytes []byte
 }
 
+// MessageKind is the transport-neutral WebSocket message kind.
+type MessageKind int
+
+const (
+	MessageText MessageKind = iota
+	MessageBinary
+)
+
+// Message carries one mutable, reassembled WebSocket message. A transformer
+// mutates Kind and/or Data in place.
+type Message struct {
+	Kind MessageKind
+	Data []byte
+}
+
 // RequestTransformer transforms one inbound request before forwarding.
 // Implementations should include a compile-time guard such as:
 //
@@ -61,6 +86,23 @@ type BufferedTransformer interface {
 	TransformBuffered(context.Context, *Body) error
 }
 
+// ClientMessageTransformer transforms one client-to-upstream WebSocket
+// message. It runs synchronously and must be prompt and non-blocking. Return
+// emit=false to drop the message.
+type ClientMessageTransformer interface {
+	TransformClientMessage(context.Context, *Message) (emit bool, err error)
+}
+
+// ServerMessageTransformer transforms one upstream-to-client WebSocket
+// message under the same rules as ClientMessageTransformer.
+type ServerMessageTransformer interface {
+	TransformServerMessage(context.Context, *Message) (emit bool, err error)
+}
+
+// MessageTransform folds the enabled directional hooks for one direction into
+// one call. Nil means no shim participates in that direction.
+type MessageTransform func(context.Context, *Message) (emit bool, err error)
+
 // EventTransformer transforms one upstream SSE frame into zero or more frames.
 // It runs synchronously in the SSE pump and must be prompt and non-blocking
 // (CPU-bound transformation only; no I/O or waiting). A transformer that holds
@@ -78,7 +120,9 @@ type StreamFinalizer interface {
 	Finalize(context.Context) ([]sse.Frame, error)
 }
 
-// Registration describes one ordered shim and its per-request factory.
+// Registration describes one ordered shim and its instance factory. HTTP
+// forwarding creates one instance per request; WebSocket forwarding creates
+// one instance per session.
 type Registration struct {
 	Name    string
 	Enabled bool
@@ -89,12 +133,14 @@ type Registration struct {
 // onion order.
 type Registry []Registration
 
-// Chain holds the enabled per-request shim instances.
+// Chain holds the enabled shim instances for one HTTP request or WebSocket
+// session.
 type Chain struct {
 	instances []any
 }
 
-// NewChain constructs each enabled shim once in registration order.
+// NewChain constructs each enabled shim once in registration order for the
+// caller's request or session lifetime.
 func (r Registry) NewChain(ctx context.Context, surface endpoint.Surface, route endpoint.Route) *Chain {
 	chain := &Chain{}
 	for _, registration := range r {
@@ -170,6 +216,56 @@ func (c *Chain) StreamAdapter() sse.FrameTransformer {
 		return nil
 	}
 	return &sseAdapter{instances: streamInstances}
+}
+
+// WSClientAdapter composes enabled client-to-upstream WebSocket message hooks.
+func (c *Chain) WSClientAdapter() MessageTransform {
+	var participants []ClientMessageTransformer
+	for _, instance := range c.instances {
+		if transformer, ok := instance.(ClientMessageTransformer); ok {
+			participants = append(participants, transformer)
+		}
+	}
+	if len(participants) == 0 {
+		return nil
+	}
+	return func(ctx context.Context, message *Message) (bool, error) {
+		for _, transformer := range participants {
+			emit, err := transformer.TransformClientMessage(ctx, message)
+			if err != nil {
+				return false, err
+			}
+			if !emit {
+				return false, nil
+			}
+		}
+		return true, nil
+	}
+}
+
+// WSServerAdapter composes enabled upstream-to-client WebSocket message hooks.
+func (c *Chain) WSServerAdapter() MessageTransform {
+	var participants []ServerMessageTransformer
+	for _, instance := range c.instances {
+		if transformer, ok := instance.(ServerMessageTransformer); ok {
+			participants = append(participants, transformer)
+		}
+	}
+	if len(participants) == 0 {
+		return nil
+	}
+	return func(ctx context.Context, message *Message) (bool, error) {
+		for i := len(participants) - 1; i >= 0; i-- {
+			emit, err := participants[i].TransformServerMessage(ctx, message)
+			if err != nil {
+				return false, err
+			}
+			if !emit {
+				return false, nil
+			}
+		}
+		return true, nil
+	}
 }
 
 type sseAdapter struct {

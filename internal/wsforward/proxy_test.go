@@ -148,6 +148,7 @@ func testProxyShutdownForceClosesSessionThatOverrunsDeadline(t *testing.T, tlsUp
 		time.Second,
 		time.Second,
 		1<<20,
+		nil,
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 		WsMetrics{},
 	)
@@ -227,6 +228,7 @@ func newTestProxy(provider identity.Provider) *Proxy {
 		time.Second,
 		time.Second,
 		1<<20,
+		nil,
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 		WsMetrics{},
 	)
@@ -304,6 +306,7 @@ func TestProxyForwardsMessagesAndBuildsUpstreamHandshake(t *testing.T) {
 		time.Second,
 		time.Second,
 		1<<20,
+		nil,
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 		WsMetrics{},
 	)
@@ -414,7 +417,7 @@ func TestProxyUsesConfiguredProxyAndVerifiedTLSForWSSDial(t *testing.T) {
 		},
 	}}
 	provider := identity.NewStatic(identity.Credential{BaseURL: upstream.URL, Token: "copilot-token"}, true)
-	proxy := New(provider, dialClient, time.Second, time.Second, 1<<20, slog.New(slog.NewTextHandler(io.Discard, nil)), WsMetrics{})
+	proxy := New(provider, dialClient, time.Second, time.Second, 1<<20, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), WsMetrics{})
 	downstream := httptest.NewServer(proxy.Handler(endpoint.OpenAIResponsesWS()))
 	t.Cleanup(downstream.Close)
 	t.Cleanup(func() {

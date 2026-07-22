@@ -43,7 +43,7 @@ func TestOpenAIResponsesHTTPAndWebSocketTransportsCoexist(t *testing.T) {
 	}, true)
 	logger := discardLogger(t)
 	forwarder := forward.New(provider, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
-	wsProxy := wsforward.New(provider, http.DefaultClient, time.Second, time.Second, 1<<20, logger, wsforward.WsMetrics{})
+	wsProxy := wsforward.New(provider, http.DefaultClient, time.Second, time.Second, 1<<20, nil, logger, wsforward.WsMetrics{})
 	handler := newHandler(testAPIKey, provider, newTestReadyObservers(), forwarder, logger, NewStreamOutcomeCounter(), config.CodexConfig{}, wsProxy)
 	downstream := httptest.NewServer(handler)
 	t.Cleanup(downstream.Close)

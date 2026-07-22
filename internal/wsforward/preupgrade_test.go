@@ -251,7 +251,7 @@ func TestProxyLogsUpstreamRequestIDFromSuccessfulHandshake(t *testing.T) {
 }
 
 func newPreupgradeTestProxy(provider identity.Provider, client *http.Client, dialTimeout time.Duration, logger *slog.Logger) *Proxy {
-	return New(provider, client, dialTimeout, time.Second, 1<<20, logger, WsMetrics{})
+	return New(provider, client, dialTimeout, time.Second, 1<<20, nil, logger, WsMetrics{})
 }
 
 func shutdownPreupgradeTestProxy(t *testing.T, proxy *Proxy) {
