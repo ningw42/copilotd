@@ -348,12 +348,13 @@ that a transform failure is **not** mistaken for an abrupt client disconnect —
 failure correctly bypasses it. No new close-code taxonomy and no new metric label
 are introduced — a transform failure reuses the existing `error` terminal. Because a
 transform runs inline in the pump, a client disconnect that races a transform is
-still **detected** by the pump's read/write error paths and is never masked. The two
-directions are independent goroutines meeting only at the terminal channel, so when a
-disconnect and a transform error occur concurrently the session is classified by
-whichever pump reports first — a benign, telemetry-only difference
-(`SessionClientClosed` vs. `SessionError`): both close both sockets, and the client,
-already gone, observes neither close code. No deterministic winner is required or
+detectable by the pump's read/write error paths but not guaranteed to be the observed
+terminal. The two directions are independent goroutines meeting only at the terminal
+channel, so when a disconnect and a transform error occur concurrently the session is
+classified by whichever pump reports first — a benign, telemetry-only difference
+(`SessionClientClosed` vs. `SessionError`). If the transform error is reported first
+the disconnect may go **unobserved**; teardown is safe either way — both sockets close,
+and the client, already gone, observes neither close code. No deterministic winner is required or
 imposed; forcing disconnect precedence would need cross-pump coordination this design
 omits, unlike the single-loop SSE pump that re-checks client cancellation at each step.
 
@@ -427,7 +428,10 @@ peers, extending the existing `wsforward` suite:
   (ADR-0009 amends ADR-0005 / ADR-0008), **ADR-0006**
   ([0006-openai-responses-websocket-transport.md](../adr/0006-openai-responses-websocket-transport.md))
   gains a `Status: accepted; message-transform seam added by ADR-0010` line and an
-  **Amendment:** back-pointer; its body is not rewritten.
+  **Amendment:** back-pointer; its body is not rewritten. Until this seam is accepted
+  both ADRs read `proposed` (ADR-0006's amendment marked provisionally); flipping
+  ADR-0010 to `accepted` and ADR-0006's amendment to the definitive wording above is
+  itself part of the shipping documentation work.
 
 ## 11. Reusable vs new
 
