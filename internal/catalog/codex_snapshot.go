@@ -142,20 +142,14 @@ func validateCodexModel(index int, rawEntry json.RawMessage, fields map[string]j
 			return fmt.Errorf("models[%d].supported_reasoning_levels[%d] is incomplete", index, levelIndex)
 		}
 	}
-	switch model.ShellType {
-	case "default", "local", "unified_exec", "disabled", "shell_command":
-	default:
-		return fmt.Errorf("models[%d] has invalid shell_type %q", index, model.ShellType)
+	if model.ShellType == "" {
+		return fmt.Errorf("models[%d] has empty shell_type", index)
 	}
-	switch model.Visibility {
-	case "list", "hide", "none":
-	default:
-		return fmt.Errorf("models[%d] has invalid visibility %q", index, model.Visibility)
+	if model.Visibility == "" {
+		return fmt.Errorf("models[%d] has empty visibility", index)
 	}
-	switch model.TruncationPolicy.Mode {
-	case "bytes", "tokens":
-	default:
-		return fmt.Errorf("models[%d] has invalid truncation policy mode %q", index, model.TruncationPolicy.Mode)
+	if model.TruncationPolicy.Mode == "" {
+		return fmt.Errorf("models[%d] truncation_policy is missing mode", index)
 	}
 	if model.TruncationPolicy.Limit == nil {
 		return fmt.Errorf("models[%d] truncation_policy is missing limit", index)

@@ -91,6 +91,59 @@ func TestDecodeCodexModelsRejectsIncompleteNestedRequiredFields(t *testing.T) {
 	}
 }
 
+func TestDecodeCodexModelsAcceptsAndPreservesUnknownEnumValues(t *testing.T) {
+	const (
+		shellType      = "future_shell"
+		visibility     = "future_visibility"
+		truncationMode = "future_truncation"
+	)
+	var envelope struct {
+		Models []map[string]any `json:"models"`
+	}
+	if err := json.Unmarshal(validCodexModelsBytes(t, "gpt-test", "prompt"), &envelope); err != nil {
+		t.Fatalf("decode complete fixture: %v", err)
+	}
+	entry := envelope.Models[0]
+	entry["shell_type"] = shellType
+	entry["visibility"] = visibility
+	truncationPolicy, ok := entry["truncation_policy"].(map[string]any)
+	if !ok {
+		t.Fatalf("fixture truncation_policy = %#v, want object", entry["truncation_policy"])
+	}
+	truncationPolicy["mode"] = truncationMode
+	currentBytes, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatalf("encode future enum fixture: %v", err)
+	}
+
+	models, err := decodeCodexModels(currentBytes)
+	if err != nil {
+		t.Fatalf("decodeCodexModels rejected future enum values: %v", err)
+	}
+	fields := models["gpt-test"]
+	for field, want := range map[string]string{
+		"shell_type": shellType,
+		"visibility": visibility,
+	} {
+		var got string
+		if err := json.Unmarshal(fields[field], &got); err != nil {
+			t.Fatalf("decode preserved %s: %v", field, err)
+		}
+		if got != want {
+			t.Errorf("preserved %s = %q, want %q", field, got, want)
+		}
+	}
+	var decodedTruncationPolicy struct {
+		Mode string `json:"mode"`
+	}
+	if err := json.Unmarshal(fields["truncation_policy"], &decodedTruncationPolicy); err != nil {
+		t.Fatalf("decode preserved truncation_policy: %v", err)
+	}
+	if decodedTruncationPolicy.Mode != truncationMode {
+		t.Errorf("preserved truncation mode = %q, want %q", decodedTruncationPolicy.Mode, truncationMode)
+	}
+}
+
 func codexModelsBytesWithoutNestedField(t *testing.T, parentField, nestedField string) []byte {
 	t.Helper()
 	var envelope struct {
