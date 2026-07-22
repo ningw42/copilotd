@@ -72,7 +72,7 @@ general bidirectional seam.
 | Direction model | **Two opt-in interfaces**, one per direction | Client (`response.create`) and server (typed event stream) carry different vocabularies; a one-directional shim implements one side with zero boilerplate; matches the existing "presence = participation" idiom; preserves onion fold symmetry. |
 | Cardinality | **1→1 + drop**, in-place mutation | Covers rewrite, drop/filter, and coalesce-via-state; keeps the adapter a linear early-exit fold; no consumer for split/inject; wideable later. |
 | Holding / `Finalize` | **None** | The WS turn terminal (`response.completed` / `response.failed` / `error`) arrives in-band as an observable message, so a shim can flush accumulated state synchronously; state-holding covers the real cases; avoids the SSE finalize complexity. |
-| Shim state scope | **Per session** | A WebSocket session is long-lived and multi-turn. The chain is built once per accepted session; a both-directions shim shares its remap state through its own struct across turns and directions. |
+| Shim state scope | **Per session** | A WebSocket session is long-lived and multi-turn. The chain is built once per accepted session; a both-directions shim shares its remap state through its own struct across turns and directions. A shim instance is thus per-session on WebSocket but per-request on HTTP; a both-transports shim must not assume a request-scoped lifetime. |
 | Registry / chain | **Reuse `shim.Registry` / `shim.Chain`** | One unified shim concept spanning HTTP, SSE, and WebSocket; a shim can close a parity gap across transports at once. |
 | Seam location (packaging) | **Carriers + interfaces + adapters in `shim`; `wsforward` imports `shim`** | `shim` already owns every mutable carrier; one-way dependency (`wsforward → shim`, mirroring `forward → shim`); no cycle, no wiring package, no injected factory. |
 | Message unit | **Reassembled coder/websocket message**, named **Message** (not "Frame") | `coder/websocket` `Read` returns whole messages; `CONTEXT.md` reserves "frame" for SSE records. |
@@ -123,6 +123,11 @@ type ServerMessageTransformer interface {
     TransformServerMessage(context.Context, *Message) (emit bool, err error)
 }
 ```
+
+The two returns are **distinct refusal paths**: `emit=false` is an intentional
+policy drop (the message is deliberately not forwarded), while a returned `err`
+signals an internal or impossible-state failure and is fatal to the session (§7).
+A shim that merely declines to forward a message must drop it, never error.
 
 These inherit the `shim` package's existing **policy invariants**: a transform may
 alter or drop information derived from a message but must not fabricate information
@@ -209,9 +214,13 @@ not yet emitted. On this transport that capability has no consumer:
   client whose upstream just died is dubious value, and not worth importing the
   finalize machinery.
 - The horizon consumer (item-ID stabilization) is pure in-place remapping — state
-  only, zero holding. Coalescing (N→1) is expressible as "accumulate in state, drop
-  each input, emit the merged message on the last input," which 1→1 + drop already
-  supports.
+  only, zero holding. Coalescing (N→1) is expressible whenever an in-band "last"
+  marker — OpenAI's per-item `response.*.done` event, or the turn terminal —
+  identifies the final input: accumulate in state, drop each input, and emit the
+  merged message in place of that final input. The merged emission *replaces* the
+  final input; a coalesce that must also forward the final input verbatim would be
+  a 1→2 split (§1 non-goals) and stays excluded. Absent such a marker, choosing the
+  emission point would require holding, which this design omits.
 
 Consequently the WS adapter is a plain per-direction fold with no finalize sweep,
 and the "must be prompt and non-blocking" rule (a transform runs inline in the pump
@@ -288,6 +297,16 @@ verbatim path and the transport remains byte-for-byte opaque.
   The `TransformClientMessage` / `TransformServerMessage` calls receive the **pump**
   context (session-scoped, derived from `baseCtx`), so cancellation and shutdown
   propagate into a running transform.
+
+  These two contexts differ in **scope**, and a shim must not confuse them: the
+  construction context (`r.Context()`) carries request-scoped values — notably the
+  correlation request-id installed by the logging middleware — whereas the pump
+  context is rooted in `baseCtx` and carries **none** of them. A shim that needs a
+  request-scoped value at transform time must therefore **capture it at
+  construction** and hold it in its own struct; the transform context is for
+  cancellation, not request-scoped lookup. Rooting the transform context in
+  `baseCtx` rather than the request context is deliberate, so shutdown cancels a
+  running transform.
 - `cmd/copilotd/main.go` passes the existing `configuredShimRegistry(cfg)` instance
   to `wsforward.New` alongside the forwarder
   ([main.go](../../cmd/copilotd/main.go#L341-L349)); the same registry backs both
@@ -334,6 +353,12 @@ consistent with the SSE result counting only written client-facing frames
 increment stays where it is (after a successful write), so a drop simply does not
 advance the forwarded count for that direction.
 
+Shim-facing observability — a logger and metrics emitter handed to a shim so it can
+account for its own transforms and drops — and any framework dropped-message counter
+are deliberately **out of scope here**. They are a separate, transport-agnostic
+design, because they change the shared shim construction contract that the HTTP and
+SSE shims also build through.
+
 ## 9. Testing
 
 Table-driven tests with local `coder/websocket` echo and scripted servers for both
@@ -359,12 +384,21 @@ peers, extending the existing `wsforward` suite:
 9. **Adapter unit tests** in `shim`: `WSClientAdapter` / `WSServerAdapter` return
    `nil` with no participants, fold in the correct order, short-circuit on drop, and
    propagate errors.
+10. **Kind mutation**: a transform that flips a message's kind (Text→Binary and the
+    reverse) is honored end-to-end — the destination peer observes the mutated kind,
+    distinct from the kind-preservation guard above.
+11. **Cancellation mid-transform**: base-context cancellation (shutdown) while a
+    transform is running tears the session down cleanly — both sockets close, the
+    sibling pump unwinds, and no goroutine leaks.
 
 ## 10. Documentation and scope reversal
 
 - **`shim` package doc** ([shim.go](../../internal/shim/shim.go#L1-L14)): extend the
-  contract description to cover the two WebSocket message hooks and the
-  no-holding / 1→1 + drop rules.
+  contract description to cover the two WebSocket message hooks, the
+  no-holding / 1→1 + drop rules, and the instance-lifetime asymmetry — a shim
+  instance is per-request on the HTTP path but per-session (long-lived, multi-turn)
+  on the WebSocket path, so a both-transports shim must not assume a request-scoped
+  lifetime and must bound any per-turn accumulation.
 - **`CONTEXT.md` glossary**: extend the **Shim** entry to note the WebSocket message
   transform (bidirectional, opt-in, no holding), and add vocabulary for the
   directional hooks and the **Message** unit (distinct from an SSE **frame**).
@@ -372,11 +406,14 @@ peers, extending the existing `wsforward` suite:
   ([2026-07-19](2026-07-19-openai-responses-websocket-forwarding-design.md#L36-L41)):
   update its "No shim / extensibility" non-goal to record that the seam now exists
   and remains opaque by default, pointing at this design.
-- **ADR-0006**
-  ([0006-openai-responses-websocket-transport.md](../adr/0006-openai-responses-websocket-transport.md)):
-  amend to record that the payload-opaque transport now carries an opt-in
-  bidirectional transform seam, opaque by default (no-op registry), interpreting a
-  message only inside a shim that opts in.
+- **ADR-0010** (new): record that the payload-opaque WebSocket transport now carries
+  an opt-in bidirectional transform seam — opaque by default (no-op registry),
+  interpreting a message only inside a shim that opts in — reversing ADR-0006's "no
+  WebSocket message hooks" non-goal. Following the repo's amendment convention
+  (ADR-0009 amends ADR-0005 / ADR-0008), **ADR-0006**
+  ([0006-openai-responses-websocket-transport.md](../adr/0006-openai-responses-websocket-transport.md))
+  gains a `Status: accepted; message-transform seam added by ADR-0010` line and an
+  **Amendment:** back-pointer; its body is not rewritten.
 
 ## 11. Reusable vs new
 

@@ -1,6 +1,12 @@
 # Forward OpenAI Responses WebSocket messages payload-opaquely
 
-**Status:** accepted
+**Status:** accepted; message-transform seam added by ADR-0010
+
+**Amendment:** ADR-0010 adds an opt-in, bidirectional message-transform seam to this
+transport, reversing the "introduce WebSocket message hooks" non-goal recorded
+below. The seam does not reuse the SSE pump, and the payload-opaque forwarding
+decision is unchanged: with the canonical no-op registry the transport is
+byte-for-byte verbatim, and a message is interpreted only inside a shim that opts in.
 
 copilotd will forward the OpenAI Responses WebSocket transport as a distinct
 bidirectional path alongside the existing HTTP/SSE path. The forwarder accepts a

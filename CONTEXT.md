@@ -136,7 +136,10 @@ sanctioned term for a **cached value**'s re-fetch cadence, e.g.
 
 **Shim**:
 A composable middleware layer that closes one specific parity gap (Phase 3+). Not
-present in Phase 1.
+present in Phase 1. A shim spans transports through one registry: it may hook the
+inbound request, the response Prelude, the buffered body, the SSE stream, and —
+opt-in and bidirectional — individual WebSocket **Messages** in each direction. The
+WebSocket hooks hold nothing: one message maps to at most one message, or is dropped.
 _Avoid_: middleware as the *name* of the mechanism — call it a shim (nested via the
 onion); "middleware" stays reserved for the `http.Handler` request pipeline. Also
 plugin, filter.
@@ -145,6 +148,23 @@ plugin, filter.
 The response envelope — status line plus headers — treated as a unit distinct from
 the body. Its shim transform runs once per response, before the body, on both the
 buffered and streaming paths (Phase 3+).
+
+**Message**:
+One reassembled WebSocket transport message — whole, not a wire frame — carrying a
+kind (Text or Binary) and payload bytes. It is the unit a WebSocket shim transform
+observes and may rewrite or drop. Distinct from an SSE **frame** (an event record on
+the streaming HTTP path) and from the Anthropic **Messages API** (an inbound
+Surface). Present only on the OpenAI Responses WebSocket path (Phase 3+).
+_Avoid_: frame (that is the SSE unit); packet.
+
+**Client / server message**:
+The two directions a WebSocket shim transform may hook — a **client message** travels
+client → upstream (a `response.create`-style request), a **server message** travels
+upstream → client (a typed Responses event). "Server" here names OpenAI's
+server-events direction (the upstream), matching the OpenAI protocol vocabulary; it
+does not make "server" a general synonym for the upstream, where copilotd is itself
+the server to its clients.
+_Avoid_: "server" as a general term for the upstream; "frame" for a message.
 
 ### Codex catalog & auto-review
 
