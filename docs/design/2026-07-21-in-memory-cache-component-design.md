@@ -346,6 +346,17 @@ The embedded snapshot, its `LICENSE`/`NOTICE`/`PROVENANCE`, and the `decodeCodex
 validator are unchanged; the snapshot's role shifts from "the served value" to
 "the floor and the accept-time contract."
 
+> **Note (2026-07-22, post-#88).** Issue #88 (per-model reviewer routing) has since
+> merged, reworking the render path this consumer feeds: `RenderCodex` now resolves
+> reviewers inside its per-model loop, `CodexRenderConfig` carries
+> `AutoReviewModelOverrides`, and `CodexRenderOutcome` reports
+> `SkippedReviewers []SkippedReviewer`. `RenderCodex` still reads the package-level
+> `codexModels` global directly (`internal/catalog/codex_render.go`), so the
+> parse-on-read change is unchanged in intent — remove the global and thread the
+> parsed `decodeCodexModels(Current())` snapshot through `RenderCodex`'s signature,
+> the `Rendering` struct, and the `handler.go` call site into that now per-model,
+> override-aware loop.
+
 ### Startup and refresh lifecycle
 
 `main` builds one `Registry`, wires both consumers into it, and drives it around
@@ -395,9 +406,10 @@ One new flag, following the `--codex-catalog-*` family and the
 beside the existing `codex-catalog-*` fields. `--codex-catalog-enabled=false` skips
 the freshness cache entirely: it is registered only when the Codex catalog is
 served, so a disabled catalog makes no outbound `openai/codex` request and shows no
-`codex_models` entry on `/readyz`. `--codex-auto-review-model` and
-`--codex-catalog-override-limits` are unaffected; the freshness cache sits
-underneath them and is inert whenever the Codex catalog is not served.
+`codex_models` entry on `/readyz`. `--codex-auto-review-model`,
+`--codex-auto-review-model-overrides`, and `--codex-catalog-override-limits` are
+unaffected; the freshness cache sits underneath them and is inert whenever the Codex
+catalog is not served.
 
 ### Observability (`/readyz`)
 
