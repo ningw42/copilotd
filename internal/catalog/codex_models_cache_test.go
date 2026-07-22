@@ -3,6 +3,7 @@ package catalog
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -341,6 +342,83 @@ func TestModelsCacheBoundsEachCredentialFreeEdgeCall(t *testing.T) {
 	}
 	if status.Source != "fetched" || status.Version != "rust-v0.145.0" || status.LastSuccess == nil {
 		t.Fatalf("status = %#v, want fetched release after three bounded calls", status)
+	}
+}
+
+func TestModelsCacheHungRequestTimesOutAndHoldsLastGood(t *testing.T) {
+	t.Parallel()
+
+	const tag = "rust-v0.145.0"
+	fetched := validCodexModelsBytes(t, "gpt-5.4", "last good")
+	var calls atomic.Int32
+	timedOut := make(chan error, 1)
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		call := calls.Add(1)
+		if call > 3 {
+			<-req.Context().Done()
+			timedOut <- req.Context().Err()
+			return nil, req.Context().Err()
+		}
+		body := []byte(`{"tag_name":"` + tag + `"}`)
+		if req.URL.Path == codexModelsContentPath {
+			body = fetched
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(bytes.NewReader(body)),
+			Request:    req,
+		}, nil
+	})}
+	registry := cache.NewRegistry()
+	models := NewModelsCache(ModelsCacheConfig{RefreshInterval: 10 * time.Millisecond}, ModelsEdge{
+		BaseURL: "https://github.invalid",
+		Client:  client,
+	}, registry, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	registry.Prime(context.Background())
+	warm, warmStatus := models.Current()
+	if warmStatus.Source != "fetched" || warmStatus.LastSuccess == nil {
+		t.Fatalf("warm status = %#v, want fetched last-good value", warmStatus)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runDone := make(chan struct{})
+	started := time.Now()
+	go func() {
+		models.Run(ctx)
+		close(runDone)
+	}()
+
+	select {
+	case err := <-timedOut:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("hung request error = %v, want context deadline exceeded", err)
+		}
+	case <-time.After(modelsRequestTimeout + time.Second):
+		t.Fatal("hung request did not stop within its five-second edge bound")
+	}
+	elapsed := time.Since(started)
+	if elapsed < 4*time.Second || elapsed > modelsRequestTimeout+time.Second {
+		t.Errorf("hung request stopped after %v, want approximately five seconds", elapsed)
+	}
+	cancel()
+	select {
+	case <-runDone:
+	case <-time.After(time.Second):
+		t.Fatal("models refresh loop did not stop after cancellation")
+	}
+
+	held, heldStatus := models.Current()
+	if heldStatus.Source != "fetched" || heldStatus.Version != warmStatus.Version {
+		t.Fatalf("held status = %#v, want last-good status %#v", heldStatus, warmStatus)
+	}
+	if heldStatus.LastSuccess == nil || !heldStatus.LastSuccess.Equal(*warmStatus.LastSuccess) {
+		t.Fatalf("held last success = %v, want original %v", heldStatus.LastSuccess, warmStatus.LastSuccess)
+	}
+	if &held[0] != &warm[0] {
+		t.Fatal("hung request replaced the last-good fetched allocation")
 	}
 }
 

@@ -5,6 +5,8 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"reflect"
+	"strings"
 )
 
 // embeddedCodexModels is Codex's bundled model catalog at rust-v0.144.5.
@@ -23,13 +25,6 @@ func init() {
 // Codex renderer. It is request-scoped; the cached value retains raw bytes.
 type CodexModels map[string]map[string]json.RawMessage
 
-var requiredCodexModelFields = []string{
-	"slug", "display_name", "supported_reasoning_levels", "shell_type",
-	"visibility", "supported_in_api", "priority", "base_instructions",
-	"supports_reasoning_summaries", "support_verbosity", "truncation_policy",
-	"supports_parallel_tool_calls", "experimental_supported_tools", "model_messages",
-}
-
 type codexRequiredFields struct {
 	Slug                       string                `json:"slug"`
 	DisplayName                string                `json:"display_name"`
@@ -45,6 +40,22 @@ type codexRequiredFields struct {
 	SupportsParallelToolCalls  bool                  `json:"supports_parallel_tool_calls"`
 	ExperimentalSupportedTools []string              `json:"experimental_supported_tools"`
 	ModelMessages              codexModelMessages    `json:"model_messages"`
+}
+
+var requiredCodexModelFields = requiredCodexJSONFields()
+
+func requiredCodexJSONFields() []string {
+	modelType := reflect.TypeFor[codexRequiredFields]()
+	fields := make([]string, 0, modelType.NumField())
+	for i := range modelType.NumField() {
+		field := modelType.Field(i)
+		name, _, _ := strings.Cut(field.Tag.Get("json"), ",")
+		if name == "" || name == "-" {
+			panic(fmt.Sprintf("codexRequiredFields.%s has no required JSON field name", field.Name))
+		}
+		fields = append(fields, name)
+	}
+	return fields
 }
 
 type codexReasoningLevel struct {
