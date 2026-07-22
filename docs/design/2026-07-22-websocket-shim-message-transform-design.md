@@ -73,6 +73,7 @@ general bidirectional seam.
 | Cardinality | **1→1 + drop**, in-place mutation | Covers rewrite, drop/filter, and coalesce-via-state; keeps the adapter a linear early-exit fold; no consumer for split/inject; wideable later. |
 | Holding / `Finalize` | **None** | The WS turn terminal (`response.completed` / `response.failed` / `error`) arrives in-band as an observable message, so a shim can flush accumulated state synchronously; state-holding covers the real cases; avoids the SSE finalize complexity. |
 | Shim state scope | **Per session** | A WebSocket session is long-lived and multi-turn. The chain is built once per accepted session; a both-directions shim shares its remap state through its own struct across turns and directions. A shim instance is thus per-session on WebSocket but per-request on HTTP; a both-transports shim must not assume a request-scoped lifetime. |
+| Cross-direction concurrency | **Shim-owned synchronization** | The client→upstream and upstream→client pumps run in separate goroutines over one per-session instance, so a both-directions shim's two hooks can be called concurrently; the shim guards its own shared state. The framework does not serialize cross-direction calls. A short CPU-bound critical section (e.g. a mutex over the remap map) is compatible with the prompt/non-blocking rule; the alternative — framework serialization — would add a lock in the hot path and block one direction while the other transforms, forfeiting the per-direction independence. |
 | Registry / chain | **Reuse `shim.Registry` / `shim.Chain`** | One unified shim concept spanning HTTP, SSE, and WebSocket; a shim can close a parity gap across transports at once. |
 | Seam location (packaging) | **Carriers + interfaces + adapters in `shim`; `wsforward` imports `shim`** | `shim` already owns every mutable carrier; one-way dependency (`wsforward → shim`, mirroring `forward → shim`); no cycle, no wiring package, no injected factory. |
 | Message unit | **Reassembled coder/websocket message**, named **Message** (not "Frame") | `coder/websocket` `Read` returns whole messages; `CONTEXT.md` reserves "frame" for SSE records. |
@@ -224,7 +225,10 @@ not yet emitted. On this transport that capability has no consumer:
 
 Consequently the WS adapter is a plain per-direction fold with no finalize sweep,
 and the "must be prompt and non-blocking" rule (a transform runs inline in the pump
-and blocks that direction while it runs) is the only timing obligation on a shim.
+and blocks that direction while it runs) is the only *timing* obligation on a shim.
+A both-directions shim carries one further obligation — synchronizing its own
+cross-direction shared state, since the two pumps run concurrently over the single
+per-session instance (§2, *Cross-direction concurrency*).
 
 ## 6. Package `wsforward`: the pump seam and session wiring
 
