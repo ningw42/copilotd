@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/ningw42/copilotd/internal/cache"
 	"github.com/ningw42/copilotd/internal/config"
 	"github.com/ningw42/copilotd/internal/forward"
 	"github.com/ningw42/copilotd/internal/identity"
@@ -52,14 +53,31 @@ type websocketDrainer interface {
 	Shutdown(context.Context) error
 }
 
+type serverOptions struct {
+	codexModels *cache.Value[[]byte]
+}
+
+// Option customizes optional server dependencies.
+type Option func(*serverOptions)
+
+// WithCodexModels supplies the live Codex models.json cached value used by the
+// opt-in Codex catalog. A nil value keeps the embedded floor.
+func WithCodexModels(value *cache.Value[[]byte]) Option {
+	return func(opts *serverOptions) { opts.codexModels = value }
+}
+
 // New builds the server from cfg and logger. The identity Provider supplies the
-// outbound Copilot credential and local readiness, observer supplies the non-secret
-// impersonation snapshot, fwd drives the Surface endpoints, and streamOutcomes
-// receives the bounded stream terminal-outcome metric. The listener is supplied
-// later to Run, so main owns bind and the server owns serve/shutdown.
-func New(cfg config.ServeConfig, logger *slog.Logger, provider identity.Provider, observer ImpersonationObserver, fwd *forward.Forwarder, wsProxy *wsforward.Proxy, streamOutcomes StreamOutcomeObserver) *Server {
+// outbound Copilot credential and local readiness, observers supply non-secret
+// readiness details, fwd drives the Surface endpoints, and streamOutcomes receives
+// the bounded stream terminal-outcome metric. The listener is supplied later to
+// Run, so main owns bind and the server owns serve/shutdown.
+func New(cfg config.ServeConfig, logger *slog.Logger, provider identity.Provider, observers ReadyObservers, fwd *forward.Forwarder, wsProxy *wsforward.Proxy, streamOutcomes StreamOutcomeObserver, configure ...Option) *Server {
+	opts := serverOptions{}
+	for _, option := range configure {
+		option(&opts)
+	}
 	httpServer := &http.Server{
-		Handler:           newHandler(cfg.APIKey, provider, observer, fwd, logger, streamOutcomes, cfg.Codex, wsProxy),
+		Handler:           newHandler(cfg.APIKey, provider, observers, fwd, logger, streamOutcomes, cfg.Codex, wsProxy, withCodexModels(opts.codexModels)),
 		ReadHeaderTimeout: readHeaderTimeout,
 		ReadTimeout:       readTimeout,
 		WriteTimeout:      writeTimeout,

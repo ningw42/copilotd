@@ -17,9 +17,10 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
-	"time"
 
 	"github.com/ningw42/copilotd/internal/build"
+	"github.com/ningw42/copilotd/internal/cache"
+	"github.com/ningw42/copilotd/internal/catalog"
 	"github.com/ningw42/copilotd/internal/config"
 	"github.com/ningw42/copilotd/internal/forward"
 	"github.com/ningw42/copilotd/internal/identity"
@@ -44,6 +45,7 @@ var errServeFailed = errors.New("serve failed")
 const (
 	productionVSCodeDiscoveryBaseURL      = "https://update.code.visualstudio.com"
 	productionMarketplaceDiscoveryBaseURL = "https://marketplace.visualstudio.com"
+	productionCodexModelsBaseURL          = "https://api.github.com"
 )
 
 // run builds the command tree, dispatches, and translates the outcome into an
@@ -295,13 +297,15 @@ func runServe(ctx context.Context, flags *config.ServeFlags, lookupEnv func(stri
 	// ever serving. Production points the exchange at the real GitHub host ("" ⇒
 	// api.github.com) with a dedicated client; the e2e test injects stubs via the
 	// same buildServeProvider seam.
-	mgr, imp, err := buildServeProvider(cfg, logger, "", newExchangeClient(), productionDiscoveryEdge())
+	cacheRegistry := cache.NewRegistry()
+	mgr, imp, err := buildServeProvider(cfg, logger, "", newExchangeClient(), productionDiscoveryEdge(), cacheRegistry)
 	if err != nil {
 		// Already carries the "run copilotd login" guidance when no source yields a
 		// token; reported through the logger, then a silent non-zero exit.
 		logger.Error("cannot start: resolving the GitHub OAuth token failed", slog.Any("error", err))
 		return errServeFailed
 	}
+	codexModels := configuredCodexModels(cfg, productionCodexModelsEdge(), cacheRegistry, logger)
 
 	ln, err := net.Listen("tcp", cfg.Addr)
 	if err != nil {
@@ -319,7 +323,7 @@ func runServe(ctx context.Context, flags *config.ServeFlags, lookupEnv func(stri
 		stop()
 	}()
 
-	if err := runBoundServe(serveCtx, cfg, logger, mgr, imp, ln); err != nil {
+	if err := runBoundServe(serveCtx, cfg, logger, mgr, imp, codexModels, cacheRegistry, ln); err != nil {
 		logger.Error("server error", slog.Any("error", err))
 		return errServeFailed
 	}
@@ -331,8 +335,8 @@ func runServe(ctx context.Context, flags *config.ServeFlags, lookupEnv func(stri
 // /healthz and the locally-ready /readyz available while bounded startup
 // discovery is in progress. Neither discovery nor startup mint outcomes gate
 // readiness or request admission.
-func runBoundServe(ctx context.Context, cfg config.ServeConfig, logger *slog.Logger, mgr *identity.Manager, imp *impersonation.Set, ln net.Listener) error {
-	go runServeStartup(ctx, cfg.ImpersonationRefreshInterval, imp, mgr, logger)
+func runBoundServe(ctx context.Context, cfg config.ServeConfig, logger *slog.Logger, mgr *identity.Manager, imp *impersonation.Set, codexModels *cache.Value[[]byte], cacheRegistry *cache.Registry, ln net.Listener) error {
+	go runServeStartup(ctx, cacheRegistry, mgr, logger)
 
 	registry := configuredShimRegistry(cfg)
 	fwd := forward.New(mgr, forward.NewClient(cfg.ResponseHeaderTimeout), cfg.OutboundTimeout, cfg.WriteTimeout, cfg.StreamIdleTimeout, cfg.StreamKeepaliveInterval, cfg.MaxRequestBytes, cfg.MaxBufferedResponseBytes, registry, forward.WithLogger(logger))
@@ -345,31 +349,31 @@ func runBoundServe(ctx context.Context, cfg config.ServeConfig, logger *slog.Log
 	})
 	streamOutcomes := server.NewStreamOutcomeCounter()
 
-	return server.New(cfg, logger, mgr, imp, fwd, wsProxy, streamOutcomes).Run(ctx, ln)
+	return server.New(cfg, logger, mgr, server.ReadyObservers{
+		Impersonation: imp,
+		Caches:        cacheRegistry,
+	}, fwd, wsProxy, streamOutcomes, server.WithCodexModels(codexModels)).Run(ctx, ln)
 }
 
-// runServeStartup performs the ordered background startup sequence. When
-// discovery is enabled, both facts are primed first, the periodic loop is
-// launched only after that bounded wait, and then the startup mint runs with the
-// resulting live (or fallback) headers. Disabling discovery skips only Prime
-// and Run; the startup mint and GitHub exchange still happen.
-func runServeStartup(ctx context.Context, interval time.Duration, imp *impersonation.Set, mgr *identity.Manager, logger *slog.Logger) {
-	discoveryEnabled := interval > 0
-	if discoveryEnabled {
-		imp.Prime(ctx)
-	}
-
-	observed := imp.Observe()
-	logger.Info("startup impersonation discovery outcome",
-		slog.Bool("enabled", discoveryEnabled),
-		slog.String("vscode_source", observed.Discovery.VSCode.Source),
-		slog.String("plugin_source", observed.Discovery.CopilotChat.Source),
-	)
-
-	if discoveryEnabled {
-		go imp.Run(ctx, interval)
-	}
+// runServeStartup performs the ordered background startup sequence. The cache
+// registry primes every refresh-enabled cached value first, launches their
+// independent refresh loops after that bounded wait, and then the startup mint
+// runs with the resulting live (or fallback) impersonation headers. Values with
+// refresh disabled stay registered and make both lifecycle operations no-ops.
+func runServeStartup(ctx context.Context, cacheRegistry *cache.Registry, mgr *identity.Manager, logger *slog.Logger) {
+	cacheRegistry.Prime(ctx)
+	logCachedValueStartupOutcomes(logger, cacheRegistry.Observe())
+	cacheRegistry.Start(ctx)
 	mgr.StartupMint(ctx)
+}
+
+func logCachedValueStartupOutcomes(logger *slog.Logger, observed []cache.Status) {
+	for _, status := range observed {
+		logger.Info("startup cached value refresh outcome",
+			slog.String("cached_value", status.Name),
+			slog.String("source", status.Source),
+			slog.String("version", status.Version))
+	}
 }
 
 func logCodexCatalogStaging(logger *slog.Logger, cfg config.ServeConfig) {
@@ -412,7 +416,7 @@ func logShimChain(logger *slog.Logger, registry shim.Registry) {
 // production uses GitHub plus the two public Microsoft origins with separate
 // plain clients, while tests point them at stubs. Every other Manager
 // timing/clock knob is left to NewManager's production defaults.
-func buildServeProvider(cfg config.ServeConfig, logger *slog.Logger, githubBaseURL string, httpClient *http.Client, discoveryEdge impersonation.Edge) (*identity.Manager, *impersonation.Set, error) {
+func buildServeProvider(cfg config.ServeConfig, logger *slog.Logger, githubBaseURL string, httpClient *http.Client, discoveryEdge impersonation.Edge, cacheRegistry *cache.Registry) (*identity.Manager, *impersonation.Set, error) {
 	oauthToken, err := identity.ResolveOAuthToken(cfg.GithubOAuthToken, cfg.GithubOAuthTokenFile)
 	if err != nil {
 		return nil, nil, err
@@ -422,7 +426,8 @@ func buildServeProvider(cfg config.ServeConfig, logger *slog.Logger, githubBaseU
 		PluginVersionFallback: cfg.PluginVersionFallback,
 		CopilotIntegrationID:  cfg.CopilotIntegrationID,
 		GithubAPIVersion:      cfg.GithubAPIVersion,
-	}, discoveryEdge, logger)
+		RefreshInterval:       cfg.ImpersonationRefreshInterval,
+	}, discoveryEdge, cacheRegistry, logger)
 	mgr := identity.NewManager(identity.ManagerConfig{
 		OAuthToken:    oauthToken,
 		GitHubBaseURL: githubBaseURL,
@@ -452,12 +457,34 @@ func productionDiscoveryEdge() impersonation.Edge {
 	}
 }
 
+func productionCodexModelsEdge() catalog.ModelsEdge {
+	return catalog.ModelsEdge{
+		BaseURL: productionCodexModelsBaseURL,
+		Client:  newCodexModelsClient(),
+	}
+}
+
+// configuredCodexModels keeps the opt-in boundary at the composition root: a
+// disabled Codex catalog registers no cached value and performs no GitHub read.
+func configuredCodexModels(cfg config.ServeConfig, edge catalog.ModelsEdge, registry *cache.Registry, logger *slog.Logger) *cache.Value[[]byte] {
+	if !cfg.Codex.Enabled {
+		return nil
+	}
+	return catalog.NewModelsCache(catalog.ModelsCacheConfig{
+		RefreshInterval: cfg.CodexCatalogRefreshInterval,
+	}, edge, registry, logger)
+}
+
 // newDiscoveryClient returns a dedicated plain client for the two public
 // Microsoft discovery endpoints. It carries no Copilot credentials or
 // impersonation transport, and each discovery request owns its timeout.
 func newDiscoveryClient() *http.Client {
 	return &http.Client{}
 }
+
+// newCodexModelsClient is credential-isolated from both the GitHub OAuth token
+// exchange and Copilot forwarding. Each edge call owns its five-second bound.
+func newCodexModelsClient() *http.Client { return &http.Client{} }
 
 // runLogin is the login lifecycle: resolve LoginConfig, build the logger, then
 // run the GitHub OAuth device flow with production defaults (real hosts, a real

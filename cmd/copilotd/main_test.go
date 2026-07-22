@@ -2,13 +2,19 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/ningw42/copilotd/internal/build"
+	"github.com/ningw42/copilotd/internal/cache"
+	"github.com/ningw42/copilotd/internal/catalog"
 	"github.com/ningw42/copilotd/internal/config"
 )
 
@@ -106,6 +112,101 @@ func TestLogCodexCatalogStaging(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestConfiguredCodexModelsRegistersOnlyForEnabledCatalog(t *testing.T) {
+	tests := []struct {
+		name    string
+		enabled bool
+		want    int
+	}{
+		{name: "disabled", want: 0},
+		{name: "enabled", enabled: true, want: 1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			registry := cache.NewRegistry()
+			var edgeCalls atomic.Int32
+			got := configuredCodexModels(config.ServeConfig{
+				Codex: config.CodexConfig{Enabled: tc.enabled},
+			}, catalog.ModelsEdge{
+				BaseURL: "https://github.invalid",
+				Client: &http.Client{Transport: mainRoundTripFunc(func(*http.Request) (*http.Response, error) {
+					edgeCalls.Add(1)
+					return nil, nil
+				})},
+			}, registry, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			registry.Prime(context.Background())
+
+			if (got != nil) != tc.enabled {
+				t.Fatalf("configured Codex models value present = %t, want %t", got != nil, tc.enabled)
+			}
+			statuses := registry.Observe()
+			if len(statuses) != tc.want {
+				t.Fatalf("registered cache statuses = %#v, want %d", statuses, tc.want)
+			}
+			if tc.enabled && statuses[0].Name != "codex_models" {
+				t.Errorf("registered status = %#v, want codex_models", statuses[0])
+			}
+			if !tc.enabled && edgeCalls.Load() != 0 {
+				t.Errorf("disabled catalog made %d Codex edge calls, want 0", edgeCalls.Load())
+			}
+		})
+	}
+}
+
+type mainRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (fn mainRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return fn(req) }
+
+func TestProductionCodexModelsEdgeUsesGitHubAndDedicatedPlainClient(t *testing.T) {
+	edge := productionCodexModelsEdge()
+	if edge.BaseURL != "https://api.github.com" {
+		t.Errorf("Codex models base URL = %q, want api.github.com", edge.BaseURL)
+	}
+	if edge.Client == nil || edge.Client == http.DefaultClient || edge.Client.Transport != nil || edge.Client.Timeout != 0 {
+		t.Errorf("Codex models client = %#v, want dedicated plain client", edge.Client)
+	}
+}
+
+func TestLogCachedValueStartupOutcomesIncludesCodexModelsWhenRegistered(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	logCachedValueStartupOutcomes(logger, []cache.Status{
+		{Name: "vscode", Source: "fetched"},
+		{Name: "copilot_chat", Source: "fallback"},
+		{Name: "codex_models", Source: "fallback", Version: "rust-v0.144.5"},
+	})
+
+	out := buf.String()
+	for _, want := range []string{
+		"startup cached value refresh outcome",
+		"cached_value=vscode source=fetched",
+		"cached_value=copilot_chat source=fallback",
+		"cached_value=codex_models source=fallback version=rust-v0.144.5",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("startup log missing %q: %s", want, out)
+		}
+	}
+	for _, forbidden := range []string{"error=", "url=", "https://"} {
+		if strings.Contains(out, forbidden) {
+			t.Errorf("startup log exposed %q: %s", forbidden, out)
+		}
+	}
+}
+
+func TestLogCachedValueStartupOutcomesOmitsCodexModelsWhenUnregistered(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	logCachedValueStartupOutcomes(logger, []cache.Status{
+		{Name: "vscode", Source: "fallback"},
+		{Name: "copilot_chat", Source: "fallback"},
+	})
+
+	if out := buf.String(); strings.Contains(out, "codex_models") {
+		t.Errorf("startup log contains unregistered Codex models outcome: %s", out)
 	}
 }
 

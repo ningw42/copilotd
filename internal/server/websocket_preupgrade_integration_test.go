@@ -57,7 +57,7 @@ func TestOpenAIWebSocketAuthAndReadinessRejectBeforeUpgrade(t *testing.T) {
 				}
 			})
 
-			handler := newHandler(testAPIKey, provider, newTestImpersonationObserver(), forwarder, logger, NewStreamOutcomeCounter(), config.CodexConfig{}, proxy)
+			handler := newHandler(testAPIKey, provider, newTestReadyObservers(), forwarder, logger, NewStreamOutcomeCounter(), config.CodexConfig{}, proxy)
 			downstream := httptest.NewServer(handler)
 			t.Cleanup(downstream.Close)
 

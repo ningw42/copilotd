@@ -32,6 +32,7 @@ uses the flat TOML keys shown below. Durations use Go duration syntax such as
 | [`--codex-auto-review-model <SLUG>`](#--codex-auto-review-model) | `COPILOTD_CODEX_AUTO_REVIEW_MODEL` | `codex-auto-review-model` | Empty | `serve` |
 | [`--codex-auto-review-model-overrides <MAP>`](#--codex-auto-review-model-overrides) | `COPILOTD_CODEX_AUTO_REVIEW_MODEL_OVERRIDES` | `codex-auto-review-model-overrides` | Empty | `serve` |
 | [`--codex-catalog-override-limits=<BOOL>`](#--codex-catalog-override-limits) | `COPILOTD_CODEX_CATALOG_OVERRIDE_LIMITS` | `codex-catalog-override-limits` | `false` | `serve` |
+| [`--codex-catalog-refresh-interval <DURATION>`](#--codex-catalog-refresh-interval) | `COPILOTD_CODEX_CATALOG_REFRESH_INTERVAL` | `codex-catalog-refresh-interval` | `24h` | `serve` |
 | [`--github-oauth-token <TOKEN>`](#--github-oauth-token) | `COPILOTD_GITHUB_OAUTH_TOKEN` | `github-oauth-token` | Empty | `serve` |
 | [`--startup-mint-retries <COUNT>`](#--startup-mint-retries) | `COPILOTD_STARTUP_MINT_RETRIES` | `startup-mint-retries` | `3` | `serve` |
 | [`--vscode-version <VERSION>`](#--vscode-version) | `COPILOTD_VSCODE_VERSION` | `vscode-version` | `1.104.1` | `serve` |
@@ -158,6 +159,14 @@ resolution before the server binds; duplicate main-model slugs also fail fast.
 
 Reports live Copilot prompt and context limits in the Codex catalog instead of
 the vendored Codex limits.
+
+### `--codex-catalog-refresh-interval`
+
+Sets the best-effort cadence for checking the latest immutable `openai/codex`
+release and refreshing Codex's `models.json` cached value. The default is `24h`;
+`0` disables outbound refresh and pins the enabled catalog to its embedded
+fallback. Negative values are rejected. When `--codex-catalog-enabled=false`,
+the cached value is not registered and no Codex release request is made.
 
 ### `--github-oauth-token`
 

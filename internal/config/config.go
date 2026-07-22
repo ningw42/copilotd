@@ -35,18 +35,19 @@ const (
 	// silence, individual downstream writes, and time-to-first-byte. The
 	// request and opt-in buffered-response caps (32 MiB each) are generous enough
 	// for multi-image base64 while guarding against pathological bodies.
-	defaultOutboundTimeout           = 600 * time.Second
-	defaultStreamIdleTimeout         = 5 * time.Minute
-	defaultStreamKeepaliveInterval   = 15 * time.Second
-	defaultWriteTimeout              = 90 * time.Second
-	defaultResponseHeaderTimeout     = 600 * time.Second
-	defaultWebSocketHandshakeTimeout = 10 * time.Second
-	defaultMaxRequestBytes           = 33554432
-	defaultMaxBufferedResponseBytes  = 33554432
-	defaultShimNopEnabled            = false
-	defaultCodexCatalogEnabled       = false
-	defaultCodexAutoReviewModel      = ""
-	defaultCodexOverrideLimits       = false
+	defaultOutboundTimeout             = 600 * time.Second
+	defaultStreamIdleTimeout           = 5 * time.Minute
+	defaultStreamKeepaliveInterval     = 15 * time.Second
+	defaultWriteTimeout                = 90 * time.Second
+	defaultResponseHeaderTimeout       = 600 * time.Second
+	defaultWebSocketHandshakeTimeout   = 10 * time.Second
+	defaultMaxRequestBytes             = 33554432
+	defaultMaxBufferedResponseBytes    = 33554432
+	defaultShimNopEnabled              = false
+	defaultCodexCatalogEnabled         = false
+	defaultCodexAutoReviewModel        = ""
+	defaultCodexOverrideLimits         = false
+	defaultCodexCatalogRefreshInterval = 24 * time.Hour
 
 	// defaultStartupMintRetries bounds the transient-failure retries of the boot
 	// warm-up mint (total attempts = 1 + N); auth-class failures short-circuit.
@@ -148,6 +149,10 @@ type ServeConfig struct {
 	// is disabled.
 	Codex CodexConfig
 
+	// CodexCatalogRefreshInterval controls best-effort refresh of Codex's
+	// models.json cached value. Zero pins the embedded floor.
+	CodexCatalogRefreshInterval time.Duration
+
 	// GithubOAuthToken is the inline GitHub OAuth token; when present it takes
 	// precedence over the GitHub OAuth token file (resolution lands in #12). It is
 	// a secret — omitted from LogValue (redaction by construction). This phase only
@@ -192,6 +197,7 @@ func (c ServeConfig) LogValue() slog.Value {
 		slog.String("codex-auto-review-model", c.Codex.AutoReviewModel),
 		slog.String("codex-auto-review-model-overrides", formatAutoReviewModelOverrides(c.Codex.AutoReviewModelOverrides)),
 		slog.Bool("codex-catalog-override-limits", c.Codex.OverrideLimits),
+		slog.Duration("codex-catalog-refresh-interval", c.CodexCatalogRefreshInterval),
 		slog.Int("startup-mint-retries", c.StartupMintRetries),
 		slog.String("vscode-version", c.VSCodeVersionFallback),
 		slog.String("plugin-version", c.PluginVersionFallback),
@@ -262,22 +268,23 @@ type ServeFlags struct {
 	fs     *ff.FlagSet
 
 	// serve-specific
-	addr                      *string
-	shutdownTimeout           *time.Duration
-	apikey                    *string
-	outboundTimeout           *time.Duration
-	streamIdleTimeout         *time.Duration
-	streamKeepaliveInterval   *time.Duration
-	writeTimeout              *time.Duration
-	responseHeaderTimeout     *time.Duration
-	webSocketHandshakeTimeout *time.Duration
-	maxRequestBytes           *int64
-	maxBufferedResponseBytes  *int64
-	shimNopEnabled            *bool
-	codexCatalogEnabled       *bool
-	codexAutoReviewModel      *string
-	codexAutoReviewOverrides  *string
-	codexOverrideLimits       *bool
+	addr                        *string
+	shutdownTimeout             *time.Duration
+	apikey                      *string
+	outboundTimeout             *time.Duration
+	streamIdleTimeout           *time.Duration
+	streamKeepaliveInterval     *time.Duration
+	writeTimeout                *time.Duration
+	responseHeaderTimeout       *time.Duration
+	webSocketHandshakeTimeout   *time.Duration
+	maxRequestBytes             *int64
+	maxBufferedResponseBytes    *int64
+	shimNopEnabled              *bool
+	codexCatalogEnabled         *bool
+	codexAutoReviewModel        *string
+	codexAutoReviewOverrides    *string
+	codexOverrideLimits         *bool
+	codexCatalogRefreshInterval *time.Duration
 
 	githubOAuthToken             *string
 	startupMintRetries           *int
@@ -310,6 +317,7 @@ func RegisterServe(fs *ff.FlagSet) *ServeFlags {
 	f.codexAutoReviewModel = fs.StringLong("codex-auto-review-model", defaultCodexAutoReviewModel, "reviewer model injected into the Codex catalog")
 	f.codexAutoReviewOverrides = fs.StringLong("codex-auto-review-model-overrides", "", "per-main-model reviewer overrides (main=reviewer,...)")
 	f.codexOverrideLimits = fs.BoolLongDefault("codex-catalog-override-limits", defaultCodexOverrideLimits, "override Codex catalog limits with live Copilot limits")
+	f.codexCatalogRefreshInterval = fs.DurationLong("codex-catalog-refresh-interval", defaultCodexCatalogRefreshInterval, "Codex models.json refresh cadence (0 pins the embedded floor)")
 
 	f.githubOAuthToken = fs.StringLong("github-oauth-token", "", "inline GitHub OAuth token (secret; precedence over the GitHub OAuth token file)")
 	f.startupMintRetries = fs.IntLong("startup-mint-retries", defaultStartupMintRetries, "transient startup-mint retries (total attempts = 1 + N)")
@@ -354,6 +362,7 @@ func (f *ServeFlags) Resolve(lookupEnv func(string) (string, bool)) (ServeConfig
 			AutoReviewModel: defaultCodexAutoReviewModel,
 			OverrideLimits:  defaultCodexOverrideLimits,
 		},
+		CodexCatalogRefreshInterval:  defaultCodexCatalogRefreshInterval,
 		StartupMintRetries:           defaultStartupMintRetries,
 		VSCodeVersionFallback:        defaultVSCodeVersionFallback,
 		PluginVersionFallback:        defaultPluginVersionFallback,
@@ -421,6 +430,9 @@ func (f *ServeFlags) Resolve(lookupEnv func(string) (string, bool)) (ServeConfig
 	}
 	if set["codex-catalog-override-limits"] {
 		cfg.Codex.OverrideLimits = *f.codexOverrideLimits
+	}
+	if set["codex-catalog-refresh-interval"] {
+		cfg.CodexCatalogRefreshInterval = *f.codexCatalogRefreshInterval
 	}
 	if set["github-oauth-token"] {
 		cfg.GithubOAuthToken = *f.githubOAuthToken
@@ -660,6 +672,13 @@ func overlay(cfg *ServeConfig, source string, get func(key string) (string, bool
 		}
 		cfg.Codex.OverrideLimits = enabled
 	}
+	if v, ok := get("codex-catalog-refresh-interval"); ok {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return fmt.Errorf("invalid codex-catalog-refresh-interval %q from %s: %w", v, source, err)
+		}
+		cfg.CodexCatalogRefreshInterval = d
+	}
 	if v, ok := get("startup-mint-retries"); ok {
 		n, err := strconv.Atoi(v)
 		if err != nil {
@@ -756,6 +775,9 @@ func (c ServeConfig) validate() error {
 	}
 	if c.ImpersonationRefreshInterval < 0 {
 		return fmt.Errorf("invalid impersonation-refresh-interval %v: must be >= 0", c.ImpersonationRefreshInterval)
+	}
+	if c.CodexCatalogRefreshInterval < 0 {
+		return fmt.Errorf("invalid codex-catalog-refresh-interval %v: must be >= 0", c.CodexCatalogRefreshInterval)
 	}
 	return nil
 }

@@ -151,9 +151,11 @@ buffered and streaming paths (Phase 3+).
 **Codex catalog**:
 The client-shaped model list served on the OpenAI Surface's `/models` when a
 request carries Codex's `?client_version=` and the feature is enabled — Codex's own
-`ModelInfo` entries (from a vendored snapshot) re-emitted field-for-field with a
-reviewer override injected. Carries *Codex's* schema and values, not Copilot's.
-Contrast the provider-shaped **Catalog**.
+`ModelInfo` entries decoded from the Codex `models.json` cached value's current
+bytes and re-emitted field-for-field with a reviewer override injected. The
+vendored snapshot is the embedded floor and accept contract; a newer accepted
+release may supply the current bytes. Carries *Codex's* schema and values, not
+Copilot's. Contrast the provider-shaped **Catalog**.
 _Avoid_: model list (unqualified).
 
 **Reviewer model**:
@@ -161,6 +163,9 @@ The real, forwardable model copilotd routes Codex's guardian auto-review to via
 `auto_review_model_override`, replacing Codex's unforwardable default
 `codex-auto-review`. Chosen per **Main model** — a per-main-model override map over
 a global default — so different main models can route to different reviewers.
+A configured reviewer is injected only when it is emitted from the intersection
+of Copilot-forwardable models and the current decoded model map, ensuring Codex
+can resolve the reviewer's complete `ModelInfo`.
 _Avoid_: auto-reviewer, guardian model.
 
 **Main model**:
@@ -179,8 +184,10 @@ _Avoid_: auth provider (unqualified).
 
 **Vendored snapshot**:
 The pinned copy of Codex's bundled `models.json` (`rust-v0.144.5`) embedded in
-copilotd, carried with Apache-2.0 `LICENSE`/`NOTICE` and a `PROVENANCE` record —
-the only faithful source for the `ModelInfo` fields Copilot never returns.
+copilotd, carried with Apache-2.0 `LICENSE`/`NOTICE` and a `PROVENANCE` record.
+It is the cached value's guaranteed-parseable embedded floor and defines the
+complete-entry accept contract for newer Codex release bytes; it is not
+necessarily the live source after a successful refresh.
 _Avoid_: snapshot (unqualified) where ambiguous.
 
 ### Streaming
@@ -213,7 +220,8 @@ _Avoid_: fake terminal, injected error (unqualified)
 **Cached value**:
 An in-memory value served from an embedded **fallback** and refreshed best-effort
 from upstream on a static TTL, holding last-good on failure; never persisted. The
-impersonation version facts and the Codex `models.json` snapshot are cached values.
+impersonation version facts and the Codex `models.json` current bytes are cached
+values.
 _Avoid_: cache (unqualified), which is also used loosely for the Copilot token.
 
 **Refresh ladder**:

@@ -68,9 +68,6 @@ func (e Edge) discoverVSCode(ctx context.Context) (string, error) {
 	if len(releases) == 0 {
 		return "", errors.New("discover VS Code version: response contains no stable releases")
 	}
-	if err := validateVersion(releases[0]); err != nil {
-		return "", fmt.Errorf("discover VS Code version: %w", err)
-	}
 	return releases[0], nil
 }
 
@@ -132,9 +129,6 @@ func (e Edge) discoverCopilotChat(ctx context.Context) (string, error) {
 		if candidate.isPrerelease() {
 			continue
 		}
-		if err := validateVersion(candidate.Version); err != nil {
-			return "", fmt.Errorf("discover Copilot Chat version: %w", err)
-		}
 		return candidate.Version, nil
 	}
 	return "", errors.New("discover Copilot Chat version: response contains no stable extension versions")
@@ -182,13 +176,6 @@ func (v marketplaceVersion) isPrerelease() bool {
 		}
 	}
 	return false
-}
-
-func validateVersion(version string) error {
-	if !IsBareVersion(version) {
-		return fmt.Errorf("invalid version %q", version)
-	}
-	return nil
 }
 
 func requireSuccess(statusCode int) error {

@@ -69,6 +69,10 @@ These constrain every component below.
    `aarch64-darwin`. No database; state at rest is a single owner-only
    credential file.
 
+   Memory-only **cached values** with embedded fallbacks do not add state at
+   rest. They are best-effort runtime data, disappear on exit, and never create
+   another file or service (ADR-0009).
+
 ### A note on the Go SDKs
 
 Go's official `anthropic-sdk-go` and `openai-go` are useful for the **auth /

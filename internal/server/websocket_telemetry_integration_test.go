@@ -76,7 +76,7 @@ func TestWebSocketTelemetryEmitsEstablishmentSessionAndAccessRecords(t *testing.
 		Accept:          accepts,
 		SessionTerminal: terminals,
 	})
-	base := startServer(t, New(testConfig(), logger, provider, newTestImpersonationObserver(), forwarder, proxy, NewStreamOutcomeCounter()))
+	base := startServer(t, New(testConfig(), logger, provider, newTestReadyObservers(), forwarder, proxy, NewStreamOutcomeCounter()))
 
 	clientURL := "ws" + strings.TrimPrefix(base, "http") + "/openai/v1/responses"
 	client, response, err := websocket.Dial(context.Background(), clientURL, &websocket.DialOptions{
@@ -184,7 +184,7 @@ func TestWebSocketPreUpgradeFailureEmitsOnlyAccessRecord(t *testing.T) {
 		Accept:          accepts,
 		SessionTerminal: terminals,
 	})
-	base := startServer(t, New(testConfig(), logger, provider, newTestImpersonationObserver(), forwarder, proxy, NewStreamOutcomeCounter()))
+	base := startServer(t, New(testConfig(), logger, provider, newTestReadyObservers(), forwarder, proxy, NewStreamOutcomeCounter()))
 
 	request, err := http.NewRequest(http.MethodGet, base+"/openai/v1/responses", nil)
 	if err != nil {
@@ -266,7 +266,7 @@ func TestAssembledServerRecoversPostUpgradeObserverPanicAndClosesBothSockets(t *
 	proxy := wsforward.New(provider, http.DefaultClient, time.Second, time.Second, 1<<20, logger, wsforward.WsMetrics{
 		Accept: panicOnEstablished{},
 	})
-	base := startServer(t, New(testConfig(), logger, provider, newTestImpersonationObserver(), forwarder, proxy, NewStreamOutcomeCounter()))
+	base := startServer(t, New(testConfig(), logger, provider, newTestReadyObservers(), forwarder, proxy, NewStreamOutcomeCounter()))
 
 	clientURL := "ws" + strings.TrimPrefix(base, "http") + "/openai/v1/responses"
 	client, response, err := websocket.Dial(context.Background(), clientURL, &websocket.DialOptions{

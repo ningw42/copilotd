@@ -7,6 +7,7 @@ import (
 	"strconv"
 
 	"github.com/ningw42/copilotd/internal/apierror"
+	"github.com/ningw42/copilotd/internal/cache"
 	"github.com/ningw42/copilotd/internal/endpoint"
 )
 
@@ -23,6 +24,7 @@ type Rendering struct {
 // shaped Phase 6a response.
 type CodexDescriptor struct {
 	Enabled      bool
+	Models       *cache.Value[[]byte]
 	RenderConfig CodexRenderConfig
 }
 
@@ -54,7 +56,15 @@ func Handler(ep endpoint.Catalog, rendering Rendering, fetcher Fetcher) http.Han
 		if servesCodexShape(ep, rendering, r) {
 			shape = CatalogShapeCodex
 			var outcome CodexRenderOutcome
-			representation, outcome, err = RenderCodex(filtered, rendering.Codex.RenderConfig)
+			currentBytes := embeddedCodexModels
+			if rendering.Codex.Models != nil {
+				currentBytes, _ = rendering.Codex.Models.Current()
+			}
+			var codexModels CodexModels
+			codexModels, err = decodeCodexModels(currentBytes)
+			if err == nil {
+				representation, outcome, err = RenderCodex(codexModels, filtered, rendering.Codex.RenderConfig)
+			}
 			if err == nil && rendering.Logger != nil {
 				for _, skipped := range outcome.SkippedReviewers {
 					rendering.Logger.WarnContext(r.Context(), "Codex catalog reviewer was skipped",

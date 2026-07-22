@@ -101,17 +101,19 @@ func TestDiscoverCopilotChat(t *testing.T) {
 	}
 }
 
-func TestDiscoveryRejectsInvalidVersionShapes(t *testing.T) {
+func TestDiscoveryReturnsSelectedVersionBeforeCacheValidation(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		name string
 		body string
+		want string
 		call func(Edge) (string, error)
 	}{
 		{
 			name: "VS Code",
 			body: `["release-1.129.2"]`,
+			want: "release-1.129.2",
 			call: func(edge Edge) (string, error) {
 				return edge.discoverVSCode(context.Background())
 			},
@@ -119,6 +121,7 @@ func TestDiscoveryRejectsInvalidVersionShapes(t *testing.T) {
 		{
 			name: "Copilot Chat",
 			body: `{"results":[{"extensions":[{"versions":[{"version":"0.49","properties":[]}]}]}]}`,
+			want: "0.49",
 			call: func(edge Edge) (string, error) {
 				return edge.discoverCopilotChat(context.Background())
 			},
@@ -140,11 +143,11 @@ func TestDiscoveryRejectsInvalidVersionShapes(t *testing.T) {
 				Client:             server.Client(),
 			}
 			value, err := test.call(edge)
-			if err == nil {
-				t.Fatalf("discovery returned value %q, want shape error", value)
+			if err != nil {
+				t.Fatalf("discovery error = %v, want selection to precede cache validation", err)
 			}
-			if value != "" {
-				t.Errorf("value = %q on error, want empty", value)
+			if value != test.want {
+				t.Errorf("value = %q, want selected candidate %q", value, test.want)
 			}
 		})
 	}

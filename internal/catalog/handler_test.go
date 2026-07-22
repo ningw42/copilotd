@@ -8,7 +8,9 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"testing"
+	"time"
 
+	"github.com/ningw42/copilotd/internal/cache"
 	"github.com/ningw42/copilotd/internal/endpoint"
 )
 
@@ -143,6 +145,49 @@ func TestHandlerCodexHEADMatchesGETHeadersAndSuppressesBody(t *testing.T) {
 	}
 	if got := getRecorder.Header().Get("X-Catalog-Shape"); got != "" {
 		t.Errorf("internal catalog shape header leaked as %q", got)
+	}
+}
+
+func TestHandlerRendersCodexFromCurrentCachedBytes(t *testing.T) {
+	fresh := validCodexModelsBytes(t, "fresh-model", "release prompt")
+	registry := cache.NewRegistry()
+	modelsValue := cache.New(cache.Cacheable[[]byte]{
+		Fallback:        embeddedCodexModels,
+		FallbackVersion: embeddedCodexModelsVersion,
+		TTL:             time.Hour,
+		Fetch: func(context.Context) ([]byte, string, error) {
+			return fresh, "rust-v0.145.0", nil
+		},
+		Hash: hashModels,
+		Validate: func(currentBytes []byte) error {
+			_, err := decodeCodexModels(currentBytes)
+			return err
+		},
+	})
+	registry.Register(modelsValue)
+	registry.Prime(context.Background())
+
+	upstreamBody := []byte(`{"data":[{"id":"fresh-model","model_picker_enabled":true,"supported_endpoints":["/responses"]}]}`)
+	handler := Handler(endpoint.OpenAICatalog(), Rendering{
+		Render: RenderOpenAI,
+		Codex: CodexDescriptor{
+			Enabled: true,
+			Models:  modelsValue,
+			RenderConfig: CodexRenderConfig{
+				OverrideLimits: true,
+			},
+		},
+	}, stubFetcher{status: http.StatusOK, body: upstreamBody})
+	recorder := httptest.NewRecorder()
+
+	handler(recorder, httptest.NewRequest(http.MethodGet, "/openai/v1/models?client_version=0.145.0", nil))
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", recorder.Code, recorder.Body.String())
+	}
+	entries := decodeRenderedCodex(t, recorder.Body.Bytes())
+	if got := renderedSlugs(t, entries); len(got) != 1 || got[0] != "fresh-model" {
+		t.Fatalf("rendered slugs = %q, want current fetched model", got)
 	}
 }
 

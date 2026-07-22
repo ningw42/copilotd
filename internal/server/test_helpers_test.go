@@ -6,31 +6,31 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/ningw42/copilotd/internal/cache"
 	"github.com/ningw42/copilotd/internal/identity"
-	"github.com/ningw42/copilotd/internal/impersonation"
 	"github.com/ningw42/copilotd/internal/wsforward"
 )
 
 type staticImpersonationObserver struct {
-	observed impersonation.Observed
+	header http.Header
 }
 
-func (s staticImpersonationObserver) Observe() impersonation.Observed { return s.observed }
+func (s staticImpersonationObserver) Header() http.Header { return s.header.Clone() }
 
-func newTestImpersonationObserver() ImpersonationObserver {
-	return staticImpersonationObserver{observed: impersonation.Observed{
-		EffectiveHeaders: http.Header{
-			"Copilot-Integration-Id": {"vscode-chat"},
-			"Editor-Plugin-Version":  {"copilot-chat/0.26.7"},
-			"Editor-Version":         {"vscode/1.104.1"},
-			"User-Agent":             {"GitHubCopilotChat/0.26.7"},
-			"X-Github-Api-Version":   {"2025-04-01"},
-		},
-		Discovery: impersonation.ObservedDiscovery{
-			VSCode:      impersonation.ObservedFact{Source: "fallback"},
-			CopilotChat: impersonation.ObservedFact{Source: "fallback"},
-		},
-	}}
+func newTestReadyObservers() ReadyObservers {
+	return ReadyObservers{Impersonation: staticImpersonationObserver{header: http.Header{
+		"Copilot-Integration-Id": {"vscode-chat"},
+		"Editor-Plugin-Version":  {"copilot-chat/0.26.7"},
+		"Editor-Version":         {"vscode/1.104.1"},
+		"User-Agent":             {"GitHubCopilotChat/0.26.7"},
+		"X-Github-Api-Version":   {"2025-04-01"},
+	}}, Caches: staticCacheObserver{}}
+}
+
+type staticCacheObserver struct{ statuses []cache.Status }
+
+func (s staticCacheObserver) Observe() []cache.Status {
+	return append([]cache.Status(nil), s.statuses...)
 }
 
 func newTestWSProxy(provider identity.Provider) *wsforward.Proxy {

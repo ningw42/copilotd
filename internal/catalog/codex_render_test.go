@@ -9,9 +9,11 @@ import (
 	"github.com/ningw42/copilotd/internal/endpoint"
 )
 
+var testCodexModels = mustDecodeCodexModels(embeddedCodexModels)
+
 func TestRenderCodexIntersectsInLiveOrderAndEmitsCompleteEntries(t *testing.T) {
 	models := Filter(capturedModels(t), endpoint.RouteOpenAIResponses)
-	body, outcome, err := RenderCodex(models, CodexRenderConfig{})
+	body, outcome, err := RenderCodex(testCodexModels, models, CodexRenderConfig{})
 	if err != nil {
 		t.Fatalf("RenderCodex: %v", err)
 	}
@@ -28,14 +30,8 @@ func TestRenderCodexIntersectsInLiveOrderAndEmitsCompleteEntries(t *testing.T) {
 		t.Errorf("rendered slugs = %q, want %q", got, wantSlugs)
 	}
 
-	required := []string{
-		"slug", "display_name", "supported_reasoning_levels", "shell_type",
-		"visibility", "supported_in_api", "priority", "base_instructions",
-		"supports_reasoning_summaries", "support_verbosity", "truncation_policy",
-		"supports_parallel_tool_calls", "experimental_supported_tools",
-	}
 	for i, entry := range entries {
-		for _, field := range required {
+		for _, field := range requiredCodexModelFields {
 			if _, ok := entry[field]; !ok {
 				t.Errorf("models[%d] is missing Codex required field %q", i, field)
 			}
@@ -58,9 +54,9 @@ func TestRenderCodexIntersectsInLiveOrderAndEmitsCompleteEntries(t *testing.T) {
 	}
 }
 
-func TestRenderCodexCopiesSnapshotFieldsVerbatimAndDoesNotAliasThem(t *testing.T) {
+func TestRenderCodexCopiesCurrentFieldsVerbatimAndDoesNotAliasThem(t *testing.T) {
 	models := Filter(capturedModels(t), endpoint.RouteOpenAIResponses)
-	body, _, err := RenderCodex(models, CodexRenderConfig{
+	body, _, err := RenderCodex(testCodexModels, models, CodexRenderConfig{
 		AutoReviewModelOverrides: map[string]string{"gpt-5.4": "gpt-5.4-mini"},
 	})
 	if err != nil {
@@ -71,7 +67,7 @@ func TestRenderCodexCopiesSnapshotFieldsVerbatimAndDoesNotAliasThem(t *testing.T
 		if err := json.Unmarshal(entry["slug"], &slug); err != nil {
 			t.Fatalf("decode rendered slug: %v", err)
 		}
-		for field, want := range codexModels[slug] {
+		for field, want := range testCodexModels[slug] {
 			if field == "auto_review_model_override" {
 				continue
 			}
@@ -89,10 +85,10 @@ func TestRenderCodexCopiesSnapshotFieldsVerbatimAndDoesNotAliasThem(t *testing.T
 		}
 	}
 
-	copy := copyCodexFields(codexModels["gpt-5.4"])
+	copy := copyCodexEntry(testCodexModels["gpt-5.4"])
 	copy["slug"][0] = 'x'
-	if bytes.Equal(copy["slug"], codexModels["gpt-5.4"]["slug"]) {
-		t.Error("copyCodexFields retained a RawMessage alias into the embedded snapshot")
+	if bytes.Equal(copy["slug"], testCodexModels["gpt-5.4"]["slug"]) {
+		t.Error("copyCodexEntry retained a RawMessage alias into the vendored snapshot")
 	}
 }
 
@@ -105,13 +101,13 @@ func TestRenderCodexInjectsOnlyAnEmittedReviewer(t *testing.T) {
 		wantSkips bool
 	}{
 		{name: "empty reviewer"},
-		{name: "emitted reviewer overwrites snapshot value", reviewer: "gpt-5.4-mini", wantValue: "gpt-5.4-mini"},
-		{name: "snapshot-only reviewer is skipped", reviewer: "codex-auto-review", wantSkips: true},
+		{name: "emitted reviewer overwrites Codex value", reviewer: "gpt-5.4-mini", wantValue: "gpt-5.4-mini"},
+		{name: "Codex-only reviewer is skipped", reviewer: "codex-auto-review", wantSkips: true},
 		{name: "Copilot-only reviewer is skipped", reviewer: "gpt-5.3-codex", wantSkips: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			body, outcome, err := RenderCodex(models, CodexRenderConfig{AutoReviewModel: tc.reviewer})
+			body, outcome, err := RenderCodex(testCodexModels, models, CodexRenderConfig{AutoReviewModel: tc.reviewer})
 			if err != nil {
 				t.Fatalf("RenderCodex: %v", err)
 			}
@@ -147,7 +143,7 @@ func TestRenderCodexInjectsOnlyAnEmittedReviewer(t *testing.T) {
 
 func TestRenderCodexResolvesPerModelReviewerBeforeGlobalFallback(t *testing.T) {
 	models := []Model{{ID: "gpt-5.4-mini"}, {ID: "gpt-5.4"}, {ID: "gpt-5.5"}}
-	body, outcome, err := RenderCodex(models, CodexRenderConfig{
+	body, outcome, err := RenderCodex(testCodexModels, models, CodexRenderConfig{
 		AutoReviewModel: "gpt-5.5",
 		AutoReviewModelOverrides: map[string]string{
 			"gpt-5.4-mini": "gpt-5.4",
@@ -173,7 +169,7 @@ func TestRenderCodexResolvesPerModelReviewerBeforeGlobalFallback(t *testing.T) {
 
 func TestRenderCodexResolvesReviewerOverridesSingleHop(t *testing.T) {
 	models := []Model{{ID: "gpt-5.4-mini"}, {ID: "gpt-5.4"}, {ID: "gpt-5.5"}}
-	body, _, err := RenderCodex(models, CodexRenderConfig{
+	body, _, err := RenderCodex(testCodexModels, models, CodexRenderConfig{
 		AutoReviewModelOverrides: map[string]string{
 			"gpt-5.4-mini": "gpt-5.4",
 			"gpt-5.4":      "gpt-5.5",
@@ -203,7 +199,7 @@ func TestRenderCodexSkipsBadExplicitReviewerWithoutGlobalFallback(t *testing.T) 
 		{ID: "gpt-5.4"},
 		{ID: "gpt-5.5"},
 	}
-	body, outcome, err := RenderCodex(models, CodexRenderConfig{
+	body, outcome, err := RenderCodex(testCodexModels, models, CodexRenderConfig{
 		AutoReviewModel: "gpt-5.5",
 		AutoReviewModelOverrides: map[string]string{
 			"gpt-5.4-mini": missingReviewer,
@@ -236,7 +232,7 @@ func TestRenderCodexSkipsBadExplicitReviewerWithoutGlobalFallback(t *testing.T) 
 func TestRenderCodexReportsBadGlobalPerAffectedModelInEmissionOrder(t *testing.T) {
 	const missingReviewer = "missing-global-reviewer"
 	models := []Model{{ID: "gpt-5.4-mini"}, {ID: "gpt-5.4"}, {ID: "gpt-5.5"}}
-	body, outcome, err := RenderCodex(models, CodexRenderConfig{
+	body, outcome, err := RenderCodex(testCodexModels, models, CodexRenderConfig{
 		AutoReviewModel: missingReviewer,
 		AutoReviewModelOverrides: map[string]string{
 			"gpt-5.4": "gpt-5.4-mini",
@@ -267,7 +263,7 @@ func TestRenderCodexReportsBadGlobalPerAffectedModelInEmissionOrder(t *testing.T
 
 func TestRenderCodexIgnoresNonAdvertisedAndMiscasedOverrideKeys(t *testing.T) {
 	models := []Model{{ID: "gpt-5.4-mini"}, {ID: "gpt-5.4"}}
-	body, outcome, err := RenderCodex(models, CodexRenderConfig{
+	body, outcome, err := RenderCodex(testCodexModels, models, CodexRenderConfig{
 		AutoReviewModelOverrides: map[string]string{
 			"gpt-5.5":      "missing-reviewer",
 			"GPT-5.4-MINI": "missing-reviewer",
@@ -295,7 +291,7 @@ func TestRenderCodexDropsAReviewerCopilotStopsForwarding(t *testing.T) {
 		}
 	}
 
-	body, outcome, err := RenderCodex(withoutReviewer, CodexRenderConfig{AutoReviewModel: "gpt-5.4"})
+	body, outcome, err := RenderCodex(testCodexModels, withoutReviewer, CodexRenderConfig{AutoReviewModel: "gpt-5.4"})
 	if err != nil {
 		t.Fatalf("RenderCodex: %v", err)
 	}
@@ -314,7 +310,7 @@ func TestRenderCodexDropsAReviewerCopilotStopsForwarding(t *testing.T) {
 	}
 }
 
-func TestRenderCodexOverlaysLimitsWithIndependentSnapshotFallbacks(t *testing.T) {
+func TestRenderCodexOverlaysLimitsWithIndependentVendoredFallbacks(t *testing.T) {
 	promptOnly, contextOnly, both := 111, 222, 333
 	models := []Model{
 		{ID: "gpt-5.4-mini", Capabilities: Capabilities{Limits: Limits{MaxPromptTokens: &promptOnly}}},
@@ -322,24 +318,24 @@ func TestRenderCodexOverlaysLimitsWithIndependentSnapshotFallbacks(t *testing.T)
 		{ID: "gpt-5.5", Capabilities: Capabilities{Limits: Limits{MaxPromptTokens: &both, MaxContextWindowTokens: &both}}},
 	}
 
-	offBody, _, err := RenderCodex(models, CodexRenderConfig{})
+	offBody, _, err := RenderCodex(testCodexModels, models, CodexRenderConfig{})
 	if err != nil {
 		t.Fatalf("RenderCodex with overlay off: %v", err)
 	}
 	for _, entry := range decodeRenderedCodex(t, offBody) {
 		slug := decodeStringField(t, entry, "slug")
-		assertRawFieldEqual(t, slug, "context_window", entry["context_window"], codexModels[slug]["context_window"])
-		assertRawFieldEqual(t, slug, "max_context_window", entry["max_context_window"], codexModels[slug]["max_context_window"])
+		assertRawFieldEqual(t, slug, "context_window", entry["context_window"], testCodexModels[slug]["context_window"])
+		assertRawFieldEqual(t, slug, "max_context_window", entry["max_context_window"], testCodexModels[slug]["max_context_window"])
 	}
 
-	onBody, _, err := RenderCodex(models, CodexRenderConfig{OverrideLimits: true})
+	onBody, _, err := RenderCodex(testCodexModels, models, CodexRenderConfig{OverrideLimits: true})
 	if err != nil {
 		t.Fatalf("RenderCodex with overlay on: %v", err)
 	}
 	entries := decodeRenderedCodex(t, onBody)
 	assertJSONInt(t, entries[0], "context_window", promptOnly)
-	assertRawFieldEqual(t, "gpt-5.4-mini", "max_context_window", entries[0]["max_context_window"], codexModels["gpt-5.4-mini"]["max_context_window"])
-	assertRawFieldEqual(t, "gpt-5.4", "context_window", entries[1]["context_window"], codexModels["gpt-5.4"]["context_window"])
+	assertRawFieldEqual(t, "gpt-5.4-mini", "max_context_window", entries[0]["max_context_window"], testCodexModels["gpt-5.4-mini"]["max_context_window"])
+	assertRawFieldEqual(t, "gpt-5.4", "context_window", entries[1]["context_window"], testCodexModels["gpt-5.4"]["context_window"])
 	assertJSONInt(t, entries[1], "max_context_window", contextOnly)
 	assertJSONInt(t, entries[2], "context_window", both)
 	assertJSONInt(t, entries[2], "max_context_window", both)
@@ -353,13 +349,13 @@ func TestRenderCodexFallsBackWhenCapturedCopilotModelsOmitLimits(t *testing.T) {
 		}
 	}
 
-	body, _, err := RenderCodex(models, CodexRenderConfig{OverrideLimits: true})
+	body, _, err := RenderCodex(testCodexModels, models, CodexRenderConfig{OverrideLimits: true})
 	if err != nil {
 		t.Fatalf("RenderCodex: %v", err)
 	}
 	for _, entry := range decodeRenderedCodex(t, body) {
 		slug := decodeStringField(t, entry, "slug")
-		assertRawFieldEqual(t, slug, "max_context_window", entry["max_context_window"], codexModels[slug]["max_context_window"])
+		assertRawFieldEqual(t, slug, "max_context_window", entry["max_context_window"], testCodexModels[slug]["max_context_window"])
 	}
 }
 
@@ -372,30 +368,6 @@ func TestDecodePreservesOptionalMaxContextWindowTokens(t *testing.T) {
 	if limit == nil || *limit != 456 {
 		t.Errorf("max_context_window_tokens = %v, want 456", limit)
 	}
-}
-
-type codexRequiredFields struct {
-	Slug                       string                `json:"slug"`
-	DisplayName                string                `json:"display_name"`
-	SupportedReasoningLevels   []codexReasoningLevel `json:"supported_reasoning_levels"`
-	ShellType                  string                `json:"shell_type"`
-	Visibility                 string                `json:"visibility"`
-	SupportedInAPI             bool                  `json:"supported_in_api"`
-	Priority                   int                   `json:"priority"`
-	BaseInstructions           string                `json:"base_instructions"`
-	SupportsReasoningSummaries bool                  `json:"supports_reasoning_summaries"`
-	SupportVerbosity           bool                  `json:"support_verbosity"`
-	TruncationPolicy           struct {
-		Mode  string `json:"mode"`
-		Limit int64  `json:"limit"`
-	} `json:"truncation_policy"`
-	SupportsParallelToolCalls  bool     `json:"supports_parallel_tool_calls"`
-	ExperimentalSupportedTools []string `json:"experimental_supported_tools"`
-}
-
-type codexReasoningLevel struct {
-	Effort      string  `json:"effort"`
-	Description *string `json:"description"`
 }
 
 func assertCodexRequiredFieldValues(t *testing.T, index int, model codexRequiredFields) {
@@ -462,7 +434,7 @@ func decodeStringField(t *testing.T, entry map[string]json.RawMessage, field str
 func assertRawFieldEqual(t *testing.T, slug, field string, got, want json.RawMessage) {
 	t.Helper()
 	if !bytes.Equal(got, want) {
-		t.Errorf("%s.%s = %s, want snapshot %s", slug, field, got, want)
+		t.Errorf("%s.%s = %s, want vendored value %s", slug, field, got, want)
 	}
 }
 

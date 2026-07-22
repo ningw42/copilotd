@@ -32,11 +32,10 @@ type CodexRenderOutcome struct {
 	SkippedReviewers []SkippedReviewer
 }
 
-// RenderCodex intersects Responses-forwardable Copilot models with the
-// embedded Codex snapshot, preserving Copilot's order. Snapshot fields are
-// copied verbatim except for the explicitly configured reviewer and limits
-// mutations.
-func RenderCodex(forwardable []Model, cfg CodexRenderConfig) ([]byte, CodexRenderOutcome, error) {
+// RenderCodex intersects Responses-forwardable Copilot models with the current
+// decoded model map, preserving Copilot's order. Codex entry fields are copied
+// verbatim except for the explicitly configured reviewer and limits mutations.
+func RenderCodex(codexModels CodexModels, forwardable []Model, cfg CodexRenderConfig) ([]byte, CodexRenderOutcome, error) {
 	emitted := make(map[string]struct{}, len(forwardable))
 	for _, model := range forwardable {
 		if _, ok := codexModels[model.ID]; ok {
@@ -48,13 +47,13 @@ func RenderCodex(forwardable []Model, cfg CodexRenderConfig) ([]byte, CodexRende
 
 	entries := make([]map[string]json.RawMessage, 0, len(emitted))
 	for _, model := range forwardable {
-		snapshot, ok := codexModels[model.ID]
+		codexEntry, ok := codexModels[model.ID]
 		if !ok {
 			continue
 		}
 
-		fields := copyCodexFields(snapshot)
-		// The snapshot's value is not authoritative for this deployment. Omit
+		fields := copyCodexEntry(codexEntry)
+		// The Codex entry's value is not authoritative for this deployment. Omit
 		// it unless the configured reviewer is itself safe to advertise.
 		delete(fields, "auto_review_model_override")
 		reviewer, overridden := cfg.AutoReviewModelOverrides[model.ID]
@@ -92,15 +91,15 @@ func RenderCodex(forwardable []Model, cfg CodexRenderConfig) ([]byte, CodexRende
 	return body, outcome, nil
 }
 
-func copyCodexFields(snapshot map[string]json.RawMessage) map[string]json.RawMessage {
-	fields := make(map[string]json.RawMessage, len(snapshot))
-	for field, raw := range snapshot {
+func copyCodexEntry(entry map[string]json.RawMessage) map[string]json.RawMessage {
+	fields := make(map[string]json.RawMessage, len(entry))
+	for field, raw := range entry {
 		fields[field] = bytes.Clone(raw)
 	}
 	return fields
 }
 
-// marshalCodexEnvelope writes raw field values directly so snapshot values,
+// marshalCodexEnvelope writes raw field values directly so current Codex values,
 // including whitespace inside arrays and objects, remain byte-identical. Map
 // keys are sorted to keep the output deterministic.
 func marshalCodexEnvelope(entries []map[string]json.RawMessage) ([]byte, error) {

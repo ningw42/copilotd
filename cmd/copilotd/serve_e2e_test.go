@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ningw42/copilotd/internal/cache"
+	"github.com/ningw42/copilotd/internal/catalog"
 	"github.com/ningw42/copilotd/internal/config"
 	"github.com/ningw42/copilotd/internal/forward"
 	"github.com/ningw42/copilotd/internal/impersonation"
@@ -166,7 +168,8 @@ func newSequencedGitHubExchangeStub(t *testing.T, apiURL string, statuses ...int
 
 func startManagerBackedE2EServer(t *testing.T, cfg config.ServeConfig, logger *slog.Logger, github *httptest.Server, runStartupMint bool) string {
 	t.Helper()
-	mgr, imp, err := buildServeProvider(cfg, logger, github.URL, github.Client(), productionDiscoveryEdge())
+	cacheRegistry := cache.NewRegistry()
+	mgr, imp, err := buildServeProvider(cfg, logger, github.URL, github.Client(), productionDiscoveryEdge(), cacheRegistry)
 	if err != nil {
 		t.Fatalf("buildServeProvider: %v", err)
 	}
@@ -174,7 +177,10 @@ func startManagerBackedE2EServer(t *testing.T, cfg config.ServeConfig, logger *s
 		mgr.StartupMint(context.Background())
 	}
 	fwd := forward.New(mgr, forward.NewClient(cfg.ResponseHeaderTimeout), cfg.OutboundTimeout, cfg.WriteTimeout, cfg.StreamIdleTimeout, cfg.StreamKeepaliveInterval, cfg.MaxRequestBytes, cfg.MaxBufferedResponseBytes, nil, forward.WithLogger(logger))
-	return startTestServer(t, server.New(cfg, logger, mgr, imp, fwd, newTestWSProxy(mgr), server.NewStreamOutcomeCounter()))
+	return startTestServer(t, server.New(cfg, logger, mgr, server.ReadyObservers{
+		Impersonation: imp,
+		Caches:        cacheRegistry,
+	}, fwd, newTestWSProxy(mgr), server.NewStreamOutcomeCounter()))
 }
 
 // TestServeFirstRealCallEndToEnd is Phase 1.5's outcome: the REAL identity.Manager
@@ -195,7 +201,8 @@ func TestServeFirstRealCallEndToEnd(t *testing.T) {
 	cfg := e2eConfig(oauth)
 	logger := discardLogger(t)
 
-	mgr, imp, err := buildServeProvider(cfg, logger, github.URL, github.Client(), productionDiscoveryEdge())
+	cacheRegistry := cache.NewRegistry()
+	mgr, imp, err := buildServeProvider(cfg, logger, github.URL, github.Client(), productionDiscoveryEdge(), cacheRegistry)
 	if err != nil {
 		t.Fatalf("buildServeProvider: %v", err)
 	}
@@ -204,7 +211,10 @@ func TestServeFirstRealCallEndToEnd(t *testing.T) {
 	mgr.StartupMint(context.Background())
 
 	fwd := forward.New(mgr, forward.NewClient(cfg.ResponseHeaderTimeout), cfg.OutboundTimeout, cfg.WriteTimeout, cfg.StreamIdleTimeout, cfg.StreamKeepaliveInterval, cfg.MaxRequestBytes, cfg.MaxBufferedResponseBytes, nil, forward.WithLogger(logger))
-	base := startTestServer(t, server.New(cfg, logger, mgr, imp, fwd, newTestWSProxy(mgr), server.NewStreamOutcomeCounter()))
+	base := startTestServer(t, server.New(cfg, logger, mgr, server.ReadyObservers{
+		Impersonation: imp,
+		Caches:        cacheRegistry,
+	}, fwd, newTestWSProxy(mgr), server.NewStreamOutcomeCounter()))
 
 	assertImpersonation := func(t *testing.T) {
 		t.Helper()
@@ -303,11 +313,12 @@ func TestServeDiscoveredVersionsEndToEnd(t *testing.T) {
 	cfg.PluginVersionFallback = "6.5.4"
 	cfg.ImpersonationRefreshInterval = time.Hour
 	logger := discardLogger(t)
+	cacheRegistry := cache.NewRegistry()
 	mgr, imp, err := buildServeProvider(cfg, logger, github.URL, github.Client(), impersonation.Edge{
 		VSCodeBaseURL:      discovery.URL,
 		MarketplaceBaseURL: discovery.URL,
 		Client:             discovery.Client(),
-	})
+	}, cacheRegistry)
 	if err != nil {
 		t.Fatalf("buildServeProvider: %v", err)
 	}
@@ -318,7 +329,7 @@ func TestServeDiscoveredVersionsEndToEnd(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- runBoundServe(ctx, cfg, logger, mgr, imp, ln) }()
+	go func() { done <- runBoundServe(ctx, cfg, logger, mgr, imp, nil, cacheRegistry, ln) }()
 	t.Cleanup(func() {
 		cancel()
 		select {
@@ -355,7 +366,149 @@ func TestServeDiscoveredVersionsEndToEnd(t *testing.T) {
 		t.Errorf("forwarded User-Agent = %q, want discovered %q", got, want)
 	}
 
-	assertReadyzImpersonation(t, base, discoveredVSCode, discoveredPlugin, "discovered")
+	assertReadyzImpersonation(t, base, discoveredVSCode, discoveredPlugin, "fetched", true)
+}
+
+func TestServeFreshCodexCatalogAndReadinessEndToEnd(t *testing.T) {
+	const (
+		tag   = "rust-v0.145.0"
+		oauth = "gho-codex-freshness"
+	)
+	fresh := completeCodexModelsBytes(t, "fresh-model", "fresh release prompt")
+	upstream := newCopilotStub(t, `{"data":[{"id":"fresh-model","vendor":"OpenAI","model_picker_enabled":true,"supported_endpoints":["/responses"]}]}`)
+
+	github := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/copilot_internal/v2/token":
+			if got := r.Header.Get("Authorization"); got != "token "+oauth {
+				t.Errorf("exchange Authorization = %q, want GitHub OAuth token", got)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"token":      "copilot-codex-token",
+				"expires_at": time.Now().Add(25 * time.Minute).Unix(),
+				"refresh_in": 1500,
+				"endpoints":  map[string]any{"api": upstream.server.URL},
+			})
+		case "/repos/openai/codex/releases/latest":
+			if got := r.Header.Get("Authorization"); got != "" {
+				t.Errorf("Codex release peek carried Authorization %q", got)
+			}
+			_, _ = io.WriteString(w, `{"tag_name":"`+tag+`"}`)
+		case "/repos/openai/codex/contents/codex-rs/models-manager/models.json":
+			if got := r.Header.Get("Authorization"); got != "" {
+				t.Errorf("Codex models fetch carried Authorization %q", got)
+			}
+			if got := r.URL.Query().Get("ref"); got != tag {
+				t.Errorf("Codex models ref = %q, want %q", got, tag)
+			}
+			_, _ = w.Write(fresh)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(github.Close)
+
+	discovery := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/releases/stable":
+			_, _ = io.WriteString(w, `["1.140.2"]`)
+		case "/_apis/public/gallery/extensionquery":
+			_, _ = io.WriteString(w, `{"results":[{"extensions":[{"versions":[{"version":"0.61.3","properties":[]}]}]}]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(discovery.Close)
+
+	cfg := e2eConfig(oauth)
+	cfg.Codex = config.CodexConfig{Enabled: true, OverrideLimits: true}
+	cfg.CodexCatalogRefreshInterval = time.Hour
+	logger := discardLogger(t)
+	registry := cache.NewRegistry()
+	mgr, imp, err := buildServeProvider(cfg, logger, github.URL, github.Client(), impersonation.Edge{
+		VSCodeBaseURL:      discovery.URL,
+		MarketplaceBaseURL: discovery.URL,
+		Client:             discovery.Client(),
+	}, registry)
+	if err != nil {
+		t.Fatalf("buildServeProvider: %v", err)
+	}
+	codexModels := configuredCodexModels(cfg, catalog.ModelsEdge{
+		BaseURL: github.URL,
+		Client:  github.Client(),
+	}, registry, logger)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- runBoundServe(ctx, cfg, logger, mgr, imp, codexModels, registry, ln) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("runBoundServe after cancellation: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Error("bound serve did not stop")
+		}
+	})
+	base := "http://" + ln.Addr().String()
+
+	var readiness struct {
+		Caches map[string]struct {
+			Source  string `json:"source"`
+			Version string `json:"version"`
+		} `json:"caches"`
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		resp, requestErr := http.Get(base + "/readyz") //nolint:noctx // local e2e server
+		if requestErr == nil {
+			body, _ := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			if json.Unmarshal(body, &readiness) == nil && readiness.Caches["codex_models"].Source == "fetched" {
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("codex_models did not become fetched; readiness=%#v", readiness)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(readiness.Caches) != 3 {
+		t.Fatalf("readiness caches = %#v, want vscode, copilot_chat, and codex_models", readiness.Caches)
+	}
+	if got := readiness.Caches["codex_models"].Version; got != tag {
+		t.Errorf("codex_models version = %q, want %q", got, tag)
+	}
+
+	req, _ := http.NewRequest(http.MethodGet, base+"/openai/v1/models?client_version=0.145.0", nil)
+	req.Header.Set("Authorization", "Bearer "+testAPIKey)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET Codex catalog: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("Codex catalog status = %d, want 200: %s", resp.StatusCode, body)
+	}
+	var rendered struct {
+		Models []struct {
+			Slug             string `json:"slug"`
+			BaseInstructions string `json:"base_instructions"`
+		} `json:"models"`
+	}
+	if err := json.Unmarshal(body, &rendered); err != nil {
+		t.Fatalf("decode Codex catalog: %v; body=%s", err, body)
+	}
+	if len(rendered.Models) != 1 || rendered.Models[0].Slug != "fresh-model" || rendered.Models[0].BaseInstructions != "fresh release prompt" {
+		t.Fatalf("rendered Codex models = %#v, want fetched release entry", rendered.Models)
+	}
 }
 
 // TestServeRequestDrivenMintRecoveryEndToEnd proves that readiness and request
@@ -374,7 +527,7 @@ func TestServeRequestDrivenMintRecoveryEndToEnd(t *testing.T) {
 		// allowed to perform the on-demand mint itself.
 		base := startManagerBackedE2EServer(t, cfg, logger, github, false)
 
-		assertReadyzImpersonation(t, base, cfg.VSCodeVersionFallback, cfg.PluginVersionFallback, "fallback")
+		assertReadyzImpersonation(t, base, cfg.VSCodeVersionFallback, cfg.PluginVersionFallback, "fallback", false)
 		resp, _ := post(t, base+"/anthropic/v1/messages", `{"model":"x"}`)
 		_ = resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
@@ -392,7 +545,7 @@ func TestServeRequestDrivenMintRecoveryEndToEnd(t *testing.T) {
 		logger := discardLogger(t)
 		base := startManagerBackedE2EServer(t, cfg, logger, github, true)
 
-		assertReadyzImpersonation(t, base, cfg.VSCodeVersionFallback, cfg.PluginVersionFallback, "fallback")
+		assertReadyzImpersonation(t, base, cfg.VSCodeVersionFallback, cfg.PluginVersionFallback, "fallback", false)
 		resp, _ := post(t, base+"/anthropic/v1/messages", `{"model":"x"}`)
 		_ = resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
@@ -443,7 +596,7 @@ func TestServeRequestDrivenMintRecoveryEndToEnd(t *testing.T) {
 			if got := exchanges.Load(); got != 1 {
 				t.Fatalf("exchange calls after failed request = %d, want 1", got)
 			}
-			assertReadyzImpersonation(t, base, cfg.VSCodeVersionFallback, cfg.PluginVersionFallback, "fallback")
+			assertReadyzImpersonation(t, base, cfg.VSCodeVersionFallback, cfg.PluginVersionFallback, "fallback", false)
 
 			recovered, _ := post(t, base+"/anthropic/v1/messages", `{"model":"x"}`)
 			_ = recovered.Body.Close()
@@ -501,4 +654,34 @@ func post(t *testing.T, url, body string) (*http.Response, string) {
 	}
 	b, _ := io.ReadAll(resp.Body)
 	return resp, string(b)
+}
+
+func completeCodexModelsBytes(t *testing.T, slug, prompt string) []byte {
+	t.Helper()
+	encoded, err := json.Marshal(map[string]any{
+		"models": []any{map[string]any{
+			"slug":                         slug,
+			"display_name":                 "Fresh model",
+			"supported_reasoning_levels":   []any{map[string]any{"effort": "medium", "description": "Balanced"}},
+			"shell_type":                   "shell_command",
+			"visibility":                   "list",
+			"supported_in_api":             true,
+			"priority":                     1,
+			"base_instructions":            prompt,
+			"supports_reasoning_summaries": true,
+			"support_verbosity":            true,
+			"truncation_policy":            map[string]any{"mode": "tokens", "limit": 10000},
+			"supports_parallel_tool_calls": true,
+			"experimental_supported_tools": []string{},
+			"model_messages": map[string]any{
+				"instructions_template":  "{{ instructions }}",
+				"instructions_variables": map[string]string{"personality_default": ""},
+				"approvals":              nil,
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("encode complete Codex models bytes: %v", err)
+	}
+	return encoded
 }

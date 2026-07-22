@@ -14,6 +14,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/ningw42/copilotd/internal/cache"
 )
 
 const (
@@ -124,7 +126,7 @@ func TestPhase4ModelsOutcomeEndToEnd(t *testing.T) {
 	cfg.APIKey = phase4APIKey
 	var logs bytes.Buffer
 	logger := newPhase4Logger(t, &logs)
-	provider, _, err := buildServeProvider(cfg, logger, exchange.URL, exchange.Client(), productionDiscoveryEdge())
+	provider, _, err := buildServeProvider(cfg, logger, exchange.URL, exchange.Client(), productionDiscoveryEdge(), cache.NewRegistry())
 	if err != nil {
 		t.Fatalf("build Phase 4 provider: %v", err)
 	}

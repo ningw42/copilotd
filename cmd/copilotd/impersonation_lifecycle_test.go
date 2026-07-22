@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ningw42/copilotd/internal/cache"
 	"github.com/ningw42/copilotd/internal/forward"
 	"github.com/ningw42/copilotd/internal/impersonation"
 	"github.com/ningw42/copilotd/internal/server"
@@ -61,11 +62,12 @@ func TestRunBoundServeIsReadyWhilePrimeWaits(t *testing.T) {
 	cfg := e2eConfig("gho-startup-window")
 	cfg.ImpersonationRefreshInterval = time.Hour
 	logger := discardLogger(t)
+	cacheRegistry := cache.NewRegistry()
 	mgr, imp, err := buildServeProvider(cfg, logger, github.URL, github.Client(), impersonation.Edge{
 		VSCodeBaseURL:      discovery.URL,
 		MarketplaceBaseURL: discovery.URL,
 		Client:             discovery.Client(),
-	})
+	}, cacheRegistry)
 	if err != nil {
 		t.Fatalf("buildServeProvider: %v", err)
 	}
@@ -76,7 +78,7 @@ func TestRunBoundServeIsReadyWhilePrimeWaits(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- runBoundServe(ctx, cfg, logger, mgr, imp, ln) }()
+	go func() { done <- runBoundServe(ctx, cfg, logger, mgr, imp, nil, cacheRegistry, ln) }()
 
 	startedPaths := make(map[string]bool, 2)
 	for range 2 {
@@ -122,6 +124,7 @@ func TestServeLifecycleCarriesFallbackAndDiscoveredVersionsOnWire(t *testing.T) 
 		wantVSCode       string
 		wantPlugin       string
 		wantSource       string
+		wantLastSuccess  bool
 		wantDiscoveryHit bool
 	}{
 		{
@@ -141,6 +144,18 @@ func TestServeLifecycleCarriesFallbackAndDiscoveredVersionsOnWire(t *testing.T) 
 			wantDiscoveryHit: true,
 		},
 		{
+			name:             "successful discovery equal to fallbacks confirms the floor",
+			interval:         time.Hour,
+			discoveryStatus:  http.StatusOK,
+			vscodeResponse:   `["9.8.7"]`,
+			pluginResponse:   `{"results":[{"extensions":[{"versions":[{"version":"6.5.4","properties":[]}]}]}]}`,
+			wantVSCode:       "9.8.7",
+			wantPlugin:       "6.5.4",
+			wantSource:       "fallback",
+			wantLastSuccess:  true,
+			wantDiscoveryHit: true,
+		},
+		{
 			name:             "successful discovery wins",
 			interval:         time.Hour,
 			discoveryStatus:  http.StatusOK,
@@ -148,7 +163,8 @@ func TestServeLifecycleCarriesFallbackAndDiscoveredVersionsOnWire(t *testing.T) 
 			pluginResponse:   `{"results":[{"extensions":[{"versions":[{"version":"0.61.3","properties":[]}]}]}]}`,
 			wantVSCode:       "1.140.2",
 			wantPlugin:       "0.61.3",
-			wantSource:       "discovered",
+			wantSource:       "fetched",
+			wantLastSuccess:  true,
 			wantDiscoveryHit: true,
 		},
 	}
@@ -183,18 +199,19 @@ func TestServeLifecycleCarriesFallbackAndDiscoveredVersionsOnWire(t *testing.T) 
 			cfg.ImpersonationRefreshInterval = tc.interval
 			var logs bytes.Buffer
 			logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+			cacheRegistry := cache.NewRegistry()
 			mgr, imp, err := buildServeProvider(cfg, logger, github.URL, github.Client(), impersonation.Edge{
 				VSCodeBaseURL:      discovery.URL,
 				MarketplaceBaseURL: discovery.URL,
 				Client:             discovery.Client(),
-			})
+			}, cacheRegistry)
 			if err != nil {
 				t.Fatalf("buildServeProvider: %v", err)
 			}
 
 			ctx, cancel := context.WithCancel(context.Background())
 			t.Cleanup(cancel)
-			runServeStartup(ctx, tc.interval, imp, mgr, logger)
+			runServeStartup(ctx, cacheRegistry, mgr, logger)
 
 			var exchange http.Header
 			select {
@@ -205,8 +222,11 @@ func TestServeLifecycleCarriesFallbackAndDiscoveredVersionsOnWire(t *testing.T) 
 			assertVersionHeaders(t, exchange, tc.wantVSCode, tc.wantPlugin)
 
 			fwd := forward.New(mgr, forward.NewClient(cfg.ResponseHeaderTimeout), cfg.OutboundTimeout, cfg.WriteTimeout, cfg.StreamIdleTimeout, cfg.StreamKeepaliveInterval, cfg.MaxRequestBytes, cfg.MaxBufferedResponseBytes, nil, forward.WithLogger(logger))
-			base := startTestServer(t, server.New(cfg, logger, mgr, imp, fwd, newTestWSProxy(mgr), server.NewStreamOutcomeCounter()))
-			assertReadyzImpersonation(t, base, tc.wantVSCode, tc.wantPlugin, tc.wantSource)
+			base := startTestServer(t, server.New(cfg, logger, mgr, server.ReadyObservers{
+				Impersonation: imp,
+				Caches:        cacheRegistry,
+			}, fwd, newTestWSProxy(mgr), server.NewStreamOutcomeCounter()))
+			assertReadyzImpersonation(t, base, tc.wantVSCode, tc.wantPlugin, tc.wantSource, tc.wantLastSuccess)
 			resp, _ := post(t, base+"/anthropic/v1/messages", `{"model":"test"}`)
 			_ = resp.Body.Close()
 			if resp.StatusCode != http.StatusOK {
@@ -219,16 +239,16 @@ func TestServeLifecycleCarriesFallbackAndDiscoveredVersionsOnWire(t *testing.T) 
 			}
 			logOutput := logs.String()
 			if !strings.Contains(logOutput, "level=INFO") ||
-				!strings.Contains(logOutput, "startup impersonation discovery outcome") ||
-				!strings.Contains(logOutput, "vscode_source="+tc.wantSource) ||
-				!strings.Contains(logOutput, "plugin_source="+tc.wantSource) {
-				t.Errorf("startup logs = %q, want info discovery outcome with %s sources", logOutput, tc.wantSource)
+				!strings.Contains(logOutput, "startup cached value refresh outcome") ||
+				!strings.Contains(logOutput, "cached_value=vscode source="+tc.wantSource) ||
+				!strings.Contains(logOutput, "cached_value=copilot_chat source="+tc.wantSource) {
+				t.Errorf("startup logs = %q, want info cached value outcomes with %s sources", logOutput, tc.wantSource)
 			}
 		})
 	}
 }
 
-func assertReadyzImpersonation(t *testing.T, base, vscode, plugin, source string) {
+func assertReadyzImpersonation(t *testing.T, base, vscode, plugin, source string, wantLastSuccess bool) {
 	t.Helper()
 	resp, err := http.Get(base + "/readyz") //nolint:noctx // local test server
 	if err != nil {
@@ -244,19 +264,14 @@ func assertReadyzImpersonation(t *testing.T, base, vscode, plugin, source string
 	}
 
 	var got struct {
-		Status        string `json:"status"`
+		Status string `json:"status"`
+		Caches map[string]struct {
+			Source      string     `json:"source"`
+			Version     string     `json:"version"`
+			LastSuccess *time.Time `json:"last_success"`
+		} `json:"caches"`
 		Impersonation struct {
 			EffectiveHeaders map[string]string `json:"effective_headers"`
-			Discovery        struct {
-				VSCode struct {
-					Source      string     `json:"source"`
-					LastSuccess *time.Time `json:"last_success"`
-				} `json:"vscode"`
-				CopilotChat struct {
-					Source      string     `json:"source"`
-					LastSuccess *time.Time `json:"last_success"`
-				} `json:"copilot_chat"`
-			} `json:"discovery"`
 		} `json:"impersonation"`
 	}
 	if err := json.Unmarshal(body, &got); err != nil {
@@ -272,13 +287,20 @@ func assertReadyzImpersonation(t *testing.T, base, vscode, plugin, source string
 		"Copilot-Integration-Id": {got.Impersonation.EffectiveHeaders["Copilot-Integration-Id"]},
 		"X-Github-Api-Version":   {got.Impersonation.EffectiveHeaders["X-GitHub-Api-Version"]},
 	}, vscode, plugin)
-	if got.Impersonation.Discovery.VSCode.Source != source || got.Impersonation.Discovery.CopilotChat.Source != source {
-		t.Errorf("/readyz discovery sources = %q/%q, want %q", got.Impersonation.Discovery.VSCode.Source, got.Impersonation.Discovery.CopilotChat.Source, source)
+	vscodeCache, vscodeOK := got.Caches["vscode"]
+	pluginCache, pluginOK := got.Caches["copilot_chat"]
+	if !vscodeOK || !pluginOK {
+		t.Fatalf("/readyz caches = %+v, want vscode and copilot_chat", got.Caches)
 	}
-	wantLastSuccess := source == "discovered"
-	if (got.Impersonation.Discovery.VSCode.LastSuccess != nil) != wantLastSuccess ||
-		(got.Impersonation.Discovery.CopilotChat.LastSuccess != nil) != wantLastSuccess {
-		t.Errorf("/readyz last_success = %v/%v, want non-null=%t", got.Impersonation.Discovery.VSCode.LastSuccess, got.Impersonation.Discovery.CopilotChat.LastSuccess, wantLastSuccess)
+	if vscodeCache.Source != source || pluginCache.Source != source {
+		t.Errorf("/readyz cache sources = %q/%q, want %q", vscodeCache.Source, pluginCache.Source, source)
+	}
+	if vscodeCache.Version != vscode || pluginCache.Version != plugin {
+		t.Errorf("/readyz cache versions = %q/%q, want %q/%q", vscodeCache.Version, pluginCache.Version, vscode, plugin)
+	}
+	if (vscodeCache.LastSuccess != nil) != wantLastSuccess ||
+		(pluginCache.LastSuccess != nil) != wantLastSuccess {
+		t.Errorf("/readyz last_success = %v/%v, want non-null=%t", vscodeCache.LastSuccess, pluginCache.LastSuccess, wantLastSuccess)
 	}
 	if strings.Contains(string(body), "Authorization") || strings.Contains(string(body), "last_error") {
 		t.Errorf("/readyz leaked secret/error detail: %s", body)
@@ -304,17 +326,18 @@ func TestServeLifecycleCancellationStopsPeriodicDiscovery(t *testing.T) {
 	cfg := e2eConfig("gho-run-cancel")
 	cfg.ImpersonationRefreshInterval = 10 * time.Millisecond
 	logger := discardLogger(t)
-	mgr, imp, err := buildServeProvider(cfg, logger, github.URL, github.Client(), impersonation.Edge{
+	cacheRegistry := cache.NewRegistry()
+	mgr, _, err := buildServeProvider(cfg, logger, github.URL, github.Client(), impersonation.Edge{
 		VSCodeBaseURL:      discovery.URL,
 		MarketplaceBaseURL: discovery.URL,
 		Client:             discovery.Client(),
-	})
+	}, cacheRegistry)
 	if err != nil {
 		t.Fatalf("buildServeProvider: %v", err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	runServeStartup(ctx, cfg.ImpersonationRefreshInterval, imp, mgr, logger)
+	runServeStartup(ctx, cacheRegistry, mgr, logger)
 	deadline := time.Now().Add(time.Second)
 	for discoveryCalls.Load() < 4 && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)

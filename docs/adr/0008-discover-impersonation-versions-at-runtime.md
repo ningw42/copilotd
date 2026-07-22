@@ -1,6 +1,12 @@
 # Discover impersonation versions at runtime with an embedded fallback
 
-**Status:** proposed
+**Status:** accepted; cache component and readiness shape amended by ADR-0009
+
+**Amendment:** ADR-0009 generalizes the concrete `versionFact` into
+`cache.Value[string]` instances driven by the process-wide cache registry. The
+discovery behavior, embedded fallbacks, and cadence remain unchanged. Per-fact
+freshness moves from `impersonation.discovery` into the uniform `/readyz`
+`caches` block; `impersonation.effective_headers` remains in place.
 
 copilotd impersonates the VS Code Copilot client through a fixed header set. Two of
 those headers carry version numbers that rot — `Editor-Version` (the VS Code
@@ -43,9 +49,9 @@ the prior stance — recorded in `config.go` §6.7 — that these were operator-
 - **Persist the cache to a file**: rejected — durable state at rest violates
   ROADMAP §2 and the Copilot token's in-memory model. The cache is memory-only.
 - **Runtime discovery with an embedded fallback, memory-only** (chosen): the two
-  facts self-update with zero operator action, the fallback guarantees a never-worse
-  baseline, and the refresh-with-fallback mechanism is a concrete `versionFact`
-  helper inside `internal/impersonation` — not a pre-extracted generic primitive.
+  facts self-update with zero operator action and the fallback guarantees a
+  never-worse baseline. The first implementation used a concrete `versionFact`;
+  ADR-0009 later generalized it after the Codex consumer supplied the second use.
 
 ## Consequences
 
@@ -67,16 +73,16 @@ the prior stance — recorded in `config.go` §6.7 — that these were operator-
   not a gate: a slow or failed discovery leaves the fact on its fallback and the
   mint proceeds, so discovery outcome never gates readiness. The listener is bound
   first, so `/healthz` and the locally-ready `/readyz` serve throughout.
-- `/readyz` gains a non-secret `impersonation` block (effective headers + per-fact
-  source and last-success), without making discovery or mint outcomes admission
-  gates; its `status` field remains the local-prerequisite signal.
+- `/readyz` exposes effective headers under `impersonation` and per-fact source,
+  version, and last-success under the uniform `caches` block, without making
+  discovery or mint outcomes admission gates; its `status` field remains the
+  local-prerequisite signal.
 - The flag surface changes: `--editor-version`, `--editor-plugin-version`, and
   `--copilot-user-agent` are removed in favor of the bare-version fallbacks
   `--vscode-version` and `--plugin-version`; `--impersonation-refresh-interval`
   (default 24h, `0` disables discovery) is added. Pre-1.0, no aliases are kept.
-- The refresh-with-fallback helper stays a concrete `versionFact` inside
-  `internal/impersonation`. Issue #53 (the vendored Codex `models.json` snapshot)
-  is the same shape but not a present consumer; if it adopts this mechanism,
-  extracting and generalizing it is that issue's responsibility.
+- The former concrete `versionFact` is generalized by ADR-0009 into the cache
+  registry once the Codex `models.json` consumer supplies the second matching
+  use case.
 
 See `docs/design/2026-07-20-impersonation-version-discovery-design.md`.

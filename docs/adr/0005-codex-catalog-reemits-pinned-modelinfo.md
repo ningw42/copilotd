@@ -1,10 +1,18 @@
-# Codex catalog re-emits Codex's own version-pinned `ModelInfo`, mutating only named fields, opt-in
+# Codex catalog re-emits Codex's own complete release `ModelInfo`, mutating only named fields, opt-in
 
-**Status:** accepted
+**Status:** accepted; freshness/pinning amended by ADR-0009
+
+**Amendment:** ADR-0009 changes the fixed `rust-v0.144.5` vendored snapshot
+from the sole served source into the embedded fallback of a memory-only cached
+value that follows the latest immutable Codex release tag. This ADR's fidelity
+contract remains in force: every accepted entry must be a complete Codex
+`ModelInfo`, re-emitted field-for-field except for the enumerated reviewer and
+limit overlays.
 
 The Codex client-shaped catalog (Phase 6b), served on
-`GET /openai/v1/models?client_version=…`, re-emits a vendored snapshot of Codex's
-own `models.json` (pinned to `rust-v0.144.5`) **field-for-field per slug**,
+`GET /openai/v1/models?client_version=…`, re-emits an accepted release of Codex's
+own `models.json` (latest immutable release tag, with the vendored
+`rust-v0.144.5` floor) **field-for-field per slug**,
 overwriting only an enumerated set of keys — `auto_review_model_override` (injected
 from a per-main-model `codex-auto-review-model-overrides` entry or the global
 `codex-auto-review-model` fallback) and, under the opt-in
@@ -37,12 +45,13 @@ unstable and copilotd must never silently change a user's model behavior.
 
 ## Consequences
 
-The deliberate divergences (design §13): the snapshot is version-pinned (a future
-required-field addition fails to deserialize and Codex retains its own bundle —
-fails safe); prompt/behavior values are `rust-v0.144.5`'s for every advertised
-model; limits are Codex's numbers unless the operator opts into the overlay;
-coverage is the intersection of Copilot-forwardable and snapshot slugs; and
-auto-review requires operator config. Recorded in
+The deliberate divergences (design §13, amended by ADR-0009): each served value
+is release-tag-pinned; a future required-field addition fails the accept-gate and
+holds the last-good release or `rust-v0.144.5` floor, so Codex retains complete
+entries. Prompt/behavior values come from that accepted release; limits are
+Codex's numbers unless the operator opts into the overlay; coverage is the
+intersection of Copilot-forwardable and accepted Codex slugs; and auto-review
+requires operator config. Recorded in
 `docs/design/2026-07-19-phase-6b-codex-model-catalog-auto-review-design.md` §13.
 
 The per-model routing extension deliberately changes the existing opt-in log

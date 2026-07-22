@@ -60,6 +60,7 @@ func defaultConfig() ServeConfig {
 		WebSocketHandshakeTimeout:    10 * time.Second,
 		MaxRequestBytes:              33554432,
 		MaxBufferedResponseBytes:     33554432,
+		CodexCatalogRefreshInterval:  24 * time.Hour,
 		StartupMintRetries:           3,
 		VSCodeVersionFallback:        "1.104.1",
 		PluginVersionFallback:        "0.26.7",
@@ -357,6 +358,57 @@ func TestCodexConfigIsInertWhenDisabled(t *testing.T) {
 	want := CodexConfig{AutoReviewModel: "staged-reviewer", OverrideLimits: true}
 	if !reflect.DeepEqual(got.Codex, want) {
 		t.Errorf("Codex = %+v, want inert staged config %+v", got.Codex, want)
+	}
+}
+
+func TestCodexCatalogRefreshIntervalPrecedence(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "copilotd.toml")
+	if err := os.WriteFile(path, []byte("codex-catalog-refresh-interval = \"12h\"\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	tests := []struct {
+		name string
+		args []string
+		env  map[string]string
+		want time.Duration
+	}{
+		{name: "default", want: 24 * time.Hour},
+		{name: "TOML", args: []string{"--config", path}, want: 12 * time.Hour},
+		{
+			name: "env over TOML",
+			args: []string{"--config", path},
+			env:  map[string]string{"COPILOTD_CODEX_CATALOG_REFRESH_INTERVAL": "6h"},
+			want: 6 * time.Hour,
+		},
+		{
+			name: "flag over env",
+			args: []string{"--config", path, "--codex-catalog-refresh-interval", "3h"},
+			env:  map[string]string{"COPILOTD_CODEX_CATALOG_REFRESH_INTERVAL": "6h"},
+			want: 3 * time.Hour,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			args := append([]string{"--apikey", testAPIKey}, tc.args...)
+			got, err := loadServe(args, envFunc(tc.env))
+			if err != nil {
+				t.Fatalf("loadServe: %v", err)
+			}
+			if got.CodexCatalogRefreshInterval != tc.want {
+				t.Errorf("CodexCatalogRefreshInterval = %v, want %v", got.CodexCatalogRefreshInterval, tc.want)
+			}
+		})
+	}
+}
+
+func TestCodexCatalogRefreshIntervalRejectsNegativeValues(t *testing.T) {
+	_, err := loadServe([]string{
+		"--apikey", testAPIKey,
+		"--codex-catalog-refresh-interval", "-1s",
+	}, noEnv())
+	if err == nil || !strings.Contains(err.Error(), "codex-catalog-refresh-interval") {
+		t.Fatalf("loadServe error = %v, want refresh interval validation", err)
 	}
 }
 
@@ -747,6 +799,7 @@ func TestLoadPrecedence(t *testing.T) {
 		c.ResponseHeaderTimeout = 600 * time.Second
 		c.WebSocketHandshakeTimeout = 10 * time.Second
 		c.MaxBufferedResponseBytes = 33554432
+		c.CodexCatalogRefreshInterval = 24 * time.Hour
 		c.StartupMintRetries = 3
 		c.VSCodeVersionFallback = "1.104.1"
 		c.PluginVersionFallback = "0.26.7"
@@ -958,6 +1011,7 @@ func TestConfigLogValueEmitsOnlyNonSecretFields(t *testing.T) {
 			},
 			OverrideLimits: true,
 		},
+		CodexCatalogRefreshInterval:  6 * time.Hour,
 		StartupMintRetries:           3,
 		VSCodeVersionFallback:        "1.104.1",
 		PluginVersionFallback:        "0.26.7",
@@ -997,6 +1051,7 @@ func TestConfigLogValueEmitsOnlyNonSecretFields(t *testing.T) {
 		"config.codex-auto-review-model=gpt-5.6-luna",
 		`config.codex-auto-review-model-overrides="gpt-5.4=gpt-5.4-mini,gpt-5.6-sol=gpt-5.4"`,
 		"config.codex-catalog-override-limits=true",
+		"config.codex-catalog-refresh-interval=6h0m0s",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("log output missing %q\nfull: %s", want, out)
