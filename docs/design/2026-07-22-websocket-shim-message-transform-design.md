@@ -264,8 +264,11 @@ func pump(ctx context.Context, source, destination *websocket.Conn,
 }
 ```
 
-`kindFromType` / `typeFromKind` map `websocket.MessageType` ↔ `shim.MessageKind`
-(text and binary only). A new `transformOperation` joins the existing
+`kindFromType` / `typeFromKind` map `websocket.MessageType` ↔ `shim.MessageKind`.
+Only Text and Binary are valid, but `MessageKind` is an open integer, so `typeFromKind`
+is **total**: `MessageBinary` maps to binary and every other value — including an
+out-of-range kind a shim may set — maps to text, so an invalid kind can never panic
+the pump. A new `transformOperation` joins the existing
 `readOperation` / `writeOperation` so a transform failure is attributed to the
 originating peer rather than mislabeled as a read or write.
 
@@ -345,7 +348,14 @@ that a transform failure is **not** mistaken for an abrupt client disconnect —
 failure correctly bypasses it. No new close-code taxonomy and no new metric label
 are introduced — a transform failure reuses the existing `error` terminal. Because a
 transform runs inline in the pump, a client disconnect that races a transform is
-still detected by the pump's read/write error paths and remains authoritative.
+still **detected** by the pump's read/write error paths and is never masked. The two
+directions are independent goroutines meeting only at the terminal channel, so when a
+disconnect and a transform error occur concurrently the session is classified by
+whichever pump reports first — a benign, telemetry-only difference
+(`SessionClientClosed` vs. `SessionError`): both close both sockets, and the client,
+already gone, observes neither close code. No deterministic winner is required or
+imposed; forcing disconnect precedence would need cross-pump coordination this design
+omits, unlike the single-loop SSE pump that re-checks client cancellation at each step.
 
 ## 8. Telemetry
 
