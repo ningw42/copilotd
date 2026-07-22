@@ -153,23 +153,32 @@ the two-level short-circuit that the version/hash split buys:
 ```
 attempt(ctx):
   v := Version(ctx)                    // (1) cheap peek — identity only, no content
-  if v == current.version:  touch(); return          // ← unchanged identity: no download at all
+  if v == current.version:                          //     unchanged identity: no download at all
+      recordAttempt(); return                       //     metadata success only; lastSuccess unchanged
 
   value, v := Fetch(ctx)               // (2) only now the full read
   h := Hash(value)                     // (3) authoritative content identity
   if h == current.hash:                              //     content identical across a version bump…
-      setVersion(v); touch(); return                 //     …re-key the label, no validate/swap
+      setVersion(v); recordSuccess(); return         //     …re-key the label, no validate/swap
   if h == floor.hash:                                //     content equals the embedded floor…
-      swapToFallback(v); touch(); return             //     …serve the embed, release the copy; source=fallback, last_success advances
+      swapToFallback(v); recordSuccess(); return     //     …serve the embed, release the copy; source=fallback, last_success advances
   if err := Validate(value); err != nil:             //     accept-gate: never poison the cache
-      holdLastGood(); recordErr(err); return
-  swap(value, v, h)                    // (4) new good value in
+      holdLastGood(); recordFailure(err); return
+  swap(value, v, h); recordSuccess()    // (4) new good value in
 ```
+
+`recordAttempt` updates the internal attempt timestamp and clears the prior
+attempt error. It deliberately does **not** advance `LastSuccess`: `Version` is
+a potentially stale or coarse metadata hint, not a content fetch or validation.
+`recordSuccess` records both the attempt and the successful content-fetch time;
+a hash match is sufficient because that content identity was already accepted.
 
 Semantics carried over verbatim from `versionFact` (ADR-0008):
 
-- **Cold.** Until the first success, `Current()` returns the fallback with
-  `source == fallback`.
+- **Cold.** Until the first successful content fetch, `Current()` returns the
+  fallback with `source == fallback` and nil `LastSuccess`. A successful
+  version-only peek may avoid a download while the value remains cold by this
+  content-freshness definition.
 - **Warm failure.** After a prior success, a failed attempt keeps the
   **last-good** value; it records `lastAttempt`/`lastErr` and lets `lastSuccess`
   age. A transient blip never downgrades a known-good value.
@@ -225,7 +234,7 @@ type Status struct {
 	Name        string     // "vscode", "copilot_chat", "codex_models"
 	Source      string     // provenance of the value served NOW: "fetched" (a distinct fetched value) | "fallback" (the embedded floor)
 	Version     string     // effective version label, e.g. "rust-v0.145.0" or "1.129.1"
-	LastSuccess *time.Time // time of the last successful, validated fetch; nil only until the first-ever success
+	LastSuccess *time.Time // last successful content fetch; a version-only peek does not advance it
 }
 
 // entry is the unexported, type-erased view the Registry drives.
@@ -246,11 +255,14 @@ the value served *now*: `"fetched"` when a distinct fetched value is served,
 `"fallback"` whenever the embedded floor is served — which includes a successful
 fetch that proved byte-identical to the floor (the floor-revert releases the
 fetched copy for the memory win, so the served bytes are the embed). `LastSuccess`
-names *when upstream last confirmed us*: it advances on **every** successful,
-validated fetch, including a floor-identical one, and is nil only until the
-first-ever success. A cold cache (`source: "fallback"`, nil `LastSuccess`) is thus
-distinguishable from one confirmed current-to-floor (`source: "fallback"`,
-non-nil `LastSuccess`).
+names when upstream last supplied content whose identity was accepted by the
+hash/validate ladder. It advances on **every** successful content fetch,
+including hash-equal and floor-identical content, and is nil until the first such
+fetch. A version-only peek records an attempt but leaves `LastSuccess` unchanged
+because `Version` is only a metadata hint. A cold cache (`source: "fallback"`, nil
+`LastSuccess`) is thus distinguishable from one whose fetched content was
+confirmed current-to-floor (`source: "fallback"`, non-nil `LastSuccess`); an
+unchanged-version short-circuit remains in the former state.
 
 ### Consumer: `internal/impersonation` (behavior-equivalent port)
 
@@ -446,14 +458,17 @@ Only non-secret state appears: each cache's `source`, effective `version`, and
 `last_success` are independent (see §`Status`): `source` names the provenance of the
 value served now (`"fetched"` = a distinct fetched value; `"fallback"` = the embedded
 floor, which includes a fetch proved byte-identical to the floor), while
-`last_success` advances on every successful validated fetch and is null only until the
-first-ever success. So a cold cache (`source: "fallback"`, null `last_success`) is
-distinguishable from one confirmed current-to-floor (`source: "fallback"`, non-null
-`last_success`). No token, no raw fetch-error text — a failure is conveyed by a null or
-aging `last_success`, never by an error string that could leak an upstream URL to an
-unauthenticated caller. `HEAD` still writes no body. When a consumer's refresh is
-disabled (`TTL == 0`), its entry still renders, at `source: "fallback"` with null
-`last_success` (it never fetches).
+`last_success` advances on every successful content fetch whose identity passes
+the hash/validate ladder. A version-only peek records an attempt but leaves it
+unchanged, so it is null until the first content fetch succeeds. A cold cache
+(`source: "fallback"`, null `last_success`) is distinguishable from one whose
+fetched content was confirmed current-to-floor (`source: "fallback"`, non-null
+`last_success`); an unchanged-version short-circuit remains cold by this
+content-freshness definition. No token and no raw fetch-error text are exposed: a
+cache with no successful content fetch has null `last_success`, while a failure
+after success leaves an aging value. `HEAD` still writes no body. When a
+consumer's refresh is disabled (`TTL == 0`), its entry still renders with
+`source: "fallback"` and null `last_success` because it never fetches content.
 
 This is a deliberate, backward-compatible-on-`status` evolution of ADR-0008's
 `/readyz` shape (the per-fact freshness relocates; `effective_headers` is retained;
@@ -505,9 +520,10 @@ Test-first, matching the package layout:
   validated fetch whose hash differs from the floor swaps to `source: fetched`; a
   floor-identical fetch stays `source: fallback` but advances `last_success`; warm
   failure holds last-good and ages `last_success`; the ladder skips the download when
-  `Version` is unchanged, skips validate/swap when `Hash` matches the served value,
-  drops back to the floor when `Hash` matches the fallback, and rejects (holds
-  last-good) when `Validate` fails; `Current()` is race-clean under `-race`;
+  `Version` is unchanged while recording the attempt without advancing
+  `last_success`, skips validate/swap when `Hash` matches the served value, drops
+  back to the floor when `Hash` matches the fallback, and rejects (holds last-good)
+  when `Validate` fails; `Current()` is race-clean under `-race`;
   `TTL <= 0` makes `Run` a no-op; `New` panics on a nil `Hash`/`Fetch`.
 - **`cache.Registry`** — `Prime` fans out concurrently and honors the 5s bound;
   `Start` launches one loop per entry on its own TTL; `Observe` collects only

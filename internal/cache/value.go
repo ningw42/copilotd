@@ -29,9 +29,11 @@ type Cacheable[V any] struct {
 
 // Status is the non-secret freshness record for a cached value.
 type Status struct {
-	Name        string
-	Source      string
-	Version     string
+	Name    string
+	Source  string
+	Version string
+	// LastSuccess is the last successful content fetch. A Version-only peek
+	// records an attempt but does not advance content freshness.
 	LastSuccess *time.Time
 }
 
@@ -44,7 +46,8 @@ type options struct {
 	newTicker func(time.Duration) Ticker
 }
 
-// WithClock replaces the wall clock used to timestamp successful refreshes.
+// WithClock replaces the wall clock used to timestamp refresh attempts and
+// successful content fetches.
 func WithClock(clock func() time.Time) Option {
 	return func(opts *options) {
 		if clock != nil {
