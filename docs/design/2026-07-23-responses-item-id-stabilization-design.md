@@ -356,8 +356,11 @@ surfaces as a fixture diff.
    `done`/deltas rewrite to the pinned id, terminal `output[]` rewrites by position;
    **every id surface present is rewritten** (an event carrying both `item.id` and
    `item_id` stabilizes both); `encrypted_content` / `content` / `summary` /
-   `summary_index` / `call_id` are byte-preserved; unknown / `output_index`-less /
-   undecodable payloads pass through unchanged.
+   `summary_index` / `call_id` are byte-preserved; a payload with **neither** a
+   top-level `output_index` **nor** a decodable `response.output[]` — and an
+   undecodable payload — passes through unchanged, while an **unknown event *type*
+   that still carries `output_index`** is stabilized structurally rather than passed
+   through (guarding the no-allowlist rule, §4).
 2. **Envelope pins nothing.** An `output_index` first seen in a `response.created` /
    `response.in_progress` envelope is left un-stabilized, and the later
    `response.output_item.added` establishes the pin (guards the apply-only envelope
@@ -377,9 +380,10 @@ surfaces as a fixture diff.
    whose `Scope` excludes an endpoint is not instantiated for it.
 6. **Gate.** Flag off → byte-for-byte verbatim on both transports (regression guard
    that the seam is inert); flag on → normalized on OpenAI `/responses`.
-7. **Fail-safe.** Malformed / `data:`-less / `output_index`-less payloads forward
-   untouched and produce **no** error on either transport — asserting a WS session is
-   never classified `SessionError`/closed `1011` by this shim.
+7. **Fail-safe.** Malformed / `data:`-less / structurally-inert (**neither**
+   `output_index` **nor** `response.output[]`) payloads forward untouched and produce
+   **no** error on either transport — asserting a WS session is never classified
+   `SessionError`/closed `1011` by this shim.
 8. **Config/CLI.** The flag threads flags > env > TOML > default to the registry, and
    a TOML file omitting the key loads `false`; the shim appears in the enabled
    shim-chain log only when on. Mirrors the `shim-nop-enabled` coverage in the
