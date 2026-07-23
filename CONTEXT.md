@@ -221,10 +221,11 @@ _Avoid_: end event, stop event, final event
 
 **copilotd-originated signal**:
 Any response copilotd itself produces rather than forwards from Copilot — the
-auth/readiness/limit errors and the synthesized stream terminals. The proxy's only
-divergence from a genuine first-party endpoint; enumerated exhaustively (the
-"divergence ledger") and identified off-band (request-id, logs), never by a field
-on the wire.
+auth/readiness/limit errors and the synthesized stream terminals. The **Fabrication**
+kind of divergence: information copilotd puts on the wire with no upstream basis.
+Enumerated in the divergence ledger and identified off-band (request-id, logs), never
+by a field on the wire. It is the only divergence that *fabricates* on the wire — not
+the only divergence: an **Alteration** may rewrite upstream data without fabricating.
 _Avoid_: proxy error, internal error
 
 **Synthesized terminal**:
@@ -234,6 +235,43 @@ never hangs; a raw passthrough Route does not acquire SSE semantics from a
 `Content-Type` value alone. It is a copilotd-originated signal, never conflated
 with a forwarded upstream terminal.
 _Avoid_: fake terminal, injected error (unqualified)
+
+**Responses item-id stabilizer**:
+A shim-owned, opt-in transform that pins one genuine upstream `id` per `output_index`
+and rewrites later id-bearing events to it, on both OpenAI `/responses` transports
+(SSE and WebSocket), so `id`-keyed clients stop corrupting on Copilot's per-event id
+churn. An **Alteration**, **not** a copilotd-originated signal: no id is minted, so
+the wire still carries only upstream-basis values. Off by default; a governed entry
+in the divergence ledger.
+_Avoid_: id rewriting (unqualified); id minting (nothing is minted).
+
+### Divergence
+
+**Divergence ledger**:
+The complete accounting of every way copilotd's wire output departs from pure
+verbatim forwarding of Copilot. Two kinds today — **Fabrication** and **Alteration** —
+each identified off-band (request-id, logs), never by a field on the wire. The
+enumeration lives in `docs/divergence-ledger.md`, one entry per divergence pointing at
+its authoritative source; this glossary defines only the kinds.
+_Avoid_: cataloguing individual divergences here — that is the ledger doc's job.
+
+**Fabrication**:
+A divergence that puts information on the wire with **no upstream basis** — the
+copilotd-originated signals (auth/readiness/limit errors, synthesized stream
+terminals). The bright line the shim policy invariant forbids crossing: "must not
+fabricate information without an upstream basis."
+
+**Alteration**:
+A divergence that rewrites an **upstream-basis** value to another upstream-basis
+value, **fabricating nothing** — e.g. the Responses item-id stabilizer pinning one
+genuine upstream id per `output_index`. Opt-in and off by default; enumerated by the
+shim registry and its config flag.
+
+**Omission** (anticipated):
+The latent third divergence kind — dropping or coalescing upstream content. The shim
+seam permits it (`emit=false`, coalesce-via-state), but no shipped divergence drops
+anything yet, so the kind is named here and gains a ledger section only when it earns
+a first entry.
 
 ### Caching
 
