@@ -551,6 +551,173 @@ func TestForwardEnabledNopIsByteExactWithEmptyChainOnBothPaths(t *testing.T) {
 	}
 }
 
+func TestForwardResponsesItemIDStabilizerSSEGateScopeAndFailSafe(t *testing.T) {
+	const (
+		dataLess          = ": upstream keepalive\r\nretry: 1000\r\n\r\n"
+		malformed         = "event: vendor.malformed\r\ndata: {\"type\":\r\n\r\n"
+		inert             = "event: vendor.metadata\r\ndata:  { \"type\" : \"vendor.metadata\", \"opaque\" : [ 1 ] } \r\n\r\n"
+		added             = "event: response.output_item.added\r\ndata: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"id-added\"}}\r\n\r\n"
+		contentPart       = "event: response.content_part.added\r\ndata: {\"type\":\"response.content_part.added\",\r\ndata: \"output_index\":0,\"item_id\":\"id-content-part\"}\r\n\r\n"
+		delta             = "event: response.output_text.delta\r\ndata: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"item_id\":\"id-delta\"}\r\n\r\n"
+		done              = "event: response.output_item.done\r\ndata: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"id\":\"id-done\"}}\r\n\r\n"
+		terminal          = "event: response.completed\r\ndata: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"id\":\"id-terminal\"}]}}\r\n\r\n"
+		responsesUpstream = dataLess + malformed + inert + added + contentPart + delta + done + terminal
+		anthropicUpstream = ": anthropic keepalive\r\n\r\nevent: message_stop\r\ndata: {\"type\":\"message_stop\",\"opaque\":true}\r\n\r\n"
+	)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		switch r.URL.Path {
+		case string(endpoint.RouteOpenAIResponses):
+			_, _ = io.WriteString(w, responsesUpstream)
+		case string(endpoint.RouteAnthropicMessages):
+			_, _ = io.WriteString(w, anthropicUpstream)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer upstream.Close()
+
+	run := func(t *testing.T, ep endpoint.HTTPForward, enabled bool) (*deadlineRecorder, StreamResult) {
+		t.Helper()
+		registry := shim.CanonicalRegistry()
+		registry[1].Enabled = enabled
+		f := New(readyStub(upstream.URL), NewClient(5*time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, registry)
+		req := httptest.NewRequest(http.MethodPost, "/provider/route", strings.NewReader(`{"stream":true}`))
+		ctx := WithStreamResultHolder(req.Context())
+		req = req.WithContext(ctx)
+		rec := newDeadlineRecorder()
+
+		f.Handler(ep)(rec, req)
+
+		result, ok := StreamResultFromContext(ctx)
+		if !ok {
+			t.Fatal("forwarder did not record an SSE stream result")
+		}
+		return rec, result
+	}
+
+	t.Run("flag off is byte-verbatim", func(t *testing.T) {
+		rec, result := run(t, endpoint.OpenAIResponsesHTTP(), false)
+		if got := rec.Body.String(); got != responsesUpstream {
+			t.Errorf("flag-off body = %q, want byte-verbatim %q", got, responsesUpstream)
+		}
+		if result.Outcome != sse.OutcomeClean || result.Frames != 8 {
+			t.Errorf("flag-off stream result = %#v, want clean with 8 frames", result)
+		}
+	})
+
+	t.Run("enabled stabilizes and forwards uncertain frames", func(t *testing.T) {
+		rec, result := run(t, endpoint.OpenAIResponsesHTTP(), true)
+		if result.Outcome != sse.OutcomeClean || result.Frames != 8 {
+			t.Errorf("enabled stream result = %#v, want clean with 8 frames", result)
+		}
+		frames := readForwardSSEFrames(t, rec.Body.Bytes())
+		if len(frames) != 8 {
+			t.Fatalf("enabled frames = %d, want 8", len(frames))
+		}
+		for i, want := range []string{dataLess, malformed, inert} {
+			if got := string(frames[i].Raw); got != want {
+				t.Errorf("fail-safe frame %d = %q, want untouched %q", i, got, want)
+			}
+		}
+
+		var ids []string
+		for _, frame := range frames[3:7] {
+			var event map[string]json.RawMessage
+			if err := json.Unmarshal(forwardSSEData(t, frame.Raw), &event); err != nil {
+				t.Fatalf("decode %s: %v", frame.Type, err)
+			}
+			if itemRaw := event["item"]; itemRaw != nil {
+				var item struct {
+					ID string `json:"id"`
+				}
+				if err := json.Unmarshal(itemRaw, &item); err != nil {
+					t.Fatal(err)
+				}
+				ids = append(ids, item.ID)
+				continue
+			}
+			var id string
+			if err := json.Unmarshal(event["item_id"], &id); err != nil {
+				t.Fatal(err)
+			}
+			ids = append(ids, id)
+		}
+		var completed struct {
+			Response struct {
+				Output []struct {
+					ID string `json:"id"`
+				} `json:"output"`
+			} `json:"response"`
+		}
+		if err := json.Unmarshal(forwardSSEData(t, frames[7].Raw), &completed); err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, completed.Response.Output[0].ID)
+		for i, id := range ids {
+			if id != "id-added" {
+				t.Errorf("stable id %d = %q, want id-added", i, id)
+			}
+		}
+		if got := bytes.Count(frames[4].Raw, []byte("data:")); got != 2 {
+			t.Errorf("changed multi-data frame has %d data fields, want 2", got)
+		}
+		if !bytes.HasPrefix(frames[4].Raw, []byte("event: response.content_part.added\r\n")) {
+			t.Errorf("changed multi-data frame lost event line: %q", frames[4].Raw)
+		}
+	})
+
+	t.Run("enabled Anthropic Messages stays byte-verbatim", func(t *testing.T) {
+		rec, result := run(t, endpoint.AnthropicMessages(), true)
+		if got := rec.Body.String(); got != anthropicUpstream {
+			t.Errorf("out-of-scope body = %q, want byte-verbatim %q", got, anthropicUpstream)
+		}
+		if result.Outcome != sse.OutcomeClean || result.Frames != 2 {
+			t.Errorf("out-of-scope stream result = %#v, want clean with 2 frames", result)
+		}
+	})
+}
+
+func readForwardSSEFrames(t *testing.T, raw []byte) []sse.Frame {
+	t.Helper()
+	reader := sse.NewReader(bytes.NewReader(raw), nil)
+	var frames []sse.Frame
+	for {
+		frame, err := reader.Read()
+		if err == io.EOF {
+			return frames
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		frames = append(frames, frame)
+	}
+}
+
+func forwardSSEData(t *testing.T, raw []byte) []byte {
+	t.Helper()
+	var payload []byte
+	found := false
+	for _, line := range bytes.Split(raw, []byte("\n")) {
+		line = bytes.TrimSuffix(line, []byte("\r"))
+		data, ok := bytes.CutPrefix(line, []byte("data:"))
+		if !ok {
+			continue
+		}
+		data = bytes.TrimPrefix(data, []byte(" "))
+		if found {
+			payload = append(payload, '\n')
+		}
+		payload = append(payload, data...)
+		found = true
+	}
+	if !found {
+		t.Fatalf("frame has no data field: %q", raw)
+	}
+	return payload
+}
+
 func TestStreamPolicyMapsStallToNativeTerminal(t *testing.T) {
 	policy := streamPolicy(endpoint.Anthropic, time.Minute, 90*time.Second, 15*time.Second, sse.RealClock{}, nil)
 	if policy.IdleTimeout != 90*time.Second {

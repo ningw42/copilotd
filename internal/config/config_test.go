@@ -562,6 +562,85 @@ func TestShimNopEnabledRejectsMalformedValues(t *testing.T) {
 	}
 }
 
+func TestShimResponsesItemIDStabilizerEnabledConfigPrecedence(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "copilotd.toml")
+	if err := os.WriteFile(path, []byte("shim-responses-item-id-stabilizer-enabled = true\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	omittedPath := filepath.Join(t.TempDir(), "old-copilotd.toml")
+	if err := os.WriteFile(omittedPath, []byte("log-level = \"info\"\n"), 0o600); err != nil {
+		t.Fatalf("write old config: %v", err)
+	}
+
+	tests := []struct {
+		name string
+		args []string
+		env  map[string]string
+		want bool
+	}{
+		{name: "shim default", want: false},
+		{name: "old TOML omission keeps default", args: []string{"--config", omittedPath}, want: false},
+		{name: "TOML overrides default", args: []string{"--config", path}, want: true},
+		{
+			name: "env overrides TOML",
+			args: []string{"--config", path},
+			env:  map[string]string{"COPILOTD_SHIM_RESPONSES_ITEM_ID_STABILIZER_ENABLED": "false"},
+			want: false,
+		},
+		{
+			name: "flag overrides env",
+			args: []string{"--config", path, "--shim-responses-item-id-stabilizer-enabled=true"},
+			env:  map[string]string{"COPILOTD_SHIM_RESPONSES_ITEM_ID_STABILIZER_ENABLED": "false"},
+			want: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			env := map[string]string{"COPILOTD_APIKEY": testAPIKey}
+			for key, value := range tc.env {
+				env[key] = value
+			}
+			got, err := loadServe(tc.args, envFunc(env))
+			if err != nil {
+				t.Fatalf("loadServe() error = %v", err)
+			}
+			if got.ShimResponsesItemIDStabilizerEnabled != tc.want {
+				t.Errorf("ShimResponsesItemIDStabilizerEnabled = %t, want %t", got.ShimResponsesItemIDStabilizerEnabled, tc.want)
+			}
+		})
+	}
+}
+
+func TestShimResponsesItemIDStabilizerEnabledRejectsMalformedValues(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "copilotd.toml")
+	if err := os.WriteFile(path, []byte("shim-responses-item-id-stabilizer-enabled = \"not-a-bool\"\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	tests := []struct {
+		name string
+		args []string
+		env  map[string]string
+	}{
+		{name: "flag", args: []string{"--apikey", testAPIKey, "--shim-responses-item-id-stabilizer-enabled=not-a-bool"}},
+		{name: "env", args: []string{"--apikey", testAPIKey}, env: map[string]string{"COPILOTD_SHIM_RESPONSES_ITEM_ID_STABILIZER_ENABLED": "not-a-bool"}},
+		{name: "TOML", args: []string{"--apikey", testAPIKey, "--config", path}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := loadServe(tc.args, envFunc(tc.env))
+			if err == nil {
+				t.Fatal("loadServe() error = nil, want malformed shim toggle rejected")
+			}
+			if !strings.Contains(err.Error(), "shim-responses-item-id-stabilizer-enabled") {
+				t.Errorf("error = %q, want shim-responses-item-id-stabilizer-enabled context", err)
+			}
+		})
+	}
+}
+
 func TestRemovedUpstreamBaseSettingsHaveNoEffect(t *testing.T) {
 	t.Run("environment variable", func(t *testing.T) {
 		got, err := loadServe([]string{"--apikey", testAPIKey}, envFunc(map[string]string{
@@ -985,23 +1064,24 @@ func TestLoadValidationErrors(t *testing.T) {
 
 func TestConfigLogValueEmitsOnlyNonSecretFields(t *testing.T) {
 	cfg := ServeConfig{
-		Addr:                      "127.0.0.1:8080",
-		LogLevel:                  "info",
-		LogFormat:                 "text",
-		LogFile:                   "/var/log/copilotd.log",
-		ShutdownTimeout:           10 * time.Second,
-		GithubOAuthTokenFile:      "/home/op/.config/copilotd/github-oauth-token",
-		APIKey:                    "super-secret-apikey-value",
-		OutboundTimeout:           600 * time.Second,
-		StreamIdleTimeout:         90 * time.Second,
-		StreamKeepaliveInterval:   15 * time.Second,
-		WriteTimeout:              90 * time.Second,
-		ResponseHeaderTimeout:     600 * time.Second,
-		WebSocketHandshakeTimeout: 12 * time.Second,
-		MaxRequestBytes:           33554432,
-		MaxBufferedResponseBytes:  16777216,
-		ShimNopEnabled:            true,
-		GithubOAuthToken:          "gho-super-secret-oauth-value",
+		Addr:                                 "127.0.0.1:8080",
+		LogLevel:                             "info",
+		LogFormat:                            "text",
+		LogFile:                              "/var/log/copilotd.log",
+		ShutdownTimeout:                      10 * time.Second,
+		GithubOAuthTokenFile:                 "/home/op/.config/copilotd/github-oauth-token",
+		APIKey:                               "super-secret-apikey-value",
+		OutboundTimeout:                      600 * time.Second,
+		StreamIdleTimeout:                    90 * time.Second,
+		StreamKeepaliveInterval:              15 * time.Second,
+		WriteTimeout:                         90 * time.Second,
+		ResponseHeaderTimeout:                600 * time.Second,
+		WebSocketHandshakeTimeout:            12 * time.Second,
+		MaxRequestBytes:                      33554432,
+		MaxBufferedResponseBytes:             16777216,
+		ShimNopEnabled:                       true,
+		ShimResponsesItemIDStabilizerEnabled: true,
+		GithubOAuthToken:                     "gho-super-secret-oauth-value",
 		Codex: CodexConfig{
 			Enabled:         true,
 			AutoReviewModel: "gpt-5.6-luna",
@@ -1041,6 +1121,7 @@ func TestConfigLogValueEmitsOnlyNonSecretFields(t *testing.T) {
 		"config.max-request-bytes=33554432",
 		"config.max-buffered-response-bytes=16777216",
 		"config.shim-nop-enabled=true",
+		"config.shim-responses-item-id-stabilizer-enabled=true",
 		"config.startup-mint-retries=3",
 		"config.vscode-version=1.104.1",
 		"config.plugin-version=0.26.7",

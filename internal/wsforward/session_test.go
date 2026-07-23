@@ -3,6 +3,7 @@ package wsforward
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -115,6 +116,176 @@ func TestProxyAppliesServerMessageShimWhileClientMessagesStayVerbatim(t *testing
 	}
 	if kind != websocket.MessageText || !bytes.Equal(data, []byte("shim:server-origin")) {
 		t.Errorf("server message = (%v, %q), want (text, shim:server-origin)", kind, data)
+	}
+}
+
+func TestProxyResponsesItemIDStabilizerIsGatedAndServerOnly(t *testing.T) {
+	const added = `{"type":"response.output_item.added","output_index":0,"item":{"id":"pinned-id"}}`
+	const churned = `{"type":"response.output_text.delta","output_index":0,"item_id":"churned-id","delta":"hello"}`
+
+	for _, tc := range []struct {
+		name    string
+		enabled bool
+		wantID  string
+	}{
+		{name: "default off is verbatim", wantID: "churned-id"},
+		{name: "enabled stabilizes server messages", enabled: true, wantID: "pinned-id"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			upstreamReceived := make(chan []byte, 1)
+			client, _, cleanup := startSessionWithRegistry(t, 1<<20, time.Second, responsesItemIDRegistry(tc.enabled), func(conn *websocket.Conn) {
+				if err := conn.Write(context.Background(), websocket.MessageText, []byte(added)); err != nil {
+					return
+				}
+				_, data, err := conn.Read(context.Background())
+				if err != nil {
+					return
+				}
+				upstreamReceived <- data
+				_ = conn.Write(context.Background(), websocket.MessageText, []byte(churned))
+			})
+			defer cleanup()
+
+			_, gotAdded, err := client.Read(ctx)
+			if err != nil {
+				t.Fatalf("read added message: %v", err)
+			}
+			if string(gotAdded) != added {
+				t.Errorf("added message = %s, want verbatim %s", gotAdded, added)
+			}
+			if err := client.Write(ctx, websocket.MessageText, []byte(churned)); err != nil {
+				t.Fatalf("write client-origin message: %v", err)
+			}
+			select {
+			case got := <-upstreamReceived:
+				if string(got) != churned {
+					t.Errorf("client-origin message = %s, want server-only verbatim %s", got, churned)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("client-origin message was not forwarded")
+			}
+			_, gotChurned, err := client.Read(ctx)
+			if err != nil {
+				t.Fatalf("read churned message: %v", err)
+			}
+			if got := responseItemID(t, gotChurned); got != tc.wantID {
+				t.Errorf("server message item id = %q, want %q", got, tc.wantID)
+			}
+			if !tc.enabled && string(gotChurned) != churned {
+				t.Errorf("disabled server message = %s, want byte-verbatim %s", gotChurned, churned)
+			}
+		})
+	}
+}
+
+func TestProxyResponsesItemIDStabilizerRewritesAllServerSurfacesAndResetsEveryTurnTerminal(t *testing.T) {
+	terminals := []string{"response.completed", "response.failed", "response.incomplete", "error"}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	client, _, cleanup := startSessionWithRegistry(t, 1<<20, time.Second, responsesItemIDRegistry(true), func(conn *websocket.Conn) {
+		for turn, terminal := range terminals {
+			pinned := fmt.Sprintf("turn-%d-pinned", turn)
+			messages := []string{
+				fmt.Sprintf(`{"type":"response.output_item.added","output_index":0,"item":{"id":%q}}`, pinned),
+				fmt.Sprintf(`{"type":"response.output_text.delta","output_index":0,"item_id":"turn-%d-delta","delta":"hello"}`, turn),
+				fmt.Sprintf(`{"type":"response.output_item.done","output_index":0,"item":{"id":"turn-%d-done","content":[1]}}`, turn),
+			}
+			if terminal == "error" {
+				messages = append(messages, `{"type":"error","message":"turn ended"}`)
+			} else {
+				messages = append(messages, fmt.Sprintf(`{"type":%q,"response":{"output":[{"id":"turn-%d-terminal","content":[1]}]}}`, terminal, turn))
+			}
+			for _, payload := range messages {
+				if err := conn.Write(context.Background(), websocket.MessageText, []byte(payload)); err != nil {
+					return
+				}
+			}
+		}
+		_ = conn.Write(context.Background(), websocket.MessageText, []byte(`{"type":"response.output_item.added","output_index":0,"item":{"id":"final-turn-fresh"}}`))
+	})
+	defer cleanup()
+
+	for turn, terminal := range terminals {
+		pinned := fmt.Sprintf("turn-%d-pinned", turn)
+		for position := range 4 {
+			_, payload, err := client.Read(ctx)
+			if err != nil {
+				t.Fatalf("read turn %d message %d: %v", turn, position, err)
+			}
+			if position < 3 {
+				if got := responseOutputIndex(t, payload); got != 0 {
+					t.Errorf("turn %d message %d output_index = %d, want stable 0", turn, position, got)
+				}
+				if got := responseItemID(t, payload); got != pinned {
+					t.Errorf("turn %d message %d item id = %q, want %q", turn, position, got, pinned)
+				}
+				continue
+			}
+			if terminal == "error" {
+				if string(payload) != `{"type":"error","message":"turn ended"}` {
+					t.Errorf("error terminal = %s, want verbatim", payload)
+				}
+				continue
+			}
+			if got := responseItemID(t, payload); got != pinned {
+				t.Errorf("turn %d terminal output id = %q, want %q", turn, got, pinned)
+			}
+		}
+	}
+
+	_, finalAdded, err := client.Read(ctx)
+	if err != nil {
+		t.Fatalf("read final fresh turn: %v", err)
+	}
+	if got := responseItemID(t, finalAdded); got != "final-turn-fresh" {
+		t.Errorf("final turn first id = %q, want fresh pin", got)
+	}
+	if got := responseOutputIndex(t, finalAdded); got != 0 {
+		t.Errorf("final turn output_index = %d, want reset index 0", got)
+	}
+}
+
+func TestProxyResponsesItemIDStabilizerFailsSafeWithoutSessionError(t *testing.T) {
+	observed := &recordingWsMetrics{}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	payloads := [][]byte{
+		[]byte(`{"type":`),
+		[]byte(` { "type" : "vendor.metadata", "opaque" : [ 1 ] } `),
+	}
+	client, sessionDone, cleanup := startSessionWithRegistryAndMetrics(t, 1<<20, time.Second, responsesItemIDRegistry(true), WsMetrics{SessionTerminal: observed}, func(conn *websocket.Conn) {
+		for _, payload := range payloads {
+			if err := conn.Write(context.Background(), websocket.MessageText, payload); err != nil {
+				return
+			}
+		}
+		_ = conn.Close(websocket.StatusNormalClosure, "done")
+	})
+	defer cleanup()
+
+	for index, want := range payloads {
+		_, got, err := client.Read(ctx)
+		if err != nil {
+			t.Fatalf("read fail-safe message %d: %v", index, err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Errorf("fail-safe message %d = %s, want byte-verbatim %s", index, got, want)
+		}
+	}
+	_, _, err := client.Read(ctx)
+	if got := websocket.CloseStatus(err); got != websocket.StatusNormalClosure {
+		t.Fatalf("client close status = %v, want 1000 rather than 1011 (err: %v)", got, err)
+	}
+	select {
+	case <-sessionDone:
+	case <-time.After(time.Second):
+		t.Fatal("session did not stop after normal upstream close")
+	}
+	_, terminals := observed.snapshot()
+	if len(terminals) != 1 || terminals[0] != SessionUpstreamClosed {
+		t.Errorf("session terminals = %v, want [upstream_closed] and no SessionError", terminals)
 	}
 }
 
@@ -859,6 +1030,11 @@ func startSession(t *testing.T, maxMessageBytes int64, writeTimeout time.Duratio
 
 func startSessionWithRegistry(t *testing.T, maxMessageBytes int64, writeTimeout time.Duration, registry shim.Registry, serveUpstream func(*websocket.Conn)) (*websocket.Conn, <-chan struct{}, func()) {
 	t.Helper()
+	return startSessionWithRegistryAndMetrics(t, maxMessageBytes, writeTimeout, registry, WsMetrics{}, serveUpstream)
+}
+
+func startSessionWithRegistryAndMetrics(t *testing.T, maxMessageBytes int64, writeTimeout time.Duration, registry shim.Registry, metrics WsMetrics, serveUpstream func(*websocket.Conn)) (*websocket.Conn, <-chan struct{}, func()) {
+	t.Helper()
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := websocket.Accept(w, r, nil)
@@ -882,7 +1058,7 @@ func startSessionWithRegistry(t *testing.T, maxMessageBytes int64, writeTimeout 
 		maxMessageBytes,
 		registry,
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
-		WsMetrics{},
+		metrics,
 	)
 	sessionDone := make(chan struct{})
 	downstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -911,4 +1087,63 @@ func startSessionWithRegistry(t *testing.T, maxMessageBytes int64, writeTimeout 
 		upstream.Close()
 	}
 	return client, sessionDone, cleanup
+}
+
+func responsesItemIDRegistry(enabled bool) shim.Registry {
+	registry := shim.CanonicalRegistry()
+	for index := range registry {
+		if registry[index].Name == "responses-item-id-stabilizer" {
+			registry[index].Enabled = enabled
+		}
+	}
+	return registry
+}
+
+func responseItemID(t *testing.T, payload []byte) string {
+	t.Helper()
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &top); err != nil {
+		t.Fatalf("decode response payload %s: %v", payload, err)
+	}
+	if raw, ok := top["item_id"]; ok {
+		var id string
+		if err := json.Unmarshal(raw, &id); err != nil {
+			t.Fatalf("decode item_id from %s: %v", payload, err)
+		}
+		return id
+	}
+	if raw, ok := top["item"]; ok {
+		var item struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal(raw, &item); err != nil {
+			t.Fatalf("decode item from %s: %v", payload, err)
+		}
+		return item.ID
+	}
+	var envelope struct {
+		Response struct {
+			Output []struct {
+				ID string `json:"id"`
+			} `json:"output"`
+		} `json:"response"`
+	}
+	if err := json.Unmarshal(payload, &envelope); err != nil {
+		t.Fatalf("decode response envelope %s: %v", payload, err)
+	}
+	if len(envelope.Response.Output) == 0 {
+		t.Fatalf("response payload has no item id: %s", payload)
+	}
+	return envelope.Response.Output[0].ID
+}
+
+func responseOutputIndex(t *testing.T, payload []byte) int {
+	t.Helper()
+	var top struct {
+		OutputIndex int `json:"output_index"`
+	}
+	if err := json.Unmarshal(payload, &top); err != nil {
+		t.Fatalf("decode response output_index from %s: %v", payload, err)
+	}
+	return top.OutputIndex
 }

@@ -35,19 +35,20 @@ const (
 	// silence, individual downstream writes, and time-to-first-byte. The
 	// request and opt-in buffered-response caps (32 MiB each) are generous enough
 	// for multi-image base64 while guarding against pathological bodies.
-	defaultOutboundTimeout             = 600 * time.Second
-	defaultStreamIdleTimeout           = 5 * time.Minute
-	defaultStreamKeepaliveInterval     = 15 * time.Second
-	defaultWriteTimeout                = 90 * time.Second
-	defaultResponseHeaderTimeout       = 600 * time.Second
-	defaultWebSocketHandshakeTimeout   = 10 * time.Second
-	defaultMaxRequestBytes             = 33554432
-	defaultMaxBufferedResponseBytes    = 33554432
-	defaultShimNopEnabled              = false
-	defaultCodexCatalogEnabled         = false
-	defaultCodexAutoReviewModel        = ""
-	defaultCodexOverrideLimits         = false
-	defaultCodexCatalogRefreshInterval = 24 * time.Hour
+	defaultOutboundTimeout                      = 600 * time.Second
+	defaultStreamIdleTimeout                    = 5 * time.Minute
+	defaultStreamKeepaliveInterval              = 15 * time.Second
+	defaultWriteTimeout                         = 90 * time.Second
+	defaultResponseHeaderTimeout                = 600 * time.Second
+	defaultWebSocketHandshakeTimeout            = 10 * time.Second
+	defaultMaxRequestBytes                      = 33554432
+	defaultMaxBufferedResponseBytes             = 33554432
+	defaultShimNopEnabled                       = false
+	defaultShimResponsesItemIDStabilizerEnabled = false
+	defaultCodexCatalogEnabled                  = false
+	defaultCodexAutoReviewModel                 = ""
+	defaultCodexOverrideLimits                  = false
+	defaultCodexCatalogRefreshInterval          = 24 * time.Hour
 
 	// defaultStartupMintRetries bounds the transient-failure retries of the boot
 	// warm-up mint (total attempts = 1 + N); auth-class failures short-circuit.
@@ -144,6 +145,10 @@ type ServeConfig struct {
 	// default, like the shim-defined default in the canonical registry.
 	ShimNopEnabled bool
 
+	// ShimResponsesItemIDStabilizerEnabled controls the opt-in OpenAI Responses
+	// item-id stabilizer shim. It is disabled by default.
+	ShimResponsesItemIDStabilizerEnabled bool
+
 	// Codex controls the opt-in client-shaped Codex catalog and its overlays.
 	// These settings are non-secret and remain valid but inert while the catalog
 	// is disabled.
@@ -193,6 +198,7 @@ func (c ServeConfig) LogValue() slog.Value {
 		slog.Int64("max-request-bytes", c.MaxRequestBytes),
 		slog.Int64("max-buffered-response-bytes", c.MaxBufferedResponseBytes),
 		slog.Bool("shim-nop-enabled", c.ShimNopEnabled),
+		slog.Bool("shim-responses-item-id-stabilizer-enabled", c.ShimResponsesItemIDStabilizerEnabled),
 		slog.Bool("codex-catalog-enabled", c.Codex.Enabled),
 		slog.String("codex-auto-review-model", c.Codex.AutoReviewModel),
 		slog.String("codex-auto-review-model-overrides", formatAutoReviewModelOverrides(c.Codex.AutoReviewModelOverrides)),
@@ -268,23 +274,24 @@ type ServeFlags struct {
 	fs     *ff.FlagSet
 
 	// serve-specific
-	addr                        *string
-	shutdownTimeout             *time.Duration
-	apikey                      *string
-	outboundTimeout             *time.Duration
-	streamIdleTimeout           *time.Duration
-	streamKeepaliveInterval     *time.Duration
-	writeTimeout                *time.Duration
-	responseHeaderTimeout       *time.Duration
-	webSocketHandshakeTimeout   *time.Duration
-	maxRequestBytes             *int64
-	maxBufferedResponseBytes    *int64
-	shimNopEnabled              *bool
-	codexCatalogEnabled         *bool
-	codexAutoReviewModel        *string
-	codexAutoReviewOverrides    *string
-	codexOverrideLimits         *bool
-	codexCatalogRefreshInterval *time.Duration
+	addr                                 *string
+	shutdownTimeout                      *time.Duration
+	apikey                               *string
+	outboundTimeout                      *time.Duration
+	streamIdleTimeout                    *time.Duration
+	streamKeepaliveInterval              *time.Duration
+	writeTimeout                         *time.Duration
+	responseHeaderTimeout                *time.Duration
+	webSocketHandshakeTimeout            *time.Duration
+	maxRequestBytes                      *int64
+	maxBufferedResponseBytes             *int64
+	shimNopEnabled                       *bool
+	shimResponsesItemIDStabilizerEnabled *bool
+	codexCatalogEnabled                  *bool
+	codexAutoReviewModel                 *string
+	codexAutoReviewOverrides             *string
+	codexOverrideLimits                  *bool
+	codexCatalogRefreshInterval          *time.Duration
 
 	githubOAuthToken             *string
 	startupMintRetries           *int
@@ -313,6 +320,7 @@ func RegisterServe(fs *ff.FlagSet) *ServeFlags {
 	f.maxRequestBytes = fs.Int64Long("max-request-bytes", defaultMaxRequestBytes, "maximum inbound request body size in bytes")
 	f.maxBufferedResponseBytes = fs.Int64Long("max-buffered-response-bytes", defaultMaxBufferedResponseBytes, "maximum buffered upstream response body size in bytes")
 	f.shimNopEnabled = fs.BoolLongDefault("shim-nop-enabled", defaultShimNopEnabled, "enable the canonical no-op shim")
+	f.shimResponsesItemIDStabilizerEnabled = fs.BoolLongDefault("shim-responses-item-id-stabilizer-enabled", defaultShimResponsesItemIDStabilizerEnabled, "stabilize churning OpenAI Responses item ids (opt-in)")
 	f.codexCatalogEnabled = fs.BoolLongDefault("codex-catalog-enabled", defaultCodexCatalogEnabled, "enable the Codex client-shaped catalog")
 	f.codexAutoReviewModel = fs.StringLong("codex-auto-review-model", defaultCodexAutoReviewModel, "reviewer model injected into the Codex catalog")
 	f.codexAutoReviewOverrides = fs.StringLong("codex-auto-review-model-overrides", "", "per-main-model reviewer overrides (main=reviewer,...)")
@@ -342,21 +350,22 @@ func (f *ServeFlags) Resolve(lookupEnv func(string) (string, bool)) (ServeConfig
 	set := setFlags(f.fs)
 
 	cfg := ServeConfig{
-		Addr:                      defaultAddr,
-		LogLevel:                  defaultLogLevel,
-		LogFormat:                 defaultLogFormat,
-		LogFile:                   "",
-		ShutdownTimeout:           defaultShutdownTimeout,
-		GithubOAuthTokenFile:      defaultOAuthTokenFile(),
-		OutboundTimeout:           defaultOutboundTimeout,
-		StreamIdleTimeout:         defaultStreamIdleTimeout,
-		StreamKeepaliveInterval:   defaultStreamKeepaliveInterval,
-		WriteTimeout:              defaultWriteTimeout,
-		ResponseHeaderTimeout:     defaultResponseHeaderTimeout,
-		WebSocketHandshakeTimeout: defaultWebSocketHandshakeTimeout,
-		MaxRequestBytes:           defaultMaxRequestBytes,
-		MaxBufferedResponseBytes:  defaultMaxBufferedResponseBytes,
-		ShimNopEnabled:            defaultShimNopEnabled,
+		Addr:                                 defaultAddr,
+		LogLevel:                             defaultLogLevel,
+		LogFormat:                            defaultLogFormat,
+		LogFile:                              "",
+		ShutdownTimeout:                      defaultShutdownTimeout,
+		GithubOAuthTokenFile:                 defaultOAuthTokenFile(),
+		OutboundTimeout:                      defaultOutboundTimeout,
+		StreamIdleTimeout:                    defaultStreamIdleTimeout,
+		StreamKeepaliveInterval:              defaultStreamKeepaliveInterval,
+		WriteTimeout:                         defaultWriteTimeout,
+		ResponseHeaderTimeout:                defaultResponseHeaderTimeout,
+		WebSocketHandshakeTimeout:            defaultWebSocketHandshakeTimeout,
+		MaxRequestBytes:                      defaultMaxRequestBytes,
+		MaxBufferedResponseBytes:             defaultMaxBufferedResponseBytes,
+		ShimNopEnabled:                       defaultShimNopEnabled,
+		ShimResponsesItemIDStabilizerEnabled: defaultShimResponsesItemIDStabilizerEnabled,
 		Codex: CodexConfig{
 			Enabled:         defaultCodexCatalogEnabled,
 			AutoReviewModel: defaultCodexAutoReviewModel,
@@ -418,6 +427,9 @@ func (f *ServeFlags) Resolve(lookupEnv func(string) (string, bool)) (ServeConfig
 	}
 	if set["shim-nop-enabled"] {
 		cfg.ShimNopEnabled = *f.shimNopEnabled
+	}
+	if set["shim-responses-item-id-stabilizer-enabled"] {
+		cfg.ShimResponsesItemIDStabilizerEnabled = *f.shimResponsesItemIDStabilizerEnabled
 	}
 	if set["codex-catalog-enabled"] {
 		cfg.Codex.Enabled = *f.codexCatalogEnabled
@@ -651,6 +663,13 @@ func overlay(cfg *ServeConfig, source string, get func(key string) (string, bool
 			return fmt.Errorf("invalid shim-nop-enabled %q from %s: %w", v, source, err)
 		}
 		cfg.ShimNopEnabled = enabled
+	}
+	if v, ok := get("shim-responses-item-id-stabilizer-enabled"); ok {
+		enabled, err := strconv.ParseBool(v)
+		if err != nil {
+			return fmt.Errorf("invalid shim-responses-item-id-stabilizer-enabled %q from %s: %w", v, source, err)
+		}
+		cfg.ShimResponsesItemIDStabilizerEnabled = enabled
 	}
 	if v, ok := get("codex-catalog-enabled"); ok {
 		enabled, err := strconv.ParseBool(v)

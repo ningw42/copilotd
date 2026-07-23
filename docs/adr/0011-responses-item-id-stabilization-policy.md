@@ -1,12 +1,15 @@
 # Stabilize churning OpenAI Responses item ids, opt-in and off by default
 
-**Status:** proposed
+**Status:** accepted
 
 copilotd will, **opt-in and off by default**, stabilize the per-item `id` that GitHub
 Copilot churns on the OpenAI Responses stream: it pins one genuine upstream id per
 `output_index` and rewrites the later id-bearing events on that index to it, across
 **both** the SSE and WebSocket `/responses` transports, touching only item-id fields.
 When the toggle is off (the default) both transports stay byte-for-byte verbatim.
+The shim is registered as `responses-item-id-stabilizer`; the operator toggle is
+`--shim-responses-item-id-stabilizer-enabled`, represented in configuration as
+`ShimResponsesItemIDStabilizerEnabled`.
 
 This is a **divergence from verbatim forwarding** — but of the **Alteration** kind,
 not **Fabrication** (`CONTEXT.md`; `docs/divergence-ledger.md`): only a genuine

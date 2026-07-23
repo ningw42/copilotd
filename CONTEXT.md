@@ -241,7 +241,10 @@ A shim-owned, opt-in transform that pins one genuine upstream `id` per `output_i
 and rewrites later id-bearing events to it, on both OpenAI `/responses` transports
 (SSE and WebSocket), so `id`-keyed clients stop corrupting on Copilot's per-event id
 churn. An **Alteration**, **not** a copilotd-originated signal: no id is minted, so
-the wire still carries only upstream-basis values. Off by default; a governed entry
+the wire still carries only upstream-basis values. Registered as
+`responses-item-id-stabilizer` and enabled by
+`--shim-responses-item-id-stabilizer-enabled` /
+`ShimResponsesItemIDStabilizerEnabled`; opt-in and off by default. A governed entry
 in the divergence ledger.
 _Avoid_: id rewriting (unqualified); id minting (nothing is minted).
 

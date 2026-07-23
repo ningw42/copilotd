@@ -34,21 +34,28 @@ func runSuccessfully(t *testing.T, args ...string) string {
 	return stdout.String()
 }
 
-func TestConfiguredShimRegistryFoldsNopToggleAndLogsEnabledOrder(t *testing.T) {
+func TestConfiguredShimRegistryFoldsTogglesAndLogsEnabledOrder(t *testing.T) {
 	tests := []struct {
-		name    string
-		enabled bool
-		wantLog string
+		name              string
+		nopEnabled        bool
+		stabilizerEnabled bool
+		wantLog           string
 	}{
-		{name: "empty enabled chain", enabled: false, wantLog: "enabled_shims=[]"},
-		{name: "enabled nop chain", enabled: true, wantLog: "enabled_shims=[nop]"},
+		{name: "empty enabled chain", wantLog: "enabled_shims=[]"},
+		{name: "enabled nop chain", nopEnabled: true, wantLog: "enabled_shims=[nop]"},
+		{name: "enabled stabilizer chain", stabilizerEnabled: true, wantLog: "enabled_shims=[responses-item-id-stabilizer]"},
+		{name: "canonical enabled order", nopEnabled: true, stabilizerEnabled: true, wantLog: "enabled_shims=\"[nop responses-item-id-stabilizer]\""},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			registry := configuredShimRegistry(config.ServeConfig{ShimNopEnabled: tc.enabled})
-			if len(registry) != 1 || registry[0].Name != "nop" || registry[0].Enabled != tc.enabled {
-				t.Fatalf("configured registry = %+v, want nop enabled=%t", registry, tc.enabled)
+			registry := configuredShimRegistry(config.ServeConfig{
+				ShimNopEnabled:                       tc.nopEnabled,
+				ShimResponsesItemIDStabilizerEnabled: tc.stabilizerEnabled,
+			})
+			if len(registry) != 2 || registry[0].Name != "nop" || registry[0].Enabled != tc.nopEnabled ||
+				registry[1].Name != "responses-item-id-stabilizer" || registry[1].Enabled != tc.stabilizerEnabled {
+				t.Fatalf("configured registry = %+v, want nop enabled=%t and stabilizer enabled=%t", registry, tc.nopEnabled, tc.stabilizerEnabled)
 			}
 
 			var buf bytes.Buffer

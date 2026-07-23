@@ -390,6 +390,8 @@ func configuredShimRegistry(cfg config.ServeConfig) shim.Registry {
 		switch registry[i].Name {
 		case "nop":
 			registry[i].Enabled = cfg.ShimNopEnabled
+		case "responses-item-id-stabilizer":
+			registry[i].Enabled = cfg.ShimResponsesItemIDStabilizerEnabled
 		}
 	}
 	return registry

@@ -21,6 +21,17 @@
 // A shim instance is per-request on the HTTP path but per-session on the
 // long-lived, multi-turn WebSocket path. A shim that spans both transports must
 // not assume a request-scoped lifetime and must bound any per-turn accumulation.
+// Registrations may declaratively restrict construction to selected
+// Surface/Route pairs with Scope; a nil Scope includes every pair.
+//
+// The Responses item-id stabilizer is registered as
+// responses-item-id-stabilizer and is governed by the
+// --shim-responses-item-id-stabilizer-enabled flag, represented in
+// configuration as ShimResponsesItemIDStabilizerEnabled. It is opt-in, off by
+// default, and scoped to OpenAI /responses. On both SSE and server-to-client
+// WebSocket paths, it pins the first genuine upstream item id per output index
+// and rewrites later item-id surfaces to that value. This is an Alteration, not
+// Fabrication: it never mints an id.
 package shim
 
 import (
@@ -126,7 +137,10 @@ type StreamFinalizer interface {
 type Registration struct {
 	Name    string
 	Enabled bool
-	New     func(context.Context, endpoint.Surface, endpoint.Route) any
+	// Scope reports whether this shim participates in a Surface/Route pair.
+	// Nil includes every pair.
+	Scope func(endpoint.Surface, endpoint.Route) bool
+	New   func(context.Context, endpoint.Surface, endpoint.Route) any
 }
 
 // Registry is an ordered set of shim registrations. Registration order is
@@ -144,7 +158,7 @@ type Chain struct {
 func (r Registry) NewChain(ctx context.Context, surface endpoint.Surface, route endpoint.Route) *Chain {
 	chain := &Chain{}
 	for _, registration := range r {
-		if registration.Enabled {
+		if registration.Enabled && (registration.Scope == nil || registration.Scope(surface, route)) {
 			chain.instances = append(chain.instances, registration.New(ctx, surface, route))
 		}
 	}
@@ -350,11 +364,23 @@ type NopShim struct{}
 
 // CanonicalRegistry returns a fresh copy of the canonical registration order.
 func CanonicalRegistry() Registry {
-	return Registry{{
-		Name:    "nop",
-		Enabled: false,
-		New: func(context.Context, endpoint.Surface, endpoint.Route) any {
-			return NopShim{}
+	return Registry{
+		{
+			Name:    "nop",
+			Enabled: false,
+			New: func(context.Context, endpoint.Surface, endpoint.Route) any {
+				return NopShim{}
+			},
 		},
-	}}
+		{
+			Name:    "responses-item-id-stabilizer",
+			Enabled: false,
+			Scope: func(surface endpoint.Surface, route endpoint.Route) bool {
+				return surface == endpoint.OpenAI && route == endpoint.RouteOpenAIResponses
+			},
+			New: func(context.Context, endpoint.Surface, endpoint.Route) any {
+				return newResponsesItemIDStabilizer()
+			},
+		},
+	}
 }

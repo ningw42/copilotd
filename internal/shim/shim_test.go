@@ -76,6 +76,44 @@ func TestChainConstructsEnabledShimsOnceWithSurfaceAndRoute(t *testing.T) {
 	}
 }
 
+func TestChainConstructsEnabledShimOnlyWithinItsScope(t *testing.T) {
+	ctx := context.Background()
+	scopeCalls := surfaceRouteRecorder{}
+	constructorCalls := 0
+	registry := Registry{{
+		Name:    "scoped",
+		Enabled: true,
+		Scope: func(surface endpoint.Surface, route endpoint.Route) bool {
+			scopeCalls.surface = surface
+			scopeCalls.route = route
+			scopeCalls.calls++
+			return surface == endpoint.OpenAI && route == endpoint.RouteOpenAIResponses
+		},
+		New: func(context.Context, endpoint.Surface, endpoint.Route) any {
+			constructorCalls++
+			return NopShim{}
+		},
+	}}
+
+	_ = registry.NewChain(ctx, endpoint.Anthropic, endpoint.RouteAnthropicMessages)
+
+	if scopeCalls.calls != 1 || scopeCalls.surface != endpoint.Anthropic || scopeCalls.route != endpoint.RouteAnthropicMessages {
+		t.Fatalf("scope predicate = %+v, want one call for Anthropic /v1/messages", scopeCalls)
+	}
+	if constructorCalls != 0 {
+		t.Fatalf("out-of-scope constructor calls = %d, want 0", constructorCalls)
+	}
+
+	_ = registry.NewChain(ctx, endpoint.OpenAI, endpoint.RouteOpenAIResponses)
+
+	if scopeCalls.calls != 2 || scopeCalls.surface != endpoint.OpenAI || scopeCalls.route != endpoint.RouteOpenAIResponses {
+		t.Fatalf("scope predicate after matching Surface/Route pair = %+v, want second call for OpenAI /responses", scopeCalls)
+	}
+	if constructorCalls != 1 {
+		t.Fatalf("in-scope constructor calls = %d, want 1", constructorCalls)
+	}
+}
+
 func TestChainRunsRequestOutwardAndPreludeInward(t *testing.T) {
 	ctx := context.Background()
 	events := []string{}
@@ -457,10 +495,85 @@ func TestNopShimImplementsNoHooks(t *testing.T) {
 
 func TestCanonicalRegistryShipsDisabledNop(t *testing.T) {
 	registry := CanonicalRegistry()
-	if len(registry) != 1 || registry[0].Name != "nop" || registry[0].Enabled {
-		t.Fatalf("CanonicalRegistry() = %+v, want one disabled nop", registry)
+	if len(registry) < 1 || registry[0].Name != "nop" || registry[0].Enabled {
+		t.Fatalf("CanonicalRegistry()[0] = %+v, want disabled nop first", registry)
+	}
+	if registry[0].Scope != nil {
+		t.Fatal("nop registration unexpectedly gained Surface/Route scope")
 	}
 	if registry[0].New == nil {
 		t.Fatal("nop registration has nil factory")
+	}
+}
+
+func TestCanonicalRegistryShipsDisabledResponsesItemIDStabilizerScopedToOpenAIResponses(t *testing.T) {
+	registry := CanonicalRegistry()
+	if len(registry) != 2 {
+		t.Fatalf("len(CanonicalRegistry()) = %d, want nop and responses item-id stabilizer", len(registry))
+	}
+	registration := registry[1]
+	if registration.Name != "responses-item-id-stabilizer" || registration.Enabled {
+		t.Fatalf("CanonicalRegistry()[1] = %+v, want disabled responses-item-id-stabilizer", registration)
+	}
+	if registration.Scope == nil {
+		t.Fatal("responses-item-id-stabilizer registration has nil scope")
+	}
+	for _, tc := range []struct {
+		name    string
+		surface endpoint.Surface
+		route   endpoint.Route
+		want    bool
+	}{
+		{name: "OpenAI Responses", surface: endpoint.OpenAI, route: endpoint.RouteOpenAIResponses, want: true},
+		{name: "Anthropic Messages", surface: endpoint.Anthropic, route: endpoint.RouteAnthropicMessages},
+		{name: "OpenAI catalog", surface: endpoint.OpenAI, route: endpoint.RouteModels},
+		{name: "GitHub Copilot Responses route", surface: endpoint.GitHubCopilot, route: endpoint.RouteOpenAIResponses},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := registration.Scope(tc.surface, tc.route); got != tc.want {
+				t.Errorf("Scope(%q, %q) = %t, want %t", tc.surface, tc.route, got, tc.want)
+			}
+		})
+	}
+	if _, ok := registration.New(context.Background(), endpoint.OpenAI, endpoint.RouteOpenAIResponses).(*responsesItemIDStabilizer); !ok {
+		t.Fatal("responses-item-id-stabilizer factory did not construct a stabilizer")
+	}
+}
+
+func TestResponsesItemIDStabilizerRegistrationSelectsOnlyResponsesTransports(t *testing.T) {
+	registry := CanonicalRegistry()
+	registry[1].Enabled = true
+	originalNew := registry[1].New
+	constructorCalls := 0
+	registry[1].New = func(ctx context.Context, surface endpoint.Surface, route endpoint.Route) any {
+		constructorCalls++
+		return originalNew(ctx, surface, route)
+	}
+	for _, tc := range []struct {
+		name                 string
+		surface              endpoint.Surface
+		route                endpoint.Route
+		wantConstructorCalls int
+		wantStreamAdapter    bool
+		wantWSServerAdapter  bool
+	}{
+		{name: "out of scope", surface: endpoint.Anthropic, route: endpoint.RouteAnthropicMessages},
+		{name: "in scope", surface: endpoint.OpenAI, route: endpoint.RouteOpenAIResponses, wantConstructorCalls: 1, wantStreamAdapter: true, wantWSServerAdapter: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			chain := registry.NewChain(context.Background(), tc.surface, tc.route)
+			if constructorCalls != tc.wantConstructorCalls {
+				t.Fatalf("stabilizer constructor calls = %d, want %d", constructorCalls, tc.wantConstructorCalls)
+			}
+			if got := chain.StreamAdapter() != nil; got != tc.wantStreamAdapter {
+				t.Errorf("StreamAdapter() presence = %t, want %t", got, tc.wantStreamAdapter)
+			}
+			if chain.WSClientAdapter() != nil {
+				t.Error("WSClientAdapter() is non-nil, want server-direction-only stabilizer")
+			}
+			if got := chain.WSServerAdapter() != nil; got != tc.wantWSServerAdapter {
+				t.Errorf("WSServerAdapter() presence = %t, want %t", got, tc.wantWSServerAdapter)
+			}
+		})
 	}
 }
