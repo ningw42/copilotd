@@ -125,21 +125,23 @@ type field[C, T any] struct {
 }
 ```
 
-The constructors return a `*field[C, T]` (satisfying `spec[C]` with pointer
-receivers) so `register()` can record `stored` for the flag layer. `check` takes
-the `key` because the current validation messages embed it (and, for `required`,
-the derived env-var name), so validators reconstruct today's text exactly.
+The constructors build a `*field[C, T]` and return it as `spec[C]`; the pointer
+receiver is what lets `register()` record `stored` for the flag layer. `check` is
+key-aware — `func(key string, v T) error`, matching `field.check` and the shared
+validators below — because the current validation messages embed the `key` (and,
+for `required`, the derived env-var name), so validators reconstruct today's text
+exactly.
 
 Rows never spell all that out. A small set of **typed constructors** wire
 `parse`/`reg`/`logf`/`def` per Go type, so each setting is one line:
 
 ```go
-func durationField[C any](name string, def time.Duration, get func(*C)*time.Duration, check func(time.Duration) error, usage string) spec[C]
-func stringField[C any](name, def string, get func(*C)*string, check func(string) error, usage string) spec[C]        // parse=identity, logf=slog.String
-func int64Field[C any](name string, def int64, get func(*C)*int64, check func(int64) error, usage string) spec[C]       // parse=ParseInt, logf=slog.Int64
-func intField[C any](name string, def int, get func(*C)*int, check func(int) error, usage string) spec[C]               // parse=Atoi,     logf=slog.Int
+func durationField[C any](name string, def time.Duration, get func(*C)*time.Duration, check func(string, time.Duration) error, usage string) spec[C]
+func stringField[C any](name, def string, get func(*C)*string, check func(string, string) error, usage string) spec[C]  // parse=identity, logf=slog.String; check=(key,value)
+func int64Field[C any](name string, def int64, get func(*C)*int64, check func(string, int64) error, usage string) spec[C] // parse=ParseInt, logf=slog.Int64
+func intField[C any](name string, def int, get func(*C)*int, check func(string, int) error, usage string) spec[C]        // parse=Atoi,     logf=slog.Int
 func boolField[C any](name string, def bool, get func(*C)*bool, usage string) spec[C]                                   // reg=BoolLongDefault, logf=slog.Bool, no check
-func secretStringField[C any](name string, get func(*C)*string, check func(string) error, usage string) spec[C]         // stringField with secret:true, def ""
+func secretStringField[C any](name string, get func(*C)*string, check func(string, string) error, usage string) spec[C]  // stringField with secret:true, def ""; check=(key,value)
 ```
 
 Shared validators are named once. Each takes the setting's `key` so it can
