@@ -1,10 +1,11 @@
 # Config: declare each setting once — Design
 
-Status: approved design (via brainstorming), pending implementation plan
+Status: approved design (via brainstorming + grilling), pending implementation
+plan; mechanism recorded in ADR-0012
 Date: 2026-07-24
 Review reference: architecture review candidate 02, "Declare each config setting once"
 Affected: `internal/config/config.go`, `internal/config/config_test.go`,
-`cmd/copilotd/main.go`; plus `internal/server/handler.go`,
+`cmd/copilotd/main.go`; plus `internal/server/{server,handler}.go`,
 `internal/catalog`, and the `server`/`catalog` tests for the Codex reshape (§7.1)
 
 ## 1. Goal & outcome
@@ -19,10 +20,14 @@ only by discipline.
 The refactor is **runtime behavior-preserving**. Precedence, resolved values,
 error message content, help output, `LogValue` redaction, and the rendered Codex
 catalog all stay observably the same. `config_test.go` (1569 lines) is the safety
-net and stays green — unchanged — at every step. The one deliberate *structural*
-change is the Codex settings (§7.1): they flatten onto `ServeConfig` and the
-renderer receives its own projected contract, migrating ~15 `server`/`catalog`
-test literals (a mechanical rename). No resolved value or rendered byte changes.
+net and stays green — unchanged — throughout the table-engine work (steps 2-5).
+The one deliberate *structural* change is the Codex flatten (§7.1, step 1): the
+`codex-*` settings flatten onto `ServeConfig` and the renderer receives its own
+projected contract. That slice edits `config_test.go` in exactly one place — the
+nested `Codex: CodexConfig{…}` literal at `config_test.go:1085-1093` flattens to
+top-level fields, while every assertion string stays identical (the log keys are
+unchanged) — and migrates the Codex test literals across three surfaces (§7.1,
+§10). No resolved value or rendered byte changes.
 
 ## 2. Problem
 
@@ -59,7 +64,8 @@ Three decisions, settled during brainstorming, frame the design:
   the package's existing explicit/pure style (it already injects `lookupEnv`
   rather than use `ff`'s native env support, to keep `Resolve` pure and
   table-testable). Reflection/struct-tags and code generation were considered and
-  rejected as out of character.
+  rejected as out of character. (Recorded as
+  [ADR-0012](../adr/0012-declare-config-settings-once-via-typed-descriptor-table.md).)
 - **Unknown-key errors: deferred.** This pass does not add rejection of typo'd
   TOML/env keys. A typo'd key remains a silent no-op, exactly as today. (Adding
   it later is a clean follow-up: the descriptor table already yields the
@@ -184,7 +190,7 @@ The engine is one small generic function. Precedence (flags > env > file >
 default) is written **once**, here, not re-encoded per field:
 
 ```go
-func resolve[C any](specs []spec[C], fs *ff.FlagSet, target *C, path string, env func(string) (string, bool)) error {
+func resolve[C any](specs []spec[C], fs *ff.FlagSet, target *C, path string, env func(string) (string, bool), finalize func(*C) error) error {
     for _, s := range specs {
         s.applyDefault(target)
     }
@@ -212,6 +218,11 @@ func resolve[C any](specs []spec[C], fs *ff.FlagSet, target *C, path string, env
     for _, s := range specs {
         s.applyFlag(target, set)
     }
+    if finalize != nil { // §7.2.2: the one two-phase field parses+validates here
+        if err := finalize(target); err != nil {
+            return err
+        }
+    }
     for _, s := range specs {
         if err := s.validate(target); err != nil {
             return err
@@ -221,9 +232,22 @@ func resolve[C any](specs []spec[C], fs *ff.FlagSet, target *C, path string, env
 }
 ```
 
-`ServeFlags.Resolve` and `LoginFlags.Resolve` become thin wrappers that build the
-right `[]spec[C]`, run `resolve`, run any finalize hook (§7), and return the typed
-config. `LogValue` becomes a loop over the same table into `slog.GroupValue`.
+The full order — `default → file → env → flag → finalize → validate` — is owned
+here, in one place, not re-encoded per caller; `finalize` is `nil` for every
+setting except `codex-auto-review-model-overrides` (§7.2.2), and login passes
+`nil`.
+
+The `[]spec[C]` table is built and `register()`'d **once**, in `RegisterServe`/
+`RegisterLogin` — where each `register(fs)` both declares the ff flag and records
+`stored` — and is held on the `*ServeFlags`/`*LoginFlags` handle. `ff.Parse` (in
+`main`, before `Resolve`) fills those `stored` pointers. `ServeFlags.Resolve` and
+`LoginFlags.Resolve` are then thin wrappers that **reuse** the already-built
+table: they resolve the config path, call `resolve` over the held `[]spec[C]`
+(passing the serve overrides `finalize`, or `nil` for login), and return the
+typed config. Building the table inside `Resolve` instead would manufacture fresh
+specs whose `stored` was never bound by `register()`/`ff.Parse`, silently dropping
+every flag override. `LogValue` becomes a loop over the same table into
+`slog.GroupValue`.
 
 ## 6. serve/login unification
 
@@ -291,20 +315,53 @@ Resolution — decouple the two concerns:
           OverrideLimits:           cfg.CodexOverrideLimits,
       },
   }
-  // configuredCodexModels(cfg.CodexCatalogRefreshInterval, ...) — cache only
+  // codexModels is produced by configuredCodexModels(cfg, ...), which reads
+  // cfg.CodexCatalogEnabled (gate) + cfg.CodexCatalogRefreshInterval (cadence);
+  // the refresh interval feeds the cache only, never the renderer.
   ```
 
-  `server.New`/`newHandler` take `catalog.CodexDescriptor` instead of
-  `config.CodexConfig`. No `config.*` type crosses the render seam, and the
-  refresh interval is never threaded into the renderer. This also unifies the two
-  Codex-wiring paths (gate/render config from config, `Models` from an option)
-  into one descriptor built in one place.
+  `server.New` and `newHandler` take this `catalog.CodexDescriptor`
+  **positionally**, replacing the current `config.CodexConfig` parameter *and* the
+  functional-option variadic:
 
-Cost: `newHandler`'s signature changes, so the ~15 `server`/`catalog`/`cmd` test
-sites that construct `config.CodexConfig{...}` migrate to
-`catalog.CodexDescriptor{...}` — a mechanical rename, and arguably a fix (server
-tests should build a catalog type, not reach into `config`). `config_test.go` is
-unaffected.
+  ```go
+  func New(cfg config.ServeConfig, logger *slog.Logger, provider identity.Provider,
+           observers ReadyObservers, fwd *forward.Forwarder, wsProxy *wsforward.Proxy,
+           streamOutcomes StreamOutcomeObserver, codex catalog.CodexDescriptor) *Server
+
+  func newHandler(apikey string, provider identity.Provider, observers ReadyObservers,
+                  fwd *forward.Forwarder, logger *slog.Logger, streamOutcomes StreamOutcomeObserver,
+                  codex catalog.CodexDescriptor, wsProxy *wsforward.Proxy) http.Handler
+  ```
+
+  This **deletes the entire functional-option apparatus at both layers** — the
+  server-level `serverOptions`/`Option`/`WithCodexModels` and the handler-level
+  `handlerOptions`/`handlerOption`/`withCodexModels`, plus `newHandler`'s in-body
+  descriptor construction — since each existed only to thread the `codexModels`
+  cache value, which now rides in `descriptor.Models`. The now-unused imports drop
+  with them: `internal/cache` from `server.go` and `handler.go`, and
+  `internal/config` from `handler.go`. `server.New` keeps taking the whole `cfg`
+  (for `APIKey` and `ShutdownTimeout`) but reads **no** `codex-*` field from it —
+  the descriptor is the sole codex carrier across the render seam. A one-line
+  invariant comment on `server.New`/`newHandler` records this (codex-* is read only
+  via the descriptor, never from `cfg`), so a later edit can't silently reintroduce
+  a second source. No `config.*` type crosses the render seam, and the refresh
+  interval is never threaded into the renderer. This unifies the two Codex-wiring
+  paths (gate/render config from config, `Models` from an option) into one
+  descriptor built in one place.
+
+Cost: the `server.New`/`newHandler` signature change ripples to the test sites
+that build the old Codex value, across **three** surfaces (not a single rename):
+(1) descriptor literals at the render seam (`server`/`catalog` tests build
+`catalog.CodexDescriptor{...}` — arguably a fix, since server tests should build a
+catalog type, not reach into `config`); (2) flattened `cfg` field-sets
+(`cmd/copilotd/main_test.go`, `serve_e2e_test.go`, and
+`catalog_openai_integration_test.go`, including its
+`newStack(codex config.CodexConfig)` helper parameter); and (3) the `main.go` call
+site (`server.WithCodexModels(...)` → the positional descriptor). `config_test.go`
+changes in exactly **one** place — the nested `Codex: CodexConfig{…}` literal at
+`:1085-1093` flattens to top-level fields — with every assertion string unchanged;
+it is otherwise untouched by this slice.
 
 ### 7.2 Remaining carve-outs
 
@@ -318,11 +375,17 @@ exceptions rather than being forced into the table:
    `applyDefault`/`applyOverlay`/`logAttr`/`validate`.
 2. **`codex-auto-review-model-overrides` (two-phase parse).** The winning scalar
    is captured into a raw scratch value during the overlay/flag layers, then
-   parsed into `CodexAutoReviewModelOverrides` by a `finalize(cfg)` hook that runs
-   after the flag layer and before validation — exactly the current ordering.
-   With `CodexConfig` gone, the scratch lives as a `Resolve`-local (or unexported
-   `ServeConfig` field); `LogValue` still renders the map via the existing
-   `formatAutoReviewModelOverrides`.
+   parsed into `CodexAutoReviewModelOverrides` by the `finalize(cfg)` hook (§5)
+   that runs after the flag layer and before validation — exactly the current
+   ordering. Because the `[]spec[C]` table is built once and reused (§5), the
+   scratch must be an **unexported `ServeConfig` field**
+   (`autoReviewModelOverridesRaw`, as today) — not a `Resolve`-local, which a
+   once-built spec would capture as one shared variable across every `Resolve`
+   call. For this field parse *is* validation (a malformed pair never yields a
+   map), so its per-row `check` is `nil`, the `finalize` parse is its sole
+   validation point, and `validate()` never inspects the map. `LogValue` still
+   renders the map via the existing `formatAutoReviewModelOverrides`. (Whether this
+   hook can later be removed entirely is tracked as issue #110.)
 
 Note — two things that look special but need no special path: the
 `github-oauth-token-file` **dynamic default** is just a `def` value the row passes
@@ -360,9 +423,16 @@ The refactor lands in slices; the full suite stays green after each step.
 
 1. **Codex reshape (independent, land first).** Flatten `config.CodexConfig` into
    `ServeConfig`, change `server.New`/`newHandler` to take
-   `catalog.CodexDescriptor`, and move the projection to the composition root
-   (§7.1). Migrate the ~15 `config.CodexConfig{}` test literals. Self-contained;
-   unblocks uniform flat `codex-*` rows in the table.
+   `catalog.CodexDescriptor` positionally, **delete the `WithCodexModels`/
+   `withCodexModels` option machinery at both layers** and drop the now-unused
+   imports (`internal/cache` from `server.go`/`handler.go`, `internal/config` from
+   `handler.go`), and move the projection to the composition root (§7.1). Migrate
+   the Codex test literals across the three surfaces (§7.1), including the single
+   flattened `Codex: CodexConfig{…}` literal at `config_test.go:1085-1093`. The
+   field rename also fans out inside `config.go` (defaults literal, `overlay`,
+   `validate`, `LogValue`) and to `configuredCodexModels`/`logCodexCatalogStaging`
+   in `main`. Self-contained at the render seam; unblocks uniform flat `codex-*`
+   rows in the table.
 2. **Scaffold.** Add `spec`/`field`, the typed constructors, shared validators,
    and the generic `resolve` engine alongside the existing code (initially
    unused). No behavior change.
@@ -378,19 +448,25 @@ The refactor lands in slices; the full suite stays green after each step.
 
 ## 10. Testing strategy
 
-- The existing `config_test.go` is the primary safety net and must pass
-  unchanged throughout (behavior preservation). Any diff to it during the
-  refactor is a signal to stop and reconcile, not to edit the test.
+- The existing `config_test.go` is the primary safety net. Through the
+  table-engine steps (2-5) it must pass **unchanged** — any diff there is a signal
+  to stop and reconcile, not to edit the test. The one exception is the Codex
+  flatten (step 1), which edits exactly one literal in it (the nested
+  `Codex: CodexConfig{…}` at `:1085-1093` → top-level fields); every assertion
+  string is unchanged.
 - Add focused unit tests for the new engine primitives: a `field[C, T]` round
-  trips default → file → env → flag precedence; `secret` omits from `logAttr`; a
-  nil `check` skips validation; `oneOf`/`positive`/`nonNegative`/`required`
-  produce the expected messages.
+  trips default → file → env → flag precedence; the `finalize` hook runs after the
+  flag layer and before `validate`; `secret` omits from `logAttr`; a nil `check`
+  skips validation; `oneOf`/`positive`/`nonNegative`/`required` produce the
+  expected messages.
 - `cmd/copilotd/main_test.go` help-order and flag-presence tests must pass
   unchanged (they pin the ordering constraint in §8).
-- The Codex reshape (§7.1) migrates ~15 `server`/`catalog`/`cmd` test literals
-  from `config.CodexConfig{}` to `catalog.CodexDescriptor{}` — mechanical, and the
-  only existing tests that change. Their assertions (rendered bytes, gating) stay
-  the same.
+- The Codex reshape (§7.1) migrates the Codex test literals across **three**
+  surfaces — render-seam descriptor literals (`server`/`catalog`), flattened `cfg`
+  field-sets (`main_test.go`, `serve_e2e_test.go`,
+  `catalog_openai_integration_test.go` incl. its `newStack` helper), and the
+  `main.go` call site — plus the single `config_test.go` literal above. Their
+  assertions (rendered bytes, gating) stay the same.
 
 ## 11. Risks & mitigations
 
@@ -398,13 +474,19 @@ The refactor lands in slices; the full suite stays green after each step.
   constructors is the boundary of what stays readable without reflection.
   Mitigation: keep the constructor set small (5–6) and the accessor closures
   one line each; if a type needs a bespoke parser it gets its own constructor.
-- **Order coupling.** Three behaviors key off table order (help, validation,
-  log). Mitigation: §8 shows one order (registration order) satisfies all three;
-  a single ordered table is the source of truth.
+- **Order coupling.** Three behaviors read table order (help, validation, log),
+  but the tests pin far less than that implies: the help test fixes only the five
+  common flags' internal order and "commons precede command-specific" — the order
+  *among* serve-specific rows is not asserted — and the `LogValue`/validation
+  tests are order-independent (§8). Mitigation: keeping registration order
+  satisfies the help constraint by construction; a single ordered table stays the
+  source of truth, with real headroom to reorder specifics if needed.
 - **Special-case creep.** The two carve-outs in §7.2 are the known irregulars.
   Mitigation: keep them explicitly named and out of the generic path rather than
   widening `field` to absorb them.
 - **Blast radius.** This is the widest-reaching candidate in the review, and the
-  Codex reshape (§7.1) additionally touches `server`/`catalog` and their tests.
-  Mitigation: land the Codex reshape as its own self-contained slice first (§9),
-  then the group-by-group config rollout keeps every later commit green and small.
+  Codex reshape (§7.1) additionally touches `server`/`catalog`, `main`, and their
+  tests — including one `config_test.go` literal (the sole change to that
+  safety-net file, in step 1). Mitigation: land the Codex reshape as its own
+  self-contained slice first (§9), then the group-by-group config rollout keeps
+  every later commit green and small.
