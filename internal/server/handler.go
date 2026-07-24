@@ -5,9 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 
-	"github.com/ningw42/copilotd/internal/cache"
 	"github.com/ningw42/copilotd/internal/catalog"
-	"github.com/ningw42/copilotd/internal/config"
 	"github.com/ningw42/copilotd/internal/endpoint"
 	"github.com/ningw42/copilotd/internal/forward"
 	"github.com/ningw42/copilotd/internal/identity"
@@ -19,16 +17,6 @@ const (
 	readyPath  = "/readyz"
 )
 
-type handlerOptions struct {
-	codexModels *cache.Value[[]byte]
-}
-
-type handlerOption func(*handlerOptions)
-
-func withCodexModels(value *cache.Value[[]byte]) handlerOption {
-	return func(opts *handlerOptions) { opts.codexModels = value }
-}
-
 // newHandler builds the router wrapped in the middleware chain
 // requestID -> accessLog -> recover (outermost to innermost). RequestID is
 // outermost so its context is visible to the inner two; recover is innermost so
@@ -39,23 +27,11 @@ func withCodexModels(value *cache.Value[[]byte]) handlerOption {
 // middleware. The full order on a Surface endpoint is therefore requestID ->
 // accessLog -> recover -> auth -> local readiness -> forward. /healthz and
 // /readyz are never gated by auth or readiness.
-func newHandler(apikey string, provider identity.Provider, observers ReadyObservers, fwd *forward.Forwarder, logger *slog.Logger, streamOutcomes StreamOutcomeObserver, codexConfig config.CodexConfig, wsProxy *wsforward.Proxy, configure ...handlerOption) http.Handler {
-	opts := handlerOptions{}
-	for _, option := range configure {
-		option(&opts)
-	}
+// Invariant: codex-* settings cross the render seam only through codex.
+func newHandler(apikey string, provider identity.Provider, observers ReadyObservers, fwd *forward.Forwarder, logger *slog.Logger, streamOutcomes StreamOutcomeObserver, codex catalog.CodexDescriptor, wsProxy *wsforward.Proxy) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET "+healthPath, handleHealth)
 	mux.HandleFunc("GET "+readyPath, handleReady(provider, observers.Impersonation, observers.Caches))
-	codexDesc := catalog.CodexDescriptor{
-		Enabled: codexConfig.Enabled,
-		Models:  opts.codexModels,
-		RenderConfig: catalog.CodexRenderConfig{
-			AutoReviewModel:          codexConfig.AutoReviewModel,
-			AutoReviewModelOverrides: codexConfig.AutoReviewModelOverrides,
-			OverrideLimits:           codexConfig.OverrideLimits,
-		},
-	}
 
 	// guard applies the Surface-endpoint-specific inner wrappers in order: auth
 	// (outer) then local readiness (inner), so auth runs first.
@@ -81,7 +57,7 @@ func newHandler(apikey string, provider identity.Provider, observers ReadyObserv
 	registerWS(endpoint.OpenAIResponsesWS())
 	registerPassthrough(endpoint.Models())
 	registerCatalog(endpoint.AnthropicCatalog(), catalog.Rendering{Render: catalog.RenderAnthropic})
-	registerCatalog(endpoint.OpenAICatalog(), catalog.Rendering{Render: catalog.RenderOpenAI, Codex: codexDesc, Logger: logger})
+	registerCatalog(endpoint.OpenAICatalog(), catalog.Rendering{Render: catalog.RenderOpenAI, Codex: codex, Logger: logger})
 
 	return requestID(accessLog(logger, streamOutcomes, recoverMW(logger, mux)))
 }

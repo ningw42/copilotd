@@ -337,6 +337,15 @@ func runServe(ctx context.Context, flags *config.ServeFlags, lookupEnv func(stri
 // readiness or request admission.
 func runBoundServe(ctx context.Context, cfg config.ServeConfig, logger *slog.Logger, mgr *identity.Manager, imp *impersonation.Set, codexModels *cache.Value[[]byte], cacheRegistry *cache.Registry, ln net.Listener) error {
 	go runServeStartup(ctx, cacheRegistry, mgr, logger)
+	codex := catalog.CodexDescriptor{
+		Enabled: cfg.CodexCatalogEnabled,
+		Models:  codexModels,
+		RenderConfig: catalog.CodexRenderConfig{
+			AutoReviewModel:          cfg.CodexAutoReviewModel,
+			AutoReviewModelOverrides: cfg.CodexAutoReviewModelOverrides,
+			OverrideLimits:           cfg.CodexOverrideLimits,
+		},
+	}
 
 	registry := configuredShimRegistry(cfg)
 	fwd := forward.New(mgr, forward.NewClient(cfg.ResponseHeaderTimeout), cfg.OutboundTimeout, cfg.WriteTimeout, cfg.StreamIdleTimeout, cfg.StreamKeepaliveInterval, cfg.MaxRequestBytes, cfg.MaxBufferedResponseBytes, registry, forward.WithLogger(logger))
@@ -352,7 +361,7 @@ func runBoundServe(ctx context.Context, cfg config.ServeConfig, logger *slog.Log
 	return server.New(cfg, logger, mgr, server.ReadyObservers{
 		Impersonation: imp,
 		Caches:        cacheRegistry,
-	}, fwd, wsProxy, streamOutcomes, server.WithCodexModels(codexModels)).Run(ctx, ln)
+	}, fwd, wsProxy, streamOutcomes, codex).Run(ctx, ln)
 }
 
 // runServeStartup performs the ordered background startup sequence. The cache
@@ -377,11 +386,11 @@ func logCachedValueStartupOutcomes(logger *slog.Logger, observed []cache.Status)
 }
 
 func logCodexCatalogStaging(logger *slog.Logger, cfg config.ServeConfig) {
-	if cfg.Codex.Enabled || cfg.Codex.AutoReviewModel == "" {
+	if cfg.CodexCatalogEnabled || cfg.CodexAutoReviewModel == "" {
 		return
 	}
 	logger.Info("Codex reviewer is staged while the Codex catalog is disabled",
-		slog.String("reviewer", cfg.Codex.AutoReviewModel))
+		slog.String("reviewer", cfg.CodexAutoReviewModel))
 }
 
 func configuredShimRegistry(cfg config.ServeConfig) shim.Registry {
@@ -469,7 +478,7 @@ func productionCodexModelsEdge() catalog.ModelsEdge {
 // configuredCodexModels keeps the opt-in boundary at the composition root: a
 // disabled Codex catalog registers no cached value and performs no GitHub read.
 func configuredCodexModels(cfg config.ServeConfig, edge catalog.ModelsEdge, registry *cache.Registry, logger *slog.Logger) *cache.Value[[]byte] {
-	if !cfg.Codex.Enabled {
+	if !cfg.CodexCatalogEnabled {
 		return nil
 	}
 	return catalog.NewModelsCache(catalog.ModelsCacheConfig{

@@ -77,26 +77,22 @@ func TestLogCodexCatalogStaging(t *testing.T) {
 		{
 			name: "disabled catalog with staged reviewer",
 			cfg: config.ServeConfig{
-				APIKey:           "super-secret-apikey-value",
-				GithubOAuthToken: "gho-super-secret-oauth-value",
-				Codex: config.CodexConfig{
-					AutoReviewModel: "gpt-5.6-luna",
-				},
+				APIKey:               "super-secret-apikey-value",
+				GithubOAuthToken:     "gho-super-secret-oauth-value",
+				CodexAutoReviewModel: "gpt-5.6-luna",
 			},
 			wantLog: true,
 		},
 		{
 			name: "enabled catalog",
-			cfg: config.ServeConfig{Codex: config.CodexConfig{
-				Enabled:         true,
-				AutoReviewModel: "gpt-5.6-luna",
-			}},
+			cfg: config.ServeConfig{
+				CodexCatalogEnabled:  true,
+				CodexAutoReviewModel: "gpt-5.6-luna",
+			},
 		},
 		{
 			name: "disabled catalog without reviewer",
-			cfg: config.ServeConfig{Codex: config.CodexConfig{
-				OverrideLimits: true,
-			}},
+			cfg:  config.ServeConfig{CodexOverrideLimits: true},
 		},
 	}
 
@@ -136,7 +132,7 @@ func TestConfiguredCodexModelsRegistersOnlyForEnabledCatalog(t *testing.T) {
 			registry := cache.NewRegistry()
 			var edgeCalls atomic.Int32
 			got := configuredCodexModels(config.ServeConfig{
-				Codex: config.CodexConfig{Enabled: tc.enabled},
+				CodexCatalogEnabled: tc.enabled,
 			}, catalog.ModelsEdge{
 				BaseURL: "https://github.invalid",
 				Client: &http.Client{Transport: mainRoundTripFunc(func(*http.Request) (*http.Response, error) {

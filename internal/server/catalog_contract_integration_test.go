@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ningw42/copilotd/internal/catalog"
 	"github.com/ningw42/copilotd/internal/config"
 	"github.com/ningw42/copilotd/internal/endpoint"
 	"github.com/ningw42/copilotd/internal/forward"
@@ -104,7 +105,7 @@ func TestCatalogLocalFailuresHaveGETEquivalentHEADFramingOverRealListener(t *tes
 					responseLimit = 1 << 20
 				}
 				forwarder := forward.New(provider, client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, responseLimit, nil)
-				base := startServer(t, New(testConfig(), discardLogger(t), provider, newTestReadyObservers(), forwarder, newTestWSProxy(provider), NewStreamOutcomeCounter()))
+				base := startServer(t, New(testConfig(), discardLogger(t), provider, newTestReadyObservers(), forwarder, newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.CodexDescriptor{}))
 
 				do := func(method string) (*http.Response, []byte) {
 					t.Helper()
@@ -186,7 +187,7 @@ func TestCatalogClientCancellationPropagatesToCopilotOverRealListener(t *testing
 
 			provider := identity.NewStatic(identity.Credential{BaseURL: upstream.URL, Token: "copilot-token"}, true)
 			forwarder := forward.New(provider, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
-			base := startServer(t, New(testConfig(), discardLogger(t), provider, newTestReadyObservers(), forwarder, newTestWSProxy(provider), NewStreamOutcomeCounter()))
+			base := startServer(t, New(testConfig(), discardLogger(t), provider, newTestReadyObservers(), forwarder, newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.CodexDescriptor{}))
 			ctx, cancel := context.WithCancel(context.Background())
 			req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+path, nil)
 			if err != nil {
@@ -259,7 +260,7 @@ func TestCatalogCorrelationAccessLogsAndSecretRedaction(t *testing.T) {
 	}
 	provider := identity.NewStatic(identity.Credential{BaseURL: upstream.URL, Token: copilotToken}, true)
 	forwarder := forward.New(provider, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil, forward.WithLogger(logger))
-	base := startServer(t, New(testConfig(), logger, provider, newTestReadyObservers(), forwarder, newTestWSProxy(provider), NewStreamOutcomeCounter()))
+	base := startServer(t, New(testConfig(), logger, provider, newTestReadyObservers(), forwarder, newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.CodexDescriptor{}))
 
 	do := func(method, requestID string) (*http.Response, []byte) {
 		t.Helper()

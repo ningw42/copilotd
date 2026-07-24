@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/ningw42/copilotd/internal/cache"
+	"github.com/ningw42/copilotd/internal/catalog"
 	"github.com/ningw42/copilotd/internal/forward"
 	"github.com/ningw42/copilotd/internal/impersonation"
 	"github.com/ningw42/copilotd/internal/server"
@@ -225,7 +226,7 @@ func TestServeLifecycleCarriesFallbackAndDiscoveredVersionsOnWire(t *testing.T) 
 			base := startTestServer(t, server.New(cfg, logger, mgr, server.ReadyObservers{
 				Impersonation: imp,
 				Caches:        cacheRegistry,
-			}, fwd, newTestWSProxy(mgr), server.NewStreamOutcomeCounter()))
+			}, fwd, newTestWSProxy(mgr), server.NewStreamOutcomeCounter(), catalog.CodexDescriptor{}))
 			assertReadyzImpersonation(t, base, tc.wantVSCode, tc.wantPlugin, tc.wantSource, tc.wantLastSuccess)
 			resp, _ := post(t, base+"/anthropic/v1/messages", `{"model":"test"}`)
 			_ = resp.Body.Close()

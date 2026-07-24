@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ningw42/copilotd/internal/catalog"
 	"github.com/ningw42/copilotd/internal/config"
 	"github.com/ningw42/copilotd/internal/endpoint"
 	"github.com/ningw42/copilotd/internal/forward"
@@ -71,7 +72,7 @@ func startPhase3CapstoneServerWithObservers(
 		forward.WithLogger(logger),
 	)
 	slog.SetDefault(previousDefault)
-	return startTestServer(t, server.New(cfg, logger, provider, newTestReadyObservers(), forwarder, newTestWSProxy(provider), outcomes)), forwarder
+	return startTestServer(t, server.New(cfg, logger, provider, newTestReadyObservers(), forwarder, newTestWSProxy(provider), outcomes, catalog.CodexDescriptor{})), forwarder
 }
 
 type phase3BufferedTranscript struct {

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ningw42/copilotd/internal/catalog"
 	"github.com/ningw42/copilotd/internal/config"
 	"github.com/ningw42/copilotd/internal/forward"
 	"github.com/ningw42/copilotd/internal/identity"
@@ -60,7 +61,7 @@ func startPhase4Server(t *testing.T, cfg config.ServeConfig, provider identity.P
 		configuredShimRegistry(cfg),
 		forward.WithLogger(logger),
 	)
-	return startTestServer(t, server.New(cfg, logger, provider, newTestReadyObservers(), forwarder, newTestWSProxy(provider), server.NewStreamOutcomeCounter()))
+	return startTestServer(t, server.New(cfg, logger, provider, newTestReadyObservers(), forwarder, newTestWSProxy(provider), server.NewStreamOutcomeCounter(), catalog.CodexDescriptor{}))
 }
 
 func performPhase4Request(

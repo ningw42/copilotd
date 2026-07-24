@@ -70,6 +70,22 @@ func defaultConfig() ServeConfig {
 	}
 }
 
+type codexSettings struct {
+	Enabled                  bool
+	AutoReviewModel          string
+	AutoReviewModelOverrides map[string]string
+	OverrideLimits           bool
+}
+
+func resolvedCodexSettings(cfg ServeConfig) codexSettings {
+	return codexSettings{
+		Enabled:                  cfg.CodexCatalogEnabled,
+		AutoReviewModel:          cfg.CodexAutoReviewModel,
+		AutoReviewModelOverrides: cfg.CodexAutoReviewModelOverrides,
+		OverrideLimits:           cfg.CodexOverrideLimits,
+	}
+}
+
 func TestLoadDefaults(t *testing.T) {
 	got, err := loadServe([]string{"--apikey", testAPIKey}, noEnv())
 	if err != nil {
@@ -98,8 +114,8 @@ func TestCodexAutoReviewModelOverridesNormalizesEmptyInputs(t *testing.T) {
 			if err != nil {
 				t.Fatalf("loadServe() error = %v", err)
 			}
-			if got.Codex.AutoReviewModelOverrides != nil {
-				t.Errorf("AutoReviewModelOverrides = %#v, want canonical nil map", got.Codex.AutoReviewModelOverrides)
+			if got.CodexAutoReviewModelOverrides != nil {
+				t.Errorf("AutoReviewModelOverrides = %#v, want canonical nil map", got.CodexAutoReviewModelOverrides)
 			}
 		})
 	}
@@ -113,9 +129,9 @@ func TestCodexAutoReviewModelOverridesResolvesFlag(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadServe() error = %v", err)
 	}
-	want := CodexConfig{AutoReviewModelOverrides: map[string]string{"gpt-5": "reviewer-mini"}}
-	if !reflect.DeepEqual(got.Codex, want) {
-		t.Errorf("Codex = %+v, want resolved config %+v", got.Codex, want)
+	want := codexSettings{AutoReviewModelOverrides: map[string]string{"gpt-5": "reviewer-mini"}}
+	if gotCodex := resolvedCodexSettings(got); !reflect.DeepEqual(gotCodex, want) {
+		t.Errorf("Codex = %+v, want resolved config %+v", gotCodex, want)
 	}
 }
 
@@ -131,8 +147,8 @@ func TestCodexAutoReviewModelOverridesNormalizesPairs(t *testing.T) {
 		"gpt-5": "reviewer=variant",
 		"mini":  "fast",
 	}
-	if !reflect.DeepEqual(got.Codex.AutoReviewModelOverrides, want) {
-		t.Errorf("AutoReviewModelOverrides = %v, want %v", got.Codex.AutoReviewModelOverrides, want)
+	if !reflect.DeepEqual(got.CodexAutoReviewModelOverrides, want) {
+		t.Errorf("AutoReviewModelOverrides = %v, want %v", got.CodexAutoReviewModelOverrides, want)
 	}
 }
 
@@ -208,8 +224,8 @@ func TestCodexAutoReviewModelOverridesUsesWholesalePrecedence(t *testing.T) {
 			if err != nil {
 				t.Fatalf("loadServe() error = %v", err)
 			}
-			if !reflect.DeepEqual(got.Codex.AutoReviewModelOverrides, tc.want) {
-				t.Errorf("AutoReviewModelOverrides = %v, want %v", got.Codex.AutoReviewModelOverrides, tc.want)
+			if !reflect.DeepEqual(got.CodexAutoReviewModelOverrides, tc.want) {
+				t.Errorf("AutoReviewModelOverrides = %v, want %v", got.CodexAutoReviewModelOverrides, tc.want)
 			}
 		})
 	}
@@ -224,7 +240,7 @@ func TestCodexAutoReviewModelOverridesIsLoggedNormalizedWhenCatalogDisabled(t *t
 	if err != nil {
 		t.Fatalf("loadServe() error = %v, want staged disabled config accepted", err)
 	}
-	if got.Codex.Enabled {
+	if got.CodexCatalogEnabled {
 		t.Fatal("Codex.Enabled = true, want catalog disabled")
 	}
 
@@ -256,13 +272,13 @@ func TestCodexConfigPrecedence(t *testing.T) {
 		name string
 		args []string
 		env  map[string]string
-		want CodexConfig
+		want codexSettings
 	}{
-		{name: "defaults", want: CodexConfig{}},
+		{name: "defaults", want: codexSettings{}},
 		{
 			name: "TOML overrides defaults",
 			args: []string{"--config", path},
-			want: CodexConfig{Enabled: true, AutoReviewModel: "reviewer-from-file", OverrideLimits: true},
+			want: codexSettings{Enabled: true, AutoReviewModel: "reviewer-from-file", OverrideLimits: true},
 		},
 		{
 			name: "env overrides TOML",
@@ -272,7 +288,7 @@ func TestCodexConfigPrecedence(t *testing.T) {
 				"COPILOTD_CODEX_AUTO_REVIEW_MODEL":       "reviewer-from-env",
 				"COPILOTD_CODEX_CATALOG_OVERRIDE_LIMITS": "false",
 			},
-			want: CodexConfig{Enabled: false, AutoReviewModel: "reviewer-from-env", OverrideLimits: false},
+			want: codexSettings{Enabled: false, AutoReviewModel: "reviewer-from-env", OverrideLimits: false},
 		},
 		{
 			name: "flags override env",
@@ -287,7 +303,7 @@ func TestCodexConfigPrecedence(t *testing.T) {
 				"COPILOTD_CODEX_AUTO_REVIEW_MODEL":       "reviewer-from-env",
 				"COPILOTD_CODEX_CATALOG_OVERRIDE_LIMITS": "false",
 			},
-			want: CodexConfig{Enabled: true, AutoReviewModel: "reviewer-from-flag", OverrideLimits: true},
+			want: codexSettings{Enabled: true, AutoReviewModel: "reviewer-from-flag", OverrideLimits: true},
 		},
 	}
 
@@ -301,8 +317,8 @@ func TestCodexConfigPrecedence(t *testing.T) {
 			if err != nil {
 				t.Fatalf("loadServe() error = %v", err)
 			}
-			if !reflect.DeepEqual(got.Codex, tc.want) {
-				t.Errorf("Codex = %+v, want %+v", got.Codex, tc.want)
+			if gotCodex := resolvedCodexSettings(got); !reflect.DeepEqual(gotCodex, tc.want) {
+				t.Errorf("Codex = %+v, want %+v", gotCodex, tc.want)
 			}
 		})
 	}
@@ -355,9 +371,9 @@ func TestCodexConfigIsInertWhenDisabled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadServe() error = %v, want staged disabled config accepted", err)
 	}
-	want := CodexConfig{AutoReviewModel: "staged-reviewer", OverrideLimits: true}
-	if !reflect.DeepEqual(got.Codex, want) {
-		t.Errorf("Codex = %+v, want inert staged config %+v", got.Codex, want)
+	want := codexSettings{AutoReviewModel: "staged-reviewer", OverrideLimits: true}
+	if gotCodex := resolvedCodexSettings(got); !reflect.DeepEqual(gotCodex, want) {
+		t.Errorf("Codex = %+v, want inert staged config %+v", gotCodex, want)
 	}
 }
 
@@ -1082,15 +1098,13 @@ func TestConfigLogValueEmitsOnlyNonSecretFields(t *testing.T) {
 		ShimNopEnabled:                       true,
 		ShimResponsesItemIDStabilizerEnabled: true,
 		GithubOAuthToken:                     "gho-super-secret-oauth-value",
-		Codex: CodexConfig{
-			Enabled:         true,
-			AutoReviewModel: "gpt-5.6-luna",
-			AutoReviewModelOverrides: map[string]string{
-				"gpt-5.6-sol": "gpt-5.4",
-				"gpt-5.4":     "gpt-5.4-mini",
-			},
-			OverrideLimits: true,
+		CodexCatalogEnabled:                  true,
+		CodexAutoReviewModel:                 "gpt-5.6-luna",
+		CodexAutoReviewModelOverrides: map[string]string{
+			"gpt-5.6-sol": "gpt-5.4",
+			"gpt-5.4":     "gpt-5.4-mini",
 		},
+		CodexOverrideLimits:          true,
 		CodexCatalogRefreshInterval:  6 * time.Hour,
 		StartupMintRetries:           3,
 		VSCodeVersionFallback:        "1.104.1",

@@ -10,17 +10,13 @@ package config
 import (
 	"fmt"
 	"log/slog"
-	"net"
 	"os"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 
-	"github.com/ningw42/copilotd/internal/impersonation"
 	"github.com/peterbourgon/ff/v4"
-	"github.com/peterbourgon/ff/v4/fftoml"
 )
 
 // Defaults for every configurable value. The bind default is loopback so this
@@ -81,21 +77,6 @@ var (
 	validLogFormats = []string{"text", "json"}
 )
 
-// CodexConfig is the resolved configuration consumed by the Codex catalog
-// renderer. Its operator-facing keys remain flat alongside the other serve
-// settings, while this value gives the server one cohesive value to thread to
-// the catalog renderer.
-type CodexConfig struct {
-	Enabled                  bool
-	AutoReviewModel          string
-	AutoReviewModelOverrides map[string]string
-	OverrideLimits           bool
-
-	// autoReviewModelOverridesRaw carries the winning scalar config value until
-	// Resolve parses it into AutoReviewModelOverrides after all layers apply.
-	autoReviewModelOverridesRaw string
-}
-
 // ServeConfig is the resolved, validated configuration for `copilotd serve`. It
 // carries the common operational fields (logging, config-selected values, and
 // the GitHub OAuth token file path) plus serve-specific settings.
@@ -149,10 +130,17 @@ type ServeConfig struct {
 	// item-id stabilizer shim. It is disabled by default.
 	ShimResponsesItemIDStabilizerEnabled bool
 
-	// Codex controls the opt-in client-shaped Codex catalog and its overlays.
-	// These settings are non-secret and remain valid but inert while the catalog
+	// The Codex settings control the opt-in client-shaped Codex catalog and its
+	// overlays. They are non-secret and remain valid but inert while the catalog
 	// is disabled.
-	Codex CodexConfig
+	CodexCatalogEnabled           bool
+	CodexAutoReviewModel          string
+	CodexAutoReviewModelOverrides map[string]string
+	CodexOverrideLimits           bool
+
+	// autoReviewModelOverridesRaw carries the winning scalar config value until
+	// Resolve parses it into CodexAutoReviewModelOverrides after all layers apply.
+	autoReviewModelOverridesRaw string
 
 	// CodexCatalogRefreshInterval controls best-effort refresh of Codex's
 	// models.json cached value. Zero pins the embedded floor.
@@ -178,39 +166,22 @@ type ServeConfig struct {
 	ImpersonationRefreshInterval time.Duration
 }
 
-// LogValue implements slog.LogValuer. It enumerates the non-secret fields
-// explicitly, so redaction is by construction: any secret field (e.g. APIKey) is
-// not logged unless it is deliberately added here.
+// LogValue implements slog.LogValuer. The descriptor table emits non-secret
+// fields only, so APIKey and the inline GitHub OAuth token are redacted by
+// construction.
 func (c ServeConfig) LogValue() slog.Value {
-	return slog.GroupValue(
-		slog.String("addr", c.Addr),
-		slog.String("log-level", c.LogLevel),
-		slog.String("log-format", c.LogFormat),
-		slog.String("log-file", c.LogFile),
-		slog.Duration("shutdown-timeout", c.ShutdownTimeout),
-		slog.String("github-oauth-token-file", c.GithubOAuthTokenFile),
-		slog.Duration("outbound-timeout", c.OutboundTimeout),
-		slog.Duration("stream-idle-timeout", c.StreamIdleTimeout),
-		slog.Duration("stream-keepalive-interval", c.StreamKeepaliveInterval),
-		slog.Duration("write-timeout", c.WriteTimeout),
-		slog.Duration("response-header-timeout", c.ResponseHeaderTimeout),
-		slog.Duration("ws-handshake-timeout", c.WebSocketHandshakeTimeout),
-		slog.Int64("max-request-bytes", c.MaxRequestBytes),
-		slog.Int64("max-buffered-response-bytes", c.MaxBufferedResponseBytes),
-		slog.Bool("shim-nop-enabled", c.ShimNopEnabled),
-		slog.Bool("shim-responses-item-id-stabilizer-enabled", c.ShimResponsesItemIDStabilizerEnabled),
-		slog.Bool("codex-catalog-enabled", c.Codex.Enabled),
-		slog.String("codex-auto-review-model", c.Codex.AutoReviewModel),
-		slog.String("codex-auto-review-model-overrides", formatAutoReviewModelOverrides(c.Codex.AutoReviewModelOverrides)),
-		slog.Bool("codex-catalog-override-limits", c.Codex.OverrideLimits),
-		slog.Duration("codex-catalog-refresh-interval", c.CodexCatalogRefreshInterval),
-		slog.Int("startup-mint-retries", c.StartupMintRetries),
-		slog.String("vscode-version", c.VSCodeVersionFallback),
-		slog.String("plugin-version", c.PluginVersionFallback),
-		slog.String("copilot-integration-id", c.CopilotIntegrationID),
-		slog.String("github-api-version", c.GithubAPIVersion),
-		slog.Duration("impersonation-refresh-interval", c.ImpersonationRefreshInterval),
-	)
+	specs, _ := serveSpecs()
+	attrs := appendSpecLogAttrs(make([]slog.Attr, 0, 27), specs, &c)
+	return slog.GroupValue(attrs...)
+}
+
+func appendSpecLogAttrs[C any](attrs []slog.Attr, specs []spec[C], target *C) []slog.Attr {
+	for _, s := range specs {
+		if attr, include := s.logAttr(target); include {
+			attrs = append(attrs, attr)
+		}
+	}
+	return attrs
 }
 
 func formatAutoReviewModelOverrides(overrides map[string]string) string {
@@ -227,113 +198,102 @@ func formatAutoReviewModelOverrides(overrides map[string]string) string {
 	return strings.Join(pairs, ",")
 }
 
-// commonFlags is a command-local registration of the five operational settings
-// shared by serve and login. Each call creates fresh flag instances, preventing
-// parse/reset state from leaking between commands.
-type commonFlags struct {
-	logLevel             *string
-	logFormat            *string
-	logFile              *string
-	configPath           *string
-	githubOAuthTokenFile *string
+// commonTargets supplies command-local accessors for the shared operational
+// settings while preserving the flat ServeConfig and LoginConfig layouts.
+type commonTargets[C any] struct {
+	logLevel, logFormat, logFile, githubOAuthTokenFile func(*C) *string
 }
 
-func registerCommon(fs *ff.FlagSet) commonFlags {
-	return commonFlags{
-		logLevel:             fs.StringLong("log-level", defaultLogLevel, "log level: debug|info|warn|error"),
-		logFormat:            fs.StringLong("log-format", defaultLogFormat, "log format: text|json"),
-		logFile:              fs.StringLong("log-file", "", "log file path (empty = stderr)"),
-		configPath:           fs.StringLong("config", "", "path to an optional TOML config file"),
-		githubOAuthTokenFile: fs.StringLong("github-oauth-token-file", defaultOAuthTokenFile(), "path to the raw GitHub OAuth token file"),
+// commonFields declares the five shared rows in their help-mandated order:
+// log-level, log-format, log-file, config, github-oauth-token-file. The config
+// path row is registration-only because it selects the file resolved below.
+func commonFields[C any](targets commonTargets[C]) ([]spec[C], *configPathField[C]) {
+	configPath := &configPathField[C]{}
+	return []spec[C]{
+		stringField("log-level", defaultLogLevel, targets.logLevel, oneOf(validLogLevels), "log level: debug|info|warn|error"),
+		stringField("log-format", defaultLogFormat, targets.logFormat, oneOf(validLogFormats), "log format: text|json"),
+		stringField("log-file", "", targets.logFile, nil, "log file path (empty = stderr)"),
+		configPath,
+		stringField("github-oauth-token-file", defaultOAuthTokenFile(), targets.githubOAuthTokenFile, nil, "path to the raw GitHub OAuth token file"),
+	}, configPath
+}
+
+type codexAutoReviewModelOverridesField struct {
+	*field[ServeConfig, string]
+}
+
+func newCodexAutoReviewModelOverridesField() spec[ServeConfig] {
+	return &codexAutoReviewModelOverridesField{
+		field: newStringField(
+			"codex-auto-review-model-overrides",
+			"",
+			func(c *ServeConfig) *string { return &c.autoReviewModelOverridesRaw },
+			nil,
+			"per-main-model reviewer overrides (main=reviewer,...)",
+		),
 	}
 }
 
-func (f commonFlags) resolvedConfigPath(set map[string]bool, lookupEnv func(string) (string, bool)) string {
-	return resolveConfigPath(set, *f.configPath, lookupEnv)
+func (f *codexAutoReviewModelOverridesField) logAttr(target *ServeConfig) (slog.Attr, bool) {
+	return slog.String(f.name, formatAutoReviewModelOverrides(target.CodexAutoReviewModelOverrides)), true
 }
 
-func (f commonFlags) applyFlagValues(set map[string]bool, logLevel, logFormat, logFile, githubOAuthTokenFile *string) {
-	if set["log-level"] {
-		*logLevel = *f.logLevel
+// serveSpecs declares every serve setting once, in registration order. The
+// common rows remain first in their help-mandated order; every phase and
+// descriptor-driven log rendering reuses this one ordered table.
+func serveSpecs() ([]spec[ServeConfig], *configPathField[ServeConfig]) {
+	common, configPath := commonFields(commonTargets[ServeConfig]{
+		logLevel:             func(c *ServeConfig) *string { return &c.LogLevel },
+		logFormat:            func(c *ServeConfig) *string { return &c.LogFormat },
+		logFile:              func(c *ServeConfig) *string { return &c.LogFile },
+		githubOAuthTokenFile: func(c *ServeConfig) *string { return &c.GithubOAuthTokenFile },
+	})
+	serveSpecific := []spec[ServeConfig]{
+		stringField("addr", defaultAddr, func(c *ServeConfig) *string { return &c.Addr }, validAddr, "bind address (host:port)"),
+		durationField("shutdown-timeout", defaultShutdownTimeout, func(c *ServeConfig) *time.Duration { return &c.ShutdownTimeout }, positive, "graceful shutdown grace period"),
+		secretStringField("apikey", func(c *ServeConfig) *string { return &c.APIKey }, required, "required inbound API key clients must present (secret)"),
+		durationField("outbound-timeout", defaultOutboundTimeout, func(c *ServeConfig) *time.Duration { return &c.OutboundTimeout }, positive, "buffered upstream response timeout"),
+		durationField("stream-idle-timeout", defaultStreamIdleTimeout, func(c *ServeConfig) *time.Duration { return &c.StreamIdleTimeout }, positive, "upstream stream idle timeout"),
+		durationField("stream-keepalive-interval", defaultStreamKeepaliveInterval, func(c *ServeConfig) *time.Duration { return &c.StreamKeepaliveInterval }, positive, "OpenAI stream keepalive interval"),
+		durationField("write-timeout", defaultWriteTimeout, func(c *ServeConfig) *time.Duration { return &c.WriteTimeout }, positive, "per-write downstream timeout"),
+		durationField("response-header-timeout", defaultResponseHeaderTimeout, func(c *ServeConfig) *time.Duration { return &c.ResponseHeaderTimeout }, positive, "upstream response-header timeout"),
+		durationField("ws-handshake-timeout", defaultWebSocketHandshakeTimeout, func(c *ServeConfig) *time.Duration { return &c.WebSocketHandshakeTimeout }, positive, "upstream WebSocket handshake timeout"),
+		int64Field("max-request-bytes", defaultMaxRequestBytes, func(c *ServeConfig) *int64 { return &c.MaxRequestBytes }, positive, "maximum inbound request body size in bytes"),
+		int64Field("max-buffered-response-bytes", defaultMaxBufferedResponseBytes, func(c *ServeConfig) *int64 { return &c.MaxBufferedResponseBytes }, positive, "maximum buffered upstream response body size in bytes"),
+		boolField("shim-nop-enabled", defaultShimNopEnabled, func(c *ServeConfig) *bool { return &c.ShimNopEnabled }, "enable the canonical no-op shim"),
+		boolField("shim-responses-item-id-stabilizer-enabled", defaultShimResponsesItemIDStabilizerEnabled, func(c *ServeConfig) *bool { return &c.ShimResponsesItemIDStabilizerEnabled }, "stabilize churning OpenAI Responses item ids (opt-in)"),
+		boolField("codex-catalog-enabled", defaultCodexCatalogEnabled, func(c *ServeConfig) *bool { return &c.CodexCatalogEnabled }, "enable the Codex client-shaped catalog"),
+		stringField("codex-auto-review-model", defaultCodexAutoReviewModel, func(c *ServeConfig) *string { return &c.CodexAutoReviewModel }, nil, "reviewer model injected into the Codex catalog"),
+		newCodexAutoReviewModelOverridesField(),
+		boolField("codex-catalog-override-limits", defaultCodexOverrideLimits, func(c *ServeConfig) *bool { return &c.CodexOverrideLimits }, "override Codex catalog limits with live Copilot limits"),
+		durationField("codex-catalog-refresh-interval", defaultCodexCatalogRefreshInterval, func(c *ServeConfig) *time.Duration { return &c.CodexCatalogRefreshInterval }, nonNegative, "Codex models.json refresh cadence (0 pins the embedded floor)"),
+		secretStringField("github-oauth-token", func(c *ServeConfig) *string { return &c.GithubOAuthToken }, nil, "inline GitHub OAuth token (secret; precedence over the GitHub OAuth token file)"),
+		intField("startup-mint-retries", defaultStartupMintRetries, func(c *ServeConfig) *int { return &c.StartupMintRetries }, nonNegative, "transient startup-mint retries (total attempts = 1 + N)"),
+		stringField("vscode-version", defaultVSCodeVersionFallback, func(c *ServeConfig) *string { return &c.VSCodeVersionFallback }, bareVersion, "impersonation: bare VS Code version fallback"),
+		stringField("plugin-version", defaultPluginVersionFallback, func(c *ServeConfig) *string { return &c.PluginVersionFallback }, bareVersion, "impersonation: bare Copilot Chat version fallback"),
+		stringField("copilot-integration-id", defaultCopilotIntegrationID, func(c *ServeConfig) *string { return &c.CopilotIntegrationID }, nil, "impersonation: Copilot-Integration-Id header value"),
+		stringField("github-api-version", defaultGithubAPIVersion, func(c *ServeConfig) *string { return &c.GithubAPIVersion }, nil, "impersonation: X-GitHub-Api-Version header value"),
+		durationField("impersonation-refresh-interval", defaultImpersonationRefreshInterval, func(c *ServeConfig) *time.Duration { return &c.ImpersonationRefreshInterval }, nonNegative, "impersonation version re-discovery cadence (0 disables discovery)"),
 	}
-	if set["log-format"] {
-		*logFormat = *f.logFormat
-	}
-	if set["log-file"] {
-		*logFile = *f.logFile
-	}
-	if set["github-oauth-token-file"] {
-		*githubOAuthTokenFile = *f.githubOAuthTokenFile
-	}
+	return append(common, serveSpecific...), configPath
 }
 
 // ServeFlags bundles the parsed flag pointers for `copilotd serve`. It is an
 // opaque handle produced by RegisterServe and consumed by Resolve.
 type ServeFlags struct {
-	common commonFlags
-	fs     *ff.FlagSet
-
-	// serve-specific
-	addr                                 *string
-	shutdownTimeout                      *time.Duration
-	apikey                               *string
-	outboundTimeout                      *time.Duration
-	streamIdleTimeout                    *time.Duration
-	streamKeepaliveInterval              *time.Duration
-	writeTimeout                         *time.Duration
-	responseHeaderTimeout                *time.Duration
-	webSocketHandshakeTimeout            *time.Duration
-	maxRequestBytes                      *int64
-	maxBufferedResponseBytes             *int64
-	shimNopEnabled                       *bool
-	shimResponsesItemIDStabilizerEnabled *bool
-	codexCatalogEnabled                  *bool
-	codexAutoReviewModel                 *string
-	codexAutoReviewOverrides             *string
-	codexOverrideLimits                  *bool
-	codexCatalogRefreshInterval          *time.Duration
-
-	githubOAuthToken             *string
-	startupMintRetries           *int
-	vscodeVersion                *string
-	pluginVersion                *string
-	copilotIntegrationID         *string
-	githubAPIVersion             *string
-	impersonationRefreshInterval *time.Duration
+	fs         *ff.FlagSet
+	specs      []spec[ServeConfig]
+	configPath *configPathField[ServeConfig]
 }
 
 // RegisterServe declares the common operational flags first, followed by the
 // serve-specific flags, on a single command-local flag set.
 func RegisterServe(fs *ff.FlagSet) *ServeFlags {
-	f := &ServeFlags{common: registerCommon(fs), fs: fs}
-
-	// Serve-specific flags (§9.2).
-	f.addr = fs.StringLong("addr", defaultAddr, "bind address (host:port)")
-	f.shutdownTimeout = fs.DurationLong("shutdown-timeout", defaultShutdownTimeout, "graceful shutdown grace period")
-	f.apikey = fs.StringLong("apikey", "", "required inbound API key clients must present (secret)")
-	f.outboundTimeout = fs.DurationLong("outbound-timeout", defaultOutboundTimeout, "buffered upstream response timeout")
-	f.streamIdleTimeout = fs.DurationLong("stream-idle-timeout", defaultStreamIdleTimeout, "upstream stream idle timeout")
-	f.streamKeepaliveInterval = fs.DurationLong("stream-keepalive-interval", defaultStreamKeepaliveInterval, "OpenAI stream keepalive interval")
-	f.writeTimeout = fs.DurationLong("write-timeout", defaultWriteTimeout, "per-write downstream timeout")
-	f.responseHeaderTimeout = fs.DurationLong("response-header-timeout", defaultResponseHeaderTimeout, "upstream response-header timeout")
-	f.webSocketHandshakeTimeout = fs.DurationLong("ws-handshake-timeout", defaultWebSocketHandshakeTimeout, "upstream WebSocket handshake timeout")
-	f.maxRequestBytes = fs.Int64Long("max-request-bytes", defaultMaxRequestBytes, "maximum inbound request body size in bytes")
-	f.maxBufferedResponseBytes = fs.Int64Long("max-buffered-response-bytes", defaultMaxBufferedResponseBytes, "maximum buffered upstream response body size in bytes")
-	f.shimNopEnabled = fs.BoolLongDefault("shim-nop-enabled", defaultShimNopEnabled, "enable the canonical no-op shim")
-	f.shimResponsesItemIDStabilizerEnabled = fs.BoolLongDefault("shim-responses-item-id-stabilizer-enabled", defaultShimResponsesItemIDStabilizerEnabled, "stabilize churning OpenAI Responses item ids (opt-in)")
-	f.codexCatalogEnabled = fs.BoolLongDefault("codex-catalog-enabled", defaultCodexCatalogEnabled, "enable the Codex client-shaped catalog")
-	f.codexAutoReviewModel = fs.StringLong("codex-auto-review-model", defaultCodexAutoReviewModel, "reviewer model injected into the Codex catalog")
-	f.codexAutoReviewOverrides = fs.StringLong("codex-auto-review-model-overrides", "", "per-main-model reviewer overrides (main=reviewer,...)")
-	f.codexOverrideLimits = fs.BoolLongDefault("codex-catalog-override-limits", defaultCodexOverrideLimits, "override Codex catalog limits with live Copilot limits")
-	f.codexCatalogRefreshInterval = fs.DurationLong("codex-catalog-refresh-interval", defaultCodexCatalogRefreshInterval, "Codex models.json refresh cadence (0 pins the embedded floor)")
-
-	f.githubOAuthToken = fs.StringLong("github-oauth-token", "", "inline GitHub OAuth token (secret; precedence over the GitHub OAuth token file)")
-	f.startupMintRetries = fs.IntLong("startup-mint-retries", defaultStartupMintRetries, "transient startup-mint retries (total attempts = 1 + N)")
-	f.vscodeVersion = fs.StringLong("vscode-version", defaultVSCodeVersionFallback, "impersonation: bare VS Code version fallback")
-	f.pluginVersion = fs.StringLong("plugin-version", defaultPluginVersionFallback, "impersonation: bare Copilot Chat version fallback")
-	f.copilotIntegrationID = fs.StringLong("copilot-integration-id", defaultCopilotIntegrationID, "impersonation: Copilot-Integration-Id header value")
-	f.githubAPIVersion = fs.StringLong("github-api-version", defaultGithubAPIVersion, "impersonation: X-GitHub-Api-Version header value")
-	f.impersonationRefreshInterval = fs.DurationLong("impersonation-refresh-interval", defaultImpersonationRefreshInterval, "impersonation version re-discovery cadence (0 disables discovery)")
+	specs, configPath := serveSpecs()
+	f := &ServeFlags{fs: fs, specs: specs, configPath: configPath}
+	for _, s := range f.specs {
+		s.register(fs)
+	}
 
 	return f
 }
@@ -348,137 +308,30 @@ func RegisterServe(fs *ff.FlagSet) *ServeFlags {
 // pure and testable.
 func (f *ServeFlags) Resolve(lookupEnv func(string) (string, bool)) (ServeConfig, error) {
 	set := setFlags(f.fs)
-
-	cfg := ServeConfig{
-		Addr:                                 defaultAddr,
-		LogLevel:                             defaultLogLevel,
-		LogFormat:                            defaultLogFormat,
-		LogFile:                              "",
-		ShutdownTimeout:                      defaultShutdownTimeout,
-		GithubOAuthTokenFile:                 defaultOAuthTokenFile(),
-		OutboundTimeout:                      defaultOutboundTimeout,
-		StreamIdleTimeout:                    defaultStreamIdleTimeout,
-		StreamKeepaliveInterval:              defaultStreamKeepaliveInterval,
-		WriteTimeout:                         defaultWriteTimeout,
-		ResponseHeaderTimeout:                defaultResponseHeaderTimeout,
-		WebSocketHandshakeTimeout:            defaultWebSocketHandshakeTimeout,
-		MaxRequestBytes:                      defaultMaxRequestBytes,
-		MaxBufferedResponseBytes:             defaultMaxBufferedResponseBytes,
-		ShimNopEnabled:                       defaultShimNopEnabled,
-		ShimResponsesItemIDStabilizerEnabled: defaultShimResponsesItemIDStabilizerEnabled,
-		Codex: CodexConfig{
-			Enabled:         defaultCodexCatalogEnabled,
-			AutoReviewModel: defaultCodexAutoReviewModel,
-			OverrideLimits:  defaultCodexOverrideLimits,
-		},
-		CodexCatalogRefreshInterval:  defaultCodexCatalogRefreshInterval,
-		StartupMintRetries:           defaultStartupMintRetries,
-		VSCodeVersionFallback:        defaultVSCodeVersionFallback,
-		PluginVersionFallback:        defaultPluginVersionFallback,
-		CopilotIntegrationID:         defaultCopilotIntegrationID,
-		GithubAPIVersion:             defaultGithubAPIVersion,
-		ImpersonationRefreshInterval: defaultImpersonationRefreshInterval,
-	}
-
-	// file layer (lowest precedence above defaults)
-	if path := f.common.resolvedConfigPath(set, lookupEnv); path != "" {
-		if err := applyFile(&cfg, path); err != nil {
-			return ServeConfig{}, err
-		}
-	}
-	// env layer
-	if err := applyEnv(&cfg, lookupEnv); err != nil {
-		return ServeConfig{}, err
-	}
-	// flag layer (highest precedence)
-	if set["addr"] {
-		cfg.Addr = *f.addr
-	}
-	f.common.applyFlagValues(set, &cfg.LogLevel, &cfg.LogFormat, &cfg.LogFile, &cfg.GithubOAuthTokenFile)
-	if set["shutdown-timeout"] {
-		cfg.ShutdownTimeout = *f.shutdownTimeout
-	}
-	if set["apikey"] {
-		cfg.APIKey = *f.apikey
-	}
-	if set["outbound-timeout"] {
-		cfg.OutboundTimeout = *f.outboundTimeout
-	}
-	if set["stream-idle-timeout"] {
-		cfg.StreamIdleTimeout = *f.streamIdleTimeout
-	}
-	if set["stream-keepalive-interval"] {
-		cfg.StreamKeepaliveInterval = *f.streamKeepaliveInterval
-	}
-	if set["write-timeout"] {
-		cfg.WriteTimeout = *f.writeTimeout
-	}
-	if set["response-header-timeout"] {
-		cfg.ResponseHeaderTimeout = *f.responseHeaderTimeout
-	}
-	if set["ws-handshake-timeout"] {
-		cfg.WebSocketHandshakeTimeout = *f.webSocketHandshakeTimeout
-	}
-	if set["max-request-bytes"] {
-		cfg.MaxRequestBytes = *f.maxRequestBytes
-	}
-	if set["max-buffered-response-bytes"] {
-		cfg.MaxBufferedResponseBytes = *f.maxBufferedResponseBytes
-	}
-	if set["shim-nop-enabled"] {
-		cfg.ShimNopEnabled = *f.shimNopEnabled
-	}
-	if set["shim-responses-item-id-stabilizer-enabled"] {
-		cfg.ShimResponsesItemIDStabilizerEnabled = *f.shimResponsesItemIDStabilizerEnabled
-	}
-	if set["codex-catalog-enabled"] {
-		cfg.Codex.Enabled = *f.codexCatalogEnabled
-	}
-	if set["codex-auto-review-model"] {
-		cfg.Codex.AutoReviewModel = *f.codexAutoReviewModel
-	}
-	if set["codex-auto-review-model-overrides"] {
-		cfg.Codex.autoReviewModelOverridesRaw = *f.codexAutoReviewOverrides
-	}
-	if set["codex-catalog-override-limits"] {
-		cfg.Codex.OverrideLimits = *f.codexOverrideLimits
-	}
-	if set["codex-catalog-refresh-interval"] {
-		cfg.CodexCatalogRefreshInterval = *f.codexCatalogRefreshInterval
-	}
-	if set["github-oauth-token"] {
-		cfg.GithubOAuthToken = *f.githubOAuthToken
-	}
-	if set["startup-mint-retries"] {
-		cfg.StartupMintRetries = *f.startupMintRetries
-	}
-	if set["vscode-version"] {
-		cfg.VSCodeVersionFallback = *f.vscodeVersion
-	}
-	if set["plugin-version"] {
-		cfg.PluginVersionFallback = *f.pluginVersion
-	}
-	if set["copilot-integration-id"] {
-		cfg.CopilotIntegrationID = *f.copilotIntegrationID
-	}
-	if set["github-api-version"] {
-		cfg.GithubAPIVersion = *f.githubAPIVersion
-	}
-	if set["impersonation-refresh-interval"] {
-		cfg.ImpersonationRefreshInterval = *f.impersonationRefreshInterval
-	}
-
-	overrides, err := parseAutoReviewModelOverrides(cfg.Codex.autoReviewModelOverridesRaw)
+	path := resolveConfigPath(set, f.configPath.flagValue(), lookupEnv)
+	var cfg ServeConfig
+	err := resolve(
+		f.specs,
+		f.fs,
+		&cfg,
+		path,
+		lookupEnv,
+		finalizeServe,
+	)
 	if err != nil {
 		return ServeConfig{}, err
 	}
-	cfg.Codex.autoReviewModelOverridesRaw = ""
-	cfg.Codex.AutoReviewModelOverrides = overrides
-
-	if err := cfg.validate(); err != nil {
-		return ServeConfig{}, err
-	}
 	return cfg, nil
+}
+
+func finalizeServe(cfg *ServeConfig) error {
+	overrides, err := parseAutoReviewModelOverrides(cfg.autoReviewModelOverridesRaw)
+	if err != nil {
+		return err
+	}
+	cfg.autoReviewModelOverridesRaw = ""
+	cfg.CodexAutoReviewModelOverrides = overrides
+	return nil
 }
 
 func parseAutoReviewModelOverrides(raw string) (map[string]string, error) {
@@ -550,267 +403,10 @@ func resolveConfigPath(set map[string]bool, flagVal string, lookupEnv func(strin
 	return ""
 }
 
-// overlay applies present values from a source getter onto cfg, keyed by the
-// canonical (TOML) key names. Only keys the getter reports present are applied;
-// absent keys keep their prior value. source names the layer for error text.
-func overlay(cfg *ServeConfig, source string, get func(key string) (string, bool)) error {
-	if v, ok := get("addr"); ok {
-		cfg.Addr = v
-	}
-	if v, ok := get("log-level"); ok {
-		cfg.LogLevel = v
-	}
-	if v, ok := get("log-format"); ok {
-		cfg.LogFormat = v
-	}
-	if v, ok := get("log-file"); ok {
-		cfg.LogFile = v
-	}
-	if v, ok := get("github-oauth-token-file"); ok {
-		cfg.GithubOAuthTokenFile = v
-	}
-	if v, ok := get("apikey"); ok {
-		cfg.APIKey = v
-	}
-	if v, ok := get("github-oauth-token"); ok {
-		cfg.GithubOAuthToken = v
-	}
-	if v, ok := get("vscode-version"); ok {
-		cfg.VSCodeVersionFallback = v
-	}
-	if v, ok := get("plugin-version"); ok {
-		cfg.PluginVersionFallback = v
-	}
-	if v, ok := get("copilot-integration-id"); ok {
-		cfg.CopilotIntegrationID = v
-	}
-	if v, ok := get("github-api-version"); ok {
-		cfg.GithubAPIVersion = v
-	}
-	if v, ok := get("impersonation-refresh-interval"); ok {
-		d, err := time.ParseDuration(v)
-		if err != nil {
-			return fmt.Errorf("invalid impersonation-refresh-interval %q from %s: %w", v, source, err)
-		}
-		cfg.ImpersonationRefreshInterval = d
-	}
-	if v, ok := get("shutdown-timeout"); ok {
-		d, err := time.ParseDuration(v)
-		if err != nil {
-			return fmt.Errorf("invalid shutdown-timeout %q from %s: %w", v, source, err)
-		}
-		cfg.ShutdownTimeout = d
-	}
-	if v, ok := get("outbound-timeout"); ok {
-		d, err := time.ParseDuration(v)
-		if err != nil {
-			return fmt.Errorf("invalid outbound-timeout %q from %s: %w", v, source, err)
-		}
-		cfg.OutboundTimeout = d
-	}
-	if v, ok := get("stream-idle-timeout"); ok {
-		d, err := time.ParseDuration(v)
-		if err != nil {
-			return fmt.Errorf("invalid stream-idle-timeout %q from %s: %w", v, source, err)
-		}
-		cfg.StreamIdleTimeout = d
-	}
-	if v, ok := get("stream-keepalive-interval"); ok {
-		d, err := time.ParseDuration(v)
-		if err != nil {
-			return fmt.Errorf("invalid stream-keepalive-interval %q from %s: %w", v, source, err)
-		}
-		cfg.StreamKeepaliveInterval = d
-	}
-	if v, ok := get("write-timeout"); ok {
-		d, err := time.ParseDuration(v)
-		if err != nil {
-			return fmt.Errorf("invalid write-timeout %q from %s: %w", v, source, err)
-		}
-		cfg.WriteTimeout = d
-	}
-	if v, ok := get("response-header-timeout"); ok {
-		d, err := time.ParseDuration(v)
-		if err != nil {
-			return fmt.Errorf("invalid response-header-timeout %q from %s: %w", v, source, err)
-		}
-		cfg.ResponseHeaderTimeout = d
-	}
-	if v, ok := get("ws-handshake-timeout"); ok {
-		d, err := time.ParseDuration(v)
-		if err != nil {
-			return fmt.Errorf("invalid ws-handshake-timeout %q from %s: %w", v, source, err)
-		}
-		cfg.WebSocketHandshakeTimeout = d
-	}
-	if v, ok := get("max-request-bytes"); ok {
-		n, err := strconv.ParseInt(v, 10, 64)
-		if err != nil {
-			return fmt.Errorf("invalid max-request-bytes %q from %s: %w", v, source, err)
-		}
-		cfg.MaxRequestBytes = n
-	}
-	if v, ok := get("max-buffered-response-bytes"); ok {
-		n, err := strconv.ParseInt(v, 10, 64)
-		if err != nil {
-			return fmt.Errorf("invalid max-buffered-response-bytes %q from %s: %w", v, source, err)
-		}
-		cfg.MaxBufferedResponseBytes = n
-	}
-	if v, ok := get("shim-nop-enabled"); ok {
-		enabled, err := strconv.ParseBool(v)
-		if err != nil {
-			return fmt.Errorf("invalid shim-nop-enabled %q from %s: %w", v, source, err)
-		}
-		cfg.ShimNopEnabled = enabled
-	}
-	if v, ok := get("shim-responses-item-id-stabilizer-enabled"); ok {
-		enabled, err := strconv.ParseBool(v)
-		if err != nil {
-			return fmt.Errorf("invalid shim-responses-item-id-stabilizer-enabled %q from %s: %w", v, source, err)
-		}
-		cfg.ShimResponsesItemIDStabilizerEnabled = enabled
-	}
-	if v, ok := get("codex-catalog-enabled"); ok {
-		enabled, err := strconv.ParseBool(v)
-		if err != nil {
-			return fmt.Errorf("invalid codex-catalog-enabled %q from %s: %w", v, source, err)
-		}
-		cfg.Codex.Enabled = enabled
-	}
-	if v, ok := get("codex-auto-review-model"); ok {
-		cfg.Codex.AutoReviewModel = v
-	}
-	if v, ok := get("codex-auto-review-model-overrides"); ok {
-		cfg.Codex.autoReviewModelOverridesRaw = v
-	}
-	if v, ok := get("codex-catalog-override-limits"); ok {
-		enabled, err := strconv.ParseBool(v)
-		if err != nil {
-			return fmt.Errorf("invalid codex-catalog-override-limits %q from %s: %w", v, source, err)
-		}
-		cfg.Codex.OverrideLimits = enabled
-	}
-	if v, ok := get("codex-catalog-refresh-interval"); ok {
-		d, err := time.ParseDuration(v)
-		if err != nil {
-			return fmt.Errorf("invalid codex-catalog-refresh-interval %q from %s: %w", v, source, err)
-		}
-		cfg.CodexCatalogRefreshInterval = d
-	}
-	if v, ok := get("startup-mint-retries"); ok {
-		n, err := strconv.Atoi(v)
-		if err != nil {
-			return fmt.Errorf("invalid startup-mint-retries %q from %s: %w", v, source, err)
-		}
-		cfg.StartupMintRetries = n
-	}
-	return nil
-}
-
-// applyFile overlays values found in the TOML file onto cfg.
-func applyFile(cfg *ServeConfig, path string) error {
-	fh, err := os.Open(path)
-	if err != nil {
-		return fmt.Errorf("open config file: %w", err)
-	}
-	defer fh.Close()
-
-	values := make(map[string]string)
-	if err := fftoml.Parse(fh, func(name, value string) error {
-		values[name] = value
-		return nil
-	}); err != nil {
-		return fmt.Errorf("parse config file %q: %w", path, err)
-	}
-	return overlay(cfg, "config file", func(key string) (string, bool) {
-		v, ok := values[key]
-		return v, ok
-	})
-}
-
-// applyEnv overlays COPILOTD_* environment values onto cfg via the injected
-// lookup, mapping each canonical key to its environment variable name.
-func applyEnv(cfg *ServeConfig, lookupEnv func(string) (string, bool)) error {
-	return overlay(cfg, "env", func(key string) (string, bool) {
-		return lookupEnv(envVarName(key))
-	})
-}
-
 // envVarName maps a canonical key to its environment variable, following the
 // same convention ff uses: "log-level" -> "COPILOTD_LOG_LEVEL".
 func envVarName(key string) string {
 	return envPrefix + "_" + strings.ToUpper(strings.ReplaceAll(key, "-", "_"))
-}
-
-func (c ServeConfig) validate() error {
-	if err := validateAddr(c.Addr); err != nil {
-		return err
-	}
-	if !slices.Contains(validLogLevels, c.LogLevel) {
-		return fmt.Errorf("invalid log-level %q: must be one of debug, info, warn, error", c.LogLevel)
-	}
-	if !slices.Contains(validLogFormats, c.LogFormat) {
-		return fmt.Errorf("invalid log-format %q: must be one of text, json", c.LogFormat)
-	}
-	if c.ShutdownTimeout <= 0 {
-		return fmt.Errorf("invalid shutdown-timeout %v: must be positive", c.ShutdownTimeout)
-	}
-	if strings.TrimSpace(c.APIKey) == "" {
-		return fmt.Errorf("apikey is required: set --apikey, COPILOTD_APIKEY, or apikey in the config file")
-	}
-	if c.OutboundTimeout <= 0 {
-		return fmt.Errorf("invalid outbound-timeout %v: must be positive", c.OutboundTimeout)
-	}
-	if c.StreamIdleTimeout <= 0 {
-		return fmt.Errorf("invalid stream-idle-timeout %v: must be positive", c.StreamIdleTimeout)
-	}
-	if c.StreamKeepaliveInterval <= 0 {
-		return fmt.Errorf("invalid stream-keepalive-interval %v: must be positive", c.StreamKeepaliveInterval)
-	}
-	if c.WriteTimeout <= 0 {
-		return fmt.Errorf("invalid write-timeout %v: must be positive", c.WriteTimeout)
-	}
-	if c.ResponseHeaderTimeout <= 0 {
-		return fmt.Errorf("invalid response-header-timeout %v: must be positive", c.ResponseHeaderTimeout)
-	}
-	if c.WebSocketHandshakeTimeout <= 0 {
-		return fmt.Errorf("invalid ws-handshake-timeout %v: must be positive", c.WebSocketHandshakeTimeout)
-	}
-	if c.MaxRequestBytes <= 0 {
-		return fmt.Errorf("invalid max-request-bytes %d: must be positive", c.MaxRequestBytes)
-	}
-	if c.MaxBufferedResponseBytes <= 0 {
-		return fmt.Errorf("invalid max-buffered-response-bytes %d: must be positive", c.MaxBufferedResponseBytes)
-	}
-	if c.StartupMintRetries < 0 {
-		return fmt.Errorf("invalid startup-mint-retries %d: must be >= 0", c.StartupMintRetries)
-	}
-	if !impersonation.IsBareVersion(c.VSCodeVersionFallback) {
-		return fmt.Errorf("invalid vscode-version %q: must be major.minor.patch with optional prerelease or build suffixes", c.VSCodeVersionFallback)
-	}
-	if !impersonation.IsBareVersion(c.PluginVersionFallback) {
-		return fmt.Errorf("invalid plugin-version %q: must be major.minor.patch with optional prerelease or build suffixes", c.PluginVersionFallback)
-	}
-	if c.ImpersonationRefreshInterval < 0 {
-		return fmt.Errorf("invalid impersonation-refresh-interval %v: must be >= 0", c.ImpersonationRefreshInterval)
-	}
-	if c.CodexCatalogRefreshInterval < 0 {
-		return fmt.Errorf("invalid codex-catalog-refresh-interval %v: must be >= 0", c.CodexCatalogRefreshInterval)
-	}
-	return nil
-}
-
-func validateAddr(addr string) error {
-	_, port, err := net.SplitHostPort(addr)
-	if err != nil {
-		return fmt.Errorf("invalid addr %q: %w", addr, err)
-	}
-	p, err := strconv.Atoi(port)
-	if err != nil || p < 0 || p > 65535 {
-		return fmt.Errorf("invalid addr %q: port must be an integer in [0,65535]", addr)
-	}
-	return nil
 }
 
 // LoginConfig is the resolved, validated configuration for `copilotd login`. It
@@ -835,31 +431,49 @@ type LoginConfig struct {
 // LogValue implements slog.LogValuer. Every login field is non-secret, so all
 // are enumerated; the token itself is never held by LoginConfig.
 func (c LoginConfig) LogValue() slog.Value {
-	return slog.GroupValue(
-		slog.String("log-level", c.LogLevel),
-		slog.String("log-format", c.LogFormat),
-		slog.String("log-file", c.LogFile),
-		slog.String("github-oauth-token-file", c.GithubOAuthTokenFile),
-		slog.String("github-client-id", c.GithubClientID),
-		slog.String("github-scope", c.GithubScope),
-	)
+	specs := loginSpecs()
+	attrs := appendSpecLogAttrs(make([]slog.Attr, 0, 6), specs.order, &c)
+	return slog.GroupValue(attrs...)
 }
 
-// LoginFlags bundles the parsed flag pointers for `copilotd login`.
-type LoginFlags struct {
-	common commonFlags
-	fs     *ff.FlagSet
+type loginSpecTable struct {
+	order      []spec[LoginConfig]
+	configPath *configPathField[LoginConfig]
+}
 
-	githubClientID *string
-	githubScope    *string
+// loginSpecs declares the shared operational settings first, followed by the
+// two login-specific settings, preserving registration, resolution, validation,
+// and logging order from one set of descriptors.
+func loginSpecs() loginSpecTable {
+	common, configPath := commonFields(commonTargets[LoginConfig]{
+		logLevel:             func(c *LoginConfig) *string { return &c.LogLevel },
+		logFormat:            func(c *LoginConfig) *string { return &c.LogFormat },
+		logFile:              func(c *LoginConfig) *string { return &c.LogFile },
+		githubOAuthTokenFile: func(c *LoginConfig) *string { return &c.GithubOAuthTokenFile },
+	})
+	loginSpecific := []spec[LoginConfig]{
+		stringField("github-client-id", defaultGithubClientID, func(c *LoginConfig) *string { return &c.GithubClientID }, required, "device-flow OAuth app client id (override for GitHub Enterprise Server)"),
+		stringField("github-scope", defaultGithubScope, func(c *LoginConfig) *string { return &c.GithubScope }, required, "device-flow OAuth scope"),
+	}
+	return loginSpecTable{
+		order:      append(common, loginSpecific...),
+		configPath: configPath,
+	}
+}
+
+// LoginFlags is the opaque registered descriptor handle for `copilotd login`.
+type LoginFlags struct {
+	fs    *ff.FlagSet
+	specs loginSpecTable
 }
 
 // RegisterLogin declares the common operational flags first, followed by the
 // login-specific flags, on a single command-local flag set.
 func RegisterLogin(fs *ff.FlagSet) *LoginFlags {
-	f := &LoginFlags{common: registerCommon(fs), fs: fs}
-	f.githubClientID = fs.StringLong("github-client-id", defaultGithubClientID, "device-flow OAuth app client id (override for GitHub Enterprise Server)")
-	f.githubScope = fs.StringLong("github-scope", defaultGithubScope, "device-flow OAuth scope")
+	f := &LoginFlags{fs: fs, specs: loginSpecs()}
+	for _, s := range f.specs.order {
+		s.register(fs)
+	}
 	return f
 }
 
@@ -867,103 +481,10 @@ func RegisterLogin(fs *ff.FlagSet) *LoginFlags {
 // flags > env > file > default) and validates, returning the LoginConfig.
 func (f *LoginFlags) Resolve(lookupEnv func(string) (string, bool)) (LoginConfig, error) {
 	set := setFlags(f.fs)
-
-	cfg := LoginConfig{
-		LogLevel:             defaultLogLevel,
-		LogFormat:            defaultLogFormat,
-		LogFile:              "",
-		GithubOAuthTokenFile: defaultOAuthTokenFile(),
-		GithubClientID:       defaultGithubClientID,
-		GithubScope:          defaultGithubScope,
-	}
-
-	// file layer (lowest precedence above defaults)
-	if path := f.common.resolvedConfigPath(set, lookupEnv); path != "" {
-		if err := applyFileLogin(&cfg, path); err != nil {
-			return LoginConfig{}, err
-		}
-	}
-	// env layer
-	applyEnvLogin(&cfg, lookupEnv)
-	// flag layer (highest precedence)
-	f.common.applyFlagValues(set, &cfg.LogLevel, &cfg.LogFormat, &cfg.LogFile, &cfg.GithubOAuthTokenFile)
-	if set["github-client-id"] {
-		cfg.GithubClientID = *f.githubClientID
-	}
-	if set["github-scope"] {
-		cfg.GithubScope = *f.githubScope
-	}
-
-	if err := cfg.validate(); err != nil {
+	path := resolveConfigPath(set, f.specs.configPath.flagValue(), lookupEnv)
+	cfg := LoginConfig{}
+	if err := resolve(f.specs.order, f.fs, &cfg, path, lookupEnv, nil); err != nil {
 		return LoginConfig{}, err
 	}
 	return cfg, nil
-}
-
-func (c LoginConfig) validate() error {
-	if !slices.Contains(validLogLevels, c.LogLevel) {
-		return fmt.Errorf("invalid log-level %q: must be one of debug, info, warn, error", c.LogLevel)
-	}
-	if !slices.Contains(validLogFormats, c.LogFormat) {
-		return fmt.Errorf("invalid log-format %q: must be one of text, json", c.LogFormat)
-	}
-	if strings.TrimSpace(c.GithubClientID) == "" {
-		return fmt.Errorf("github-client-id is required: set --github-client-id, COPILOTD_GITHUB_CLIENT_ID, or github-client-id in the config file")
-	}
-	if strings.TrimSpace(c.GithubScope) == "" {
-		return fmt.Errorf("github-scope is required: set --github-scope, COPILOTD_GITHUB_SCOPE, or github-scope in the config file")
-	}
-	return nil
-}
-
-// overlayLogin applies present values from a source getter onto cfg. Every login
-// key is a string, so unlike serve's overlay it needs no per-field parsing.
-func overlayLogin(cfg *LoginConfig, get func(key string) (string, bool)) {
-	if v, ok := get("log-level"); ok {
-		cfg.LogLevel = v
-	}
-	if v, ok := get("log-format"); ok {
-		cfg.LogFormat = v
-	}
-	if v, ok := get("log-file"); ok {
-		cfg.LogFile = v
-	}
-	if v, ok := get("github-oauth-token-file"); ok {
-		cfg.GithubOAuthTokenFile = v
-	}
-	if v, ok := get("github-client-id"); ok {
-		cfg.GithubClientID = v
-	}
-	if v, ok := get("github-scope"); ok {
-		cfg.GithubScope = v
-	}
-}
-
-// applyFileLogin overlays values found in the TOML file onto cfg.
-func applyFileLogin(cfg *LoginConfig, path string) error {
-	fh, err := os.Open(path)
-	if err != nil {
-		return fmt.Errorf("open config file: %w", err)
-	}
-	defer fh.Close()
-
-	values := make(map[string]string)
-	if err := fftoml.Parse(fh, func(name, value string) error {
-		values[name] = value
-		return nil
-	}); err != nil {
-		return fmt.Errorf("parse config file %q: %w", path, err)
-	}
-	overlayLogin(cfg, func(key string) (string, bool) {
-		v, ok := values[key]
-		return v, ok
-	})
-	return nil
-}
-
-// applyEnvLogin overlays COPILOTD_* environment values onto cfg.
-func applyEnvLogin(cfg *LoginConfig, lookupEnv func(string) (string, bool)) {
-	overlayLogin(cfg, func(key string) (string, bool) {
-		return lookupEnv(envVarName(key))
-	})
 }

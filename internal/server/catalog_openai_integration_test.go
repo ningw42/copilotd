@@ -15,10 +15,22 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ningw42/copilotd/internal/catalog"
 	"github.com/ningw42/copilotd/internal/config"
 	"github.com/ningw42/copilotd/internal/forward"
 	"github.com/ningw42/copilotd/internal/identity"
 )
+
+func testCodexDescriptor(cfg config.ServeConfig) catalog.CodexDescriptor {
+	return catalog.CodexDescriptor{
+		Enabled: cfg.CodexCatalogEnabled,
+		RenderConfig: catalog.CodexRenderConfig{
+			AutoReviewModel:          cfg.CodexAutoReviewModel,
+			AutoReviewModelOverrides: cfg.CodexAutoReviewModelOverrides,
+			OverrideLimits:           cfg.CodexOverrideLimits,
+		},
+	}
+}
 
 func TestCodexCatalogPerModelReviewerOverRealListener(t *testing.T) {
 	const (
@@ -35,15 +47,13 @@ func TestCodexCatalogPerModelReviewerOverRealListener(t *testing.T) {
 	defer upstream.Close()
 
 	cfg := testConfig()
-	cfg.Codex = config.CodexConfig{
-		Enabled: true,
-		AutoReviewModelOverrides: map[string]string{
-			mainModel: reviewer,
-		},
+	cfg.CodexCatalogEnabled = true
+	cfg.CodexAutoReviewModelOverrides = map[string]string{
+		mainModel: reviewer,
 	}
 	provider := identity.NewStatic(identity.Credential{BaseURL: upstream.URL, Token: "copilot-token"}, true)
 	forwarder := forward.New(provider, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
-	base := startServer(t, New(cfg, discardLogger(t), provider, newTestReadyObservers(), forwarder, newTestWSProxy(provider), NewStreamOutcomeCounter()))
+	base := startServer(t, New(cfg, discardLogger(t), provider, newTestReadyObservers(), forwarder, newTestWSProxy(provider), NewStreamOutcomeCounter(), testCodexDescriptor(cfg)))
 	req, err := http.NewRequest(http.MethodGet, base+"/openai/v1/models?client_version=0.144.5", nil)
 	if err != nil {
 		t.Fatalf("build catalog request: %v", err)
@@ -132,17 +142,20 @@ func TestCodexCatalogOverRealListener(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	newStack := func(codex config.CodexConfig, ready bool) (string, *identity.Static) {
+	newStack := func(codex config.ServeConfig, ready bool) (string, *identity.Static) {
 		t.Helper()
 		cfg := testConfig()
-		cfg.Codex = codex
+		cfg.CodexCatalogEnabled = codex.CodexCatalogEnabled
+		cfg.CodexAutoReviewModel = codex.CodexAutoReviewModel
+		cfg.CodexAutoReviewModelOverrides = codex.CodexAutoReviewModelOverrides
+		cfg.CodexOverrideLimits = codex.CodexOverrideLimits
 		provider := identity.NewStatic(identity.Credential{
 			BaseURL: upstream.URL,
 			Token:   "copilot-token",
 			Headers: http.Header{"Copilot-Integration-Id": {"vscode-chat"}},
 		}, ready)
 		forwarder := forward.New(provider, forward.NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
-		return startServer(t, New(cfg, discardLogger(t), provider, newTestReadyObservers(), forwarder, newTestWSProxy(provider), NewStreamOutcomeCounter())), provider
+		return startServer(t, New(cfg, discardLogger(t), provider, newTestReadyObservers(), forwarder, newTestWSProxy(provider), NewStreamOutcomeCounter(), testCodexDescriptor(cfg))), provider
 	}
 
 	requestCatalog := func(base, method, target, keyHeader, key, requestID string) (*http.Response, []byte) {
@@ -180,7 +193,7 @@ func TestCodexCatalogOverRealListener(t *testing.T) {
 		}
 	}
 
-	codexBase, provider := newStack(config.CodexConfig{Enabled: true, AutoReviewModel: reviewer}, true)
+	codexBase, provider := newStack(config.ServeConfig{CodexCatalogEnabled: true, CodexAutoReviewModel: reviewer}, true)
 	startHits := hits.Load()
 	getRequestID := "codex-capstone-get"
 	getResponse, getBody := requestCatalog(codexBase, http.MethodGet, "/openai/v1/models?client_version=0.144.5", "Authorization", "Bearer "+testAPIKey, getRequestID)
@@ -240,14 +253,14 @@ func TestCodexCatalogOverRealListener(t *testing.T) {
 	}
 	assertOpenAIList(noQueryBody)
 
-	noInjectionBase, _ := newStack(config.CodexConfig{Enabled: true}, true)
+	noInjectionBase, _ := newStack(config.ServeConfig{CodexCatalogEnabled: true}, true)
 	noInjectionResponse, noInjectionBody := requestCatalog(noInjectionBase, http.MethodGet, "/openai/v1/models?client_version=0.144.5", "Authorization", "Bearer "+testAPIKey, "codex-capstone-no-injection")
 	if noInjectionResponse.StatusCode != http.StatusOK {
 		t.Fatalf("no-injection response = %d %s", noInjectionResponse.StatusCode, noInjectionBody)
 	}
 	assertOpenAIList(noInjectionBody)
 
-	disabledBase, _ := newStack(config.CodexConfig{AutoReviewModel: reviewer}, true)
+	disabledBase, _ := newStack(config.ServeConfig{CodexAutoReviewModel: reviewer}, true)
 	disabledResponse, disabledBody := requestCatalog(disabledBase, http.MethodGet, "/openai/v1/models?client_version=0.144.5", "Authorization", "Bearer "+testAPIKey, "codex-capstone-disabled")
 	if disabledResponse.StatusCode != http.StatusOK {
 		t.Fatalf("disabled response = %d %s", disabledResponse.StatusCode, disabledBody)
@@ -309,15 +322,13 @@ func TestCodexCatalogConfigWiringWarningAndAccessLogConfidentiality(t *testing.T
 
 	logger, logs := bufferLogger(t, "info")
 	cfg := testConfig()
-	cfg.Codex = config.CodexConfig{
-		Enabled: true,
-		AutoReviewModelOverrides: map[string]string{
-			mainModel: reviewer,
-		},
+	cfg.CodexCatalogEnabled = true
+	cfg.CodexAutoReviewModelOverrides = map[string]string{
+		mainModel: reviewer,
 	}
 	provider := identity.NewStatic(identity.Credential{BaseURL: upstream.URL, Token: copilotToken}, true)
 	forwarder := forward.New(provider, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
-	base := startServer(t, New(cfg, logger, provider, newTestReadyObservers(), forwarder, newTestWSProxy(provider), NewStreamOutcomeCounter()))
+	base := startServer(t, New(cfg, logger, provider, newTestReadyObservers(), forwarder, newTestWSProxy(provider), NewStreamOutcomeCounter(), testCodexDescriptor(cfg)))
 
 	requestCatalog := func(target string) (*http.Response, []byte) {
 		t.Helper()
@@ -394,7 +405,7 @@ func TestOpenAIModelCatalogMapsFetchFailuresOverRealListener(t *testing.T) {
 				return nil, tt.upstreamErr
 			})}
 			forwarder := forward.New(provider, client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
-			base := startServer(t, New(testConfig(), discardLogger(t), provider, newTestReadyObservers(), forwarder, newTestWSProxy(provider), NewStreamOutcomeCounter()))
+			base := startServer(t, New(testConfig(), discardLogger(t), provider, newTestReadyObservers(), forwarder, newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.CodexDescriptor{}))
 
 			req, err := http.NewRequest(http.MethodGet, base+"/openai/v1/models", nil)
 			if err != nil {
@@ -451,7 +462,7 @@ func TestOpenAIModelCatalogOverRealListener(t *testing.T) {
 		Headers: http.Header{"Copilot-Integration-Id": {"vscode-chat"}},
 	}, true)
 	forwarder := forward.New(provider, forward.NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
-	base := startServer(t, New(testConfig(), discardLogger(t), provider, newTestReadyObservers(), forwarder, newTestWSProxy(provider), NewStreamOutcomeCounter()))
+	base := startServer(t, New(testConfig(), discardLogger(t), provider, newTestReadyObservers(), forwarder, newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.CodexDescriptor{}))
 
 	do := func(method, keyHeader, key string) (*http.Response, []byte) {
 		t.Helper()
