@@ -34,6 +34,7 @@ form is accepted as input, so `--stream-idle-timeout 5m` and
 | [`--max-request-bytes <BYTES>`](#--max-request-bytes) | `COPILOTD_MAX_REQUEST_BYTES` | `max-request-bytes` | `33554432` (32 MiB) | `serve` |
 | [`--max-buffered-response-bytes <BYTES>`](#--max-buffered-response-bytes) | `COPILOTD_MAX_BUFFERED_RESPONSE_BYTES` | `max-buffered-response-bytes` | `33554432` (32 MiB) | `serve` |
 | [`--shim-nop-enabled=<BOOL>`](#--shim-nop-enabled) | `COPILOTD_SHIM_NOP_ENABLED` | `shim-nop-enabled` | `false` | `serve` |
+| [`--shim-responses-item-id-stabilizer-enabled=<BOOL>`](#--shim-responses-item-id-stabilizer-enabled) | `COPILOTD_SHIM_RESPONSES_ITEM_ID_STABILIZER_ENABLED` | `shim-responses-item-id-stabilizer-enabled` | `false` | `serve` |
 | [`--codex-catalog-enabled=<BOOL>`](#--codex-catalog-enabled) | `COPILOTD_CODEX_CATALOG_ENABLED` | `codex-catalog-enabled` | `false` | `serve` |
 | [`--codex-auto-review-model <SLUG>`](#--codex-auto-review-model) | `COPILOTD_CODEX_AUTO_REVIEW_MODEL` | `codex-auto-review-model` | Empty | `serve` |
 | [`--codex-auto-review-model-overrides <MAP>`](#--codex-auto-review-model-overrides) | `COPILOTD_CODEX_AUTO_REVIEW_MODEL_OVERRIDES` | `codex-auto-review-model-overrides` | Empty | `serve` |
@@ -125,6 +126,16 @@ buffered-response shim; values must be positive.
 ### `--shim-nop-enabled`
 
 Enables the canonical no-op response shim.
+
+### `--shim-responses-item-id-stabilizer-enabled`
+
+Enables the opt-in OpenAI Responses item-id stabilizer shim. When enabled, it
+pins one genuine upstream item `id` per `output_index` on the `/responses` SSE
+and WebSocket transports and rewrites the later id-bearing events on that index
+to it; no id is minted, and any payload it cannot confidently rewrite is
+forwarded verbatim. Scoped to the OpenAI `/responses` endpoint, so every other
+surface is untouched. Disabled by default, leaving both transports
+byte-for-byte verbatim.
 
 ### `--codex-catalog-enabled`
 
