@@ -4,6 +4,18 @@ on:
   push:
     branches:
       - '**'
+    # Only build/test when something that affects the Go module changes.
+    # cmd/** and internal/** are matched wholesale so embedded data
+    # (internal/catalog/codexdata) and testdata fixtures are covered too.
+    # Path filters apply to `push` only; `workflow_call` from release.yml
+    # always runs.
+    paths:
+      - '**.go'
+      - go.mod
+      - go.sum
+      - cmd/**
+      - internal/**
+      - .github/workflows/test.yml
   workflow_call:
 
 permissions:
