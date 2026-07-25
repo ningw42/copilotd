@@ -128,7 +128,7 @@ func TestTypedFieldsResolveValues(t *testing.T) {
 
 	fs := ff.NewFlagSet("test")
 	specs := []spec[target]{
-		durationField("duration", time.Second, func(c *target) *time.Duration { return &c.duration }, positive, "duration"),
+		durationField("duration", time.Second, inSeconds, func(c *target) *time.Duration { return &c.duration }, positive, "duration"),
 		stringField("text", "default", func(c *target) *string { return &c.text }, nil, "text"),
 		int64Field("bytes", 1, func(c *target) *int64 { return &c.bytes }, positive, "bytes"),
 		intField("retries", 1, func(c *target) *int { return &c.retries }, nonNegative, "retries"),
@@ -197,6 +197,32 @@ func TestFieldWithoutCheckSkipsValidation(t *testing.T) {
 	s := stringField("value", "", func(c *target) *string { return &c.value }, nil, "value")
 	if err := s.validate(&cfg); err != nil {
 		t.Errorf("validate() error = %v, want nil", err)
+	}
+}
+
+func TestDurationUnitFormatsExactMultiplesAndFallsBack(t *testing.T) {
+	tests := []struct {
+		name string
+		unit durationUnit
+		in   time.Duration
+		want string
+	}{
+		{name: "seconds exact", unit: inSeconds, in: 600 * time.Second, want: "600s"},
+		{name: "hours exact", unit: inHours, in: 24 * time.Hour, want: "24h"},
+		{name: "zero in seconds", unit: inSeconds, in: 0, want: "0s"},
+		{name: "zero in hours", unit: inHours, in: 0, want: "0h"},
+		// Only an override can produce a value the declared unit cannot state
+		// exactly; Go's own notation is the lossless fallback.
+		{name: "sub-unit remainder in seconds", unit: inSeconds, in: 1500 * time.Millisecond, want: "1.5s"},
+		{name: "sub-unit remainder in hours", unit: inHours, in: 90 * time.Minute, want: "1h30m0s"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.unit.format(tc.in); got != tc.want {
+				t.Errorf("format(%v) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
 	}
 }
 

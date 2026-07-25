@@ -9,6 +9,12 @@ loaded automatically; select one with `--config` or `COPILOTD_CONFIG`. The file
 uses the flat TOML keys shown below. Durations use Go duration syntax such as
 `500ms`, `30s`, or `24h`; quote duration and other string values in TOML.
 
+Each duration default below is stated in that setting's canonical unit —
+seconds for timeouts, hours for refresh intervals — and `copilotd serve --help`
+prints the same string. The canonical unit is presentation only: any Go duration
+form is accepted as input, so `--stream-idle-timeout 5m` and
+`--stream-idle-timeout 300s` are equivalent.
+
 | CLI flag (highest precedence) | Environment variable | TOML key | Default (lowest precedence) | Command |
 | --- | --- | --- | --- | --- |
 | [`--config <PATH>`](#--config) | `COPILOTD_CONFIG` | — | No file | `serve`, `login` |
@@ -20,7 +26,7 @@ uses the flat TOML keys shown below. Durations use Go duration syntax such as
 | [`--shutdown-timeout <DURATION>`](#--shutdown-timeout) | `COPILOTD_SHUTDOWN_TIMEOUT` | `shutdown-timeout` | `10s` | `serve` |
 | [`--apikey <KEY>`](#--apikey) | `COPILOTD_APIKEY` | `apikey` | Required | `serve` |
 | [`--outbound-timeout <DURATION>`](#--outbound-timeout) | `COPILOTD_OUTBOUND_TIMEOUT` | `outbound-timeout` | `600s` | `serve` |
-| [`--stream-idle-timeout <DURATION>`](#--stream-idle-timeout) | `COPILOTD_STREAM_IDLE_TIMEOUT` | `stream-idle-timeout` | `5m` | `serve` |
+| [`--stream-idle-timeout <DURATION>`](#--stream-idle-timeout) | `COPILOTD_STREAM_IDLE_TIMEOUT` | `stream-idle-timeout` | `600s` | `serve` |
 | [`--stream-keepalive-interval <DURATION>`](#--stream-keepalive-interval) | `COPILOTD_STREAM_KEEPALIVE_INTERVAL` | `stream-keepalive-interval` | `15s` | `serve` |
 | [`--write-timeout <DURATION>`](#--write-timeout) | `COPILOTD_WRITE_TIMEOUT` | `write-timeout` | `90s` | `serve` |
 | [`--response-header-timeout <DURATION>`](#--response-header-timeout) | `COPILOTD_RESPONSE_HEADER_TIMEOUT` | `response-header-timeout` | `600s` | `serve` |
@@ -87,7 +93,8 @@ model-catalog fetches.
 
 ### `--stream-idle-timeout`
 
-Limits genuine upstream silence on a streaming response.
+Limits genuine upstream silence on a streaming response. The default is `600s`,
+matching the other two upstream bounds.
 
 ### `--stream-keepalive-interval`
 

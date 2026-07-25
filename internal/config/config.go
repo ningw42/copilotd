@@ -31,8 +31,13 @@ const (
 	// silence, individual downstream writes, and time-to-first-byte. The
 	// request and opt-in buffered-response caps (32 MiB each) are generous enough
 	// for multi-image base64 while guarding against pathological bodies.
+	//
+	// Timeouts are written in seconds and refresh intervals in hours, matching
+	// the durationUnit each row declares below so a constant, its --help default,
+	// and its CONFIGURATION.md row all read alike. Overrides still accept any Go
+	// duration form.
 	defaultOutboundTimeout                      = 600 * time.Second
-	defaultStreamIdleTimeout                    = 5 * time.Minute
+	defaultStreamIdleTimeout                    = 600 * time.Second
 	defaultStreamKeepaliveInterval              = 15 * time.Second
 	defaultWriteTimeout                         = 90 * time.Second
 	defaultResponseHeaderTimeout                = 600 * time.Second
@@ -251,14 +256,14 @@ func serveSpecs() ([]spec[ServeConfig], *configPathField[ServeConfig]) {
 	})
 	serveSpecific := []spec[ServeConfig]{
 		stringField("addr", defaultAddr, func(c *ServeConfig) *string { return &c.Addr }, validAddr, "bind address (host:port)"),
-		durationField("shutdown-timeout", defaultShutdownTimeout, func(c *ServeConfig) *time.Duration { return &c.ShutdownTimeout }, positive, "graceful shutdown grace period"),
+		durationField("shutdown-timeout", defaultShutdownTimeout, inSeconds, func(c *ServeConfig) *time.Duration { return &c.ShutdownTimeout }, positive, "graceful shutdown grace period"),
 		secretStringField("apikey", func(c *ServeConfig) *string { return &c.APIKey }, required, "required inbound API key clients must present (secret)"),
-		durationField("outbound-timeout", defaultOutboundTimeout, func(c *ServeConfig) *time.Duration { return &c.OutboundTimeout }, positive, "buffered upstream response timeout"),
-		durationField("stream-idle-timeout", defaultStreamIdleTimeout, func(c *ServeConfig) *time.Duration { return &c.StreamIdleTimeout }, positive, "upstream stream idle timeout"),
-		durationField("stream-keepalive-interval", defaultStreamKeepaliveInterval, func(c *ServeConfig) *time.Duration { return &c.StreamKeepaliveInterval }, positive, "OpenAI stream keepalive interval"),
-		durationField("write-timeout", defaultWriteTimeout, func(c *ServeConfig) *time.Duration { return &c.WriteTimeout }, positive, "per-write downstream timeout"),
-		durationField("response-header-timeout", defaultResponseHeaderTimeout, func(c *ServeConfig) *time.Duration { return &c.ResponseHeaderTimeout }, positive, "upstream response-header timeout"),
-		durationField("ws-handshake-timeout", defaultWebSocketHandshakeTimeout, func(c *ServeConfig) *time.Duration { return &c.WebSocketHandshakeTimeout }, positive, "upstream WebSocket handshake timeout"),
+		durationField("outbound-timeout", defaultOutboundTimeout, inSeconds, func(c *ServeConfig) *time.Duration { return &c.OutboundTimeout }, positive, "buffered upstream response timeout"),
+		durationField("stream-idle-timeout", defaultStreamIdleTimeout, inSeconds, func(c *ServeConfig) *time.Duration { return &c.StreamIdleTimeout }, positive, "upstream stream idle timeout"),
+		durationField("stream-keepalive-interval", defaultStreamKeepaliveInterval, inSeconds, func(c *ServeConfig) *time.Duration { return &c.StreamKeepaliveInterval }, positive, "OpenAI stream keepalive interval"),
+		durationField("write-timeout", defaultWriteTimeout, inSeconds, func(c *ServeConfig) *time.Duration { return &c.WriteTimeout }, positive, "per-write downstream timeout"),
+		durationField("response-header-timeout", defaultResponseHeaderTimeout, inSeconds, func(c *ServeConfig) *time.Duration { return &c.ResponseHeaderTimeout }, positive, "upstream response-header timeout"),
+		durationField("ws-handshake-timeout", defaultWebSocketHandshakeTimeout, inSeconds, func(c *ServeConfig) *time.Duration { return &c.WebSocketHandshakeTimeout }, positive, "upstream WebSocket handshake timeout"),
 		int64Field("max-request-bytes", defaultMaxRequestBytes, func(c *ServeConfig) *int64 { return &c.MaxRequestBytes }, positive, "maximum inbound request body size in bytes"),
 		int64Field("max-buffered-response-bytes", defaultMaxBufferedResponseBytes, func(c *ServeConfig) *int64 { return &c.MaxBufferedResponseBytes }, positive, "maximum buffered upstream response body size in bytes"),
 		boolField("shim-nop-enabled", defaultShimNopEnabled, func(c *ServeConfig) *bool { return &c.ShimNopEnabled }, "enable the canonical no-op shim"),
@@ -267,14 +272,14 @@ func serveSpecs() ([]spec[ServeConfig], *configPathField[ServeConfig]) {
 		stringField("codex-auto-review-model", defaultCodexAutoReviewModel, func(c *ServeConfig) *string { return &c.CodexAutoReviewModel }, nil, "reviewer model injected into the Codex catalog"),
 		newCodexAutoReviewModelOverridesField(),
 		boolField("codex-catalog-override-limits", defaultCodexOverrideLimits, func(c *ServeConfig) *bool { return &c.CodexOverrideLimits }, "override Codex catalog limits with live Copilot limits"),
-		durationField("codex-catalog-refresh-interval", defaultCodexCatalogRefreshInterval, func(c *ServeConfig) *time.Duration { return &c.CodexCatalogRefreshInterval }, nonNegative, "Codex models.json refresh cadence (0 pins the embedded floor)"),
+		durationField("codex-catalog-refresh-interval", defaultCodexCatalogRefreshInterval, inHours, func(c *ServeConfig) *time.Duration { return &c.CodexCatalogRefreshInterval }, nonNegative, "Codex models.json refresh cadence (0 pins the embedded floor)"),
 		secretStringField("github-oauth-token", func(c *ServeConfig) *string { return &c.GithubOAuthToken }, nil, "inline GitHub OAuth token (secret; precedence over the GitHub OAuth token file)"),
 		intField("startup-mint-retries", defaultStartupMintRetries, func(c *ServeConfig) *int { return &c.StartupMintRetries }, nonNegative, "transient startup-mint retries (total attempts = 1 + N)"),
 		stringField("vscode-version", defaultVSCodeVersionFallback, func(c *ServeConfig) *string { return &c.VSCodeVersionFallback }, bareVersion, "impersonation: bare VS Code version fallback"),
 		stringField("plugin-version", defaultPluginVersionFallback, func(c *ServeConfig) *string { return &c.PluginVersionFallback }, bareVersion, "impersonation: bare Copilot Chat version fallback"),
 		stringField("copilot-integration-id", defaultCopilotIntegrationID, func(c *ServeConfig) *string { return &c.CopilotIntegrationID }, nil, "impersonation: Copilot-Integration-Id header value"),
 		stringField("github-api-version", defaultGithubAPIVersion, func(c *ServeConfig) *string { return &c.GithubAPIVersion }, nil, "impersonation: X-GitHub-Api-Version header value"),
-		durationField("impersonation-refresh-interval", defaultImpersonationRefreshInterval, func(c *ServeConfig) *time.Duration { return &c.ImpersonationRefreshInterval }, nonNegative, "impersonation version re-discovery cadence (0 disables discovery)"),
+		durationField("impersonation-refresh-interval", defaultImpersonationRefreshInterval, inHours, func(c *ServeConfig) *time.Duration { return &c.ImpersonationRefreshInterval }, nonNegative, "impersonation version re-discovery cadence (0 disables discovery)"),
 	}
 	return append(common, serveSpecific...), configPath
 }

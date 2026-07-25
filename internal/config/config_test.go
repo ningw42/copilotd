@@ -54,7 +54,7 @@ func defaultConfig() ServeConfig {
 		GithubOAuthTokenFile:         defaultOAuthTokenFile(),
 		APIKey:                       testAPIKey,
 		OutboundTimeout:              600 * time.Second,
-		StreamIdleTimeout:            5 * time.Minute,
+		StreamIdleTimeout:            600 * time.Second,
 		StreamKeepaliveInterval:      15 * time.Second,
 		WriteTimeout:                 90 * time.Second,
 		ResponseHeaderTimeout:        600 * time.Second,
@@ -821,7 +821,7 @@ func TestStreamIdleTimeoutConfigPrecedence(t *testing.T) {
 		env  map[string]string
 		want time.Duration
 	}{
-		{name: "default", want: 5 * time.Minute},
+		{name: "default", want: 600 * time.Second},
 		{name: "TOML overrides default", args: []string{"--config", path}, want: 11 * time.Second},
 		{
 			name: "env overrides TOML",
@@ -844,6 +844,74 @@ func TestStreamIdleTimeoutConfigPrecedence(t *testing.T) {
 				env[key] = value
 			}
 			got, err := loadServe(tc.args, envFunc(env))
+			if err != nil {
+				t.Fatalf("loadServe() error = %v", err)
+			}
+			if got.StreamIdleTimeout != tc.want {
+				t.Errorf("StreamIdleTimeout = %v, want %v", got.StreamIdleTimeout, tc.want)
+			}
+		})
+	}
+}
+
+// TestDurationDefaultsRenderInDeclaredUnit pins the help text of every duration
+// setting to the notation CONFIGURATION.md documents. Go's Duration.String()
+// would print these as 10m0s/1m30s/24h0m0s, so without this guard the two
+// surfaces silently drift apart again the moment a row's unit or default moves.
+// The placeholder assertion covers the fs.AddFlag registration, which derives
+// the placeholder from the value type unless it is set explicitly.
+func TestDurationDefaultsRenderInDeclaredUnit(t *testing.T) {
+	want := map[string]string{
+		"shutdown-timeout":               "10s",
+		"outbound-timeout":               "600s",
+		"stream-idle-timeout":            "600s",
+		"stream-keepalive-interval":      "15s",
+		"write-timeout":                  "90s",
+		"response-header-timeout":        "600s",
+		"ws-handshake-timeout":           "10s",
+		"codex-catalog-refresh-interval": "24h",
+		"impersonation-refresh-interval": "24h",
+	}
+
+	fs := ff.NewFlagSet("copilotd")
+	RegisterServe(fs)
+
+	for name, def := range want {
+		flag, ok := fs.GetFlag(name)
+		if !ok {
+			t.Fatalf("flag %q is not registered", name)
+		}
+		if got := flag.GetDefault(); got != def {
+			t.Errorf("%s default = %q, want %q", name, got, def)
+		}
+		if got := flag.GetPlaceholder(); got != "DURATION" {
+			t.Errorf("%s placeholder = %q, want %q", name, got, "DURATION")
+		}
+	}
+}
+
+// TestDurationSettingsAcceptAnyGoDurationForm guards the other half of the
+// unit-aware rendering: declaring a display unit must not narrow what an
+// override may say. Every form below denotes the same duration and must resolve
+// identically, whichever unit the row presents its default in.
+func TestDurationSettingsAcceptAnyGoDurationForm(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want time.Duration
+	}{
+		{name: "declared unit", raw: "300s", want: 300 * time.Second},
+		{name: "larger unit", raw: "5m", want: 300 * time.Second},
+		{name: "compound form", raw: "0h5m0s", want: 300 * time.Second},
+		{name: "sub-second component", raw: "299900ms", want: 299900 * time.Millisecond},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := loadServe(
+				[]string{"--stream-idle-timeout", tc.raw},
+				envFunc(map[string]string{"COPILOTD_APIKEY": testAPIKey}),
+			)
 			if err != nil {
 				t.Fatalf("loadServe() error = %v", err)
 			}
@@ -906,7 +974,7 @@ func TestLoadPrecedence(t *testing.T) {
 	// retry default) into a precedence want, since Resolve now populates them; the
 	// precedence cases only exercise addr/log/file fields.
 	withDefaults := func(c ServeConfig) ServeConfig {
-		c.StreamIdleTimeout = 5 * time.Minute
+		c.StreamIdleTimeout = 600 * time.Second
 		c.StreamKeepaliveInterval = 15 * time.Second
 		c.WriteTimeout = 90 * time.Second
 		c.ResponseHeaderTimeout = 600 * time.Second

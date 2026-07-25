@@ -123,7 +123,75 @@ func newStringField[C any](name, def string, get func(*C) *string, check func(st
 	}
 }
 
-func durationField[C any](name string, def time.Duration, get func(*C) *time.Duration, check func(string, time.Duration) error, usage string) spec[C] {
+// durationUnit fixes the notation a duration setting presents its default in,
+// so --help and CONFIGURATION.md state one value one way. Go's own
+// Duration.String() normalizes to the largest units ("600s" prints as "10m0s"),
+// which is what drove the two docs apart; declaring the unit per row keeps them
+// together. Presentation only — every duration still parses any Go duration
+// form.
+type durationUnit struct {
+	suffix string
+	size   time.Duration
+}
+
+var (
+	inSeconds = durationUnit{suffix: "s", size: time.Second}
+	inHours   = durationUnit{suffix: "h", size: time.Hour}
+)
+
+// format renders d in the declared unit, falling back to Go's notation when the
+// unit cannot express d exactly — a value only an override can produce.
+func (u durationUnit) format(d time.Duration) string {
+	if u.size <= 0 || d%u.size != 0 {
+		return d.String()
+	}
+	return strconv.FormatInt(int64(d/u.size), 10) + u.suffix
+}
+
+// durationFlagValue is the flag.Value behind every duration setting. ff renders
+// a flag's help default from Value.String() (snapshotted at registration), so
+// owning String() is what lets a row choose its notation. Set stays
+// time.ParseDuration, leaving accepted input identical to the ff-supplied value
+// this replaces.
+type durationFlagValue struct {
+	ptr  *time.Duration
+	unit durationUnit
+}
+
+func (v *durationFlagValue) String() string {
+	if v == nil || v.ptr == nil {
+		return ""
+	}
+	return v.unit.format(*v.ptr)
+}
+
+func (v *durationFlagValue) Set(raw string) error {
+	parsed, err := time.ParseDuration(raw)
+	if err != nil {
+		return err
+	}
+	*v.ptr = parsed
+	return nil
+}
+
+// registerDuration is the fs.DurationLong equivalent for a unit-aware value.
+// The placeholder is explicit because ff would otherwise derive it from the
+// value's type name and print something other than DURATION. Panics on error,
+// as ff's own typed helpers do.
+func registerDuration(fs *ff.FlagSet, name string, def time.Duration, unit durationUnit, usage string) *time.Duration {
+	stored := def
+	if _, err := fs.AddFlag(ff.FlagConfig{
+		LongName:    name,
+		Usage:       usage,
+		Value:       &durationFlagValue{ptr: &stored, unit: unit},
+		Placeholder: "DURATION",
+	}); err != nil {
+		panic(err)
+	}
+	return &stored
+}
+
+func durationField[C any](name string, def time.Duration, unit durationUnit, get func(*C) *time.Duration, check func(string, time.Duration) error, usage string) spec[C] {
 	return &field[C, time.Duration]{
 		name:  name,
 		usage: usage,
@@ -131,7 +199,7 @@ func durationField[C any](name string, def time.Duration, get func(*C) *time.Dur
 		get:   get,
 		parse: time.ParseDuration,
 		reg: func(fs *ff.FlagSet, name string, def time.Duration, usage string) *time.Duration {
-			return fs.DurationLong(name, def, usage)
+			return registerDuration(fs, name, def, unit, usage)
 		},
 		logf:  slog.Duration,
 		check: check,
