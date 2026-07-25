@@ -166,12 +166,12 @@ type ServeConfig struct {
 	ImpersonationRefreshInterval time.Duration
 }
 
-// LogValue implements slog.LogValuer. The descriptor table emits non-secret
-// fields only, so APIKey and the inline GitHub OAuth token are redacted by
-// construction.
+// LogValue implements slog.LogValuer. A read-only descriptor view rebuilt from
+// the shared declaration emits non-secret fields only, so APIKey and the inline
+// GitHub OAuth token are redacted by construction.
 func (c ServeConfig) LogValue() slog.Value {
 	specs, _ := serveSpecs()
-	attrs := appendSpecLogAttrs(make([]slog.Attr, 0, 27), specs, &c)
+	attrs := appendSpecLogAttrs(make([]slog.Attr, 0, len(specs)), specs, &c)
 	return slog.GroupValue(attrs...)
 }
 
@@ -238,9 +238,10 @@ func (f *codexAutoReviewModelOverridesField) logAttr(target *ServeConfig) (slog.
 	return slog.String(f.name, formatAutoReviewModelOverrides(target.CodexAutoReviewModelOverrides)), true
 }
 
-// serveSpecs declares every serve setting once, in registration order. The
-// common rows remain first in their help-mandated order; every phase and
-// descriptor-driven log rendering reuses this one ordered table.
+// serveSpecs declares every serve setting once, in registration order. Each
+// registered handle retains one instance for resolution; LogValue creates a
+// read-only view from this same declaration. The common rows remain first in
+// their help-mandated order.
 func serveSpecs() ([]spec[ServeConfig], *configPathField[ServeConfig]) {
 	common, configPath := commonFields(commonTargets[ServeConfig]{
 		logLevel:             func(c *ServeConfig) *string { return &c.LogLevel },
@@ -432,7 +433,7 @@ type LoginConfig struct {
 // are enumerated; the token itself is never held by LoginConfig.
 func (c LoginConfig) LogValue() slog.Value {
 	specs := loginSpecs()
-	attrs := appendSpecLogAttrs(make([]slog.Attr, 0, 6), specs.order, &c)
+	attrs := appendSpecLogAttrs(make([]slog.Attr, 0, len(specs.order)), specs.order, &c)
 	return slog.GroupValue(attrs...)
 }
 

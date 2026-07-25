@@ -42,8 +42,10 @@ typed row makes the compiler, not discipline, the thing that keeps them agreeing
 
 ## Consequences
 
-- Adding or changing a setting is a one-row edit, and the compiler enforces that
-  all of its aspects agree.
+- Adding or changing a setting is a one-row production edit, and the compiler
+  enforces that all of its aspects agree. The exact emitted-log-key test remains
+  an intentional safety review gate: a newly logged non-secret key must also be
+  approved in that test's closed expected set.
 - Two settings stay out of the generic path as small, named carve-outs rather
   than widening `field`: `--config` (bootstrap-only; a registration-only spec that
   holds help ordering) and `codex-auto-review-model-overrides` (the sole
@@ -62,7 +64,9 @@ typed row makes the compiler, not discipline, the thing that keeps them agreeing
   `config.*` type crosses the render seam.
 - The change is runtime behavior-preserving: precedence, resolved values, error
   text, help output, `LogValue` redaction, and the rendered Codex catalog are all
-  unchanged; `config_test.go` is the safety net (changed only by the single Codex
-  literal in the flatten slice).
+  unchanged; `config_test.go` is the safety net (its compile-time
+  `CodexConfig`/`got.Codex` accesses migrate mechanically in the flatten slice,
+  with assertion strings unchanged, and it remains unchanged through the later
+  table-engine slices).
 
 See `docs/design/2026-07-24-config-declare-once-design.md`.

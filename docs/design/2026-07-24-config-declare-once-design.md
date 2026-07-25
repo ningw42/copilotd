@@ -14,8 +14,10 @@ Collapse the per-setting duplication in `internal/config/config.go` so that each
 configuration setting is **declared in one place**. A single typed descriptor per
 setting drives all of: default value, flag registration, env/TOML overlay and
 parse, precedence, `LogValue` redaction, and validation. Adding or changing a
-setting becomes a one-row edit instead of an eight-site edit kept in agreement
-only by discipline.
+setting becomes a one-row production edit instead of an eight-site edit kept in
+agreement only by discipline. The exact emitted-log-key safety test is a
+deliberate review gate: adding a non-secret setting also requires approving its
+key in that closed expected set, without duplicating production metadata.
 
 The refactor is **runtime behavior-preserving**. Precedence, resolved values,
 error message content, help output, `LogValue` redaction, and the rendered Codex
@@ -23,11 +25,11 @@ catalog all stay observably the same. `config_test.go` (1569 lines) is the safet
 net and stays green — unchanged — throughout the table-engine work (steps 2-5).
 The one deliberate *structural* change is the Codex flatten (§7.1, step 1): the
 `codex-*` settings flatten onto `ServeConfig` and the renderer receives its own
-projected contract. That slice edits `config_test.go` in exactly one place — the
-nested `Codex: CodexConfig{…}` literal at `config_test.go:1085-1093` flattens to
-top-level fields, while every assertion string stays identical (the log keys are
-unchanged) — and migrates the Codex test literals across three surfaces (§7.1,
-§10). No resolved value or rendered byte changes.
+projected contract. That slice mechanically migrates the compile-time
+`CodexConfig`/`got.Codex` accesses that the flatten deletes, including the nested
+literal at `config_test.go:1085-1093`, while every assertion string stays
+identical (the log keys are unchanged). It also migrates the Codex test literals
+across three surfaces (§7.1, §10). No resolved value or rendered byte changes.
 
 ## 2. Problem
 
@@ -248,8 +250,10 @@ table: they resolve the config path, call `resolve` over the held `[]spec[C]`
 (passing the serve overrides `finalize`, or `nil` for login), and return the
 typed config. Building the table inside `Resolve` instead would manufacture fresh
 specs whose `stored` was never bound by `register()`/`ff.Parse`, silently dropping
-every flag override. `LogValue` becomes a loop over the same table into
-`slog.GroupValue`.
+every flag override. Because the resolved configs are value-only and do not carry
+their registration handles, `LogValue` creates a read-only descriptor view from
+the same one-row declaration and loops it into `slog.GroupValue`; `logAttr` does
+not use the registration-only `stored` pointers.
 
 ## 6. serve/login unification
 
@@ -360,10 +364,11 @@ catalog type, not reach into `config`); (2) flattened `cfg` field-sets
 (`cmd/copilotd/main_test.go`, `serve_e2e_test.go`, and
 `catalog_openai_integration_test.go`, including its
 `newStack(codex config.CodexConfig)` helper parameter); and (3) the `main.go` call
-site (`server.WithCodexModels(...)` → the positional descriptor). `config_test.go`
-changes in exactly **one** place — the nested `Codex: CodexConfig{…}` literal at
-`:1085-1093` flattens to top-level fields — with every assertion string unchanged;
-it is otherwise untouched by this slice.
+site (`server.WithCodexModels(...)` → the positional descriptor). In
+`config_test.go`, the nested `Codex: CodexConfig{…}` literal at `:1085-1093`
+flattens to top-level fields and the other compile-time `CodexConfig`/`got.Codex`
+accesses migrate mechanically to the flat shape. Every assertion string remains
+unchanged.
 
 ### 7.2 Remaining carve-outs
 
@@ -404,10 +409,12 @@ These are preserved by construction and verified by the existing suite:
   command-specific ones. Table order = registration order = `commonFields(...)`
   (fixed order) ++ command-specific, which satisfies this.
 - **LogValue.** `TestConfigLogValueEmitsOnlyNonSecretFields` /
-  `TestLoginConfigLogValueEmitsAllFields` assert field **presence** via
-  `strings.Contains` and secret **absence** — they are order-independent. Emitting
-  in table order is safe; `secret:true` rows (`apikey`, `github-oauth-token`) are
-  omitted, and `--config`/`--github-oauth-token` remain unlogged.
+  `TestLoginConfigLogValueEmitsAllFields` assert field values via
+  `strings.Contains`, the exact emitted key set through `LogValue`, and secret
+  **absence**. The closed key set is intentionally order-independent and forces
+  an explicit test review when a new non-secret setting becomes logged.
+  `secret:true` rows (`apikey`, `github-oauth-token`) are omitted, and
+  `--config`/`--github-oauth-token` remain unlogged.
 - **Validation.** `TestLoadValidationErrors` triggers exactly one bad field per
   case and matches an error substring. Running `validate` in table order changes
   no single-field message; no test asserts multi-field validation precedence.
@@ -429,12 +436,13 @@ The refactor lands in slices; the full suite stays green after each step.
    `withCodexModels` option machinery at both layers** and drop the now-unused
    imports (`internal/cache` from `server.go`/`handler.go`, `internal/config` from
    `handler.go`), and move the projection to the composition root (§7.1). Migrate
-   the Codex test literals across the three surfaces (§7.1), including the single
-   flattened `Codex: CodexConfig{…}` literal at `config_test.go:1085-1093`. The
-   field rename also fans out inside `config.go` (defaults literal, `overlay`,
+   the Codex test literals across the three surfaces (§7.1). The field rename
+   also fans out inside `config.go` (defaults literal, `overlay`,
    `validate`, `LogValue`) and to `configuredCodexModels`/`logCodexCatalogStaging`
-   in `main`. Self-contained at the render seam; unblocks uniform flat `codex-*`
-   rows in the table.
+   in `main`, plus the compile-required flat-shape accessor migration in
+   `config_test.go` (including the nested literal at `:1085-1093`).
+   Self-contained at the render seam; unblocks uniform flat `codex-*` rows in the
+   table.
 2. **Scaffold.** Add `spec`/`field`, the typed constructors, shared validators,
    and the generic `resolve` engine alongside the existing code (initially
    unused). No behavior change.
@@ -453,9 +461,10 @@ The refactor lands in slices; the full suite stays green after each step.
 - The existing `config_test.go` is the primary safety net. Through the
   table-engine steps (2-5) it must pass **unchanged** — any diff there is a signal
   to stop and reconcile, not to edit the test. The one exception is the Codex
-  flatten (step 1), which edits exactly one literal in it (the nested
-  `Codex: CodexConfig{…}` at `:1085-1093` → top-level fields); every assertion
-  string is unchanged.
+  flatten (step 1), which mechanically migrates the compile-time
+  `CodexConfig`/`got.Codex` accesses that the deleted nested type and field made
+  invalid, including the literal at `:1085-1093`; every assertion string is
+  unchanged.
 - Add focused unit tests for the new engine primitives: a `field[C, T]` round
   trips default → file → env → flag precedence; the `finalize` hook runs after the
   flag layer and before `validate`; `secret` omits from `logAttr`; a nil `check`
@@ -467,8 +476,8 @@ The refactor lands in slices; the full suite stays green after each step.
   surfaces — render-seam descriptor literals (`server`/`catalog`), flattened `cfg`
   field-sets (`main_test.go`, `serve_e2e_test.go`,
   `catalog_openai_integration_test.go` incl. its `newStack` helper), and the
-  `main.go` call site — plus the single `config_test.go` literal above. Their
-  assertions (rendered bytes, gating) stay the same.
+  `main.go` call site — plus the compile-required `config_test.go` flat-shape
+  migration above. Their assertions (rendered bytes, gating) stay the same.
 
 ## 11. Risks & mitigations
 
@@ -488,7 +497,7 @@ The refactor lands in slices; the full suite stays green after each step.
   widening `field` to absorb them.
 - **Blast radius.** This is the widest-reaching candidate in the review, and the
   Codex reshape (§7.1) additionally touches `server`/`catalog`, `main`, and their
-  tests — including one `config_test.go` literal (the sole change to that
-  safety-net file, in step 1). Mitigation: land the Codex reshape as its own
-  self-contained slice first (§9), then the group-by-group config rollout keeps
-  every later commit green and small.
+  tests — including the mechanical flat-shape migration in `config_test.go`
+  (confined to step 1, with assertion strings unchanged). Mitigation: land the
+  Codex reshape as its own self-contained slice first (§9), then the
+  group-by-group config rollout keeps every later commit green and small.

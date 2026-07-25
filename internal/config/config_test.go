@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -86,6 +87,20 @@ func resolvedCodexSettings(cfg ServeConfig) codexSettings {
 	}
 }
 
+func assertLogValueKeys(t *testing.T, value slog.Value, want []string) {
+	t.Helper()
+	attrs := value.Group()
+	got := make([]string, 0, len(attrs))
+	for _, attr := range attrs {
+		got = append(got, attr.Key)
+	}
+	slices.Sort(got)
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		t.Errorf("LogValue keys = %q, want %q", got, want)
+	}
+}
+
 func TestLoadDefaults(t *testing.T) {
 	got, err := loadServe([]string{"--apikey", testAPIKey}, noEnv())
 	if err != nil {
@@ -132,6 +147,9 @@ func TestCodexAutoReviewModelOverridesResolvesFlag(t *testing.T) {
 	want := codexSettings{AutoReviewModelOverrides: map[string]string{"gpt-5": "reviewer-mini"}}
 	if gotCodex := resolvedCodexSettings(got); !reflect.DeepEqual(gotCodex, want) {
 		t.Errorf("Codex = %+v, want resolved config %+v", gotCodex, want)
+	}
+	if got.autoReviewModelOverridesRaw != "" {
+		t.Errorf("autoReviewModelOverridesRaw = %q, want cleared after finalize", got.autoReviewModelOverridesRaw)
 	}
 }
 
@@ -1173,6 +1191,36 @@ func TestConfigLogValueEmitsOnlyNonSecretFields(t *testing.T) {
 			t.Errorf("log output must not contain removed %s setting\nfull: %s", removed, out)
 		}
 	}
+
+	assertLogValueKeys(t, cfg.LogValue(), []string{
+		"addr",
+		"log-level",
+		"log-format",
+		"log-file",
+		"shutdown-timeout",
+		"github-oauth-token-file",
+		"outbound-timeout",
+		"stream-idle-timeout",
+		"stream-keepalive-interval",
+		"write-timeout",
+		"response-header-timeout",
+		"ws-handshake-timeout",
+		"max-request-bytes",
+		"max-buffered-response-bytes",
+		"shim-nop-enabled",
+		"shim-responses-item-id-stabilizer-enabled",
+		"codex-catalog-enabled",
+		"codex-auto-review-model",
+		"codex-auto-review-model-overrides",
+		"codex-catalog-override-limits",
+		"codex-catalog-refresh-interval",
+		"startup-mint-retries",
+		"vscode-version",
+		"plugin-version",
+		"copilot-integration-id",
+		"github-api-version",
+		"impersonation-refresh-interval",
+	})
 }
 
 // TestLoadServeIdentityFields covers the new serve-only identity/impersonation
@@ -1580,4 +1628,12 @@ func TestLoginConfigLogValueEmitsAllFields(t *testing.T) {
 			t.Errorf("log output missing %q\nfull: %s", want, out)
 		}
 	}
+	assertLogValueKeys(t, cfg.LogValue(), []string{
+		"log-level",
+		"log-format",
+		"log-file",
+		"github-oauth-token-file",
+		"github-client-id",
+		"github-scope",
+	})
 }
