@@ -602,29 +602,51 @@ dependency:
 
 Each step compiles and passes the full suite before the next begins.
 
+0. **Prefactor: the shadowing renames.** `upstream` is currently a local variable
+   name in both `forward` and `wsforward`, shadowing the new package name inside
+   the exact functions that must call it. `upstreamRoute` in `forward`,
+   `upstreamConn` in `wsforward`, matching the names already beside them. A pure
+   rename, kept out of any step that also changes behaviour.
 1. **`internal/upstream` with no callers.** `Call`, `Failure`, `Caller`,
    `ReadBounded`, `RequestIDHeader`, the header policy, and the four test tables.
-   Written test-first: the tables are the specification.
+   Written test-first: the tables are the specification. **Import guard 1** — the
+   leaf allowlist — lands here, so the invariant every later step rests on is
+   protected *during* the migration rather than after it.
 2. **Move the header policy.** `forward` deletes its header block and calls into
    `upstream`; `CopyResponseHeaders` is repointed. Behaviour-neutral *except* the
    `Sec-WebSocket-*` strip, which now applies on the HTTP path too — inert in
    practice, since nothing sends a handshake header to `POST /v1/messages`. So
-   `forward`'s existing suite is the regression check.
+   `forward`'s existing suite is the regression check. **`forward.New` gains
+   `caller` here** — nine positional parameters to ten — because `Prepare` is a
+   `*Caller` method and the outbound header policy is unreachable without one;
+   `provider`, `client`, and `maxBufferedResponseBytes` stay for now.
 3. **The two HTTP handlers onto `Do`.** `PassthroughHandler` and `forward`.
-   Behaviour changes 3 and 4 land here, with their tests.
+   Behaviour changes 3 and 4 land here, with their tests. No constructor change.
 4. **`Buffered` and `catalog.Source`.** Delete `catalog/fetch.go`,
-   `forward.FetchModels`, `Forwarder.maxBufferedResponseBytes`, and the `catalog`
-   import; add both import guards. Behaviour change 6 lands here, with its tests.
+   `forward.FetchModels`, and the `catalog` import; add **import guard 2**.
+   Behaviour change 6 lands here, with its tests. **`forward.New` drops
+   `provider`, `client`, and `maxBufferedResponseBytes` here** — ten parameters
+   to seven, net **−2** from the original nine.
 5. **`wsforward` onto `Prepare` / `Classify` / `Correlate`.** Behaviour changes
-   1, 2, and 5 land here, with their tests.
+   1, 2, and 5 land here, with their tests. `wsforward.New` loses `provider` and
+   gains `caller` in this one step, so it is net **0** throughout.
 6. **The shared constant and the docs.** `server/middleware.go`, CONTEXT.md,
    ADR-0013.
 
-`upstream` is currently a local variable name in both `forward` and `wsforward`,
-shadowing the new package name inside the exact functions that must call it. Each
-is renamed as part of the step that touches its function — `upstreamRoute` in
-`forward` and `upstreamConn` in `wsforward`, matching the names already beside
-them.
+Steps 2 and 5 are the two constructor changes, and both need the shared `Caller`
+in the composition root. They are on independent branches, so whichever lands
+first introduces the single construction.
+
+**Decomposition.** This order was decomposed into implementer tickets #123–#131,
+with the maintainer's approval, as follows: step 1 splits into three tickets —
+one per test table (the failure vocabulary; `Call` and the header policy;
+`Do` / `Buffered` / `ReadBounded`) — because written test-first it does not fit
+one working context. The resulting graph is a **finer partial order**: step 2
+depends only on the header-policy ticket, not on all of step 1, and step 5 runs
+parallel to steps 2–4 rather than after them. That preserves this section's
+invariant — each ticket compiles and passes the full suite — without preserving
+its linear numbering, which is the means rather than the end. Steps 0 and the
+guard-1 placement above are part of the same approved decomposition.
 
 ## CONTEXT.md changes
 
@@ -634,7 +656,7 @@ One new entry under *Surfaces & forwarding*, after **Forwarder**:
 > The single authenticated request copilotd makes to GitHub Copilot on behalf of
 > one inbound request — credential, base URL join, header policy, request-id
 > correlation, bounded reading of the response, and failure classification,
-> centrally governed across every transport and endpoint. Lives in
+> centrally governed across every transport and Endpoint. Lives in
 > `internal/upstream`. Reading a bounded response body is part of the call;
 > **interpreting** it is not — pumping, upgrading, decoding, and copying stay
 > with the caller.
@@ -695,9 +717,11 @@ design exists to remove.
 - ADR-0013 (**new, with this design**) — the shared policy for every authenticated
   call to GitHub Copilot is governed by `internal/upstream`.
 - [Token usage meter](2026-07-26-token-usage-meter-design.md) — **in flight, and
-  ordered after this one**, taking ADR-0014. Behaviour change 3 moves ground the
-  meter stands on: its §11.1 and §12 describe an over-cap non-stream response as a
-  413, which becomes a 502 here. Landing this first means the meter is written
-  against a settled buffered-read path rather than one moving underneath it.
+  ordered after this one**, taking ADR-0014. Behaviour change 3 settles ground the
+  meter stands on: its §11.1 already expects **502** for an over-cap non-stream
+  response, explicitly conditioned on this design landing first. Landing this
+  first makes that expectation good rather than provisional, and means the meter
+  is written against a settled buffered-read path rather than one moving
+  underneath it.
 - [Divergence ledger](../divergence-ledger.md) — unchanged; see
   [Behaviour changes](#behaviour-changes).
