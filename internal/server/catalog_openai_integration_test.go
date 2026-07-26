@@ -52,8 +52,8 @@ func TestCodexCatalogPerModelReviewerOverRealListener(t *testing.T) {
 		mainModel: reviewer,
 	}
 	provider := identity.NewStatic(identity.Credential{BaseURL: upstream.URL, Token: "copilot-token"}, true)
-	forwarder := forward.New(provider, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
-	base := startServer(t, New(cfg, discardLogger(t), provider, newTestReadyObservers(), forwarder, newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.RenderDescriptors{Codex: testCodexDescriptor(cfg)}))
+	forwarder := newTestForwarder(provider, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
+	base := startServer(t, New(cfg, discardLogger(t), provider, newTestReadyObservers(), forwarder, newTestCatalogSource(provider), newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.RenderDescriptors{Codex: testCodexDescriptor(cfg)}))
 	req, err := http.NewRequest(http.MethodGet, base+"/openai/v1/models?client_version=0.144.5", nil)
 	if err != nil {
 		t.Fatalf("build catalog request: %v", err)
@@ -154,8 +154,8 @@ func TestCodexCatalogOverRealListener(t *testing.T) {
 			Token:   "copilot-token",
 			Headers: http.Header{"Copilot-Integration-Id": {"vscode-chat"}},
 		}, ready)
-		forwarder := forward.New(provider, forward.NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
-		return startServer(t, New(cfg, discardLogger(t), provider, newTestReadyObservers(), forwarder, newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.RenderDescriptors{Codex: testCodexDescriptor(cfg)})), provider
+		forwarder := newTestForwarder(provider, forward.NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
+		return startServer(t, New(cfg, discardLogger(t), provider, newTestReadyObservers(), forwarder, newTestCatalogSource(provider), newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.RenderDescriptors{Codex: testCodexDescriptor(cfg)})), provider
 	}
 
 	requestCatalog := func(base, method, target, keyHeader, key, requestID string) (*http.Response, []byte) {
@@ -327,8 +327,8 @@ func TestCodexCatalogConfigWiringWarningAndAccessLogConfidentiality(t *testing.T
 		mainModel: reviewer,
 	}
 	provider := identity.NewStatic(identity.Credential{BaseURL: upstream.URL, Token: copilotToken}, true)
-	forwarder := forward.New(provider, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
-	base := startServer(t, New(cfg, logger, provider, newTestReadyObservers(), forwarder, newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.RenderDescriptors{Codex: testCodexDescriptor(cfg)}))
+	forwarder := newTestForwarder(provider, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
+	base := startServer(t, New(cfg, logger, provider, newTestReadyObservers(), forwarder, newTestCatalogSourceWith(provider, forward.NewClient(time.Second), time.Second, 1<<20, logger), newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.RenderDescriptors{Codex: testCodexDescriptor(cfg)}))
 
 	requestCatalog := func(target string) (*http.Response, []byte) {
 		t.Helper()
@@ -404,8 +404,8 @@ func TestOpenAIModelCatalogMapsFetchFailuresOverRealListener(t *testing.T) {
 			client := &http.Client{Transport: serverRoundTripFunc(func(*http.Request) (*http.Response, error) {
 				return nil, tt.upstreamErr
 			})}
-			forwarder := forward.New(provider, client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
-			base := startServer(t, New(testConfig(), discardLogger(t), provider, newTestReadyObservers(), forwarder, newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.RenderDescriptors{}))
+			forwarder := newTestForwarder(provider, client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
+			base := startServer(t, New(testConfig(), discardLogger(t), provider, newTestReadyObservers(), forwarder, newTestCatalogSourceWith(provider, client, time.Second, 1<<20, discardLogger(t)), newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.RenderDescriptors{}))
 
 			req, err := http.NewRequest(http.MethodGet, base+"/openai/v1/models", nil)
 			if err != nil {
@@ -461,8 +461,8 @@ func TestOpenAIModelCatalogOverRealListener(t *testing.T) {
 		Token:   "copilot-token",
 		Headers: http.Header{"Copilot-Integration-Id": {"vscode-chat"}},
 	}, true)
-	forwarder := forward.New(provider, forward.NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
-	base := startServer(t, New(testConfig(), discardLogger(t), provider, newTestReadyObservers(), forwarder, newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.RenderDescriptors{}))
+	forwarder := newTestForwarder(provider, forward.NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
+	base := startServer(t, New(testConfig(), discardLogger(t), provider, newTestReadyObservers(), forwarder, newTestCatalogSource(provider), newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.RenderDescriptors{}))
 
 	do := func(method, keyHeader, key string) (*http.Response, []byte) {
 		t.Helper()

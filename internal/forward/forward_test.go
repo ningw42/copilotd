@@ -18,12 +18,23 @@ import (
 	"time"
 
 	"github.com/ningw42/copilotd/internal/apierror"
+	"github.com/ningw42/copilotd/internal/config"
 	"github.com/ningw42/copilotd/internal/endpoint"
 	"github.com/ningw42/copilotd/internal/identity"
 	"github.com/ningw42/copilotd/internal/logging"
 	"github.com/ningw42/copilotd/internal/shim"
 	"github.com/ningw42/copilotd/internal/sse"
+	upstreampolicy "github.com/ningw42/copilotd/internal/upstream"
 )
+
+func newTestForwarder(provider identity.Provider, client *http.Client, outboundTimeout, writeTimeout, streamIdleTimeout, streamKeepaliveInterval time.Duration, maxRequestBytes, maxBufferedResponseBytes int64, registry shim.Registry, options ...Option) *Forwarder {
+	return newTestForwarderWithLogger(provider, client, outboundTimeout, writeTimeout, streamIdleTimeout, streamKeepaliveInterval, maxRequestBytes, maxBufferedResponseBytes, slog.Default(), registry, options...)
+}
+
+func newTestForwarderWithLogger(provider identity.Provider, client *http.Client, outboundTimeout, writeTimeout, streamIdleTimeout, streamKeepaliveInterval time.Duration, maxRequestBytes, maxBufferedResponseBytes int64, logger *slog.Logger, registry shim.Registry, options ...Option) *Forwarder {
+	caller := upstreampolicy.New(provider, client, outboundTimeout, maxBufferedResponseBytes, logger)
+	return New(caller, outboundTimeout, writeTimeout, streamIdleTimeout, streamKeepaliveInterval, maxRequestBytes, registry, options...)
+}
 
 type requestMutationShim struct {
 	query string
@@ -44,11 +55,15 @@ func (s *requestMutationShim) TransformRequest(_ context.Context, r *shim.Reques
 
 func TestForwardRequestShimMutationsReachUpstreamAndQueryStaysCoreOwned(t *testing.T) {
 	var gotBody []byte
+	var gotContentLength int64
 	var gotHeader http.Header
+	var gotMethod string
 	var gotRequestURI string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotBody, _ = io.ReadAll(r.Body)
+		gotContentLength = r.ContentLength
 		gotHeader = r.Header.Clone()
+		gotMethod = r.Method
 		gotRequestURI = r.RequestURI
 		w.WriteHeader(http.StatusNoContent)
 	}))
@@ -65,7 +80,7 @@ func TestForwardRequestShimMutationsReachUpstreamAndQueryStaysCoreOwned(t *testi
 			return instance
 		},
 	}}
-	f := New(readyStub(upstream.URL), NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, registry)
+	f := newTestForwarder(readyStub(upstream.URL), NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, registry)
 	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages?tag=first&escaped=%2f%2F&flag", strings.NewReader(`{"original":true}`))
 	rec := newDeadlineRecorder()
 
@@ -83,14 +98,99 @@ func TestForwardRequestShimMutationsReachUpstreamAndQueryStaysCoreOwned(t *testi
 	if gotRequestURI != "/v1/messages?tag=first&escaped=%2f%2F&flag" {
 		t.Errorf("upstream RequestURI = %q, want core-owned verbatim query", gotRequestURI)
 	}
+	if gotMethod != http.MethodPost {
+		t.Errorf("upstream method = %q, want POST", gotMethod)
+	}
 	if string(gotBody) != `{"shimmed":true}` {
 		t.Errorf("upstream body = %q, want shimmed body", gotBody)
+	}
+	if gotContentLength != int64(len(gotBody)) {
+		t.Errorf("upstream ContentLength = %d, want sized shimmed body length %d", gotContentLength, len(gotBody))
 	}
 	if gotHeader.Get("Content-Type") != "application/shim+json" || gotHeader.Get("X-Shim") != "applied" {
 		t.Errorf("upstream headers = %v, want shim mutations", gotHeader)
 	}
 	if gotHeader.Get("Editor-Version") != "vscode/1.104.1" {
 		t.Errorf("Editor-Version = %q, want impersonation to override shim", gotHeader.Get("Editor-Version"))
+	}
+	if gotHeader.Get("Accept-Encoding") != "identity" {
+		t.Errorf("Accept-Encoding = %q, want identity", gotHeader.Get("Accept-Encoding"))
+	}
+}
+
+func TestHTTPHandlersTrimCredentialBaseURLTrailingSlash(t *testing.T) {
+	tests := []struct {
+		name     string
+		request  func() *http.Request
+		endpoint func(*Forwarder) http.HandlerFunc
+		wantPath string
+	}{
+		{
+			name:    "raw passthrough",
+			request: func() *http.Request { return httptest.NewRequest(http.MethodGet, "/models", nil) },
+			endpoint: func(f *Forwarder) http.HandlerFunc {
+				return f.PassthroughHandler(endpoint.Models())
+			},
+			wantPath: "/models",
+		},
+		{
+			name: "inference",
+			request: func() *http.Request {
+				return httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{}`))
+			},
+			endpoint: func(f *Forwarder) http.HandlerFunc {
+				return f.Handler(endpoint.AnthropicMessages())
+			},
+			wantPath: "/v1/messages",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotPath string
+			client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				gotPath = r.URL.Path
+				return &http.Response{StatusCode: http.StatusNoContent, Header: make(http.Header), Body: http.NoBody, Request: r}, nil
+			})}
+			f := newTestForwarder(readyStub("https://upstream.invalid/"), client, time.Second, time.Second, time.Second, time.Second, 1<<20, 1<<20, nil)
+			rec := newDeadlineRecorder()
+
+			tc.endpoint(f)(rec, tc.request())
+
+			if rec.Code != http.StatusNoContent {
+				t.Fatalf("status = %d, want 204", rec.Code)
+			}
+			if gotPath != tc.wantPath {
+				t.Errorf("upstream URL path = %q, want single-slash join %q", gotPath, tc.wantPath)
+			}
+		})
+	}
+}
+
+func TestForwardDoCorrelatesThroughConfiguredCallerLogger(t *testing.T) {
+	var logs bytes.Buffer
+	logger, err := logging.NewWithWriter(&logs, config.ServeConfig{LogLevel: "info", LogFormat: "text"})
+	if err != nil {
+		t.Fatalf("build configured logger: %v", err)
+	}
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusNoContent,
+			Header:     http.Header{upstreampolicy.RequestIDHeader: {"upstream-request-id"}},
+			Body:       http.NoBody,
+			Request:    r,
+		}, nil
+	})}
+	f := newTestForwarderWithLogger(readyStub("https://upstream.invalid"), client, time.Second, time.Second, time.Second, time.Second, 1<<20, 1<<20, logger, nil, WithLogger(logger))
+	request := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{}`))
+	request = request.WithContext(logging.WithRequestID(request.Context(), "copilotd-request-id"))
+
+	f.Handler(endpoint.AnthropicMessages())(newDeadlineRecorder(), request)
+
+	for _, want := range []string{"request_id=copilotd-request-id", "upstream_request_id=upstream-request-id"} {
+		if !strings.Contains(logs.String(), want) {
+			t.Errorf("configured correlation log = %q, want %q", logs.String(), want)
+		}
 	}
 }
 
@@ -142,7 +242,7 @@ func TestForwardBufferedShimTransformsBodyAndRecomputesContentLength(t *testing.
 			return instance
 		},
 	}}
-	f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, registry)
+	f := newTestForwarder(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, registry)
 	rec := newDeadlineRecorder()
 
 	f.Handler(endpoint.OpenAIResponsesHTTP())(rec, httptest.NewRequest(http.MethodPost, "/openai/v1/responses", strings.NewReader(`{}`)))
@@ -188,7 +288,7 @@ func TestForwardWithoutBufferedHookCommitsBeforeReadingVerbatimBody(t *testing.T
 	})}
 	registry := shim.CanonicalRegistry()
 	registry[0].Enabled = true
-	f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1, registry)
+	f := newTestForwarder(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1, registry)
 	rec := &commitObservingRecorder{deadlineRecorder: newDeadlineRecorder(), body: body}
 
 	f.Handler(endpoint.AnthropicMessages())(rec, httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{}`)))
@@ -226,7 +326,7 @@ func TestForwardBufferedShimSkipsNonIdentityEncodedResponse(t *testing.T) {
 			return instance
 		},
 	}}
-	f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1, registry)
+	f := newTestForwarder(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1, registry)
 	rec := newDeadlineRecorder()
 
 	f.Handler(endpoint.OpenAIResponsesHTTP())(rec, httptest.NewRequest(http.MethodPost, "/openai/v1/responses", strings.NewReader(`{}`)))
@@ -265,15 +365,18 @@ func TestForwardBufferedResponseOverCapRendersBeforeCommit(t *testing.T) {
 			return instance
 		},
 	}}
-	f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 8, registry)
+	provider := readyStub("https://upstream.invalid")
+	caller := upstreampolicy.New(provider, client, time.Second, 8, slog.Default())
+	// The inference path must use the cap owned by the shared Caller.
+	f := New(caller, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, registry)
 	rec := newDeadlineRecorder()
 
 	f.Handler(endpoint.OpenAIResponsesHTTP())(rec, httptest.NewRequest(http.MethodPost, "/openai/v1/responses", strings.NewReader(`{}`)))
 
-	if rec.Code != http.StatusRequestEntityTooLarge {
-		t.Errorf("status = %d, want 413", rec.Code)
+	if rec.Code != http.StatusBadGateway {
+		t.Errorf("status = %d, want 502", rec.Code)
 	}
-	const wantBody = `{"error":{"message":"upstream response body exceeds the maximum allowed size","type":"invalid_request_error","code":null,"param":null}}`
+	const wantBody = `{"error":{"message":"upstream response body exceeds the maximum allowed size","type":"api_error","code":null,"param":null}}`
 	if got := rec.Body.String(); got != wantBody {
 		t.Errorf("body = %q, want native cap error %q", got, wantBody)
 	}
@@ -282,6 +385,148 @@ func TestForwardBufferedResponseOverCapRendersBeforeCommit(t *testing.T) {
 	}
 	if got := rec.Header().Get("X-Upstream"); got != "" {
 		t.Errorf("X-Upstream = %q, want no upstream header committed", got)
+	}
+}
+
+func TestForwardCleanupCancelsBeforeClosingResponseBody(t *testing.T) {
+	body := &cancelAwareBody{chunks: [][]byte{[]byte(`{"ok":true}`)}}
+	client := bodyClient(body, http.Header{"Content-Type": {"application/json"}})
+	f := newTestForwarder(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
+	recorder := newDeadlineRecorder()
+
+	f.Handler(endpoint.AnthropicMessages())(recorder, httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{}`)))
+
+	if recorder.Code != http.StatusOK || recorder.Body.String() != `{"ok":true}` {
+		t.Errorf("response = status %d body %q, want upstream 200 body", recorder.Code, recorder.Body.String())
+	}
+	assertBodyCleanup(t, body, true)
+}
+
+type contextReadCloser struct {
+	ctx     context.Context
+	started chan struct{}
+}
+
+func (b *contextReadCloser) Read([]byte) (int, error) {
+	close(b.started)
+	<-b.ctx.Done()
+	return 0, b.ctx.Err()
+}
+
+func (*contextReadCloser) Close() error { return nil }
+
+func TestForwardClientCancelDuringBufferedReadIsSilent(t *testing.T) {
+	started := make(chan struct{})
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": {"application/json"}},
+			Body:       &contextReadCloser{ctx: r.Context(), started: started},
+			Request:    r,
+		}, nil
+	})}
+	registry := shim.Registry{{
+		Name:    "buffered",
+		Enabled: true,
+		New: func(context.Context, endpoint.Surface, endpoint.Route) any {
+			return &bufferedResponseShim{}
+		},
+	}}
+	f := newTestForwarder(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, registry)
+	ctx, cancel := context.WithCancel(context.Background())
+	request := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{}`)).WithContext(ctx)
+	writer := &failingResponseWriter{header: make(http.Header)}
+	done := make(chan struct{})
+	go func() {
+		f.Handler(endpoint.AnthropicMessages())(writer, request)
+		close(done)
+	}()
+
+	<-started
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("handler did not return after cancellation interrupted the buffered read")
+	}
+	if writer.status != 0 || len(writer.written) != 0 || len(writer.header) != 0 {
+		t.Errorf("client-cancel response = status %d headers %v body %q, want no write", writer.status, writer.header, writer.written)
+	}
+}
+
+func TestForwardBufferedReadTimeoutRendersClassifiedGatewayTimeout(t *testing.T) {
+	var logs bytes.Buffer
+	logger, err := logging.NewWithWriter(&logs, config.ServeConfig{LogLevel: "info", LogFormat: "text"})
+	if err != nil {
+		t.Fatalf("build logger: %v", err)
+	}
+	started := make(chan struct{})
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": {"application/json"}},
+			Body:       &contextReadCloser{ctx: r.Context(), started: started},
+			Request:    r,
+		}, nil
+	})}
+	registry := shim.Registry{{
+		Name:    "buffered",
+		Enabled: true,
+		New: func(context.Context, endpoint.Surface, endpoint.Route) any {
+			return &bufferedResponseShim{}
+		},
+	}}
+	f := newTestForwarderWithLogger(readyStub("https://upstream.invalid"), client, 20*time.Millisecond, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, logger, registry, WithLogger(logger))
+	recorder := newDeadlineRecorder()
+
+	f.Handler(endpoint.OpenAIResponsesHTTP())(recorder, httptest.NewRequest(http.MethodPost, "/openai/v1/responses", strings.NewReader(`{}`)))
+
+	select {
+	case <-started:
+	default:
+		t.Fatal("buffered response body was not read")
+	}
+	if recorder.Code != http.StatusGatewayTimeout {
+		t.Errorf("status = %d, want 504", recorder.Code)
+	}
+	const wantBody = `{"error":{"message":"the upstream request timed out","type":"api_error","code":null,"param":null}}`
+	if got := recorder.Body.String(); got != wantBody {
+		t.Errorf("body = %q, want classified timeout %q", got, wantBody)
+	}
+	if got := strings.Count(logs.String(), "upstream call failed"); got != 1 {
+		t.Errorf("failure log records = %d, want 1: %q", got, logs.String())
+	}
+}
+
+func TestForwardStartsBufferedReadTimerOnlyAfterResponse(t *testing.T) {
+	const outboundTimeout = 10 * time.Millisecond
+	instance := &bufferedResponseShim{body: []byte(`{"transformed":true}`)}
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		time.Sleep(4 * outboundTimeout)
+		if err := r.Context().Err(); err != nil {
+			t.Errorf("upstream call context ended before response: %v", err)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": {"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"ok":true}`)),
+			Request:    r,
+		}, nil
+	})}
+	registry := shim.Registry{{
+		Name:    "buffered",
+		Enabled: true,
+		New: func(context.Context, endpoint.Surface, endpoint.Route) any {
+			return instance
+		},
+	}}
+	f := newTestForwarder(readyStub("https://upstream.invalid"), client, outboundTimeout, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, registry)
+	recorder := newDeadlineRecorder()
+
+	f.Handler(endpoint.OpenAIResponsesHTTP())(recorder, httptest.NewRequest(http.MethodPost, "/openai/v1/responses", strings.NewReader(`{}`)))
+
+	if recorder.Code != http.StatusOK || recorder.Body.String() != `{"transformed":true}` {
+		t.Errorf("response = status %d body %q, want transformed response after delayed headers", recorder.Code, recorder.Body.String())
 	}
 }
 
@@ -305,7 +550,7 @@ func TestForwardBufferedShimFailureRendersBeforeCommit(t *testing.T) {
 			return instance
 		},
 	}}
-	f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, registry)
+	f := newTestForwarder(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, registry)
 	rec := newDeadlineRecorder()
 
 	f.Handler(endpoint.AnthropicMessages())(rec, httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{}`)))
@@ -372,7 +617,7 @@ func TestForwardPreludeShimCommitsMutationsBeforeBodyOnBothPaths(t *testing.T) {
 					return &preludeMutationShim{}
 				},
 			}}
-			f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, registry)
+			f := newTestForwarder(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, registry)
 			rec := newFirstWriteRecorder()
 
 			f.Handler(endpoint.AnthropicMessages())(rec, httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{}`)))
@@ -441,7 +686,7 @@ func TestForwardRequestShimRejectionUsesNativeShapeWithoutCallingUpstream(t *tes
 					return &rejectingRequestShim{err: tc.err}
 				},
 			}}
-			f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, registry)
+			f := newTestForwarder(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, registry)
 			rec := newDeadlineRecorder()
 
 			f.Handler(tc.ep)(rec, httptest.NewRequest(http.MethodPost, "/provider/route", strings.NewReader(`{}`)))
@@ -489,7 +734,7 @@ func TestForwardPreludeShimRejectionReplacesUpstreamResponseBeforeCommit(t *test
 			return &rejectingPreludeShim{}
 		},
 	}}
-	f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, registry)
+	f := newTestForwarder(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, registry)
 	rec := newDeadlineRecorder()
 
 	f.Handler(endpoint.OpenAIResponsesHTTP())(rec, httptest.NewRequest(http.MethodPost, "/openai/v1/responses", strings.NewReader(`{}`)))
@@ -530,7 +775,7 @@ func TestForwardEnabledNopIsByteExactWithEmptyChainOnBothPaths(t *testing.T) {
 						Request:    r,
 					}, nil
 				})}
-				f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, registry)
+				f := newTestForwarder(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, registry)
 				rec := newDeadlineRecorder()
 				f.Handler(endpoint.AnthropicMessages())(rec, httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{"raw":true}`)))
 				return rec
@@ -582,7 +827,7 @@ func TestForwardResponsesItemIDStabilizerSSEGateScopeAndFailSafe(t *testing.T) {
 		t.Helper()
 		registry := shim.CanonicalRegistry()
 		registry[1].Enabled = enabled
-		f := New(readyStub(upstream.URL), NewClient(5*time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, registry)
+		f := newTestForwarder(readyStub(upstream.URL), NewClient(5*time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, registry)
 		req := httptest.NewRequest(http.MethodPost, "/provider/route", strings.NewReader(`{"stream":true}`))
 		ctx := WithStreamResultHolder(req.Context())
 		req = req.WithContext(ctx)
@@ -789,7 +1034,7 @@ func TestStreamPolicySelectsSurfaceTerminalAndKeepalive(t *testing.T) {
 }
 
 func TestNewUsesConfiguredStreamTimers(t *testing.T) {
-	f := New(readyStub("https://upstream.invalid"), http.DefaultClient, time.Minute, time.Minute, 37*time.Second, 13*time.Second, 1<<20, 1<<20, nil)
+	f := newTestForwarder(readyStub("https://upstream.invalid"), http.DefaultClient, time.Minute, time.Minute, 37*time.Second, 13*time.Second, 1<<20, 1<<20, nil)
 	if f.streamIdleTimeout != 37*time.Second {
 		t.Errorf("streamIdleTimeout = %v, want 37s", f.streamIdleTimeout)
 	}
@@ -891,7 +1136,7 @@ func TestForwardStreamShimFailureRendersNativeTerminalAndReleasesUpstream(t *tes
 			return instance
 		},
 	}}
-	f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, registry)
+	f := newTestForwarder(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, registry)
 	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{"stream":true}`))
 	ctx := WithStreamResultHolder(req.Context())
 	req = req.WithContext(ctx)
@@ -929,7 +1174,7 @@ func TestForwardSuppressesOuterFinalizeErrorAfterFullyComposedTerminal(t *testin
 		{Name: "outer", Enabled: true, New: func(context.Context, endpoint.Surface, endpoint.Route) any { return outer }},
 		{Name: "inner", Enabled: true, New: func(context.Context, endpoint.Surface, endpoint.Route) any { return inner }},
 	}
-	f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, registry)
+	f := newTestForwarder(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, registry)
 	var logOutput bytes.Buffer
 	f.logger = slog.New(slog.NewTextHandler(&logOutput, nil))
 	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{"stream":true}`))
@@ -984,7 +1229,7 @@ func TestForwardDiscardsPartiallyComposedMiddleFinalizeOutput(t *testing.T) {
 		{Name: "middle-B", Enabled: true, New: func(context.Context, endpoint.Surface, endpoint.Route) any { return middle }},
 		{Name: "inner-C", Enabled: true, New: func(context.Context, endpoint.Surface, endpoint.Route) any { return inner }},
 	}
-	f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, registry)
+	f := newTestForwarder(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, registry)
 	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{"stream":true}`))
 	ctx := WithStreamResultHolder(req.Context())
 	req = req.WithContext(ctx)
@@ -1052,7 +1297,7 @@ func TestForwardEndpointContractControlsEventStreamProcessing(t *testing.T) {
 					Request: r,
 				}, nil
 			})}
-			f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
+			f := newTestForwarder(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 			req := httptest.NewRequest(http.MethodPost, "/provider/route", strings.NewReader(`{}`))
 			ctx := WithStreamResultHolder(req.Context())
 			req = req.WithContext(ctx)
@@ -1098,7 +1343,7 @@ func TestForwardParameterizedEventStreamUsesPump(t *testing.T) {
 			Request: r,
 		}, nil
 	})}
-	f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
+	f := newTestForwarder(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 	downstream := httptest.NewServer(f.Handler(endpoint.AnthropicMessages()))
 	defer downstream.Close()
 
@@ -1148,7 +1393,7 @@ func TestForwardRemovesExplicitIdentityEncodingFromEventStream(t *testing.T) {
 			Request: r,
 		}, nil
 	})}
-	f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
+	f := newTestForwarder(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{"stream":true}`))
 	rec := newDeadlineRecorder()
 
@@ -1228,7 +1473,7 @@ func TestForwardRejectsUnsupportedEventStreamEncodingBeforeCommit(t *testing.T) 
 					Request: r,
 				}, nil
 			})}
-			f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
+			f := newTestForwarder(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 			req := httptest.NewRequest(http.MethodPost, "/provider/route", strings.NewReader(`{"stream":true}`))
 			rec := newDeadlineRecorder()
 
@@ -1323,7 +1568,7 @@ func TestForwardKeepsCompressedBufferedResponseOpaque(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	f := New(readyStub(upstream.URL), NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
+	f := newTestForwarder(readyStub(upstream.URL), NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{}`))
 	rec := newDeadlineRecorder()
 
@@ -1354,7 +1599,7 @@ func TestForwardStoresStreamResultOnRequestHolder(t *testing.T) {
 			Request:    r,
 		}, nil
 	})}
-	f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
+	f := newTestForwarder(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{"stream":true}`))
 	ctx := WithStreamResultHolder(req.Context())
 	req = req.WithContext(ctx)
@@ -1381,7 +1626,7 @@ func TestForwardReportsDataTypeFallbacks(t *testing.T) {
 			Request:    r,
 		}, nil
 	})}
-	f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
+	f := newTestForwarder(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{"stream":true}`))
 	ctx := WithStreamResultHolder(req.Context())
 	req = req.WithContext(ctx)
@@ -1412,7 +1657,7 @@ func TestForwardOpenAITerminalsAreVerbatimAndNeverDoubled(t *testing.T) {
 					Request:    r,
 				}, nil
 			})}
-			f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
+			f := newTestForwarder(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 			req := httptest.NewRequest(http.MethodPost, "/openai/v1/responses", strings.NewReader(`{"stream":true}`))
 			ctx := WithStreamResultHolder(req.Context())
 			req = req.WithContext(ctx)
@@ -1443,7 +1688,7 @@ func TestForwardLeavesStreamResultUnsetForBufferedResponse(t *testing.T) {
 			Request:    r,
 		}, nil
 	})}
-	f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
+	f := newTestForwarder(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{"stream":false}`))
 	ctx := WithStreamResultHolder(req.Context())
 	req = req.WithContext(ctx)
@@ -1464,7 +1709,7 @@ func TestForwardStoresCanonicalOpenAIStreamSurface(t *testing.T) {
 			Request:    r,
 		}, nil
 	})}
-	f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
+	f := newTestForwarder(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 	req := httptest.NewRequest(http.MethodPost, "/openai/v1/responses", strings.NewReader(`{"stream":true}`))
 	ctx := WithStreamResultHolder(req.Context())
 	req = req.WithContext(ctx)
@@ -1525,7 +1770,7 @@ func TestForwardPreservesRawQueryOnCurrentRoutes(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	f := New(readyStub(upstream.URL), NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
+	f := newTestForwarder(readyStub(upstream.URL), NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 	tests := []struct {
 		name           string
 		inboundTarget  string
@@ -1587,7 +1832,7 @@ func TestForwardPreservesBareQueryMarker(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	f := New(readyStub(upstream.URL), NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
+	f := newTestForwarder(readyStub(upstream.URL), NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages?", strings.NewReader(`{}`))
 	rec := newDeadlineRecorder()
 
@@ -1609,7 +1854,7 @@ func TestForwardRequestsIdentityEncodingOnCurrentRoutes(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	f := New(readyStub(upstream.URL), NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
+	f := newTestForwarder(readyStub(upstream.URL), NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 	tests := []struct {
 		name          string
 		inboundTarget string
@@ -1681,7 +1926,7 @@ func TestForwardVerbatimAndHeaderPolicy(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	f := New(readyStub(upstream.URL), NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
+	f := newTestForwarder(readyStub(upstream.URL), NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 
 	const reqBody = `{"model":"claude-3-5-sonnet","messages":[{"role":"user","content":"hi"}]}`
 	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(reqBody))
@@ -1761,7 +2006,7 @@ func TestForwardJSONErrorToStreamRequestUsesBufferedPath(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	f := New(readyStub(upstream.URL), NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
+	f := newTestForwarder(readyStub(upstream.URL), NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{"stream":true}`))
 	rec := newDeadlineRecorder()
 	f.Handler(endpoint.AnthropicMessages())(rec, req)
@@ -1784,7 +2029,7 @@ func TestForwardSurfacePeek(t *testing.T) {
 		_, _ = io.WriteString(w, `{"ok":true}`)
 	}))
 	defer upstream.Close()
-	f := New(readyStub(upstream.URL), NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
+	f := newTestForwarder(readyStub(upstream.URL), NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 
 	forward := func(surface endpoint.Surface, body string) *deadlineRecorder {
 		path := "/anthropic/v1/messages"
@@ -1856,7 +2101,7 @@ func TestForwardBodyBounding(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	f := New(readyStub(upstream.URL), NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 8, 1<<20, nil) // 8-byte request cap
+	f := newTestForwarder(readyStub(upstream.URL), NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 8, 1<<20, nil) // 8-byte request cap
 	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{"model":"way too long"}`))
 	rec := newDeadlineRecorder()
 	f.Handler(endpoint.AnthropicMessages())(rec, req)
@@ -1877,7 +2122,7 @@ func TestForwardProxyOriginErrors(t *testing.T) {
 			w.WriteHeader(http.StatusOK)
 		}))
 		defer upstream.Close()
-		f := New(readyStub(upstream.URL), NewClient(50*time.Millisecond), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
+		f := newTestForwarder(readyStub(upstream.URL), NewClient(50*time.Millisecond), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 		req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{}`))
 		rec := newDeadlineRecorder()
 		f.Handler(endpoint.AnthropicMessages())(rec, req)
@@ -1892,7 +2137,7 @@ func TestForwardProxyOriginErrors(t *testing.T) {
 
 	t.Run("unreachable upstream yields 502", func(t *testing.T) {
 		// 127.0.0.1:1 refuses connections immediately.
-		f := New(readyStub("http://127.0.0.1:1"), NewClient(5*time.Second), 2*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
+		f := newTestForwarder(readyStub("http://127.0.0.1:1"), NewClient(5*time.Second), 2*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 		req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{}`))
 		rec := newDeadlineRecorder()
 		f.Handler(endpoint.AnthropicMessages())(rec, req)
@@ -1911,7 +2156,7 @@ func TestForwardProxyOriginErrors(t *testing.T) {
 			<-r.Context().Done()
 		}))
 		defer upstream.Close()
-		f := New(readyStub(upstream.URL), NewClient(5*time.Second), 50*time.Millisecond, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
+		f := newTestForwarder(readyStub(upstream.URL), NewClient(5*time.Second), 50*time.Millisecond, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 		req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{}`))
 		rec := newDeadlineRecorder()
 		f.Handler(endpoint.AnthropicMessages())(rec, req)
@@ -1936,7 +2181,7 @@ func TestOutboundTimeoutIsNotAppliedToEventStream(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	f := New(readyStub(upstream.URL), NewClient(time.Second), 50*time.Millisecond, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
+	f := newTestForwarder(readyStub(upstream.URL), NewClient(time.Second), 50*time.Millisecond, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 	req := httptest.NewRequest(http.MethodPost, "/openai/v1/responses", strings.NewReader(`{}`))
 	rec := newDeadlineRecorder()
 	f.Handler(endpoint.OpenAIResponsesHTTP())(rec, req)
@@ -1946,49 +2191,66 @@ func TestOutboundTimeoutIsNotAppliedToEventStream(t *testing.T) {
 	}
 }
 
-// TestForwardClientCancelPropagates proves a client disconnect cancels the
-// upstream call and the handler returns promptly without synthesizing a 504.
-func TestForwardClientCancelPropagates(t *testing.T) {
-	upstreamCancelled := make(chan struct{})
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Drain the body so the server's background read can detect the client
-		// closing the connection and cancel this request's context.
-		_, _ = io.Copy(io.Discard, r.Body)
-		select {
-		case <-r.Context().Done():
-			close(upstreamCancelled)
-		case <-time.After(3 * time.Second):
-		}
-	}))
-	defer upstream.Close()
-
-	f := New(readyStub(upstream.URL), NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{}`)).WithContext(ctx)
-	rec := newDeadlineRecorder()
-
-	done := make(chan struct{})
-	go func() {
-		f.Handler(endpoint.AnthropicMessages())(rec, req)
-		close(done)
-	}()
-
-	time.Sleep(50 * time.Millisecond) // let the outbound request reach the upstream
-	cancel()
-
-	select {
-	case <-upstreamCancelled:
-	case <-time.After(3 * time.Second):
-		t.Fatal("upstream did not observe the client cancellation")
+// TestHTTPHandlersKeepClientCancelDuringCallSilent proves a client disconnect
+// cancels each upstream call and neither handler writes any response bytes.
+func TestHTTPHandlersKeepClientCancelDuringCallSilent(t *testing.T) {
+	tests := []struct {
+		name     string
+		request  func() *http.Request
+		endpoint func(*Forwarder) http.HandlerFunc
+	}{
+		{
+			name:    "raw passthrough",
+			request: func() *http.Request { return httptest.NewRequest(http.MethodGet, "/models", nil) },
+			endpoint: func(f *Forwarder) http.HandlerFunc {
+				return f.PassthroughHandler(endpoint.Models())
+			},
+		},
+		{
+			name: "inference",
+			request: func() *http.Request {
+				return httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{}`))
+			},
+			endpoint: func(f *Forwarder) http.HandlerFunc {
+				return f.Handler(endpoint.AnthropicMessages())
+			},
+		},
 	}
-	select {
-	case <-done:
-	case <-time.After(3 * time.Second):
-		t.Fatal("handler did not return promptly after client cancel")
-	}
-	if rec.Code == http.StatusGatewayTimeout {
-		t.Errorf("client cancel synthesized a 504, want no error body")
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			started := make(chan struct{})
+			client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				close(started)
+				<-r.Context().Done()
+				return nil, r.Context().Err()
+			})}
+			f := newTestForwarder(readyStub("https://upstream.invalid"), client, time.Second, time.Second, time.Second, time.Second, 1<<20, 1<<20, nil)
+			ctx, cancel := context.WithCancel(context.Background())
+			request := tc.request().WithContext(ctx)
+			writer := &failingResponseWriter{header: make(http.Header)}
+			done := make(chan struct{})
+			go func() {
+				tc.endpoint(f)(writer, request)
+				close(done)
+			}()
+
+			select {
+			case <-started:
+			case <-time.After(time.Second):
+				t.Fatal("upstream call did not start")
+			}
+			cancel()
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+				t.Fatal("handler did not return after client cancellation")
+			}
+
+			if writer.status != 0 || len(writer.written) != 0 {
+				t.Errorf("client-cancel response = status %d body %q, want no write", writer.status, writer.written)
+			}
+		})
 	}
 }
 
@@ -2010,7 +2272,7 @@ func TestBufferedCopyAbortsWhenClientStopsDraining(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	f := New(readyStub(upstream.URL), NewClient(5*time.Second), 5*time.Second, 100*time.Millisecond, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
+	f := newTestForwarder(readyStub(upstream.URL), NewClient(5*time.Second), 5*time.Second, 100*time.Millisecond, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 	handlerReturned := make(chan struct{})
 	downstream := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer close(handlerReturned)

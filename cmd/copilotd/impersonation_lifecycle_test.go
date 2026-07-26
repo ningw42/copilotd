@@ -222,11 +222,11 @@ func TestServeLifecycleCarriesFallbackAndDiscoveredVersionsOnWire(t *testing.T) 
 			}
 			assertVersionHeaders(t, exchange, tc.wantVSCode, tc.wantPlugin)
 
-			fwd := forward.New(mgr, forward.NewClient(cfg.ResponseHeaderTimeout), cfg.OutboundTimeout, cfg.WriteTimeout, cfg.StreamIdleTimeout, cfg.StreamKeepaliveInterval, cfg.MaxRequestBytes, cfg.MaxBufferedResponseBytes, nil, forward.WithLogger(logger))
+			fwd := newTestForwarderWithLogger(mgr, forward.NewClient(cfg.ResponseHeaderTimeout), cfg.OutboundTimeout, cfg.WriteTimeout, cfg.StreamIdleTimeout, cfg.StreamKeepaliveInterval, cfg.MaxRequestBytes, cfg.MaxBufferedResponseBytes, logger, nil, forward.WithLogger(logger))
 			base := startTestServer(t, server.New(cfg, logger, mgr, server.ReadyObservers{
 				Impersonation: imp,
 				Caches:        cacheRegistry,
-			}, fwd, newTestWSProxy(mgr), server.NewStreamOutcomeCounter(), catalog.RenderDescriptors{}))
+			}, fwd, newTestCatalogSource(mgr), newTestWSProxy(mgr), server.NewStreamOutcomeCounter(), catalog.RenderDescriptors{}))
 			assertReadyzImpersonation(t, base, tc.wantVSCode, tc.wantPlugin, tc.wantSource, tc.wantLastSuccess)
 			resp, _ := post(t, base+"/anthropic/v1/messages", `{"model":"test"}`)
 			_ = resp.Body.Close()

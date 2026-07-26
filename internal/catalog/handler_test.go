@@ -3,36 +3,37 @@ package catalog
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"testing"
 	"time"
 
+	"github.com/ningw42/copilotd/internal/apierror"
 	"github.com/ningw42/copilotd/internal/cache"
 	"github.com/ningw42/copilotd/internal/endpoint"
+	"github.com/ningw42/copilotd/internal/upstream"
 )
 
-type stubFetcher struct {
-	status int
-	body   []byte
-	err    error
-	fetch  func(context.Context, endpoint.Route) (int, []byte, error)
+type stubSource struct {
+	status   int
+	body     []byte
+	failure  *upstream.Failure
+	buffered func(context.Context, upstream.Call) (int, []byte, *upstream.Failure)
 }
 
-type routeRecordingFetcher struct {
-	upstream endpoint.Route
+type routeRecordingSource struct {
+	call upstream.Call
 }
 
-func (f *routeRecordingFetcher) FetchModels(_ context.Context, upstream endpoint.Route) (int, []byte, error) {
-	f.upstream = upstream
+func (s *routeRecordingSource) Buffered(_ context.Context, call upstream.Call) (int, []byte, *upstream.Failure) {
+	s.call = call
 	return http.StatusOK, []byte(`{"data":[]}`), nil
 }
 
-func TestHandlerFetchesTheCatalogContractsUpstreamRoute(t *testing.T) {
-	fetcher := &routeRecordingFetcher{}
-	handler := Handler(endpoint.OpenAICatalog(), Rendering{Render: RenderOpenAI}, fetcher)
+func TestHandlerCallsTheCatalogContractsUpstreamRoute(t *testing.T) {
+	source := &routeRecordingSource{}
+	handler := Handler(endpoint.OpenAICatalog(), Rendering{Render: RenderOpenAI}, source)
 	recorder := httptest.NewRecorder()
 
 	handler(recorder, httptest.NewRequest(http.MethodGet, "/openai/v1/models", nil))
@@ -40,8 +41,14 @@ func TestHandlerFetchesTheCatalogContractsUpstreamRoute(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", recorder.Code, recorder.Body.String())
 	}
-	if got, want := fetcher.upstream, endpoint.OpenAICatalog().Upstream(); got != want {
-		t.Errorf("fetched upstream route = %q, want contract route %q", got, want)
+	if got, want := source.call.Route, endpoint.OpenAICatalog().Upstream(); got != want {
+		t.Errorf("upstream call route = %q, want contract route %q", got, want)
+	}
+	if source.call.Method != http.MethodGet {
+		t.Errorf("upstream call method = %q, want GET", source.call.Method)
+	}
+	if !source.call.AcceptIdentityEncoding {
+		t.Error("upstream call did not request identity encoding")
 	}
 }
 
@@ -83,7 +90,7 @@ func TestHandlerNegotiatesCodexShapeOnlyWhenEveryGateIsOpen(t *testing.T) {
 					},
 				},
 			}
-			handler := Handler(endpoint.OpenAICatalog(), rendering, stubFetcher{status: http.StatusOK, body: upstreamBody})
+			handler := Handler(endpoint.OpenAICatalog(), rendering, stubSource{status: http.StatusOK, body: upstreamBody})
 			target := "/openai/v1/models"
 			if tc.rawQuery != "" {
 				target += "?" + tc.rawQuery
@@ -122,7 +129,7 @@ func TestHandlerCodexHEADMatchesGETHeadersAndSuppressesBody(t *testing.T) {
 			},
 		},
 	}
-	handler := Handler(endpoint.OpenAICatalog(), rendering, stubFetcher{status: http.StatusOK, body: upstreamBody})
+	handler := Handler(endpoint.OpenAICatalog(), rendering, stubSource{status: http.StatusOK, body: upstreamBody})
 
 	getRecorder := httptest.NewRecorder()
 	handler(getRecorder, httptest.NewRequest(http.MethodGet, "/openai/v1/models?client_version=secret-query-value", nil))
@@ -177,7 +184,7 @@ func TestHandlerRendersCodexFromCurrentCachedBytes(t *testing.T) {
 				OverrideLimits: true,
 			},
 		},
-	}, stubFetcher{status: http.StatusOK, body: upstreamBody})
+	}, stubSource{status: http.StatusOK, body: upstreamBody})
 	recorder := httptest.NewRecorder()
 
 	handler(recorder, httptest.NewRequest(http.MethodGet, "/openai/v1/models?client_version=0.145.0", nil))
@@ -187,36 +194,35 @@ func TestHandlerRendersCodexFromCurrentCachedBytes(t *testing.T) {
 	}
 	entries := decodeRenderedCodex(t, recorder.Body.Bytes())
 	if got := renderedSlugs(t, entries); len(got) != 1 || got[0] != "fresh-model" {
-		t.Fatalf("rendered slugs = %q, want current fetched model", got)
+		t.Fatalf("rendered slugs = %q, want current Catalog model", got)
 	}
 }
 
-func (f stubFetcher) FetchModels(ctx context.Context, upstream endpoint.Route) (int, []byte, error) {
-	if f.fetch != nil {
-		return f.fetch(ctx, upstream)
+func (s stubSource) Buffered(ctx context.Context, call upstream.Call) (int, []byte, *upstream.Failure) {
+	if s.buffered != nil {
+		return s.buffered(ctx, call)
 	}
-	return f.status, f.body, f.err
+	return s.status, s.body, s.failure
 }
 
 func TestHandlerMapsEveryFailureInTheSelectedSurfaceDialect(t *testing.T) {
 	tests := []struct {
 		name        string
-		fetcher     stubFetcher
+		source      stubSource
 		render      func([]Model) ([]byte, error)
 		wantStatus  int
 		wantMessage string
 	}{
-		{name: "missing credential", fetcher: stubFetcher{err: fmt.Errorf("%w: credential-secret", ErrNoCredential)}, wantStatus: 503, wantMessage: "no upstream credential available"},
-		{name: "request construction", fetcher: stubFetcher{err: fmt.Errorf("%w: url-secret", ErrBuildUpstream)}, wantStatus: 502, wantMessage: "could not fetch the upstream models catalog"},
-		{name: "unreachable", fetcher: stubFetcher{err: fmt.Errorf("%w: network-secret", ErrUpstreamUnreachable)}, wantStatus: 502, wantMessage: "could not fetch the upstream models catalog"},
-		{name: "response read", fetcher: stubFetcher{err: fmt.Errorf("%w: response-secret", ErrUpstreamRead)}, wantStatus: 502, wantMessage: "could not fetch the upstream models catalog"},
-		{name: "timeout", fetcher: stubFetcher{err: fmt.Errorf("%w: timeout-secret", ErrUpstreamTimeout)}, wantStatus: 504, wantMessage: "the upstream request timed out"},
-		{name: "unknown fetch error", fetcher: stubFetcher{err: errors.New("unknown-secret")}, wantStatus: 502, wantMessage: "could not fetch the upstream models catalog"},
-		{name: "upstream status", fetcher: stubFetcher{status: 429, body: []byte(`{"copilot":"body-secret"}`)}, wantStatus: 502, wantMessage: "upstream models request failed"},
-		{name: "malformed catalog", fetcher: stubFetcher{status: 200, body: []byte(`<body-secret>`)}, wantStatus: 502, wantMessage: "upstream models response was invalid"},
+		{name: "missing credential", source: stubSource{failure: &upstream.Failure{Kind: apierror.NotReady, Message: "no upstream credential available", Err: errors.New("credential-secret")}}, wantStatus: 503, wantMessage: "no upstream credential available"},
+		{name: "request construction", source: stubSource{failure: &upstream.Failure{Kind: apierror.BadGateway, Message: "could not build the upstream request", Err: errors.New("url-secret")}}, wantStatus: 502, wantMessage: "could not build the upstream request"},
+		{name: "unreachable", source: stubSource{failure: &upstream.Failure{Kind: apierror.BadGateway, Message: "could not reach the upstream", Err: errors.New("network-secret")}}, wantStatus: 502, wantMessage: "could not reach the upstream"},
+		{name: "response read", source: stubSource{failure: &upstream.Failure{Kind: apierror.BadGateway, Message: "could not read the upstream response", Err: errors.New("response-secret")}}, wantStatus: 502, wantMessage: "could not read the upstream response"},
+		{name: "timeout", source: stubSource{failure: &upstream.Failure{Kind: apierror.GatewayTimeout, Message: "the upstream request timed out", Err: errors.New("timeout-secret")}}, wantStatus: 504, wantMessage: "the upstream request timed out"},
+		{name: "upstream status", source: stubSource{status: 429, body: []byte(`{"copilot":"body-secret"}`)}, wantStatus: 502, wantMessage: "upstream models request failed"},
+		{name: "malformed catalog", source: stubSource{status: 200, body: []byte(`<body-secret>`)}, wantStatus: 502, wantMessage: "upstream models response was invalid"},
 		{
 			name:        "render failure",
-			fetcher:     stubFetcher{status: 200, body: []byte(`{"data":[]}`)},
+			source:      stubSource{status: 200, body: []byte(`{"data":[]}`)},
 			render:      func([]Model) ([]byte, error) { return nil, errors.New("render-secret") },
 			wantStatus:  502,
 			wantMessage: "could not render the models catalog",
@@ -250,7 +256,7 @@ func TestHandlerMapsEveryFailureInTheSelectedSurfaceDialect(t *testing.T) {
 				if render == nil {
 					render = RenderOpenAI
 				}
-				handler := Handler(surface.ep, Rendering{Render: render}, tc.fetcher)
+				handler := Handler(surface.ep, Rendering{Render: render}, tc.source)
 				recorder := httptest.NewRecorder()
 
 				handler(recorder, httptest.NewRequest(http.MethodGet, "/models", nil))
@@ -281,12 +287,12 @@ func (w *writeSpy) Write(body []byte) (int, error) {
 
 func TestHandlerPropagatesCancellationWithoutWritingAReplacementError(t *testing.T) {
 	started := make(chan struct{})
-	fetcher := stubFetcher{fetch: func(ctx context.Context, _ endpoint.Route) (int, []byte, error) {
+	source := stubSource{buffered: func(ctx context.Context, _ upstream.Call) (int, []byte, *upstream.Failure) {
 		close(started)
 		<-ctx.Done()
-		return 0, nil, fmt.Errorf("%w: %v", ErrUpstreamRead, ctx.Err())
+		return 0, nil, &upstream.Failure{ClientGone: true, Err: ctx.Err()}
 	}}
-	handler := Handler(endpoint.AnthropicCatalog(), Rendering{Render: RenderAnthropic}, fetcher)
+	handler := Handler(endpoint.AnthropicCatalog(), Rendering{Render: RenderAnthropic}, source)
 	ctx, cancel := context.WithCancel(context.Background())
 	request := httptest.NewRequest(http.MethodGet, "/anthropic/v1/models", nil).WithContext(ctx)
 	writer := &writeSpy{header: make(http.Header)}

@@ -53,8 +53,8 @@ func readyStub(baseURL string) *identity.Static {
 func testHandler(t *testing.T, logger *slog.Logger) http.Handler {
 	t.Helper()
 	prov := readyStub("")
-	fwd := forward.New(prov, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
-	return newHandler(testAPIKey, prov, newTestReadyObservers(), fwd, logger, NewStreamOutcomeCounter(), catalog.RenderDescriptors{}, newTestWSProxy(prov))
+	fwd := newTestForwarder(prov, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
+	return newHandler(testAPIKey, prov, newTestReadyObservers(), fwd, newTestCatalogSource(prov), logger, NewStreamOutcomeCounter(), catalog.RenderDescriptors{}, newTestWSProxy(prov))
 }
 
 // bufferLogger returns a logger writing to an in-memory buffer at the given
@@ -468,8 +468,8 @@ func TestLifecycleSmoke(t *testing.T) {
 		t.Fatalf("listen: %v", err)
 	}
 	provider := readyStub("")
-	forwarder := forward.New(provider, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
-	srv := New(testConfig(), discardLogger(t), provider, newTestReadyObservers(), forwarder, newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.RenderDescriptors{})
+	forwarder := newTestForwarder(provider, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
+	srv := New(testConfig(), discardLogger(t), provider, newTestReadyObservers(), forwarder, newTestCatalogSource(provider), newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.RenderDescriptors{})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	runErr := make(chan error, 1)

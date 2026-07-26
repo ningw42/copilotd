@@ -19,6 +19,7 @@ import (
 	"github.com/ningw42/copilotd/internal/endpoint"
 	"github.com/ningw42/copilotd/internal/identity"
 	"github.com/ningw42/copilotd/internal/logging"
+	"github.com/ningw42/copilotd/internal/upstream"
 )
 
 func TestRawNetworkConnUnwrapsNestedTransports(t *testing.T) {
@@ -31,6 +32,208 @@ func TestRawNetworkConnUnwrapsNestedTransports(t *testing.T) {
 		t.Fatalf("raw network connection = %T, want %T", got, raw)
 	}
 }
+
+func TestProxyClientCancelDuringUpstreamHandshakeWritesNothingAndBooksNoMetric(t *testing.T) {
+	requestEntered := make(chan struct{})
+	dialClient := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		close(requestEntered)
+		<-request.Context().Done()
+		return nil, request.Context().Err()
+	})}
+	observed := &recordingWsMetrics{}
+	provider := identity.NewStatic(identity.Credential{
+		BaseURL: "http://upstream.invalid",
+		Token:   "copilot-token",
+	}, true)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	proxy := New(
+		newTestCaller(provider, logger),
+		dialClient,
+		time.Second,
+		time.Second,
+		1<<20,
+		nil,
+		logger,
+		WsMetrics{Accept: observed},
+	)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := proxy.Shutdown(ctx); err != nil {
+			t.Errorf("shutdown proxy: %v", err)
+		}
+	})
+
+	requestCtx, cancelRequest := context.WithCancel(context.Background())
+	request := validUpgradeRequest().WithContext(requestCtx)
+	recorder := httptest.NewRecorder()
+	handlerDone := make(chan struct{})
+	go func() {
+		defer close(handlerDone)
+		proxy.Handler(endpoint.OpenAIResponsesWS()).ServeHTTP(recorder, request)
+	}()
+
+	select {
+	case <-requestEntered:
+	case <-time.After(time.Second):
+		t.Fatal("upstream handshake did not start")
+	}
+	cancelRequest()
+	select {
+	case <-handlerDone:
+	case <-time.After(time.Second):
+		t.Fatal("handler did not stop after client cancellation")
+	}
+
+	if got := recorder.Body.Len(); got != 0 {
+		t.Errorf("response bytes = %d, want 0: %q", got, recorder.Body.String())
+	}
+	accepts, terminals := observed.snapshot()
+	if len(accepts) != 0 {
+		t.Errorf("accept observations = %v, want none", accepts)
+	}
+	if len(terminals) != 0 {
+		t.Errorf("session terminal observations = %v, want none", terminals)
+	}
+}
+
+func TestProxyForwardsClientHeaderAndStripsWebSocketOffers(t *testing.T) {
+	requests := make(chan http.Header, 1)
+	dialClient := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		requests <- request.Header.Clone()
+		return nil, errors.New("stop after capturing upstream handshake")
+	})}
+	provider := identity.NewStatic(identity.Credential{
+		BaseURL: "http://upstream.invalid",
+		Token:   "copilot-token",
+	}, true)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	proxy := New(
+		newTestCaller(provider, logger),
+		dialClient,
+		time.Second,
+		time.Second,
+		1<<20,
+		nil,
+		logger,
+		WsMetrics{},
+	)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := proxy.Shutdown(ctx); err != nil {
+			t.Errorf("shutdown proxy: %v", err)
+		}
+	})
+
+	request := validUpgradeRequest()
+	request.Header.Set("X-Client-Feature", "forward-me")
+	request.Header.Set("Sec-WebSocket-Protocol", "client-offer")
+	request.Header.Set("Sec-WebSocket-Extensions", "permessage-deflate")
+	proxy.Handler(endpoint.OpenAIResponsesWS()).ServeHTTP(httptest.NewRecorder(), request)
+
+	header := <-requests
+	if got := header.Get("X-Client-Feature"); got != "forward-me" {
+		t.Errorf("upstream X-Client-Feature = %q, want forward-me", got)
+	}
+	for _, name := range []string{"Sec-WebSocket-Protocol", "Sec-WebSocket-Extensions"} {
+		if got := header.Values(name); len(got) != 0 {
+			t.Errorf("upstream %s = %v, want absent", name, got)
+		}
+	}
+}
+
+func TestProxyCredentialResolutionUsesPhaseContextWithoutDialDeadline(t *testing.T) {
+	provider := &contextRecordingProvider{credential: identity.Credential{
+		BaseURL: "http://upstream.invalid",
+		Token:   "copilot-token",
+	}}
+	dialClient := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("stop after credential resolution")
+	})}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	proxy := New(
+		newTestCaller(provider, logger),
+		dialClient,
+		time.Nanosecond,
+		time.Second,
+		1<<20,
+		nil,
+		logger,
+		WsMetrics{},
+	)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := proxy.Shutdown(ctx); err != nil {
+			t.Errorf("shutdown proxy: %v", err)
+		}
+	})
+
+	proxy.Handler(endpoint.OpenAIResponsesWS()).ServeHTTP(httptest.NewRecorder(), validUpgradeRequest())
+
+	if provider.hadDeadline {
+		t.Error("credential resolution context inherited the dial deadline")
+	}
+}
+
+func TestProxyPreservesBareQuestionMarkInUpstreamHandshake(t *testing.T) {
+	type capturedURL struct {
+		value      string
+		forceQuery bool
+	}
+	requests := make(chan capturedURL, 1)
+	dialClient := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		requests <- capturedURL{value: request.URL.String(), forceQuery: request.URL.ForceQuery}
+		return nil, errors.New("stop after capturing upstream URL")
+	})}
+	provider := identity.NewStatic(identity.Credential{
+		BaseURL: "http://upstream.invalid",
+		Token:   "copilot-token",
+	}, true)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	proxy := New(
+		newTestCaller(provider, logger),
+		dialClient,
+		time.Second,
+		time.Second,
+		1<<20,
+		nil,
+		logger,
+		WsMetrics{},
+	)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := proxy.Shutdown(ctx); err != nil {
+			t.Errorf("shutdown proxy: %v", err)
+		}
+	})
+
+	request := validUpgradeRequest()
+	request.URL.ForceQuery = true
+	proxy.Handler(endpoint.OpenAIResponsesWS()).ServeHTTP(httptest.NewRecorder(), request)
+
+	got := <-requests
+	if want := "http://upstream.invalid/responses?"; got.value != want {
+		t.Errorf("upstream URL = %q, want %q", got.value, want)
+	}
+	if !got.forceQuery {
+		t.Error("upstream ForceQuery = false, want true")
+	}
+}
+
+type contextRecordingProvider struct {
+	credential  identity.Credential
+	hadDeadline bool
+}
+
+func (p *contextRecordingProvider) Current(ctx context.Context) (identity.Credential, error) {
+	_, p.hadDeadline = ctx.Deadline()
+	return p.credential, nil
+}
+
+func (*contextRecordingProvider) Ready() bool { return true }
 
 type testNetConnWrapper struct {
 	net.Conn
@@ -61,7 +264,7 @@ func TestProxyShutdownRefusesNewUpgradesWith503(t *testing.T) {
 
 func TestProxyShutdownDrainsActiveSessionWithGoingAway(t *testing.T) {
 	upstreamClosed := make(chan websocket.StatusCode, 1)
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstreamServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := websocket.Accept(w, r, nil)
 		if err != nil {
 			t.Errorf("accept upstream WebSocket: %v", err)
@@ -71,10 +274,10 @@ func TestProxyShutdownDrainsActiveSessionWithGoingAway(t *testing.T) {
 		_, _, err = conn.Read(context.Background())
 		upstreamClosed <- websocket.CloseStatus(err)
 	}))
-	t.Cleanup(upstream.Close)
+	t.Cleanup(upstreamServer.Close)
 
 	proxy := newTestProxy(identity.NewStatic(identity.Credential{
-		BaseURL: upstream.URL,
+		BaseURL: upstreamServer.URL,
 		Token:   "copilot-token",
 	}, true))
 	client, handlerDone, downstream := dialProxy(t, proxy)
@@ -124,32 +327,34 @@ func testProxyShutdownForceClosesSessionThatOverrunsDeadline(t *testing.T, tlsUp
 		close(upstreamAccepted)
 		<-releaseUpstream
 	})
-	var upstream *httptest.Server
+	var upstreamServer *httptest.Server
 	if tlsUpstream {
-		upstream = httptest.NewTLSServer(upstreamHandler)
+		upstreamServer = httptest.NewTLSServer(upstreamHandler)
 	} else {
-		upstream = httptest.NewServer(upstreamHandler)
+		upstreamServer = httptest.NewServer(upstreamHandler)
 	}
 	t.Cleanup(func() {
 		close(releaseUpstream)
-		upstream.Close()
+		upstreamServer.Close()
 	})
 
 	dialClient := &http.Client{Transport: http.DefaultTransport}
 	if tlsUpstream {
-		dialClient = upstream.Client()
+		dialClient = upstreamServer.Client()
 	}
+	provider := identity.NewStatic(identity.Credential{
+		BaseURL: upstreamServer.URL,
+		Token:   "copilot-token",
+	}, true)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	proxy := New(
-		identity.NewStatic(identity.Credential{
-			BaseURL: upstream.URL,
-			Token:   "copilot-token",
-		}, true),
+		newTestCaller(provider, logger),
 		dialClient,
 		time.Second,
 		time.Second,
 		1<<20,
 		nil,
-		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		logger,
 		WsMetrics{},
 	)
 	client, handlerDone, downstream := dialProxy(t, proxy)
@@ -222,16 +427,21 @@ func (p *blockingProvider) Current(ctx context.Context) (identity.Credential, er
 func (p *blockingProvider) Ready() bool { return true }
 
 func newTestProxy(provider identity.Provider) *Proxy {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	return New(
-		provider,
+		newTestCaller(provider, logger),
 		&http.Client{Transport: http.DefaultTransport},
 		time.Second,
 		time.Second,
 		1<<20,
 		nil,
-		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		logger,
 		WsMetrics{},
 	)
+}
+
+func newTestCaller(provider identity.Provider, logger *slog.Logger) *upstream.Caller {
+	return upstream.New(provider, http.DefaultClient, time.Second, 1<<20, logger)
 }
 
 func dialProxy(t *testing.T, proxy *Proxy) (*websocket.Conn, <-chan struct{}, *httptest.Server) {
@@ -272,7 +482,7 @@ func TestProxyForwardsMessagesAndBuildsUpstreamHandshake(t *testing.T) {
 		header   http.Header
 	}
 	handshakes := make(chan handshake, 1)
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstreamServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		handshakes <- handshake{path: r.URL.Path, rawQuery: r.URL.RawQuery, header: r.Header.Clone()}
 		conn, err := websocket.Accept(w, r, nil)
 		if err != nil {
@@ -290,24 +500,25 @@ func TestProxyForwardsMessagesAndBuildsUpstreamHandshake(t *testing.T) {
 			}
 		}
 	}))
-	t.Cleanup(upstream.Close)
+	t.Cleanup(upstreamServer.Close)
 
 	provider := identity.NewStatic(identity.Credential{
-		BaseURL: upstream.URL,
+		BaseURL: upstreamServer.URL,
 		Token:   "copilot-token",
 		Headers: http.Header{
 			"Copilot-Integration-Id": {"vscode-chat"},
 			"Editor-Version":         {"vscode/1.104.1"},
 		},
 	}, true)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	proxy := New(
-		provider,
+		newTestCaller(provider, logger),
 		&http.Client{Transport: http.DefaultTransport},
 		time.Second,
 		time.Second,
 		1<<20,
 		nil,
-		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		logger,
 		WsMetrics{},
 	)
 	downstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -389,7 +600,7 @@ func TestProxyForwardsMessagesAndBuildsUpstreamHandshake(t *testing.T) {
 }
 
 func TestProxyUsesConfiguredProxyAndVerifiedTLSForWSSDial(t *testing.T) {
-	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstreamServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := websocket.Accept(w, r, nil)
 		if err != nil {
 			t.Errorf("accept TLS upstream WebSocket: %v", err)
@@ -401,10 +612,10 @@ func TestProxyUsesConfiguredProxyAndVerifiedTLSForWSSDial(t *testing.T) {
 			_ = conn.Write(r.Context(), messageType, payload)
 		}
 	}))
-	t.Cleanup(upstream.Close)
+	t.Cleanup(upstreamServer.Close)
 
 	roots := x509.NewCertPool()
-	roots.AddCert(upstream.Certificate())
+	roots.AddCert(upstreamServer.Certificate())
 	proxyRequests := make(chan string, 1)
 	dialClient := &http.Client{Transport: &http.Transport{
 		Proxy: func(request *http.Request) (*url.URL, error) {
@@ -416,8 +627,9 @@ func TestProxyUsesConfiguredProxyAndVerifiedTLSForWSSDial(t *testing.T) {
 			RootCAs:    roots,
 		},
 	}}
-	provider := identity.NewStatic(identity.Credential{BaseURL: upstream.URL, Token: "copilot-token"}, true)
-	proxy := New(provider, dialClient, time.Second, time.Second, 1<<20, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), WsMetrics{})
+	provider := identity.NewStatic(identity.Credential{BaseURL: upstreamServer.URL, Token: "copilot-token"}, true)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	proxy := New(newTestCaller(provider, logger), dialClient, time.Second, time.Second, 1<<20, nil, logger, WsMetrics{})
 	downstream := httptest.NewServer(proxy.Handler(endpoint.OpenAIResponsesWS()))
 	t.Cleanup(downstream.Close)
 	t.Cleanup(func() {

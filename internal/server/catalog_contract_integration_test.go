@@ -104,8 +104,8 @@ func TestCatalogLocalFailuresHaveGETEquivalentHEADFramingOverRealListener(t *tes
 				if responseLimit == 0 {
 					responseLimit = 1 << 20
 				}
-				forwarder := forward.New(provider, client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, responseLimit, nil)
-				base := startServer(t, New(testConfig(), discardLogger(t), provider, newTestReadyObservers(), forwarder, newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.RenderDescriptors{}))
+				forwarder := newTestForwarder(provider, client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, responseLimit, nil)
+				base := startServer(t, New(testConfig(), discardLogger(t), provider, newTestReadyObservers(), forwarder, newTestCatalogSourceWith(provider, client, time.Second, responseLimit, discardLogger(t)), newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.RenderDescriptors{}))
 
 				do := func(method string) (*http.Response, []byte) {
 					t.Helper()
@@ -186,8 +186,8 @@ func TestCatalogClientCancellationPropagatesToCopilotOverRealListener(t *testing
 			defer upstream.Close()
 
 			provider := identity.NewStatic(identity.Credential{BaseURL: upstream.URL, Token: "copilot-token"}, true)
-			forwarder := forward.New(provider, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
-			base := startServer(t, New(testConfig(), discardLogger(t), provider, newTestReadyObservers(), forwarder, newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.RenderDescriptors{}))
+			forwarder := newTestForwarder(provider, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
+			base := startServer(t, New(testConfig(), discardLogger(t), provider, newTestReadyObservers(), forwarder, newTestCatalogSource(provider), newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.RenderDescriptors{}))
 			ctx, cancel := context.WithCancel(context.Background())
 			req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+path, nil)
 			if err != nil {
@@ -259,8 +259,8 @@ func TestCatalogCorrelationAccessLogsAndSecretRedaction(t *testing.T) {
 		t.Fatalf("build logger: %v", err)
 	}
 	provider := identity.NewStatic(identity.Credential{BaseURL: upstream.URL, Token: copilotToken}, true)
-	forwarder := forward.New(provider, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil, forward.WithLogger(logger))
-	base := startServer(t, New(testConfig(), logger, provider, newTestReadyObservers(), forwarder, newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.RenderDescriptors{}))
+	forwarder := newTestForwarderWithLogger(provider, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, logger, nil, forward.WithLogger(logger))
+	base := startServer(t, New(testConfig(), logger, provider, newTestReadyObservers(), forwarder, newTestCatalogSourceWith(provider, forward.NewClient(time.Second), time.Second, 1<<20, logger), newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.RenderDescriptors{}))
 
 	do := func(method, requestID string) (*http.Response, []byte) {
 		t.Helper()

@@ -121,6 +121,16 @@ The approved WebSocket transport retains `wsforward.Proxy` as its exported Go
 identifier; outside code references, call it the **WebSocket forwarder**.
 _Avoid_: proxy (unqualified), router
 
+**Upstream call**:
+The single authenticated request copilotd makes to GitHub Copilot on behalf of
+one inbound request — credential, base URL join, header policy, request-id
+correlation, bounded reading of the response, and failure classification,
+centrally governed across every transport and Endpoint. Lives in
+`internal/upstream`. Reading a bounded response body is part of the call;
+**interpreting** it is not — pumping, upgrading, decoding, and copying stay
+with the caller.
+_Avoid_: outbound request (unqualified), fetch.
+
 **Impersonation**:
 Presenting the request to Copilot as the VS Code Copilot client via a header set,
 so upstream client checks pass. The two version-bearing headers (`Editor-Version`;

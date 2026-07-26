@@ -1,27 +1,10 @@
 package wsforward
 
 import (
-	"context"
 	"encoding/base64"
-	"log/slog"
 	"net/http"
 	"strings"
-
-	"github.com/ningw42/copilotd/internal/logging"
 )
-
-func (p *Proxy) logUpstreamRequestID(ctx context.Context, header http.Header) {
-	requestID, ok := logging.RequestIDFrom(ctx)
-	if !ok {
-		return
-	}
-	upstreamRequestID := header.Get(requestIDHeader)
-	if upstreamRequestID == "" || upstreamRequestID == requestID {
-		return
-	}
-	p.logger.InfoContext(ctx, "upstream response correlation",
-		slog.String("upstream_request_id", upstreamRequestID))
-}
 
 func isWebSocketUpgrade(r *http.Request) bool {
 	if r.Method != http.MethodGet || !r.ProtoAtLeast(1, 1) ||

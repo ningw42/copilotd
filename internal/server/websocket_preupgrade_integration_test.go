@@ -47,8 +47,8 @@ func TestOpenAIWebSocketAuthAndReadinessRejectBeforeUpgrade(t *testing.T) {
 				Token:   "copilot-token",
 			}, test.ready)
 			logger := discardLogger(t)
-			forwarder := forward.New(provider, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
-			proxy := wsforward.New(provider, http.DefaultClient, time.Second, time.Second, 1<<20, nil, logger, wsforward.WsMetrics{})
+			forwarder := newTestForwarder(provider, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
+			proxy := wsforward.New(newTestWSCaller(provider, logger), http.DefaultClient, time.Second, time.Second, 1<<20, nil, logger, wsforward.WsMetrics{})
 			t.Cleanup(func() {
 				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 				defer cancel()
@@ -57,7 +57,7 @@ func TestOpenAIWebSocketAuthAndReadinessRejectBeforeUpgrade(t *testing.T) {
 				}
 			})
 
-			handler := newHandler(testAPIKey, provider, newTestReadyObservers(), forwarder, logger, NewStreamOutcomeCounter(), catalog.RenderDescriptors{}, proxy)
+			handler := newHandler(testAPIKey, provider, newTestReadyObservers(), forwarder, newTestCatalogSource(provider), logger, NewStreamOutcomeCounter(), catalog.RenderDescriptors{}, proxy)
 			downstream := httptest.NewServer(handler)
 			t.Cleanup(downstream.Close)
 

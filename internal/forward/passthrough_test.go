@@ -71,7 +71,7 @@ func TestPassthroughPreservesRawQueryAndForceQuery(t *testing.T) {
 				}))
 				defer upstream.Close()
 
-				f := New(readyStub(upstream.URL), NewClient(time.Second), time.Second, time.Second, time.Second, time.Second, 1, 1, nil)
+				f := newTestForwarder(readyStub(upstream.URL), NewClient(time.Second), time.Second, time.Second, time.Second, time.Second, 1, 1, nil)
 				req := httptest.NewRequest(method, tc.target, nil)
 				rec := newDeadlineRecorder()
 
@@ -120,7 +120,7 @@ func testPassthroughEnforcesRequestHeaderOwnership(t *testing.T, method string) 
 			Request:    r,
 		}, nil
 	})}
-	f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, time.Second, time.Second, 1, 1, nil)
+	f := newTestForwarder(readyStub("https://upstream.invalid"), client, time.Second, time.Second, time.Second, time.Second, 1, 1, nil)
 	req := httptest.NewRequest(method, "/models", nil)
 	req.Body = io.NopCloser(strings.NewReader(requestBody))
 	req.ContentLength = int64(len(requestBody))
@@ -204,7 +204,7 @@ func TestPassthroughLeavesAbsentAcceptEncodingAbsent(t *testing.T) {
 		gotValues = append([]string(nil), r.Header.Values("Accept-Encoding")...)
 		return &http.Response{StatusCode: http.StatusNoContent, Header: make(http.Header), Body: http.NoBody, Request: r}, nil
 	})}
-	f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, time.Second, time.Second, 1, 1, nil)
+	f := newTestForwarder(readyStub("https://upstream.invalid"), client, time.Second, time.Second, time.Second, time.Second, 1, 1, nil)
 
 	f.PassthroughHandler(endpoint.Models())(newDeadlineRecorder(), httptest.NewRequest(http.MethodGet, "/models", nil))
 
@@ -215,11 +215,12 @@ func TestPassthroughLeavesAbsentAcceptEncodingAbsent(t *testing.T) {
 
 func TestPassthroughHandlerMapsMethodAndRouteAndCopiesBasicResponse(t *testing.T) {
 	tests := []struct {
-		method   string
-		wantBody string
+		method            string
+		requestBodyLength int64
+		wantBody          string
 	}{
-		{method: http.MethodGet, wantBody: "opaque upstream body"},
-		{method: http.MethodHead, wantBody: ""},
+		{method: http.MethodGet, requestBodyLength: int64(len("request body larger than the one-byte inference cap")), wantBody: "opaque upstream body"},
+		{method: http.MethodHead, requestBodyLength: -1, wantBody: ""},
 	}
 
 	for _, tc := range tests {
@@ -239,8 +240,8 @@ func TestPassthroughHandlerMapsMethodAndRouteAndCopiesBasicResponse(t *testing.T
 				if r.URL.Path != "/models" {
 					t.Errorf("upstream Route = %q, want /models", r.URL.Path)
 				}
-				if r.ContentLength != int64(len(requestBody)) {
-					t.Errorf("upstream ContentLength = %d, want %d", r.ContentLength, len(requestBody))
+				if r.ContentLength != tc.requestBodyLength {
+					t.Errorf("upstream ContentLength = %d, want %d", r.ContentLength, tc.requestBodyLength)
 				}
 				body, err := io.ReadAll(r.Body)
 				if err != nil {
@@ -276,10 +277,10 @@ func TestPassthroughHandlerMapsMethodAndRouteAndCopiesBasicResponse(t *testing.T
 					panic("passthrough instantiated the shim onion")
 				},
 			}}
-			f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, time.Second, time.Second, 1, 1, registry)
+			f := newTestForwarder(readyStub("https://upstream.invalid"), client, time.Second, time.Second, time.Second, time.Second, 1, 1, registry)
 			req := httptest.NewRequest(tc.method, "/models", nil)
 			req.Body = inboundBody
-			req.ContentLength = int64(len(requestBody))
+			req.ContentLength = tc.requestBodyLength
 			req.Host = "client.example"
 			req.Header.Set("Host", "client-header.example")
 			req.Header.Set("Authorization", "Bearer inbound-api-key")
@@ -331,7 +332,7 @@ func TestSingleModelsPassthroughForwardsEachInboundMethodWithoutSSEProcessing(t 
 			Request: r,
 		}, nil
 	})}
-	f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, time.Nanosecond, time.Nanosecond, 1, 1, nil)
+	f := newTestForwarder(readyStub("https://upstream.invalid"), client, time.Second, time.Second, time.Nanosecond, time.Nanosecond, 1, 1, nil)
 	handler := f.PassthroughHandler(endpoint.Models())
 	tests := []struct {
 		method   string
@@ -371,7 +372,7 @@ func TestPassthroughCurrentFailureUsesGitHubCopilotRendererWithoutCallingUpstrea
 		clientCalls++
 		return nil, errors.New("must not be called")
 	})}
-	f := New(provider, client, time.Second, time.Second, time.Second, time.Second, 1, 1, nil)
+	f := newTestForwarder(provider, client, time.Second, time.Second, time.Second, time.Second, 1, 1, nil)
 	rec := newDeadlineRecorder()
 
 	f.PassthroughHandler(endpoint.Models())(rec, httptest.NewRequest(http.MethodHead, "/models", nil))
@@ -433,7 +434,7 @@ func TestPassthroughPreservesAuthoritativeResponses(t *testing.T) {
 						Request: r,
 					}, nil
 				})}
-			f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, time.Nanosecond, time.Nanosecond, 1, 1, nil)
+			f := newTestForwarder(readyStub("https://upstream.invalid"), client, time.Second, time.Second, time.Nanosecond, time.Nanosecond, 1, 1, nil)
 			rec := newDeadlineRecorder()
 			rec.Header().Set("X-Request-Id", "resolved-request-id")
 
@@ -488,7 +489,7 @@ func TestPassthroughTransportPreservesEncodedBytesAndFirstRedirect(t *testing.T)
 		}))
 		defer upstream.Close()
 
-		f := New(readyStub(upstream.URL), NewClient(time.Second), time.Second, time.Second, time.Second, time.Second, 1, 1, nil)
+		f := newTestForwarder(readyStub(upstream.URL), NewClient(time.Second), time.Second, time.Second, time.Second, time.Second, 1, 1, nil)
 		req := httptest.NewRequest(http.MethodGet, "/models", nil)
 		req.Header.Set("Accept-Encoding", "gzip")
 		rec := newDeadlineRecorder()
@@ -516,7 +517,7 @@ func TestPassthroughTransportPreservesEncodedBytesAndFirstRedirect(t *testing.T)
 		}))
 		defer upstream.Close()
 
-		f := New(readyStub(upstream.URL), NewClient(time.Second), time.Second, time.Second, time.Second, time.Second, 1, 1, nil)
+		f := newTestForwarder(readyStub(upstream.URL), NewClient(time.Second), time.Second, time.Second, time.Second, time.Second, 1, 1, nil)
 		rec := newDeadlineRecorder()
 		f.PassthroughHandler(endpoint.Models())(rec, httptest.NewRequest(http.MethodGet, "/models", nil))
 
@@ -547,7 +548,7 @@ func TestPassthroughDoesNotReplayModelsAfterResponseFailure(t *testing.T) {
 			defer upstream.Close()
 
 			client := NewClient(time.Second)
-			f := New(readyStub(upstream.URL), client, time.Second, time.Second, time.Second, time.Second, 1, 1, nil)
+			f := newTestForwarder(readyStub(upstream.URL), client, time.Second, time.Second, time.Second, time.Second, 1, 1, nil)
 			trace := &httptrace.ClientTrace{GotConn: func(info httptrace.GotConnInfo) {
 				transportAttempts.Add(1)
 				usedCachedConnection.Store(info.Reused)
@@ -636,7 +637,7 @@ func TestPassthroughReusesInjectedClientConnectionPool(t *testing.T) {
 			}}
 			req := httptest.NewRequest(http.MethodGet, "/models", nil)
 			req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
-			f := New(readyStub(upstream.URL), client, time.Second, time.Second, time.Second, time.Second, 1, 1, nil)
+			f := newTestForwarder(readyStub(upstream.URL), client, time.Second, time.Second, time.Second, time.Second, 1, 1, nil)
 			rec := newDeadlineRecorder()
 			f.PassthroughHandler(endpoint.Models())(rec, req)
 
@@ -712,7 +713,7 @@ func TestPassthroughPreHeaderFailuresUseLocalErrorPolicy(t *testing.T) {
 				calls++
 				return roundTrip(r)
 			})}
-			f := New(provider, client, time.Second, time.Second, time.Second, time.Second, 1, 1, nil)
+			f := newTestForwarder(provider, client, time.Second, time.Second, time.Second, time.Second, 1, 1, nil)
 			rec := newDeadlineRecorder()
 
 			f.PassthroughHandler(endpoint.Models())(rec, httptest.NewRequest(http.MethodHead, "/models", nil))
@@ -738,7 +739,7 @@ func TestPassthroughResponseHeaderTimeoutUsesConfiguredClient(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	f := New(readyStub(upstream.URL), NewClient(20*time.Millisecond), time.Second, time.Second, time.Second, time.Second, 1, 1, nil)
+	f := newTestForwarder(readyStub(upstream.URL), NewClient(20*time.Millisecond), time.Second, time.Second, time.Second, time.Second, 1, 1, nil)
 	rec := newDeadlineRecorder()
 	f.PassthroughHandler(endpoint.Models())(rec, httptest.NewRequest(http.MethodGet, "/models", nil))
 	<-upstreamStarted
@@ -753,7 +754,7 @@ func TestPassthroughPostCommitReadFailureCancelsThenClosesWithoutSynthesis(t *te
 	readErr := errors.New("upstream body failed")
 	body := &cancelAwareBody{chunks: [][]byte{[]byte("event: model.future\ndata: {\"opaque\":true}\n\n")}, terminal: readErr}
 	client := bodyClient(body, http.Header{"Content-Type": {"text/event-stream"}})
-	f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, time.Nanosecond, time.Nanosecond, 1, 1, nil)
+	f := newTestForwarder(readyStub("https://upstream.invalid"), client, time.Second, time.Second, time.Nanosecond, time.Nanosecond, 1, 1, nil)
 	rec := newDeadlineRecorder()
 
 	f.PassthroughHandler(endpoint.Models())(rec, httptest.NewRequest(http.MethodGet, "/models", nil))
@@ -768,7 +769,7 @@ func TestPassthroughPostCommitReadFailureCancelsThenClosesWithoutSynthesis(t *te
 func TestPassthroughOutboundTimeoutStopsCommittedRawBody(t *testing.T) {
 	body := &cancelAwareBody{chunks: [][]byte{[]byte("raw-prefix")}, blockAfterChunks: true}
 	client := bodyClient(body, http.Header{"Content-Type": {"application/octet-stream"}})
-	f := New(readyStub("https://upstream.invalid"), client, 20*time.Millisecond, time.Second, time.Nanosecond, time.Nanosecond, 1, 1, nil)
+	f := newTestForwarder(readyStub("https://upstream.invalid"), client, 20*time.Millisecond, time.Second, time.Nanosecond, time.Nanosecond, 1, 1, nil)
 	rec := newDeadlineRecorder()
 
 	f.PassthroughHandler(endpoint.Models())(rec, httptest.NewRequest(http.MethodGet, "/models", nil))
@@ -782,7 +783,7 @@ func TestPassthroughOutboundTimeoutStopsCommittedRawBody(t *testing.T) {
 func TestPassthroughWriteFailureCancelsAndClosesWithoutReplacement(t *testing.T) {
 	body := &cancelAwareBody{chunks: [][]byte{[]byte("model-response-data-must-not-be-logged")}}
 	client := bodyClient(body, http.Header{"Content-Type": {"application/json"}})
-	f := New(readyStub("https://upstream.invalid"), client, time.Second, 37*time.Second, time.Nanosecond, time.Nanosecond, 1, 1, nil)
+	f := newTestForwarder(readyStub("https://upstream.invalid"), client, time.Second, 37*time.Second, time.Nanosecond, time.Nanosecond, 1, 1, nil)
 	w := &failingResponseWriter{header: make(http.Header), writeErr: errors.New("client stopped reading")}
 	started := time.Now()
 
@@ -803,7 +804,7 @@ func TestPassthroughClientCancelStopsCopyAndReleasesBody(t *testing.T) {
 	prefixRead := make(chan struct{})
 	body := &cancelAwareBody{chunks: [][]byte{[]byte("client-visible-prefix")}, blockAfterChunks: true, firstRead: prefixRead}
 	client := bodyClient(body, http.Header{"Content-Type": {"application/json"}})
-	f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, time.Nanosecond, time.Nanosecond, 1, 1, nil)
+	f := newTestForwarder(readyStub("https://upstream.invalid"), client, time.Second, time.Second, time.Nanosecond, time.Nanosecond, 1, 1, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	req := httptest.NewRequest(http.MethodGet, "/models", nil).WithContext(ctx)
 	rec := newDeadlineRecorder()
@@ -835,7 +836,7 @@ func TestPassthroughSSELookingBodyDoesNotUseSSETimers(t *testing.T) {
 	const raw = "data: {\"unknown\":true}\n\nnot even a complete SSE frame"
 	body := &cancelAwareBody{chunks: [][]byte{[]byte(raw)}, delay: 30 * time.Millisecond}
 	client := bodyClient(body, http.Header{"Content-Type": {"text/event-stream"}})
-	f := New(readyStub("https://upstream.invalid"), client, time.Second, time.Second, time.Millisecond, time.Millisecond, 1, 1, nil)
+	f := newTestForwarder(readyStub("https://upstream.invalid"), client, time.Second, time.Second, time.Millisecond, time.Millisecond, 1, 1, nil)
 	rec := newDeadlineRecorder()
 
 	f.PassthroughHandler(endpoint.Models())(rec, httptest.NewRequest(http.MethodGet, "/models", nil))

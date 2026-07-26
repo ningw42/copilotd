@@ -160,7 +160,7 @@ func TestProxyReturnsBadGatewayBeforeAcceptWhenUpstreamDialIsRefused(t *testing.
 	if recorder.Code != http.StatusBadGateway {
 		t.Errorf("status = %d, want 502 before any downstream 101", recorder.Code)
 	}
-	const wantBody = `{"error":{"message":"could not reach the upstream WebSocket","type":"api_error","code":null,"param":null}}`
+	const wantBody = `{"error":{"message":"could not reach the upstream","type":"api_error","code":null,"param":null}}`
 	if got := recorder.Body.String(); got != wantBody {
 		t.Errorf("body = %q, want %q", got, wantBody)
 	}
@@ -187,7 +187,7 @@ func TestProxyReturnsGatewayTimeoutBeforeAcceptWhenUpstreamDialTimesOut(t *testi
 	if recorder.Code != http.StatusGatewayTimeout {
 		t.Errorf("status = %d, want 504 before any downstream 101", recorder.Code)
 	}
-	const wantBody = `{"error":{"message":"the upstream WebSocket handshake timed out","type":"api_error","code":null,"param":null}}`
+	const wantBody = `{"error":{"message":"the upstream request timed out","type":"api_error","code":null,"param":null}}`
 	if got := recorder.Body.String(); got != wantBody {
 		t.Errorf("body = %q, want %q", got, wantBody)
 	}
@@ -251,7 +251,7 @@ func TestProxyLogsUpstreamRequestIDFromSuccessfulHandshake(t *testing.T) {
 }
 
 func newPreupgradeTestProxy(provider identity.Provider, client *http.Client, dialTimeout time.Duration, logger *slog.Logger) *Proxy {
-	return New(provider, client, dialTimeout, time.Second, 1<<20, nil, logger, WsMetrics{})
+	return New(newTestCaller(provider, logger), client, dialTimeout, time.Second, 1<<20, nil, logger, WsMetrics{})
 }
 
 func shutdownPreupgradeTestProxy(t *testing.T, proxy *Proxy) {

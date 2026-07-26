@@ -59,7 +59,7 @@ func startPhase3CapstoneServerWithObservers(
 	}, true)
 	previousDefault := slog.Default()
 	slog.SetDefault(logger)
-	forwarder := forward.New(
+	forwarder := newTestForwarderWithLogger(
 		provider,
 		forward.NewClient(cfg.ResponseHeaderTimeout),
 		cfg.OutboundTimeout,
@@ -68,11 +68,12 @@ func startPhase3CapstoneServerWithObservers(
 		cfg.StreamKeepaliveInterval,
 		cfg.MaxRequestBytes,
 		cfg.MaxBufferedResponseBytes,
+		logger,
 		registry,
-		forward.WithLogger(logger),
-	)
+		forward.WithLogger(logger))
+
 	slog.SetDefault(previousDefault)
-	return startTestServer(t, server.New(cfg, logger, provider, newTestReadyObservers(), forwarder, newTestWSProxy(provider), outcomes, catalog.RenderDescriptors{})), forwarder
+	return startTestServer(t, server.New(cfg, logger, provider, newTestReadyObservers(), forwarder, newTestCatalogSource(provider), newTestWSProxy(provider), outcomes, catalog.RenderDescriptors{})), forwarder
 }
 
 type phase3BufferedTranscript struct {

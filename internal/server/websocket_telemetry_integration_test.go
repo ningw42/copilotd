@@ -70,14 +70,14 @@ func TestWebSocketTelemetryEmitsEstablishmentSessionAndAccessRecords(t *testing.
 
 	provider := readyStub(upstream.URL)
 	logger, logs := websocketTelemetryLogger(t)
-	forwarder := forward.New(provider, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
+	forwarder := newTestForwarder(provider, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 	accepts := NewWsAcceptCounter()
 	terminals := NewWsSessionTerminalCounter()
-	proxy := wsforward.New(provider, http.DefaultClient, time.Second, time.Second, 1<<20, nil, logger, wsforward.WsMetrics{
+	proxy := wsforward.New(newTestWSCaller(provider, logger), http.DefaultClient, time.Second, time.Second, 1<<20, nil, logger, wsforward.WsMetrics{
 		Accept:          accepts,
 		SessionTerminal: terminals,
 	})
-	base := startServer(t, New(testConfig(), logger, provider, newTestReadyObservers(), forwarder, proxy, NewStreamOutcomeCounter(), catalog.RenderDescriptors{}))
+	base := startServer(t, New(testConfig(), logger, provider, newTestReadyObservers(), forwarder, newTestCatalogSource(provider), proxy, NewStreamOutcomeCounter(), catalog.RenderDescriptors{}))
 
 	clientURL := "ws" + strings.TrimPrefix(base, "http") + "/openai/v1/responses"
 	client, response, err := websocket.Dial(context.Background(), clientURL, &websocket.DialOptions{
@@ -178,14 +178,14 @@ func TestWebSocketTelemetryEmitsEstablishmentSessionAndAccessRecords(t *testing.
 func TestWebSocketPreUpgradeFailureEmitsOnlyAccessRecord(t *testing.T) {
 	provider := readyStub("http://unused.invalid")
 	logger, logs := websocketTelemetryLogger(t)
-	forwarder := forward.New(provider, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
+	forwarder := newTestForwarder(provider, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 	accepts := NewWsAcceptCounter()
 	terminals := NewWsSessionTerminalCounter()
-	proxy := wsforward.New(provider, http.DefaultClient, time.Second, time.Second, 1<<20, nil, logger, wsforward.WsMetrics{
+	proxy := wsforward.New(newTestWSCaller(provider, logger), http.DefaultClient, time.Second, time.Second, 1<<20, nil, logger, wsforward.WsMetrics{
 		Accept:          accepts,
 		SessionTerminal: terminals,
 	})
-	base := startServer(t, New(testConfig(), logger, provider, newTestReadyObservers(), forwarder, proxy, NewStreamOutcomeCounter(), catalog.RenderDescriptors{}))
+	base := startServer(t, New(testConfig(), logger, provider, newTestReadyObservers(), forwarder, newTestCatalogSource(provider), proxy, NewStreamOutcomeCounter(), catalog.RenderDescriptors{}))
 
 	request, err := http.NewRequest(http.MethodGet, base+"/openai/v1/responses", nil)
 	if err != nil {
@@ -263,11 +263,11 @@ func TestAssembledServerRecoversPostUpgradeObserverPanicAndClosesBothSockets(t *
 		Token:   "private-copilot-token",
 	}, true)
 	logger, logs := websocketTelemetryLogger(t)
-	forwarder := forward.New(provider, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
-	proxy := wsforward.New(provider, http.DefaultClient, time.Second, time.Second, 1<<20, nil, logger, wsforward.WsMetrics{
+	forwarder := newTestForwarder(provider, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
+	proxy := wsforward.New(newTestWSCaller(provider, logger), http.DefaultClient, time.Second, time.Second, 1<<20, nil, logger, wsforward.WsMetrics{
 		Accept: panicOnEstablished{},
 	})
-	base := startServer(t, New(testConfig(), logger, provider, newTestReadyObservers(), forwarder, proxy, NewStreamOutcomeCounter(), catalog.RenderDescriptors{}))
+	base := startServer(t, New(testConfig(), logger, provider, newTestReadyObservers(), forwarder, newTestCatalogSource(provider), proxy, NewStreamOutcomeCounter(), catalog.RenderDescriptors{}))
 
 	clientURL := "ws" + strings.TrimPrefix(base, "http") + "/openai/v1/responses"
 	client, response, err := websocket.Dial(context.Background(), clientURL, &websocket.DialOptions{

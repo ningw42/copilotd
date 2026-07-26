@@ -28,7 +28,7 @@ const (
 // accessLog -> recover -> auth -> local readiness -> forward. /healthz and
 // /readyz are never gated by auth or readiness.
 // Invariant: catalog settings cross the render seam only through catalogs.
-func newHandler(apikey string, provider identity.Provider, observers ReadyObservers, fwd *forward.Forwarder, logger *slog.Logger, streamOutcomes StreamOutcomeObserver, catalogs catalog.RenderDescriptors, wsProxy *wsforward.Proxy) http.Handler {
+func newHandler(apikey string, provider identity.Provider, observers ReadyObservers, fwd *forward.Forwarder, source catalog.Source, logger *slog.Logger, streamOutcomes StreamOutcomeObserver, catalogs catalog.RenderDescriptors, wsProxy *wsforward.Proxy) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET "+healthPath, handleHealth)
 	mux.HandleFunc("GET "+readyPath, handleReady(provider, observers.Impersonation, observers.Caches))
@@ -48,7 +48,7 @@ func newHandler(apikey string, provider identity.Provider, observers ReadyObserv
 	registerWS := func(ep endpoint.WSForward) { mount(ep, wsProxy.Handler(ep)) }
 	registerPassthrough := func(ep endpoint.Passthrough) { mount(ep, fwd.PassthroughHandler(ep)) }
 	registerCatalog := func(ep endpoint.Catalog, rendering catalog.Rendering) {
-		mount(ep, catalog.Handler(ep, rendering, fwd))
+		mount(ep, catalog.Handler(ep, rendering, source))
 	}
 
 	registerForward(endpoint.AnthropicMessages())

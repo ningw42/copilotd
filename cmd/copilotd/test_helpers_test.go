@@ -7,9 +7,12 @@ import (
 	"time"
 
 	"github.com/ningw42/copilotd/internal/cache"
+	"github.com/ningw42/copilotd/internal/forward"
 	"github.com/ningw42/copilotd/internal/identity"
 	"github.com/ningw42/copilotd/internal/impersonation"
 	"github.com/ningw42/copilotd/internal/server"
+	"github.com/ningw42/copilotd/internal/shim"
+	"github.com/ningw42/copilotd/internal/upstream"
 	"github.com/ningw42/copilotd/internal/wsforward"
 )
 
@@ -34,15 +37,26 @@ func newTestReadyObservers() server.ReadyObservers {
 	}
 }
 
+func newTestForwarderWithLogger(provider identity.Provider, client *http.Client, outboundTimeout, writeTimeout, streamIdleTimeout, streamKeepaliveInterval time.Duration, maxRequestBytes, maxBufferedResponseBytes int64, logger *slog.Logger, registry shim.Registry, options ...forward.Option) *forward.Forwarder {
+	caller := upstream.New(provider, client, outboundTimeout, maxBufferedResponseBytes, logger)
+	return forward.New(caller, outboundTimeout, writeTimeout, streamIdleTimeout, streamKeepaliveInterval, maxRequestBytes, registry, options...)
+}
+
+func newTestCatalogSource(provider identity.Provider) *upstream.Caller {
+	return upstream.New(provider, forward.NewClient(time.Second), time.Second, 1<<20, slog.Default())
+}
+
 func newTestWSProxy(provider identity.Provider) *wsforward.Proxy {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	caller := upstream.New(provider, http.DefaultClient, time.Second, 1<<20, logger)
 	return wsforward.New(
-		provider,
+		caller,
 		http.DefaultClient,
 		time.Second,
 		time.Second,
 		1<<20,
 		nil,
-		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		logger,
 		wsforward.WsMetrics{},
 	)
 }

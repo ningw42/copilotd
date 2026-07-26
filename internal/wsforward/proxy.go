@@ -5,14 +5,10 @@ package wsforward
 import (
 	"bufio"
 	"context"
-	"errors"
-	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptrace"
-	"net/url"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -20,17 +16,15 @@ import (
 	"github.com/coder/websocket"
 	"github.com/ningw42/copilotd/internal/apierror"
 	"github.com/ningw42/copilotd/internal/endpoint"
-	"github.com/ningw42/copilotd/internal/identity"
 	"github.com/ningw42/copilotd/internal/logging"
 	"github.com/ningw42/copilotd/internal/shim"
+	"github.com/ningw42/copilotd/internal/upstream"
 )
-
-const requestIDHeader = "X-Request-Id"
 
 // Proxy owns the upstream dial and both message pumps for Responses WebSocket
 // sessions.
 type Proxy struct {
-	provider        identity.Provider
+	caller          *upstream.Caller
 	dialClient      *http.Client
 	dialTimeout     time.Duration
 	writeTimeout    time.Duration
@@ -104,11 +98,11 @@ func (w *capturingResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) 
 
 // New returns a WebSocket Proxy with an independently cancellable session
 // context. dialClient must not impose a total client timeout.
-func New(provider identity.Provider, dialClient *http.Client, dialTimeout, writeTimeout time.Duration, maxMessageBytes int64, registry shim.Registry, logger *slog.Logger, metrics WsMetrics) *Proxy {
+func New(caller *upstream.Caller, dialClient *http.Client, dialTimeout, writeTimeout time.Duration, maxMessageBytes int64, registry shim.Registry, logger *slog.Logger, metrics WsMetrics) *Proxy {
 	baseCtx, cancel := context.WithCancel(context.Background())
 	drainCtx, cancelDrain := context.WithCancel(context.Background())
 	return &Proxy{
-		provider:        provider,
+		caller:          caller,
 		dialClient:      dialClient,
 		dialTimeout:     dialTimeout,
 		writeTimeout:    writeTimeout,
@@ -149,17 +143,17 @@ func (p *Proxy) Handler(ep endpoint.WSForward) http.HandlerFunc {
 			return
 		}
 
-		cred, err := p.provider.Current(phaseCtx)
-		if err != nil {
-			apierror.Write(w, surface, apierror.NotReady, "no upstream credential available")
-			p.metrics.observeAccept(AcceptRejected)
-			return
-		}
-
-		upstreamURL, err := websocketURL(cred.BaseURL, upstreamRoute, r.URL.RawQuery, r.URL.ForceQuery)
-		if err != nil {
-			apierror.Write(w, surface, apierror.BadGateway, "could not build the upstream WebSocket URL")
-			p.metrics.observeAccept(AcceptDialFailed)
+		outReq, failure := p.caller.Prepare(phaseCtx, upstream.Call{
+			Route:        upstreamRoute,
+			Method:       http.MethodGet,
+			Query:        r.URL.RawQuery,
+			ForceQuery:   r.URL.ForceQuery,
+			ClientHeader: r.Header,
+		})
+		if failure != nil {
+			if failure.RespondTo(w, surface) {
+				p.metrics.observeAccept(acceptOutcome(failure))
+			}
 			return
 		}
 		dialCtx, cancelDial := context.WithTimeout(phaseCtx, p.dialTimeout)
@@ -169,27 +163,31 @@ func (p *Proxy) Handler(ep endpoint.WSForward) http.HandlerFunc {
 				upstreamTransport = rawNetworkConn(info.Conn)
 			},
 		})
-		upstream, response, err := websocket.Dial(dialCtx, upstreamURL, &websocket.DialOptions{
+		upstreamConn, response, err := websocket.Dial(dialCtx, outReq.URL.String(), &websocket.DialOptions{
 			HTTPClient:      p.dialClient,
-			HTTPHeader:      upstreamHeaders(cred, r.Context()),
+			HTTPHeader:      outReq.Header,
 			CompressionMode: websocket.CompressionDisabled,
 		})
+		dialDeadlineExceeded := dialCtx.Err() == context.DeadlineExceeded
 		cancelDial()
 		if err != nil {
 			if response != nil && response.Body != nil {
 				_ = response.Body.Close()
 			}
-			if errors.Is(err, context.DeadlineExceeded) || errors.Is(dialCtx.Err(), context.DeadlineExceeded) {
-				apierror.Write(w, surface, apierror.GatewayTimeout, "the upstream WebSocket handshake timed out")
-				p.metrics.observeAccept(AcceptDialFailed)
-				return
+			// Preserve a deadline that fired before cleanup; otherwise classify
+			// against the still-live phase context so cancelDial cannot manufacture
+			// ClientGone for an ordinary execution error.
+			classificationCtx := phaseCtx
+			if dialDeadlineExceeded {
+				classificationCtx = dialCtx
 			}
-			apierror.Write(w, surface, apierror.BadGateway, "could not reach the upstream WebSocket")
-			p.metrics.observeAccept(AcceptDialFailed)
+			if p.caller.Classify(classificationCtx, err).RespondTo(w, surface) {
+				p.metrics.observeAccept(AcceptDialFailed)
+			}
 			return
 		}
-		p.logUpstreamRequestID(r.Context(), response.Header)
-		defer func() { _ = upstream.CloseNow() }()
+		p.caller.Correlate(r.Context(), response.Header)
+		defer func() { _ = upstreamConn.CloseNow() }()
 
 		clientResponseWriter := &capturingResponseWriter{ResponseWriter: w}
 		client, err := websocket.Accept(clientResponseWriter, r, &websocket.AcceptOptions{
@@ -219,17 +217,24 @@ func (p *Proxy) Handler(ep endpoint.WSForward) http.HandlerFunc {
 
 		session := &activeSession{
 			client:            client,
-			upstream:          upstream,
+			upstream:          upstreamConn,
 			clientTransport:   clientResponseWriter.transport,
 			upstreamTransport: upstreamTransport,
 		}
 		p.trackSession(session)
 		defer p.untrackSession(session)
 
-		result := runSession(p.drainCtx, p.baseCtx, client, upstream, p.writeTimeout, p.maxMessageBytes, chain.WSClientAdapter(), chain.WSServerAdapter())
+		result := runSession(p.drainCtx, p.baseCtx, client, upstreamConn, p.writeTimeout, p.maxMessageBytes, chain.WSClientAdapter(), chain.WSServerAdapter())
 		p.logSession(requestID, time.Since(sessionStart), result)
 		p.metrics.observeSessionTerminal(result.terminal)
 	}
+}
+
+func acceptOutcome(failure *upstream.Failure) AcceptOutcome {
+	if failure.Kind == apierror.NotReady {
+		return AcceptRejected
+	}
+	return AcceptDialFailed
 }
 
 func (p *Proxy) logSession(requestID string, duration time.Duration, result sessionResult) {
@@ -276,49 +281,6 @@ func (p *Proxy) forceCloseSessions() {
 	for _, session := range sessions {
 		session.forceClose()
 	}
-}
-
-func websocketURL(baseURL string, upstream endpoint.Route, rawQuery string, forceQuery bool) (string, error) {
-	u, err := url.Parse(baseURL)
-	if err != nil {
-		return "", fmt.Errorf("parse upstream base URL: %w", err)
-	}
-	switch u.Scheme {
-	case "https":
-		u.Scheme = "wss"
-	case "http":
-		u.Scheme = "ws"
-	default:
-		return "", fmt.Errorf("unsupported upstream URL scheme %q", u.Scheme)
-	}
-	u.Path = strings.TrimSuffix(u.Path, "/") + string(upstream)
-	u.RawPath = ""
-	u.RawQuery = rawQuery
-	u.ForceQuery = forceQuery
-	return u.String(), nil
-}
-
-func upstreamHeaders(cred identity.Credential, ctx context.Context) http.Header {
-	header := make(http.Header, len(cred.Headers)+2)
-	for name, values := range cred.Headers {
-		if isHandshakeHeader(name) {
-			continue
-		}
-		for _, value := range values {
-			header.Add(name, value)
-		}
-	}
-	header.Set("Authorization", "Bearer "+cred.Token)
-	if requestID, ok := logging.RequestIDFrom(ctx); ok {
-		header.Set(requestIDHeader, requestID)
-	}
-	return header
-}
-
-func isHandshakeHeader(name string) bool {
-	return strings.EqualFold(name, "Connection") ||
-		strings.EqualFold(name, "Upgrade") ||
-		strings.HasPrefix(strings.ToLower(name), "sec-websocket-")
 }
 
 // StartDrain makes subsequent upgrade attempts fail before any upstream work.

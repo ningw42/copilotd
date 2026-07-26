@@ -582,14 +582,16 @@ func TestProxySnapshotsRegistryAndBuildsFreshContextualChainPerSession(t *testin
 			})
 		},
 	}}
+	provider := identity.NewStatic(identity.Credential{BaseURL: upstream.URL, Token: "copilot-token"}, true)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	proxy := New(
-		identity.NewStatic(identity.Credential{BaseURL: upstream.URL, Token: "copilot-token"}, true),
+		newTestCaller(provider, logger),
 		http.DefaultClient,
 		time.Second,
 		time.Second,
 		1<<20,
 		registry,
-		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		logger,
 		WsMetrics{},
 	)
 	defer func() {
@@ -682,14 +684,16 @@ func TestProxyShutdownCancelsRunningClientTransformAndSiblingPump(t *testing.T) 
 		close(upstreamClosed)
 	}))
 	defer upstream.Close()
+	provider := identity.NewStatic(identity.Credential{BaseURL: upstream.URL, Token: "copilot-token"}, true)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	proxy := New(
-		identity.NewStatic(identity.Credential{BaseURL: upstream.URL, Token: "copilot-token"}, true),
+		newTestCaller(provider, logger),
 		http.DefaultClient,
 		time.Second,
 		time.Second,
 		1<<20,
 		registry,
-		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		logger,
 		WsMetrics{},
 	)
 	handlerDone := make(chan struct{})
@@ -1050,14 +1054,15 @@ func startSessionWithRegistryAndMetrics(t *testing.T, maxMessageBytes int64, wri
 		BaseURL: upstream.URL,
 		Token:   "copilot-token",
 	}, true)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	proxy := New(
-		provider,
+		newTestCaller(provider, logger),
 		&http.Client{Transport: http.DefaultTransport},
 		time.Second,
 		writeTimeout,
 		maxMessageBytes,
 		registry,
-		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		logger,
 		metrics,
 	)
 	sessionDone := make(chan struct{})

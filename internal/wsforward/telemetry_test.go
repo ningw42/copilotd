@@ -58,6 +58,7 @@ func TestProxyObservesOnePreUpgradeAcceptOutcome(t *testing.T) {
 		dialTimeout time.Duration
 		request     *http.Request
 		wantStatus  int
+		wantBody    string
 		want        AcceptOutcome
 	}{
 		{
@@ -102,6 +103,46 @@ func TestProxyObservesOnePreUpgradeAcceptOutcome(t *testing.T) {
 			wantStatus:  http.StatusGatewayTimeout,
 			want:        AcceptDialFailed,
 		},
+		{
+			name: "expired dial context wins over generic transport error",
+			provider: identity.NewStatic(identity.Credential{
+				BaseURL: "http://upstream.invalid",
+				Token:   "private-copilot-token",
+			}, true),
+			client: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+				<-request.Context().Done()
+				return nil, errors.New("generic transport failure after deadline")
+			})},
+			dialTimeout: 5 * time.Millisecond,
+			request:     validUpgradeRequest(),
+			wantStatus:  http.StatusGatewayTimeout,
+			wantBody:    `{"error":{"message":"the upstream request timed out","type":"api_error","code":null,"param":null}}`,
+			want:        AcceptDialFailed,
+		},
+		{
+			name: "ordinary upstream execution error is a dial failure",
+			provider: identity.NewStatic(identity.Credential{
+				BaseURL: "http://upstream.invalid",
+				Token:   "private-copilot-token",
+			}, true),
+			client: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return nil, errors.New("connection refused")
+			})},
+			request:    validUpgradeRequest(),
+			wantStatus: http.StatusBadGateway,
+			want:       AcceptDialFailed,
+		},
+		{
+			name: "wrongly schemed upstream URL is a dial failure",
+			provider: identity.NewStatic(identity.Credential{
+				BaseURL: "ftp://upstream.invalid",
+				Token:   "private-copilot-token",
+			}, true),
+			request:    validUpgradeRequest(),
+			wantStatus: http.StatusBadGateway,
+			wantBody:   `{"error":{"message":"could not reach the upstream","type":"api_error","code":null,"param":null}}`,
+			want:       AcceptDialFailed,
+		},
 	}
 
 	for _, test := range tests {
@@ -115,14 +156,15 @@ func TestProxyObservesOnePreUpgradeAcceptOutcome(t *testing.T) {
 				dialTimeout = time.Second
 			}
 			observed := &recordingWsMetrics{}
+			logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
 			proxy := New(
-				test.provider,
+				newTestCaller(test.provider, logger),
 				client,
 				dialTimeout,
 				time.Second,
 				1<<20,
 				nil,
-				slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+				logger,
 				WsMetrics{Accept: observed, SessionTerminal: observed},
 			)
 			t.Cleanup(func() {
@@ -138,6 +180,9 @@ func TestProxyObservesOnePreUpgradeAcceptOutcome(t *testing.T) {
 
 			if recorder.Code != test.wantStatus {
 				t.Errorf("status = %d, want %d", recorder.Code, test.wantStatus)
+			}
+			if test.wantBody != "" && recorder.Body.String() != test.wantBody {
+				t.Errorf("body = %q, want %q", recorder.Body.String(), test.wantBody)
 			}
 			accepts, terminals := observed.snapshot()
 			if len(accepts) != 1 || accepts[0] != test.want {
@@ -628,7 +673,7 @@ func startTelemetrySessionWithRegistry(t *testing.T, logger *slog.Logger, observ
 		Token:   "private-copilot-token",
 	}, true)
 	proxy := New(
-		provider,
+		newTestCaller(provider, logger),
 		http.DefaultClient,
 		time.Second,
 		time.Second,

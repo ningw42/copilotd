@@ -230,7 +230,8 @@ type Caller struct {
 
 // Do executes call and returns the upstream response, or one classified failure.
 // ctx is used verbatim — Do never derives a child — so the caller keeps sole
-// authority over cancellation and over any post-response deadline.
+// authority over cancellation and over any post-response deadline. A successful
+// response body retains that request context for ReadBounded classification.
 func (c *Caller) Do(ctx context.Context, call Call) (*http.Response, *Failure)
 
 // Buffered executes call and reads the whole body under the buffered cap. It
@@ -249,7 +250,8 @@ func (c *Caller) Classify(ctx context.Context, err error) *Failure
 func (c *Caller) Correlate(ctx context.Context, header http.Header)
 
 // ReadBounded reads body under the Caller's configured cap — the form every call
-// site uses, so the cap has exactly one owner.
+// site uses, so the cap has exactly one owner. A body returned by Do retains its
+// request context, so cancellation-aware classification happens here.
 func (c *Caller) ReadBounded(body io.Reader) ([]byte, *Failure)
 
 // ReadBounded reads body under max. It is the pure primitive the tables drive;
@@ -277,13 +279,15 @@ call)`, so the body is bound to `inner`, and only then is
 `time.AfterFunc(c.outboundTimeout, …)` armed. That ordering is what makes the
 stalled-read test meaningful rather than accidentally green.
 
-**A failed buffered read consults the context before it answers.** `ReadBounded`
-stays context-free — it is the low-level primitive — and `Buffered`, which holds
-the context, decides what the failure meant:
+**A failed buffered read consults the context before it answers.** The free
+`ReadBounded` stays context-free as the low-level primitive. `Do` binds each
+successful response body to the request context, and `Caller.ReadBounded`
+inspects that context and its cause before returning its already-classified
+`Failure`; `Buffered` and `forward` therefore share the same decision:
 
-| `context.Cause(inner)` | result |
+| bound context cause | result |
 |---|---|
-| the outbound-timeout sentinel | `GatewayTimeout` |
+| `context.DeadlineExceeded`, set by the body consumer's post-response timer | `GatewayTimeout` |
 | `context.Canceled`, propagated from the inbound request | `ClientGone` |
 | neither | `BadGateway`, read failure |
 
@@ -386,9 +390,13 @@ copy disappears. Each tail keeps what is genuinely its own: the
 `cancel()`-before-`Body.Close()` ordering and its comment, the outbound timer,
 `CopyResponseHeaders`, the HEAD check, and the `io.Copy` through `sse.NewWriter`.
 
-`forward`'s buffered branch becomes `f.caller.ReadBounded(resp.Body)` plus
-`failure.RespondTo`, and `Forwarder` drops its `maxBufferedResponseBytes` field,
-so the cap is read from the one place that owns it.
+`forward` creates a cancel-cause context before `Do`. Only after the response
+arrives does a non-SSE path arm its post-response timer with
+`context.DeadlineExceeded`; the SSE path still passes an ordinary cancel func to
+`sse.Pump` and has no total-duration timer. The buffered branch becomes
+`f.caller.ReadBounded(resp.Body)` plus `failure.RespondTo`, and `Forwarder` drops
+its `maxBufferedResponseBytes` field, so the cap is read from the one place that
+owns it.
 
 ### `catalog.Handler`
 
@@ -396,7 +404,8 @@ so the cap is read from the one place that owns it.
 `stubFetcher` is today:
 
 ```go
-// Source fetches one current Copilot model catalog as bounded bytes.
+// Source performs one upstream call for the current Copilot model Catalog and
+// returns its bounded bytes.
 type Source interface {
 	Buffered(ctx context.Context, call upstream.Call) (int, []byte, *upstream.Failure)
 }
@@ -438,9 +447,14 @@ upstreamConn, response, err := websocket.Dial(dialCtx, outReq.URL.String(),
 		HTTPHeader:      outReq.Header,
 		CompressionMode: websocket.CompressionDisabled,
 	})
+dialDeadlineExceeded := dialCtx.Err() == context.DeadlineExceeded
 cancelDial()
 if err != nil {
-	if p.caller.Classify(dialCtx, err).RespondTo(w, surface) {
+	classificationCtx := phaseCtx
+	if dialDeadlineExceeded {
+		classificationCtx = dialCtx
+	}
+	if p.caller.Classify(classificationCtx, err).RespondTo(w, surface) {
 		p.metrics.observeAccept(AcceptDialFailed)
 	}
 	return
@@ -453,6 +467,16 @@ bounded by the dial timeout today and must not become so. `acceptOutcome` maps
 `NotReady` → `AcceptRejected` and everything else → `AcceptDialFailed`,
 preserving today's split between a credential rejection and a dial failure; the
 metric vocabulary stays in `wsforward`, where it belongs.
+
+After the dial returns, the handler captures whether `dialCtx` had already
+expired before calling `cancelDial`; cleanup must not manufacture a `ClientGone`
+classification. The dial's returned `err` often preserves a deadline, but a
+transport may return a generic error after its context expires. The
+belt-and-braces rule therefore classifies against the deadline-bearing
+`dialCtx` only when that pre-cleanup state was `DeadlineExceeded`; otherwise it
+uses the still-live `phaseCtx`, which preserves inbound cancellation without
+mistaking explicit dial cleanup for client departure. `Classify` keeps timeout
+precedence over cancellation.
 
 `wsforward.websocketURL` is **deleted, not shrunk**. `websocket.Dial` accepts an
 `https://` URL directly, rewriting the scheme itself, so `outReq.URL.String()` is
@@ -565,7 +589,8 @@ a stalled read classified as a timeout via the cancel cause rather than as a rea
 failure; **a read failing because the parent context was cancelled classified as
 `ClientGone`, not as a read failure** — the case that makes deleting
 `catalog/handler.go:37` safe. `Caller.ReadBounded` and the free `ReadBounded`
-agree on every row.
+agree on every context-free row; the Caller form additionally classifies the
+context bound to a body returned by `Do`.
 
 Migrations:
 

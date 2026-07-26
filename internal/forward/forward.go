@@ -1,8 +1,8 @@
 // Package forward is copilotd's dumb upstream forwarder: it moves a request to
 // GitHub Copilot and copies the response back with minimal interpretation. It is
-// deliberately Copilot-agnostic — it sees only the identity.Credential seam
-// (base URL, bearer token, impersonation headers) and never learns how that
-// credential was minted. Inference requests use the bounded shim/SSE path;
+// deliberately Copilot-agnostic — it sees only the shared upstream Caller and
+// never learns how its credential was minted. Inference requests use the
+// bounded shim/SSE path;
 // support requests use a focused streaming passthrough path. Both rewrite
 // headers by a fixed denylist and copy upstream responses body-verbatim. Only
 // copilotd-originated signals are synthesized via apierror.
@@ -13,10 +13,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
-	"math"
 	"mime"
 	"net/http"
 	"strconv"
@@ -24,37 +22,28 @@ import (
 	"time"
 
 	"github.com/ningw42/copilotd/internal/apierror"
-	"github.com/ningw42/copilotd/internal/catalog"
 	"github.com/ningw42/copilotd/internal/endpoint"
-	"github.com/ningw42/copilotd/internal/identity"
-	"github.com/ningw42/copilotd/internal/logging"
 	"github.com/ningw42/copilotd/internal/shim"
 	"github.com/ningw42/copilotd/internal/sse"
+	"github.com/ningw42/copilotd/internal/upstream"
 )
 
-// requestIDHeader carries copilotd's resolved correlation id onto the upstream
-// request. It mirrors the inbound header name and is kept local so forward does
-// not import server (which would be a cycle).
-const requestIDHeader = "X-Request-Id"
-
 // Forwarder forwards inbound Surface endpoint requests upstream. Its dependencies
-// are injected so it stays Copilot-agnostic and unit-testable: the credential
-// Provider, the outbound HTTP client, the per-request context deadline, the
-// inbound and buffered-response body caps, and the ordered shim registry.
+// are injected so it stays Copilot-agnostic and unit-testable: the shared
+// upstream Caller, the per-request context deadline, the inbound body cap, and
+// the ordered shim registry.
 type Forwarder struct {
-	provider                 identity.Provider
-	client                   *http.Client
-	outboundTimeout          time.Duration
-	writeTimeout             time.Duration
-	streamIdleTimeout        time.Duration
-	streamKeepaliveInterval  time.Duration
-	clock                    sse.Clock
-	fallbacks                *sse.FallbackCounter
-	logger                   *slog.Logger
-	suppressedShimErrors     *sse.SuppressedShimErrorCounter
-	maxRequestBytes          int64
-	maxBufferedResponseBytes int64
-	registry                 shim.Registry
+	caller                  *upstream.Caller
+	outboundTimeout         time.Duration
+	writeTimeout            time.Duration
+	streamIdleTimeout       time.Duration
+	streamKeepaliveInterval time.Duration
+	clock                   sse.Clock
+	fallbacks               *sse.FallbackCounter
+	logger                  *slog.Logger
+	suppressedShimErrors    *sse.SuppressedShimErrorCounter
+	maxRequestBytes         int64
+	registry                shim.Registry
 }
 
 // Option configures an optional Forwarder dependency.
@@ -71,22 +60,20 @@ func WithLogger(logger *slog.Logger) Option {
 }
 
 // New builds a Forwarder from its injected dependencies.
-func New(provider identity.Provider, client *http.Client, outboundTimeout, writeTimeout, streamIdleTimeout, streamKeepaliveInterval time.Duration, maxRequestBytes, maxBufferedResponseBytes int64, registry shim.Registry, options ...Option) *Forwarder {
+func New(caller *upstream.Caller, outboundTimeout, writeTimeout, streamIdleTimeout, streamKeepaliveInterval time.Duration, maxRequestBytes int64, registry shim.Registry, options ...Option) *Forwarder {
 	registry = append(shim.Registry(nil), registry...)
 	f := &Forwarder{
-		provider:                 provider,
-		client:                   client,
-		outboundTimeout:          outboundTimeout,
-		writeTimeout:             writeTimeout,
-		streamIdleTimeout:        streamIdleTimeout,
-		streamKeepaliveInterval:  streamKeepaliveInterval,
-		clock:                    sse.RealClock{},
-		fallbacks:                sse.NewFallbackCounter(),
-		logger:                   slog.Default(),
-		suppressedShimErrors:     sse.NewSuppressedShimErrorCounter(),
-		maxRequestBytes:          maxRequestBytes,
-		maxBufferedResponseBytes: maxBufferedResponseBytes,
-		registry:                 registry,
+		caller:                  caller,
+		outboundTimeout:         outboundTimeout,
+		writeTimeout:            writeTimeout,
+		streamIdleTimeout:       streamIdleTimeout,
+		streamKeepaliveInterval: streamKeepaliveInterval,
+		clock:                   sse.RealClock{},
+		fallbacks:               sse.NewFallbackCounter(),
+		logger:                  slog.Default(),
+		suppressedShimErrors:    sse.NewSuppressedShimErrorCounter(),
+		maxRequestBytes:         maxRequestBytes,
+		registry:                registry,
 	}
 	for _, configure := range options {
 		configure(f)
@@ -127,14 +114,14 @@ func NewClient(responseHeaderTimeout time.Duration) *http.Client {
 // Anthropic requests are forwarded without a peek; the OpenAI surface peeks
 // only background:true, which remains unsupported.
 func (f *Forwarder) Handler(ep endpoint.HTTPForward) http.HandlerFunc {
-	upstream := ep.Upstream()
+	upstreamRoute := ep.Upstream()
 	surface := ep.Surface()
 	return func(w http.ResponseWriter, r *http.Request) {
 		body, ok := f.readBody(w, r, surface)
 		if !ok {
 			return
 		}
-		chain := f.registry.NewChain(r.Context(), surface, upstream)
+		chain := f.registry.NewChain(r.Context(), surface, upstreamRoute)
 		header, body, err := chain.RunRequest(r.Context(), r.URL.RawQuery, r.Header, body)
 		if err != nil {
 			writeShimError(w, surface, err)
@@ -153,47 +140,26 @@ func (f *Forwarder) Handler(ep endpoint.HTTPForward) http.HandlerFunc {
 // deliberately bypasses request peeking, body caps, shims, and SSE
 // classification. The inbound request method is preserved upstream.
 func (f *Forwarder) PassthroughHandler(ep endpoint.Passthrough) http.HandlerFunc {
-	upstream := ep.Upstream()
+	upstreamRoute := ep.Upstream()
 	surface := ep.Surface()
 	return func(w http.ResponseWriter, r *http.Request) {
-		cred, err := f.provider.Current(r.Context())
-		if err != nil {
-			apierror.Write(w, surface, apierror.NotReady, "no upstream credential available")
-			return
-		}
-
 		ctx, cancel := context.WithCancel(r.Context())
 		defer cancel()
 
-		outboundBody := r.Body
-		if outboundBody == nil || outboundBody == http.NoBody {
-			// net/http transparently retries bodyless GET and HEAD requests after
-			// some failures on reused connections. Preserve an empty body on the
-			// wire while making this request explicitly single-attempt.
-			outboundBody = &singleAttemptBody{ReadCloser: http.NoBody}
-		}
-		outReq, err := http.NewRequestWithContext(ctx, r.Method, cred.BaseURL+string(upstream), outboundBody)
-		if err != nil {
-			apierror.Write(w, surface, apierror.BadGateway, "could not build the upstream request")
+		resp, failure := f.caller.Do(ctx, upstream.Call{
+			Route:                  upstreamRoute,
+			Method:                 r.Method,
+			Query:                  r.URL.RawQuery,
+			ForceQuery:             r.URL.ForceQuery,
+			ClientHeader:           r.Header,
+			Body:                   r.Body,
+			ContentLength:          r.ContentLength,
+			AcceptIdentityEncoding: false,
+		})
+		if failure != nil {
+			failure.RespondTo(w, surface)
 			return
 		}
-		outReq.URL.RawQuery = r.URL.RawQuery
-		outReq.URL.ForceQuery = r.URL.ForceQuery
-		outReq.ContentLength = r.ContentLength
-		outReq.Header = authenticatedOutboundHeaders(r, cred)
-		resp, err := f.client.Do(outReq)
-		if err != nil {
-			switch {
-			case errors.Is(r.Context().Err(), context.Canceled):
-				return
-			case errors.Is(err, context.DeadlineExceeded):
-				apierror.Write(w, surface, apierror.GatewayTimeout, "the upstream request timed out")
-			default:
-				apierror.Write(w, surface, apierror.BadGateway, "could not reach the upstream")
-			}
-			return
-		}
-		f.logUpstreamRequestID(r.Context(), resp.Header)
 		// A committed response can only be terminated, never replaced. Cancel
 		// upstream work before closing its body so every post-commit exit path
 		// releases a body whose Close may itself wait for cancellation.
@@ -205,75 +171,13 @@ func (f *Forwarder) PassthroughHandler(ep endpoint.Passthrough) http.HandlerFunc
 		outboundTimer := time.AfterFunc(f.outboundTimeout, cancel)
 		defer outboundTimer.Stop()
 
-		copyResponseHeaders(w.Header(), resp.Header)
+		upstream.CopyResponseHeaders(w.Header(), resp.Header)
 		w.WriteHeader(resp.StatusCode)
 		if r.Method == http.MethodHead {
 			return
 		}
 		_, _ = io.Copy(sse.NewWriter(w, f.writeTimeout, time.Now), resp.Body)
 	}
-}
-
-// FetchModels obtains the current account-authorized Copilot model Catalog as
-// one bounded, buffered response. The Forwarder deliberately does not decode or
-// reshape the body; callers own any provider-shaped representation.
-func (f *Forwarder) FetchModels(parent context.Context, upstream endpoint.Route) (int, []byte, error) {
-	cred, err := f.provider.Current(parent)
-	if err != nil {
-		return 0, nil, fmt.Errorf("%w: %v", catalog.ErrNoCredential, err)
-	}
-
-	ctx, cancel := context.WithCancelCause(parent)
-	outReq, err := http.NewRequestWithContext(ctx, http.MethodGet, cred.BaseURL+string(upstream), &singleAttemptBody{ReadCloser: http.NoBody})
-	if err != nil {
-		cancel(nil)
-		return 0, nil, fmt.Errorf("%w: %v", catalog.ErrBuildUpstream, err)
-	}
-	outReq.Header = authenticatedOutboundHeaders(outReq, cred)
-	outReq.Header.Set("Accept-Encoding", "identity")
-
-	resp, err := f.client.Do(outReq)
-	if err != nil {
-		cancel(nil)
-		if errors.Is(err, context.DeadlineExceeded) {
-			return 0, nil, fmt.Errorf("%w: %v", catalog.ErrUpstreamTimeout, err)
-		}
-		return 0, nil, fmt.Errorf("%w: %v", catalog.ErrUpstreamUnreachable, err)
-	}
-	f.logUpstreamRequestID(parent, resp.Header)
-	defer func() {
-		cancel(nil)
-		_ = resp.Body.Close()
-	}()
-
-	timeoutCause := errors.New("models fetch outbound timeout")
-	outboundTimer := time.AfterFunc(f.outboundTimeout, func() { cancel(timeoutCause) })
-	defer outboundTimer.Stop()
-
-	reader := io.Reader(resp.Body)
-	if f.maxBufferedResponseBytes < math.MaxInt64 {
-		reader = io.LimitReader(resp.Body, f.maxBufferedResponseBytes+1)
-	}
-	body, err := io.ReadAll(reader)
-	if err != nil {
-		if cause := context.Cause(ctx); errors.Is(cause, timeoutCause) || errors.Is(cause, context.DeadlineExceeded) {
-			return 0, nil, fmt.Errorf("%w: %v", catalog.ErrUpstreamTimeout, err)
-		}
-		return 0, nil, fmt.Errorf("%w: %v", catalog.ErrUpstreamRead, err)
-	}
-	if int64(len(body)) > f.maxBufferedResponseBytes {
-		return 0, nil, fmt.Errorf("%w: upstream response body exceeds the maximum allowed size", catalog.ErrUpstreamRead)
-	}
-	return resp.StatusCode, body, nil
-}
-
-var _ catalog.Fetcher = (*Forwarder)(nil)
-
-// singleAttemptBody differs from http.NoBody only in identity. Its non-nil Body
-// and nil GetBody make Go's Transport treat an otherwise bodyless GET or HEAD as
-// non-replayable; Transport's empty-body probe still emits no body on the wire.
-type singleAttemptBody struct {
-	io.ReadCloser
 }
 
 func writeShimError(w http.ResponseWriter, surface endpoint.Surface, err error) {
@@ -315,61 +219,47 @@ func peekBackground(body []byte) bool {
 	return p.Background != nil && *p.Background
 }
 
-// forward mints/reads the credential, builds the outbound request with the
-// original bytes and the rewritten headers, calls upstream under the inbound
-// cancellation context and response-header bound, and copies the response back
-// verbatim. Failures originated by copilotd are classified into 502/504 (and a client
-// disconnect is swallowed — the caller has already left).
+// forward performs one upstream call with the original bytes and rewritten
+// headers, then copies the response back verbatim. Copilotd-originated failures
+// are rendered through the call's classification (and a client disconnect is
+// swallowed because the caller has already left).
 func (f *Forwarder) forward(w http.ResponseWriter, r *http.Request, header http.Header, body []byte, ep endpoint.HTTPForward, chain *shim.Chain) {
-	upstream := ep.Upstream()
+	upstreamRoute := ep.Upstream()
 	surface := ep.Surface()
-	cred, err := f.provider.Current(r.Context())
-	if err != nil {
-		// A request-time credential failure (the real Manager's on-demand mint
-		// failing, #11) leaves nothing to forward; surface the temporary absence
-		// without changing service-wide readiness. The static stub normally does
-		// not error here.
-		apierror.Write(w, surface, apierror.NotReady, "no upstream credential available")
+	ctx, cancelCause := context.WithCancelCause(r.Context())
+	cancel := context.CancelFunc(func() { cancelCause(context.Canceled) })
+
+	resp, failure := f.caller.Do(ctx, upstream.Call{
+		Route:                  upstreamRoute,
+		Method:                 http.MethodPost,
+		Query:                  r.URL.RawQuery,
+		ForceQuery:             r.URL.ForceQuery,
+		ClientHeader:           header,
+		Body:                   bytes.NewReader(body),
+		ContentLength:          int64(len(body)),
+		AcceptIdentityEncoding: true,
+	})
+	if failure != nil {
+		cancel()
+		failure.RespondTo(w, surface)
 		return
 	}
-
-	ctx, cancel := context.WithCancel(r.Context())
-	defer cancel()
-
-	outReq, err := http.NewRequestWithContext(ctx, http.MethodPost, cred.BaseURL+string(upstream), bytes.NewReader(body))
-	if err != nil {
-		apierror.Write(w, surface, apierror.BadGateway, "could not build the upstream request")
-		return
-	}
-	outReq.URL.RawQuery = r.URL.RawQuery
-	outReq.URL.ForceQuery = r.URL.ForceQuery
-	headerRequest := *r
-	headerRequest.Header = header
-	outReq.Header = outboundHeaders(&headerRequest, cred)
-
-	resp, err := f.client.Do(outReq)
-	if err != nil {
-		switch {
-		case errors.Is(r.Context().Err(), context.Canceled):
-			// The client disconnected; deriving ctx from r.Context() already
-			// cancelled the upstream call, and there is no one left to answer.
-			return
-		case errors.Is(err, context.DeadlineExceeded):
-			apierror.Write(w, surface, apierror.GatewayTimeout, "the upstream request timed out")
-		default:
-			apierror.Write(w, surface, apierror.BadGateway, "could not reach the upstream")
-		}
-		return
-	}
-	f.logUpstreamRequestID(r.Context(), resp.Header)
-	defer func() { _ = resp.Body.Close() }()
+	// A committed response can only be terminated, never replaced. Cancel
+	// upstream work before closing its body so every exit path releases a body
+	// whose Close may itself wait for cancellation.
+	defer func() {
+		cancel()
+		_ = resp.Body.Close()
+	}()
 
 	// A synchronous completion keeps the existing total-duration backstop. SSE
 	// responses deliberately do not have a total-duration cap.
 	eventStream := ep.AllowsSSE() && isEventStream(resp.Header.Get("Content-Type"))
 	var outboundTimer *time.Timer
 	if !eventStream {
-		outboundTimer = time.AfterFunc(f.outboundTimeout, cancel)
+		outboundTimer = time.AfterFunc(f.outboundTimeout, func() {
+			cancelCause(context.DeadlineExceeded)
+		})
 		defer outboundTimer.Stop()
 	}
 
@@ -381,14 +271,14 @@ func (f *Forwarder) forward(w http.ResponseWriter, r *http.Request, header http.
 		resp.Header.Del("Content-Encoding")
 	}
 	preludeHeader := make(http.Header)
-	copyResponseHeaders(preludeHeader, resp.Header)
+	upstream.CopyResponseHeaders(preludeHeader, resp.Header)
 	status, preludeHeader, err := chain.RunPrelude(r.Context(), resp.StatusCode, preludeHeader)
 	if err != nil {
 		writeShimError(w, surface, err)
 		return
 	}
 	if eventStream {
-		copyResponseHeaders(w.Header(), preludeHeader)
+		upstream.CopyResponseHeaders(w.Header(), preludeHeader)
 		w.Header().Del("Content-Length")
 		w.WriteHeader(status)
 		policy := streamPolicy(ep.Surface(), f.writeTimeout, f.streamIdleTimeout, f.streamKeepaliveInterval, f.clock, f.fallbacks.Increment)
@@ -404,22 +294,14 @@ func (f *Forwarder) forward(w http.ResponseWriter, r *http.Request, header http.
 		return
 	}
 	if !chain.HasBufferedTransformer() || !identityContentEncoding(resp.Header) {
-		copyResponseHeaders(w.Header(), preludeHeader)
+		upstream.CopyResponseHeaders(w.Header(), preludeHeader)
 		w.WriteHeader(status)
 		_, _ = io.Copy(sse.NewWriter(w, f.writeTimeout, time.Now), resp.Body)
 		return
 	}
-	reader := io.Reader(resp.Body)
-	if f.maxBufferedResponseBytes < math.MaxInt64 {
-		reader = io.LimitReader(resp.Body, f.maxBufferedResponseBytes+1)
-	}
-	buffered, err := io.ReadAll(reader)
-	if err != nil {
-		apierror.Write(w, surface, apierror.BadGateway, "could not read the upstream response")
-		return
-	}
-	if int64(len(buffered)) > f.maxBufferedResponseBytes {
-		apierror.Write(w, surface, apierror.PayloadTooLarge, "upstream response body exceeds the maximum allowed size")
+	buffered, failure := f.caller.ReadBounded(resp.Body)
+	if failure != nil {
+		failure.RespondTo(w, surface)
 		return
 	}
 	buffered, err = chain.RunBuffered(r.Context(), buffered)
@@ -428,22 +310,9 @@ func (f *Forwarder) forward(w http.ResponseWriter, r *http.Request, header http.
 		return
 	}
 	preludeHeader.Set("Content-Length", strconv.Itoa(len(buffered)))
-	copyResponseHeaders(w.Header(), preludeHeader)
+	upstream.CopyResponseHeaders(w.Header(), preludeHeader)
 	w.WriteHeader(status)
 	_, _ = sse.NewWriter(w, f.writeTimeout, time.Now).Write(buffered)
-}
-
-func (f *Forwarder) logUpstreamRequestID(ctx context.Context, header http.Header) {
-	requestID, ok := logging.RequestIDFrom(ctx)
-	if !ok {
-		return
-	}
-	upstreamRequestID := header.Get(requestIDHeader)
-	if upstreamRequestID == "" || upstreamRequestID == requestID {
-		return
-	}
-	f.logger.InfoContext(ctx, "upstream response correlation",
-		slog.String("upstream_request_id", upstreamRequestID))
 }
 
 func identityContentEncoding(header http.Header) bool {
@@ -489,102 +358,4 @@ func streamPolicy(surface endpoint.Surface, writeTimeout, streamIdleTimeout, str
 		Clock:             clock,
 		OnFallback:        onFallback,
 	}
-}
-
-// hopByHop is the standard set of connection-scoped headers a proxy must not
-// forward in either direction. Names are in http.CanonicalHeaderKey form
-// (note "Te" is the canonical form of "TE").
-var hopByHop = map[string]bool{
-	"Connection":          true,
-	"Keep-Alive":          true,
-	"Proxy-Authenticate":  true,
-	"Proxy-Authorization": true,
-	"Te":                  true,
-	"Trailer":             true,
-	"Transfer-Encoding":   true,
-	"Upgrade":             true,
-}
-
-// requestStrip is hopByHop plus the headers copilotd must never leak upstream:
-// the inbound API key (both schemes), the client Host, and the recomputed
-// Content-Length.
-var requestStrip = withExtra(hopByHop, "Authorization", "X-Api-Key", "Host", "Content-Length")
-
-// responseStrip also suppresses Copilot's request id: the outer server
-// middleware has already installed copilotd's resolved correlation value.
-var responseStrip = withExtra(hopByHop, requestIDHeader)
-
-func withExtra(base map[string]bool, extra ...string) map[string]bool {
-	m := make(map[string]bool, len(base)+len(extra))
-	for k := range base {
-		m[k] = true
-	}
-	for _, k := range extra {
-		m[http.CanonicalHeaderKey(k)] = true
-	}
-	return m
-}
-
-// outboundHeaders builds the inference request headers and forces identity
-// response encoding on top of the shared authenticated-header policy.
-func outboundHeaders(r *http.Request, cred identity.Credential) http.Header {
-	out := authenticatedOutboundHeaders(r, cred)
-	out.Set("Accept-Encoding", "identity")
-	return out
-}
-
-// authenticatedOutboundHeaders copies every inbound header except the strip-set
-// (and any header named in Connection), then replaces credentials,
-// impersonation, and correlation values. cred.Headers is copied onto a fresh map
-// and never mutated.
-func authenticatedOutboundHeaders(r *http.Request, cred identity.Credential) http.Header {
-	out := make(http.Header, len(r.Header))
-	conn := connectionTokens(r.Header)
-	for name, vals := range r.Header {
-		cn := http.CanonicalHeaderKey(name)
-		if requestStrip[cn] || conn[cn] {
-			continue
-		}
-		out[cn] = append([]string(nil), vals...)
-	}
-	out.Set("Authorization", "Bearer "+cred.Token)
-	for name, vals := range cred.Headers {
-		out[http.CanonicalHeaderKey(name)] = append([]string(nil), vals...)
-	}
-	if id, ok := logging.RequestIDFrom(r.Context()); ok {
-		out.Set(requestIDHeader, id)
-	}
-	return out
-}
-
-// copyResponseHeaders copies response headers minus the response strip-set (and
-// any named in the upstream Connection header) downstream verbatim.
-func copyResponseHeaders(dst, src http.Header) {
-	conn := connectionTokens(src)
-	for name, vals := range src {
-		cn := http.CanonicalHeaderKey(name)
-		if responseStrip[cn] || conn[cn] {
-			continue
-		}
-		for _, v := range vals {
-			dst.Add(cn, v)
-		}
-	}
-}
-
-// connectionTokens returns the set of header names listed in the Connection
-// header, which are themselves hop-by-hop for this message.
-func connectionTokens(h http.Header) map[string]bool {
-	var tokens map[string]bool
-	for _, v := range h.Values("Connection") {
-		for _, tok := range strings.Split(v, ",") {
-			if name := strings.TrimSpace(tok); name != "" {
-				if tokens == nil {
-					tokens = make(map[string]bool)
-				}
-				tokens[http.CanonicalHeaderKey(name)] = true
-			}
-		}
-	}
-	return tokens
 }

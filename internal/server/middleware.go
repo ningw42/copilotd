@@ -10,9 +10,8 @@ import (
 	"github.com/ningw42/copilotd/internal/forward"
 	"github.com/ningw42/copilotd/internal/logging"
 	"github.com/ningw42/copilotd/internal/sse"
+	"github.com/ningw42/copilotd/internal/upstream"
 )
-
-const requestIDHeader = "X-Request-Id"
 
 // requestID resolves the correlation id — honoring a well-formed inbound value,
 // otherwise generating one — stores it in the request context (so logs pick it
@@ -20,8 +19,8 @@ const requestIDHeader = "X-Request-Id"
 // even a panic-produced response still carries it.
 func requestID(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		id := logging.ResolveRequestID(r.Header.Get(requestIDHeader))
-		w.Header().Set(requestIDHeader, id)
+		id := logging.ResolveRequestID(r.Header.Get(upstream.RequestIDHeader))
+		w.Header().Set(upstream.RequestIDHeader, id)
 		ctx := logging.WithRequestID(r.Context(), id)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})

@@ -49,7 +49,7 @@ func phase4LogLinesContaining(logOutput string, fragments ...string) []string {
 
 func startPhase4Server(t *testing.T, cfg config.ServeConfig, provider identity.Provider, logger *slog.Logger) string {
 	t.Helper()
-	forwarder := forward.New(
+	forwarder := newTestForwarderWithLogger(
 		provider,
 		forward.NewClient(cfg.ResponseHeaderTimeout),
 		cfg.OutboundTimeout,
@@ -58,10 +58,11 @@ func startPhase4Server(t *testing.T, cfg config.ServeConfig, provider identity.P
 		cfg.StreamKeepaliveInterval,
 		cfg.MaxRequestBytes,
 		cfg.MaxBufferedResponseBytes,
+		logger,
 		configuredShimRegistry(cfg),
-		forward.WithLogger(logger),
-	)
-	return startTestServer(t, server.New(cfg, logger, provider, newTestReadyObservers(), forwarder, newTestWSProxy(provider), server.NewStreamOutcomeCounter(), catalog.RenderDescriptors{}))
+		forward.WithLogger(logger))
+
+	return startTestServer(t, server.New(cfg, logger, provider, newTestReadyObservers(), forwarder, newTestCatalogSource(provider), newTestWSProxy(provider), server.NewStreamOutcomeCounter(), catalog.RenderDescriptors{}))
 }
 
 func performPhase4Request(

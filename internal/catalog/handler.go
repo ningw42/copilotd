@@ -1,7 +1,7 @@
 package catalog
 
 import (
-	"errors"
+	"context"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -9,6 +9,7 @@ import (
 	"github.com/ningw42/copilotd/internal/apierror"
 	"github.com/ningw42/copilotd/internal/cache"
 	"github.com/ningw42/copilotd/internal/endpoint"
+	"github.com/ningw42/copilotd/internal/upstream"
 )
 
 // Rendering bundles the request-time and representation concerns that stay
@@ -35,16 +36,25 @@ type CodexDescriptor struct {
 	RenderConfig CodexRenderConfig
 }
 
-// Handler fetches one current Copilot catalog and renders it for a Surface.
-// Credential/transport details stay behind the narrow Fetcher interface.
-func Handler(ep endpoint.Catalog, rendering Rendering, fetcher Fetcher) http.HandlerFunc {
+// Source performs one upstream call for the current Copilot model Catalog and
+// returns its bounded bytes.
+type Source interface {
+	Buffered(ctx context.Context, call upstream.Call) (int, []byte, *upstream.Failure)
+}
+
+var _ Source = (*upstream.Caller)(nil)
+
+// Handler obtains one current Copilot Catalog and renders it for a Surface.
+// Credential/transport details stay behind the narrow Source interface.
+func Handler(ep endpoint.Catalog, rendering Rendering, source Source) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		status, body, err := fetcher.FetchModels(r.Context(), ep.Upstream())
-		if err != nil {
-			if r.Context().Err() != nil {
-				return
-			}
-			writeFetchError(w, ep.Surface(), err)
+		status, body, failure := source.Buffered(r.Context(), upstream.Call{
+			Route:                  ep.Upstream(),
+			Method:                 http.MethodGet,
+			AcceptIdentityEncoding: true,
+		})
+		if failure != nil {
+			failure.RespondTo(w, ep.Surface())
 			return
 		}
 		if status != http.StatusOK {
@@ -106,15 +116,4 @@ func servesCodexShape(ep endpoint.Catalog, rendering Rendering, r *http.Request)
 		(rendering.Codex.RenderConfig.AutoReviewModel != "" ||
 			len(rendering.Codex.RenderConfig.AutoReviewModelOverrides) > 0 ||
 			rendering.Codex.RenderConfig.OverrideLimits)
-}
-
-func writeFetchError(w http.ResponseWriter, surface endpoint.Surface, err error) {
-	switch {
-	case errors.Is(err, ErrNoCredential):
-		apierror.Write(w, surface, apierror.NotReady, "no upstream credential available")
-	case errors.Is(err, ErrUpstreamTimeout):
-		apierror.Write(w, surface, apierror.GatewayTimeout, "the upstream request timed out")
-	default:
-		apierror.Write(w, surface, apierror.BadGateway, "could not fetch the upstream models catalog")
-	}
 }

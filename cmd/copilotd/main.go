@@ -28,6 +28,7 @@ import (
 	"github.com/ningw42/copilotd/internal/logging"
 	"github.com/ningw42/copilotd/internal/server"
 	"github.com/ningw42/copilotd/internal/shim"
+	"github.com/ningw42/copilotd/internal/upstream"
 	"github.com/ningw42/copilotd/internal/wsforward"
 	"github.com/peterbourgon/ff/v4"
 	"github.com/peterbourgon/ff/v4/ffhelp"
@@ -353,11 +354,13 @@ func runBoundServe(ctx context.Context, cfg config.ServeConfig, logger *slog.Log
 	}
 
 	registry := configuredShimRegistry(cfg)
-	fwd := forward.New(mgr, forward.NewClient(cfg.ResponseHeaderTimeout), cfg.OutboundTimeout, cfg.WriteTimeout, cfg.StreamIdleTimeout, cfg.StreamKeepaliveInterval, cfg.MaxRequestBytes, cfg.MaxBufferedResponseBytes, registry, forward.WithLogger(logger))
+	forwardClient := forward.NewClient(cfg.ResponseHeaderTimeout)
+	caller := upstream.New(mgr, forwardClient, cfg.OutboundTimeout, cfg.MaxBufferedResponseBytes, logger)
+	fwd := forward.New(caller, cfg.OutboundTimeout, cfg.WriteTimeout, cfg.StreamIdleTimeout, cfg.StreamKeepaliveInterval, cfg.MaxRequestBytes, registry, forward.WithLogger(logger))
 	wsDialClient := &http.Client{Transport: &http.Transport{Proxy: http.ProxyFromEnvironment}}
 	wsAccepts := server.NewWsAcceptCounter()
 	wsTerminals := server.NewWsSessionTerminalCounter()
-	wsProxy := wsforward.New(mgr, wsDialClient, cfg.WebSocketHandshakeTimeout, cfg.WriteTimeout, cfg.MaxRequestBytes, registry, logger, wsforward.WsMetrics{
+	wsProxy := wsforward.New(caller, wsDialClient, cfg.WebSocketHandshakeTimeout, cfg.WriteTimeout, cfg.MaxRequestBytes, registry, logger, wsforward.WsMetrics{
 		Accept:          wsAccepts,
 		SessionTerminal: wsTerminals,
 	})
@@ -366,7 +369,7 @@ func runBoundServe(ctx context.Context, cfg config.ServeConfig, logger *slog.Log
 	return server.New(cfg, logger, mgr, server.ReadyObservers{
 		Impersonation: imp,
 		Caches:        cacheRegistry,
-	}, fwd, wsProxy, streamOutcomes, catalogs).Run(ctx, ln)
+	}, fwd, caller, wsProxy, streamOutcomes, catalogs).Run(ctx, ln)
 }
 
 // runServeStartup performs the ordered background startup sequence. The cache
