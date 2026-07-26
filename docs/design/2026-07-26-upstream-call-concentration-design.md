@@ -1,4 +1,4 @@
-# Concentrate the upstream call in `internal/upstream`
+# Concentrate upstream-call policy in `internal/upstream`
 
 **Status:** proposed
 **Date:** 2026-07-26
@@ -8,10 +8,11 @@
 copilotd's outbound half — acquire the credential, build the upstream URL and
 header set, execute, correlate the upstream request id, classify the failure — is
 written four times, once per call site, and the copies have drifted into
-behavioural differences. This design concentrates that work into one
-dependency-light package, `internal/upstream`, whose boundary is exactly *"I have
-an Endpoint and a body" → "I have an upstream response or a classified failure."*
-The four call sites keep only their transport-specific tail.
+behavioural differences. This design concentrates the shared policy and the work
+that composes cleanly into one dependency-light package, `internal/upstream`.
+It is the authority for the shared policy on the path from *"I have an Endpoint
+and a body"* to *"I have an upstream response or a classified failure"*; call
+sites keep transport-specific execution where necessary and their response tail.
 
 Three of the drifts are live defects and are fixed here, not preserved: the
 WebSocket transport silently discards every inbound client header that the HTTP
@@ -103,11 +104,11 @@ forwarder to a rendering package, in the opposite direction from
 
 ## Goals
 
-- One module owns everything between "I have an Endpoint and a body" and "I have
-  an upstream response or a classified failure."
-- One header policy for every upstream call, transport-uniform, in one file.
-- One failure classifier and one response step, inseparable, so a missing branch
-  is impossible rather than merely unlikely.
+- One module governs the shared policy between "I have an Endpoint and a body"
+  and "I have an upstream response or a classified failure."
+- One centrally governed header policy for every upstream call, in one file.
+- One failure classifier and one response step, inseparable, so callers do not
+  maintain separate branch sets.
 - Remove the `forward` → `catalog` import and `catalog`'s parallel error enum.
 - Fix the WebSocket header drop and the missing client-cancel branch.
 - Leave the module's interface as the test surface: the header policy and the
@@ -131,13 +132,15 @@ forwarder to a rendering package, in the opposite direction from
 ## The concept
 
 An **upstream call** is the single authenticated request copilotd makes to
-GitHub Copilot on behalf of one inbound request. It has one credential source,
-one header policy, one correlation rule, and one failure vocabulary, regardless
-of which transport carries it or which endpoint occasioned it.
+GitHub Copilot on behalf of one inbound request. Its credential source, header
+policy, correlation rule, and failure vocabulary are centrally governed,
+regardless of which transport carries it or which endpoint occasioned it.
 
-The module owns the call. It does not own what the caller does with the response:
-pumping an SSE stream, upgrading a WebSocket, decoding a catalog, and copying
-bytes verbatim are four different tails on one shared trunk.
+The module owns the shared call policy and the HTTP execution that composes
+behind it. WebSocket dialing remains transport-specific. The module does not own
+what the caller does with the response: pumping an SSE stream, upgrading a
+WebSocket, decoding a catalog, and copying bytes verbatim are four different
+tails on one shared trunk.
 
 ## The `internal/upstream` package
 
@@ -216,7 +219,7 @@ on a field preserves the information for logs without risking it on the wire.
 ### `Caller`
 
 ```go
-// Caller performs copilotd's authenticated calls to GitHub Copilot.
+// Caller applies copilotd's shared upstream-call policy and executes HTTP calls.
 type Caller struct {
 	provider         identity.Provider
 	client           *http.Client
@@ -301,9 +304,8 @@ One file owns which headers cross which boundary in either direction.
 `copyResponseHeaders` all move here from `forward`; `CopyResponseHeaders` is
 exported for `forward`'s two response paths.
 
-`requestStrip` gains a `Sec-WebSocket-*` prefix rule, which makes the policy
-**transport-uniform** — no per-transport parameter, and no way for a WebSocket
-call and an HTTP call to disagree about a header again.
+`requestStrip` gains a `Sec-WebSocket-*` prefix rule, so both current transports
+consume the same centrally governed rule set without a per-transport parameter.
 
 Outbound order, applied once:
 
@@ -575,9 +577,9 @@ One new entry under *Surfaces & forwarding*, after **Forwarder**:
 > **Upstream call**:
 > The single authenticated request copilotd makes to GitHub Copilot on behalf of
 > one inbound request — credential, base URL join, header policy, request-id
-> correlation, and failure classification, uniform across every transport and
-> endpoint. Lives in `internal/upstream`; what a caller does with the response
-> (pump, upgrade, decode, copy) stays with the caller.
+> correlation, and failure classification, centrally governed across every
+> transport and endpoint. Lives in `internal/upstream`; what a caller does with
+> the response (pump, upgrade, decode, copy) stays with the caller.
 > _Avoid_: outbound request (unqualified), fetch.
 
 No other entry changes. **Forwarder** still names the dumb core; the upstream call
@@ -620,7 +622,7 @@ resolves for free.
   `ep.Upstream()`, never from a literal.
 - [ADR-0003](../adr/0003-synthesized-stream-terminals-off-band-origin.md) — the
   post-commit stream path this module deliberately does not touch.
-- ADR-0013 (**new, with this design**) — every authenticated call to GitHub
-  Copilot goes through `internal/upstream`.
+- ADR-0013 (**new, with this design**) — the shared policy for every authenticated
+  call to GitHub Copilot is governed by `internal/upstream`.
 - [Divergence ledger](../divergence-ledger.md) — unchanged; see
   [No divergence-ledger change](#no-divergence-ledger-change).
