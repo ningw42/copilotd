@@ -182,14 +182,24 @@ func RenderAnthropicWithConfig(models []Model, config AnthropicRenderConfig) ([]
 		FirstID *string          `json:"first_id"`
 		LastID  *string          `json:"last_id"`
 	}{Data: make([]anthropicModel, 0, len(models))}
+	var sourceIDByRenderedID map[string]string
+	if config.ModelIDNormalizationEnabled {
+		sourceIDByRenderedID = make(map[string]string, len(models))
+	}
 
 	for _, model := range models {
 		if model.ID == "" || model.Name == "" {
 			return nil, fmt.Errorf("Anthropic catalog model is missing id or name")
 		}
 		id := model.ID
-		if config.ModelIDNormalizationEnabled {
+		if config.ModelIDNormalizationEnabled && model.Vendor == "Anthropic" && strings.HasPrefix(model.ID, "claude-") {
 			id = strings.ReplaceAll(id, ".", "-")
+		}
+		if previousID, exists := sourceIDByRenderedID[id]; exists {
+			return nil, fmt.Errorf("Anthropic catalog model IDs %q and %q collide as %q after normalization", previousID, model.ID, id)
+		}
+		if sourceIDByRenderedID != nil {
+			sourceIDByRenderedID[id] = model.ID
 		}
 		envelope.Data = append(envelope.Data, anthropicModel{
 			ID:             id,

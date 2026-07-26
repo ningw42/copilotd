@@ -180,7 +180,7 @@ func startManagerBackedE2EServer(t *testing.T, cfg config.ServeConfig, logger *s
 	return startTestServer(t, server.New(cfg, logger, mgr, server.ReadyObservers{
 		Impersonation: imp,
 		Caches:        cacheRegistry,
-	}, fwd, newTestWSProxy(mgr), server.NewStreamOutcomeCounter(), catalog.CodexDescriptor{}))
+	}, fwd, newTestWSProxy(mgr), server.NewStreamOutcomeCounter(), catalog.RenderDescriptors{}))
 }
 
 // TestServeFirstRealCallEndToEnd is Phase 1.5's outcome: the REAL identity.Manager
@@ -214,7 +214,7 @@ func TestServeFirstRealCallEndToEnd(t *testing.T) {
 	base := startTestServer(t, server.New(cfg, logger, mgr, server.ReadyObservers{
 		Impersonation: imp,
 		Caches:        cacheRegistry,
-	}, fwd, newTestWSProxy(mgr), server.NewStreamOutcomeCounter(), catalog.CodexDescriptor{}))
+	}, fwd, newTestWSProxy(mgr), server.NewStreamOutcomeCounter(), catalog.RenderDescriptors{}))
 
 	assertImpersonation := func(t *testing.T) {
 		t.Helper()

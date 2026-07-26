@@ -72,7 +72,7 @@ func startPhase3CapstoneServerWithObservers(
 		forward.WithLogger(logger),
 	)
 	slog.SetDefault(previousDefault)
-	return startTestServer(t, server.New(cfg, logger, provider, newTestReadyObservers(), forwarder, newTestWSProxy(provider), outcomes, catalog.CodexDescriptor{})), forwarder
+	return startTestServer(t, server.New(cfg, logger, provider, newTestReadyObservers(), forwarder, newTestWSProxy(provider), outcomes, catalog.RenderDescriptors{})), forwarder
 }
 
 type phase3BufferedTranscript struct {

@@ -17,11 +17,6 @@ const (
 	readyPath  = "/readyz"
 )
 
-type catalogRenderConfigs struct {
-	Anthropic catalog.AnthropicRenderConfig
-	Codex     catalog.CodexDescriptor
-}
-
 // newHandler builds the router wrapped in the middleware chain
 // requestID -> accessLog -> recover (outermost to innermost). RequestID is
 // outermost so its context is visible to the inner two; recover is innermost so
@@ -33,7 +28,7 @@ type catalogRenderConfigs struct {
 // accessLog -> recover -> auth -> local readiness -> forward. /healthz and
 // /readyz are never gated by auth or readiness.
 // Invariant: catalog settings cross the render seam only through catalogs.
-func newHandler(apikey string, provider identity.Provider, observers ReadyObservers, fwd *forward.Forwarder, logger *slog.Logger, streamOutcomes StreamOutcomeObserver, catalogs catalogRenderConfigs, wsProxy *wsforward.Proxy) http.Handler {
+func newHandler(apikey string, provider identity.Provider, observers ReadyObservers, fwd *forward.Forwarder, logger *slog.Logger, streamOutcomes StreamOutcomeObserver, catalogs catalog.RenderDescriptors, wsProxy *wsforward.Proxy) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET "+healthPath, handleHealth)
 	mux.HandleFunc("GET "+readyPath, handleReady(provider, observers.Impersonation, observers.Caches))

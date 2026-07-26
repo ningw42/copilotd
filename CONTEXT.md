@@ -108,9 +108,10 @@ re-rendered in the real provider's `GET /v1/models` schema. Carries the provider
 the GitHub Copilot Surface's raw `/models` passthrough, which reshapes nothing.
 This is the **provider-shaped** catalog; the **Codex catalog** is the client-shaped
 counterpart.
-The Anthropic catalog can optionally normalize Copilot's dotted model IDs to
-Anthropic's hyphenated convention. This is an opt-in **Alteration** disabled by
-default; it changes only the provider-shaped catalog, not inference forwarding.
+The Anthropic catalog can optionally replace dots with hyphens in model IDs where
+Copilot reports `vendor:"Anthropic"` and the ID begins `claude-`. This is an
+opt-in **Alteration** disabled by default; all other model IDs stay verbatim, and
+it changes only the provider-shaped catalog, not inference forwarding.
 _Avoid_: model list (unqualified); models endpoint (that is the raw passthrough)
 
 **Forwarder**:

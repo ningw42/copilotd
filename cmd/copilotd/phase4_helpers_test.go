@@ -61,7 +61,7 @@ func startPhase4Server(t *testing.T, cfg config.ServeConfig, provider identity.P
 		configuredShimRegistry(cfg),
 		forward.WithLogger(logger),
 	)
-	return startTestServer(t, server.New(cfg, logger, provider, newTestReadyObservers(), forwarder, newTestWSProxy(provider), server.NewStreamOutcomeCounter(), catalog.CodexDescriptor{}))
+	return startTestServer(t, server.New(cfg, logger, provider, newTestReadyObservers(), forwarder, newTestWSProxy(provider), server.NewStreamOutcomeCounter(), catalog.RenderDescriptors{}))
 }
 
 func performPhase4Request(

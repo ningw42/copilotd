@@ -19,6 +19,13 @@ type Rendering struct {
 	Logger *slog.Logger
 }
 
+// RenderDescriptors contains the complete renderer-specific contracts projected
+// by the composition root. Its zero value preserves both provider-shaped catalogs.
+type RenderDescriptors struct {
+	Anthropic AnthropicRenderConfig
+	Codex     CodexDescriptor
+}
+
 // CodexDescriptor contains the opt-in gate and pure-render settings for the
 // OpenAI catalog's Codex client shape. A zero value preserves the provider-
 // shaped Phase 6a response.

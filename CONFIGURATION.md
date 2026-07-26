@@ -126,9 +126,10 @@ buffered-response shim; values must be positive.
 
 ### `--anthropic-catalog-model-id-normalization-enabled`
 
-Normalizes model IDs in the provider-shaped Anthropic catalog to Anthropic's
-hyphenated convention, for example `claude-opus-4.8` becomes
-`claude-opus-4-8`. The catalog's `first_id` and `last_id` use the same normalized
+Replaces dots with hyphens in provider-shaped Anthropic catalog IDs when Copilot
+reports `vendor:"Anthropic"` and the ID begins `claude-`; for example,
+`claude-opus-4.8` becomes `claude-opus-4-8`. Other vendors and non-Claude IDs
+remain verbatim. The catalog's `first_id` and `last_id` use the same normalized
 IDs. This setting affects only `/anthropic/v1/models`; inference requests and
 responses remain unchanged. Disabled by default, preserving Copilot's IDs.
 

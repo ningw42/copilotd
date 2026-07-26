@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/ningw42/copilotd/internal/catalog"
 	"github.com/ningw42/copilotd/internal/forward"
 	"github.com/ningw42/copilotd/internal/identity"
 	"github.com/ningw42/copilotd/internal/wsforward"
@@ -56,7 +57,7 @@ func TestOpenAIWebSocketAuthAndReadinessRejectBeforeUpgrade(t *testing.T) {
 				}
 			})
 
-			handler := newHandler(testAPIKey, provider, newTestReadyObservers(), forwarder, logger, NewStreamOutcomeCounter(), catalogRenderConfigs{}, proxy)
+			handler := newHandler(testAPIKey, provider, newTestReadyObservers(), forwarder, logger, NewStreamOutcomeCounter(), catalog.RenderDescriptors{}, proxy)
 			downstream := httptest.NewServer(handler)
 			t.Cleanup(downstream.Close)
 

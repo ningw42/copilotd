@@ -337,13 +337,18 @@ func runServe(ctx context.Context, flags *config.ServeFlags, lookupEnv func(stri
 // readiness or request admission.
 func runBoundServe(ctx context.Context, cfg config.ServeConfig, logger *slog.Logger, mgr *identity.Manager, imp *impersonation.Set, codexModels *cache.Value[[]byte], cacheRegistry *cache.Registry, ln net.Listener) error {
 	go runServeStartup(ctx, cacheRegistry, mgr, logger)
-	codex := catalog.CodexDescriptor{
-		Enabled: cfg.CodexCatalogEnabled,
-		Models:  codexModels,
-		RenderConfig: catalog.CodexRenderConfig{
-			AutoReviewModel:          cfg.CodexAutoReviewModel,
-			AutoReviewModelOverrides: cfg.CodexAutoReviewModelOverrides,
-			OverrideLimits:           cfg.CodexOverrideLimits,
+	catalogs := catalog.RenderDescriptors{
+		Anthropic: catalog.AnthropicRenderConfig{
+			ModelIDNormalizationEnabled: cfg.AnthropicCatalogModelIDNormalizationEnabled,
+		},
+		Codex: catalog.CodexDescriptor{
+			Enabled: cfg.CodexCatalogEnabled,
+			Models:  codexModels,
+			RenderConfig: catalog.CodexRenderConfig{
+				AutoReviewModel:          cfg.CodexAutoReviewModel,
+				AutoReviewModelOverrides: cfg.CodexAutoReviewModelOverrides,
+				OverrideLimits:           cfg.CodexOverrideLimits,
+			},
 		},
 	}
 
@@ -361,7 +366,7 @@ func runBoundServe(ctx context.Context, cfg config.ServeConfig, logger *slog.Log
 	return server.New(cfg, logger, mgr, server.ReadyObservers{
 		Impersonation: imp,
 		Caches:        cacheRegistry,
-	}, fwd, wsProxy, streamOutcomes, codex).Run(ctx, ln)
+	}, fwd, wsProxy, streamOutcomes, catalogs).Run(ctx, ln)
 }
 
 // runServeStartup performs the ordered background startup sequence. The cache

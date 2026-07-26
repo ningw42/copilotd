@@ -39,7 +39,7 @@ func TestAnthropicModelCatalogOverRealListener(t *testing.T) {
 		Headers: http.Header{"Copilot-Integration-Id": {"vscode-chat"}},
 	}, true)
 	forwarder := forward.New(provider, forward.NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
-	base := startServer(t, New(testConfig(), discardLogger(t), provider, newTestReadyObservers(), forwarder, newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.CodexDescriptor{}))
+	base := startServer(t, New(testConfig(), discardLogger(t), provider, newTestReadyObservers(), forwarder, newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.RenderDescriptors{}))
 
 	do := func(method, target, keyHeader, key string) (*http.Response, []byte) {
 		t.Helper()
@@ -139,9 +139,9 @@ func TestAnthropicModelCatalogNormalizesModelIDsWhenEnabled(t *testing.T) {
 		Headers: http.Header{"Copilot-Integration-Id": {"vscode-chat"}},
 	}, true)
 	forwarder := forward.New(provider, forward.NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
-	cfg := testConfig()
-	cfg.AnthropicCatalogModelIDNormalizationEnabled = true
-	base := startServer(t, New(cfg, discardLogger(t), provider, newTestReadyObservers(), forwarder, newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.CodexDescriptor{}))
+	base := startServer(t, New(testConfig(), discardLogger(t), provider, newTestReadyObservers(), forwarder, newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.RenderDescriptors{
+		Anthropic: catalog.AnthropicRenderConfig{ModelIDNormalizationEnabled: true},
+	}))
 
 	req, err := http.NewRequest(http.MethodGet, base+"/anthropic/v1/models", nil)
 	if err != nil {

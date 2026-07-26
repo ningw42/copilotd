@@ -58,15 +58,10 @@ type websocketDrainer interface {
 // readiness details, fwd drives the Surface endpoints, and streamOutcomes receives
 // the bounded stream terminal-outcome metric. The listener is supplied later to
 // Run, so main owns bind and the server owns serve/shutdown.
-// Invariant: catalog settings cross the render seam only through catalogRenderConfigs.
-func New(cfg config.ServeConfig, logger *slog.Logger, provider identity.Provider, observers ReadyObservers, fwd *forward.Forwarder, wsProxy *wsforward.Proxy, streamOutcomes StreamOutcomeObserver, codex catalog.CodexDescriptor) *Server {
+// Invariant: catalog settings cross the render seam only through catalogs, never through cfg.
+func New(cfg config.ServeConfig, logger *slog.Logger, provider identity.Provider, observers ReadyObservers, fwd *forward.Forwarder, wsProxy *wsforward.Proxy, streamOutcomes StreamOutcomeObserver, catalogs catalog.RenderDescriptors) *Server {
 	httpServer := &http.Server{
-		Handler: newHandler(cfg.APIKey, provider, observers, fwd, logger, streamOutcomes, catalogRenderConfigs{
-			Anthropic: catalog.AnthropicRenderConfig{
-				ModelIDNormalizationEnabled: cfg.AnthropicCatalogModelIDNormalizationEnabled,
-			},
-			Codex: codex,
-		}, wsProxy),
+		Handler:           newHandler(cfg.APIKey, provider, observers, fwd, logger, streamOutcomes, catalogs, wsProxy),
 		ReadHeaderTimeout: readHeaderTimeout,
 		ReadTimeout:       readTimeout,
 		WriteTimeout:      writeTimeout,

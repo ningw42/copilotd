@@ -28,6 +28,54 @@ func TestRenderAnthropicEmptyCatalogHasNullBoundaryIDs(t *testing.T) {
 	}
 }
 
+func TestRenderAnthropicNormalizesOnlyAnthropicClaudeModelIDs(t *testing.T) {
+	body, err := RenderAnthropicWithConfig([]Model{
+		{ID: "claude-opus-4.8", Name: "Claude Opus 4.8", Vendor: "Anthropic"},
+		{ID: "gemini-3.1-pro-preview", Name: "Gemini 3.1 Pro Preview", Vendor: "Google"},
+		{ID: "future.model", Name: "Future Model", Vendor: "Anthropic"},
+		{ID: "claude-future-4.9", Name: "Claude Future 4.9", Vendor: "Anthropic"},
+		{ID: "claude-sonnet-4.5", Name: "Claude Sonnet 4.5", Vendor: "Anthropic"},
+	}, AnthropicRenderConfig{ModelIDNormalizationEnabled: true})
+	if err != nil {
+		t.Fatalf("RenderAnthropicWithConfig() error = %v", err)
+	}
+	var got struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("decode Anthropic catalog: %v", err)
+	}
+	want := []string{
+		"claude-opus-4-8", "gemini-3.1-pro-preview", "future.model",
+		"claude-future-4-9", "claude-sonnet-4-5",
+	}
+	if len(got.Data) != len(want) {
+		t.Fatalf("data length = %d, want %d", len(got.Data), len(want))
+	}
+	for i, model := range got.Data {
+		if model.ID != want[i] {
+			t.Errorf("data[%d].id = %q, want %q", i, model.ID, want[i])
+		}
+	}
+}
+
+func TestRenderAnthropicRejectsNormalizedModelIDCollisions(t *testing.T) {
+	_, err := RenderAnthropicWithConfig([]Model{
+		{ID: "claude-opus-4.8", Name: "Claude Opus 4.8", Vendor: "Anthropic"},
+		{ID: "claude-opus-4-8", Name: "Claude Opus 4.8 Alias", Vendor: "Anthropic"},
+	}, AnthropicRenderConfig{ModelIDNormalizationEnabled: true})
+	if err == nil {
+		t.Fatal("RenderAnthropicWithConfig() error = nil, want normalized ID collision rejected")
+	}
+	for _, want := range []string{"claude-opus-4.8", "claude-opus-4-8", "collide"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %q, want %q context", err, want)
+		}
+	}
+}
+
 func TestRenderAnthropicMapsOnlyEvidenceBackedOptionalCapabilities(t *testing.T) {
 	models, err := Decode([]byte(`{
 		"unknown_top_level":"ignored",

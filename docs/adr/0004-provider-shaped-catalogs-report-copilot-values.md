@@ -13,10 +13,14 @@ because fabricating the provider's numbers would violate the no-fabrication rule
 
 One opt-in exception applies to Anthropic model-ID spelling. With
 `--anthropic-catalog-model-id-normalization-enabled=true`, the Anthropic catalog
-replaces dots in Copilot's IDs with hyphens (for example, `claude-opus-4.8` →
-`claude-opus-4-8`) and uses the normalized values for `first_id` and `last_id`.
-Live inference accepts both spellings and returns the hyphenated ID, so this is an
-evidence-backed Alteration rather than fabrication. The default remains `false`,
+replaces dots with hyphens only when Copilot identifies the model's vendor as
+`"Anthropic"` and its ID begins `claude-` (for example, `claude-opus-4.8` →
+`claude-opus-4-8`), then uses the same value for `first_id` and `last_id`. A
+[dated live probe](../research/2026-07-26-anthropic-model-id-aliases.md) through
+copilotd to GitHub Copilot verifies this spelling convention across the current
+Opus, Sonnet, and Haiku families. The vendor and family guards keep unrelated
+Surface-forwardable models verbatim; a normalized-ID collision fails rendering
+rather than emitting duplicate pagination keys. The default remains `false`,
 preserving Copilot's values, and inference forwarding is unchanged.
 
 ## Considered options
@@ -28,6 +32,10 @@ preserving Copilot's values, and inference forwarding is unchanged.
   upstream never sent.
 - **Schema-shaped, Copilot's values** (chosen) — the provider's schema, Copilot's
   values, and omission (not fabrication) where Copilot gives no basis.
+- **Static Claude alias table** — rejected because it freezes the models observed
+  today into feature code. Copilot can support or list a new Claude family without
+  a copilotd release; vendor-plus-`claude-` scoping applies the provider spelling
+  convention without rewriting another vendor's IDs.
 
 ## Consequences
 
@@ -47,7 +55,8 @@ The accepted, enumerated divergences from the genuine provider (design §5.5):
   OpenAI's `"openai"`/`"system"` convention.
 - List order is Copilot's `data[]` order, not "most recently released first."
 - When Anthropic model-ID normalization is enabled, the Anthropic catalog's IDs
-  use the provider's hyphenated spelling instead of Copilot's dotted spelling.
+  use Anthropic's hyphenated convention for `vendor:"Anthropic"` / `claude-`
+  models instead of the corresponding dotted Copilot spellings.
 
 Catalog membership is keyed on the wire-Surface, not vendor: `/openai/v1/models`
 lists every model forwardable on the Responses Surface, including non-OpenAI-vendor
