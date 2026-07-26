@@ -646,6 +646,55 @@ func TestShimResponsesItemIDStabilizerEnabledConfigPrecedence(t *testing.T) {
 	}
 }
 
+func TestAnthropicCatalogModelIDNormalizationEnabledConfigPrecedence(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "copilotd.toml")
+	if err := os.WriteFile(path, []byte("anthropic-catalog-model-id-normalization-enabled = true\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	tests := []struct {
+		name string
+		args []string
+		env  map[string]string
+		want bool
+	}{
+		{name: "default", want: false},
+		{name: "TOML overrides default", args: []string{"--config", path}, want: true},
+		{
+			name: "env overrides TOML",
+			args: []string{"--config", path},
+			env: map[string]string{
+				"COPILOTD_ANTHROPIC_CATALOG_MODEL_ID_NORMALIZATION_ENABLED": "false",
+			},
+			want: false,
+		},
+		{
+			name: "flag overrides env",
+			args: []string{"--config", path, "--anthropic-catalog-model-id-normalization-enabled=true"},
+			env: map[string]string{
+				"COPILOTD_ANTHROPIC_CATALOG_MODEL_ID_NORMALIZATION_ENABLED": "false",
+			},
+			want: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			env := map[string]string{"COPILOTD_APIKEY": testAPIKey}
+			for key, value := range tc.env {
+				env[key] = value
+			}
+			got, err := loadServe(tc.args, envFunc(env))
+			if err != nil {
+				t.Fatalf("loadServe() error = %v", err)
+			}
+			if got.AnthropicCatalogModelIDNormalizationEnabled != tc.want {
+				t.Errorf("AnthropicCatalogModelIDNormalizationEnabled = %t, want %t", got.AnthropicCatalogModelIDNormalizationEnabled, tc.want)
+			}
+		})
+	}
+}
+
 func TestShimResponsesItemIDStabilizerEnabledRejectsMalformedValues(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "copilotd.toml")
 	if err := os.WriteFile(path, []byte("shim-responses-item-id-stabilizer-enabled = \"not-a-bool\"\n"), 0o600); err != nil {
@@ -1166,21 +1215,22 @@ func TestLoadValidationErrors(t *testing.T) {
 
 func TestConfigLogValueEmitsOnlyNonSecretFields(t *testing.T) {
 	cfg := ServeConfig{
-		Addr:                                 "127.0.0.1:8080",
-		LogLevel:                             "info",
-		LogFormat:                            "text",
-		LogFile:                              "/var/log/copilotd.log",
-		ShutdownTimeout:                      10 * time.Second,
-		GithubOAuthTokenFile:                 "/home/op/.config/copilotd/github-oauth-token",
-		APIKey:                               "super-secret-apikey-value",
-		OutboundTimeout:                      600 * time.Second,
-		StreamIdleTimeout:                    90 * time.Second,
-		StreamKeepaliveInterval:              15 * time.Second,
-		WriteTimeout:                         90 * time.Second,
-		ResponseHeaderTimeout:                600 * time.Second,
-		WebSocketHandshakeTimeout:            12 * time.Second,
-		MaxRequestBytes:                      33554432,
-		MaxBufferedResponseBytes:             16777216,
+		Addr:                      "127.0.0.1:8080",
+		LogLevel:                  "info",
+		LogFormat:                 "text",
+		LogFile:                   "/var/log/copilotd.log",
+		ShutdownTimeout:           10 * time.Second,
+		GithubOAuthTokenFile:      "/home/op/.config/copilotd/github-oauth-token",
+		APIKey:                    "super-secret-apikey-value",
+		OutboundTimeout:           600 * time.Second,
+		StreamIdleTimeout:         90 * time.Second,
+		StreamKeepaliveInterval:   15 * time.Second,
+		WriteTimeout:              90 * time.Second,
+		ResponseHeaderTimeout:     600 * time.Second,
+		WebSocketHandshakeTimeout: 12 * time.Second,
+		MaxRequestBytes:           33554432,
+		MaxBufferedResponseBytes:  16777216,
+		AnthropicCatalogModelIDNormalizationEnabled: true,
 		ShimNopEnabled:                       true,
 		ShimResponsesItemIDStabilizerEnabled: true,
 		GithubOAuthToken:                     "gho-super-secret-oauth-value",
@@ -1220,6 +1270,7 @@ func TestConfigLogValueEmitsOnlyNonSecretFields(t *testing.T) {
 		"config.ws-handshake-timeout=12s",
 		"config.max-request-bytes=33554432",
 		"config.max-buffered-response-bytes=16777216",
+		"config.anthropic-catalog-model-id-normalization-enabled=true",
 		"config.shim-nop-enabled=true",
 		"config.shim-responses-item-id-stabilizer-enabled=true",
 		"config.startup-mint-retries=3",
@@ -1275,6 +1326,7 @@ func TestConfigLogValueEmitsOnlyNonSecretFields(t *testing.T) {
 		"ws-handshake-timeout",
 		"max-request-bytes",
 		"max-buffered-response-bytes",
+		"anthropic-catalog-model-id-normalization-enabled",
 		"shim-nop-enabled",
 		"shim-responses-item-id-stabilizer-enabled",
 		"codex-catalog-enabled",

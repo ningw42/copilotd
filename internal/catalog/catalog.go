@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/ningw42/copilotd/internal/endpoint"
 )
@@ -151,9 +152,21 @@ type anthropicCapabilities struct {
 	Thinking          *thinkingCapability  `json:"thinking,omitempty"`
 }
 
+// AnthropicRenderConfig controls opt-in value normalization in the provider-
+// shaped Anthropic catalog. Its zero value preserves Copilot's model IDs.
+type AnthropicRenderConfig struct {
+	ModelIDNormalizationEnabled bool
+}
+
 // RenderAnthropic renders Copilot models in Anthropic's model-list schema,
 // enriching only the capability claims for which Copilot supplies a signal.
 func RenderAnthropic(models []Model) ([]byte, error) {
+	return RenderAnthropicWithConfig(models, AnthropicRenderConfig{})
+}
+
+// RenderAnthropicWithConfig renders the Anthropic catalog with opt-in value
+// normalization configured by the caller.
+func RenderAnthropicWithConfig(models []Model, config AnthropicRenderConfig) ([]byte, error) {
 	type anthropicModel struct {
 		ID             string                `json:"id"`
 		Type           string                `json:"type"`
@@ -174,8 +187,12 @@ func RenderAnthropic(models []Model) ([]byte, error) {
 		if model.ID == "" || model.Name == "" {
 			return nil, fmt.Errorf("Anthropic catalog model is missing id or name")
 		}
+		id := model.ID
+		if config.ModelIDNormalizationEnabled {
+			id = strings.ReplaceAll(id, ".", "-")
+		}
 		envelope.Data = append(envelope.Data, anthropicModel{
-			ID:             model.ID,
+			ID:             id,
 			Type:           "model",
 			DisplayName:    model.Name,
 			CreatedAt:      "1970-01-01T00:00:00Z",
@@ -184,9 +201,9 @@ func RenderAnthropic(models []Model) ([]byte, error) {
 			Capabilities:   renderAnthropicCapabilities(model.Capabilities),
 		})
 	}
-	if len(models) > 0 {
-		envelope.FirstID = &models[0].ID
-		envelope.LastID = &models[len(models)-1].ID
+	if len(envelope.Data) > 0 {
+		envelope.FirstID = &envelope.Data[0].ID
+		envelope.LastID = &envelope.Data[len(envelope.Data)-1].ID
 	}
 	return json.Marshal(envelope)
 }

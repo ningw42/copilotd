@@ -33,6 +33,7 @@ form is accepted as input, so `--stream-idle-timeout 5m` and
 | [`--ws-handshake-timeout <DURATION>`](#--ws-handshake-timeout) | `COPILOTD_WS_HANDSHAKE_TIMEOUT` | `ws-handshake-timeout` | `10s` | `serve` |
 | [`--max-request-bytes <BYTES>`](#--max-request-bytes) | `COPILOTD_MAX_REQUEST_BYTES` | `max-request-bytes` | `33554432` (32 MiB) | `serve` |
 | [`--max-buffered-response-bytes <BYTES>`](#--max-buffered-response-bytes) | `COPILOTD_MAX_BUFFERED_RESPONSE_BYTES` | `max-buffered-response-bytes` | `33554432` (32 MiB) | `serve` |
+| [`--anthropic-catalog-model-id-normalization-enabled=<BOOL>`](#--anthropic-catalog-model-id-normalization-enabled) | `COPILOTD_ANTHROPIC_CATALOG_MODEL_ID_NORMALIZATION_ENABLED` | `anthropic-catalog-model-id-normalization-enabled` | `false` | `serve` |
 | [`--shim-nop-enabled=<BOOL>`](#--shim-nop-enabled) | `COPILOTD_SHIM_NOP_ENABLED` | `shim-nop-enabled` | `false` | `serve` |
 | [`--shim-responses-item-id-stabilizer-enabled=<BOOL>`](#--shim-responses-item-id-stabilizer-enabled) | `COPILOTD_SHIM_RESPONSES_ITEM_ID_STABILIZER_ENABLED` | `shim-responses-item-id-stabilizer-enabled` | `false` | `serve` |
 | [`--codex-catalog-enabled=<BOOL>`](#--codex-catalog-enabled) | `COPILOTD_CODEX_CATALOG_ENABLED` | `codex-catalog-enabled` | `false` | `serve` |
@@ -122,6 +123,14 @@ values must be positive.
 
 Caps model-catalog response bodies and upstream response bodies processed by a
 buffered-response shim; values must be positive.
+
+### `--anthropic-catalog-model-id-normalization-enabled`
+
+Normalizes model IDs in the provider-shaped Anthropic catalog to Anthropic's
+hyphenated convention, for example `claude-opus-4.8` becomes
+`claude-opus-4-8`. The catalog's `first_id` and `last_id` use the same normalized
+IDs. This setting affects only `/anthropic/v1/models`; inference requests and
+responses remain unchanged. Disabled by default, preserving Copilot's IDs.
 
 ### `--shim-nop-enabled`
 

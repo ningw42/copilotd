@@ -108,6 +108,9 @@ re-rendered in the real provider's `GET /v1/models` schema. Carries the provider
 the GitHub Copilot Surface's raw `/models` passthrough, which reshapes nothing.
 This is the **provider-shaped** catalog; the **Codex catalog** is the client-shaped
 counterpart.
+The Anthropic catalog can optionally normalize Copilot's dotted model IDs to
+Anthropic's hyphenated convention. This is an opt-in **Alteration** disabled by
+default; it changes only the provider-shaped catalog, not inference forwarding.
 _Avoid_: model list (unqualified); models endpoint (that is the raw passthrough)
 
 **Forwarder**:
@@ -268,7 +271,8 @@ fabricate information without an upstream basis."
 A divergence that rewrites an **upstream-basis** value to another upstream-basis
 value, **fabricating nothing** — e.g. the Responses item-id stabilizer pinning one
 genuine upstream id per `output_index`. Opt-in and off by default; enumerated by the
-shim registry and its config flag.
+divergence ledger and exposed through a config flag. Transport-owned Alterations
+are additionally enumerated by the shim registry.
 
 **Omission** (anticipated):
 The latent third divergence kind — dropping or coalescing upstream content. The shim

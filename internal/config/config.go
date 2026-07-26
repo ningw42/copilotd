@@ -36,20 +36,21 @@ const (
 	// the durationUnit each row declares below so a constant, its --help default,
 	// and its CONFIGURATION.md row all read alike. Overrides still accept any Go
 	// duration form.
-	defaultOutboundTimeout                      = 600 * time.Second
-	defaultStreamIdleTimeout                    = 600 * time.Second
-	defaultStreamKeepaliveInterval              = 15 * time.Second
-	defaultWriteTimeout                         = 90 * time.Second
-	defaultResponseHeaderTimeout                = 600 * time.Second
-	defaultWebSocketHandshakeTimeout            = 10 * time.Second
-	defaultMaxRequestBytes                      = 33554432
-	defaultMaxBufferedResponseBytes             = 33554432
-	defaultShimNopEnabled                       = false
-	defaultShimResponsesItemIDStabilizerEnabled = false
-	defaultCodexCatalogEnabled                  = false
-	defaultCodexAutoReviewModel                 = ""
-	defaultCodexOverrideLimits                  = false
-	defaultCodexCatalogRefreshInterval          = 24 * time.Hour
+	defaultOutboundTimeout                             = 600 * time.Second
+	defaultStreamIdleTimeout                           = 600 * time.Second
+	defaultStreamKeepaliveInterval                     = 15 * time.Second
+	defaultWriteTimeout                                = 90 * time.Second
+	defaultResponseHeaderTimeout                       = 600 * time.Second
+	defaultWebSocketHandshakeTimeout                   = 10 * time.Second
+	defaultMaxRequestBytes                             = 33554432
+	defaultMaxBufferedResponseBytes                    = 33554432
+	defaultAnthropicCatalogModelIDNormalizationEnabled = false
+	defaultShimNopEnabled                              = false
+	defaultShimResponsesItemIDStabilizerEnabled        = false
+	defaultCodexCatalogEnabled                         = false
+	defaultCodexAutoReviewModel                        = ""
+	defaultCodexOverrideLimits                         = false
+	defaultCodexCatalogRefreshInterval                 = 24 * time.Hour
 
 	// defaultStartupMintRetries bounds the transient-failure retries of the boot
 	// warm-up mint (total attempts = 1 + N); auth-class failures short-circuit.
@@ -126,6 +127,10 @@ type ServeConfig struct {
 	// MaxBufferedResponseBytes caps an upstream response only when a buffered
 	// response shim is active; an over-limit body yields 413 before commit.
 	MaxBufferedResponseBytes int64
+
+	// AnthropicCatalogModelIDNormalizationEnabled controls the opt-in rewrite
+	// from Copilot's dotted model IDs to Anthropic's hyphenated convention.
+	AnthropicCatalogModelIDNormalizationEnabled bool
 
 	// ShimNopEnabled controls the canonical no-op shim. It is disabled by
 	// default, like the shim-defined default in the canonical registry.
@@ -266,6 +271,7 @@ func serveSpecs() ([]spec[ServeConfig], *configPathField[ServeConfig]) {
 		durationField("ws-handshake-timeout", defaultWebSocketHandshakeTimeout, inSeconds, func(c *ServeConfig) *time.Duration { return &c.WebSocketHandshakeTimeout }, positive, "upstream WebSocket handshake timeout"),
 		int64Field("max-request-bytes", defaultMaxRequestBytes, func(c *ServeConfig) *int64 { return &c.MaxRequestBytes }, positive, "maximum inbound request body size in bytes"),
 		int64Field("max-buffered-response-bytes", defaultMaxBufferedResponseBytes, func(c *ServeConfig) *int64 { return &c.MaxBufferedResponseBytes }, positive, "maximum buffered upstream response body size in bytes"),
+		boolField("anthropic-catalog-model-id-normalization-enabled", defaultAnthropicCatalogModelIDNormalizationEnabled, func(c *ServeConfig) *bool { return &c.AnthropicCatalogModelIDNormalizationEnabled }, "normalize Anthropic catalog model ids to hyphenated slugs (opt-in)"),
 		boolField("shim-nop-enabled", defaultShimNopEnabled, func(c *ServeConfig) *bool { return &c.ShimNopEnabled }, "enable the canonical no-op shim"),
 		boolField("shim-responses-item-id-stabilizer-enabled", defaultShimResponsesItemIDStabilizerEnabled, func(c *ServeConfig) *bool { return &c.ShimResponsesItemIDStabilizerEnabled }, "stabilize churning OpenAI Responses item ids (opt-in)"),
 		boolField("codex-catalog-enabled", defaultCodexCatalogEnabled, func(c *ServeConfig) *bool { return &c.CodexCatalogEnabled }, "enable the Codex client-shaped catalog"),

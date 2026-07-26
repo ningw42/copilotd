@@ -24,6 +24,7 @@ single place the divergence is defined, and this row is a pointer to it.
 | Divergence | Source of truth | What it diverges | Toggle |
 |---|---|---|---|
 | Responses item-id stabilizer | [ADR-0011](adr/0011-responses-item-id-stabilization-policy.md) + [design](design/2026-07-23-responses-item-id-stabilization-design.md); shim `responses-item-id-stabilizer` | Rewrites Copilot's churning per-event item `id` to one genuine upstream id per `output_index`, on both OpenAI `/responses` transports (SSE + WebSocket), so `id`-keyed clients stop corrupting. No id is minted — every value on the wire retains an upstream basis. | `--shim-responses-item-id-stabilizer-enabled` / `ShimResponsesItemIDStabilizerEnabled` — **off by default** |
+| Anthropic catalog model-ID normalization | [ADR-0004](adr/0004-provider-shaped-catalogs-report-copilot-values.md) + `internal/catalog` | Rewrites dots in Copilot model IDs to Anthropic's canonical hyphenated spelling on `/anthropic/v1/models`, including `first_id` and `last_id`. Inference forwarding remains verbatim. | `--anthropic-catalog-model-id-normalization-enabled` / `AnthropicCatalogModelIDNormalizationEnabled` — **off by default** |
 
 ## Omission — dropping or coalescing upstream content
 

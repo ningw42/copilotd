@@ -54,7 +54,7 @@ func testHandler(t *testing.T, logger *slog.Logger) http.Handler {
 	t.Helper()
 	prov := readyStub("")
 	fwd := forward.New(prov, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
-	return newHandler(testAPIKey, prov, newTestReadyObservers(), fwd, logger, NewStreamOutcomeCounter(), catalog.CodexDescriptor{}, newTestWSProxy(prov))
+	return newHandler(testAPIKey, prov, newTestReadyObservers(), fwd, logger, NewStreamOutcomeCounter(), catalogRenderConfigs{}, newTestWSProxy(prov))
 }
 
 // bufferLogger returns a logger writing to an in-memory buffer at the given

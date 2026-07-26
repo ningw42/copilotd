@@ -17,6 +17,11 @@ const (
 	readyPath  = "/readyz"
 )
 
+type catalogRenderConfigs struct {
+	Anthropic catalog.AnthropicRenderConfig
+	Codex     catalog.CodexDescriptor
+}
+
 // newHandler builds the router wrapped in the middleware chain
 // requestID -> accessLog -> recover (outermost to innermost). RequestID is
 // outermost so its context is visible to the inner two; recover is innermost so
@@ -27,8 +32,8 @@ const (
 // middleware. The full order on a Surface endpoint is therefore requestID ->
 // accessLog -> recover -> auth -> local readiness -> forward. /healthz and
 // /readyz are never gated by auth or readiness.
-// Invariant: codex-* settings cross the render seam only through codex.
-func newHandler(apikey string, provider identity.Provider, observers ReadyObservers, fwd *forward.Forwarder, logger *slog.Logger, streamOutcomes StreamOutcomeObserver, codex catalog.CodexDescriptor, wsProxy *wsforward.Proxy) http.Handler {
+// Invariant: catalog settings cross the render seam only through catalogs.
+func newHandler(apikey string, provider identity.Provider, observers ReadyObservers, fwd *forward.Forwarder, logger *slog.Logger, streamOutcomes StreamOutcomeObserver, catalogs catalogRenderConfigs, wsProxy *wsforward.Proxy) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET "+healthPath, handleHealth)
 	mux.HandleFunc("GET "+readyPath, handleReady(provider, observers.Impersonation, observers.Caches))
@@ -56,8 +61,10 @@ func newHandler(apikey string, provider identity.Provider, observers ReadyObserv
 	registerForward(endpoint.OpenAIResponsesHTTP())
 	registerWS(endpoint.OpenAIResponsesWS())
 	registerPassthrough(endpoint.Models())
-	registerCatalog(endpoint.AnthropicCatalog(), catalog.Rendering{Render: catalog.RenderAnthropic})
-	registerCatalog(endpoint.OpenAICatalog(), catalog.Rendering{Render: catalog.RenderOpenAI, Codex: codex, Logger: logger})
+	registerCatalog(endpoint.AnthropicCatalog(), catalog.Rendering{Render: func(models []catalog.Model) ([]byte, error) {
+		return catalog.RenderAnthropicWithConfig(models, catalogs.Anthropic)
+	}})
+	registerCatalog(endpoint.OpenAICatalog(), catalog.Rendering{Render: catalog.RenderOpenAI, Codex: catalogs.Codex, Logger: logger})
 
 	return requestID(accessLog(logger, streamOutcomes, recoverMW(logger, mux)))
 }

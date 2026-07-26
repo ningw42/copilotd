@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"strconv"
 	"sync/atomic"
 	"testing"
@@ -118,5 +119,67 @@ func TestAnthropicModelCatalogOverRealListener(t *testing.T) {
 	}
 	if got := hits.Load(); got != 2 {
 		t.Errorf("unregistered routes reached upstream; hits = %d, want 2", got)
+	}
+}
+
+func TestAnthropicModelCatalogNormalizesModelIDsWhenEnabled(t *testing.T) {
+	captured, err := os.ReadFile("../catalog/testdata/copilot-models-2026-07-18.json")
+	if err != nil {
+		t.Fatalf("read captured catalog: %v", err)
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(captured)
+	}))
+	defer upstream.Close()
+
+	provider := identity.NewStatic(identity.Credential{
+		BaseURL: upstream.URL,
+		Token:   "copilot-token",
+		Headers: http.Header{"Copilot-Integration-Id": {"vscode-chat"}},
+	}, true)
+	forwarder := forward.New(provider, forward.NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
+	cfg := testConfig()
+	cfg.AnthropicCatalogModelIDNormalizationEnabled = true
+	base := startServer(t, New(cfg, discardLogger(t), provider, newTestReadyObservers(), forwarder, newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.CodexDescriptor{}))
+
+	req, err := http.NewRequest(http.MethodGet, base+"/anthropic/v1/models", nil)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+testAPIKey)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET catalog: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	var got struct {
+		Data []struct {
+			ID          string `json:"id"`
+			DisplayName string `json:"display_name"`
+		} `json:"data"`
+		FirstID *string `json:"first_id"`
+		LastID  *string `json:"last_id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode catalog: %v", err)
+	}
+	ids := make([]string, len(got.Data))
+	for i, model := range got.Data {
+		ids[i] = model.ID
+	}
+	wantIDs := []string{
+		"claude-opus-4-6", "claude-opus-4-7", "claude-opus-4-8",
+		"claude-sonnet-4-6", "claude-sonnet-5", "claude-sonnet-4-5", "claude-haiku-4-5",
+	}
+	if !slices.Equal(ids, wantIDs) {
+		t.Errorf("Anthropic catalog IDs = %q, want %q", ids, wantIDs)
+	}
+	if got.FirstID == nil || *got.FirstID != wantIDs[0] || got.LastID == nil || *got.LastID != wantIDs[len(wantIDs)-1] {
+		t.Errorf("Anthropic boundaries = first:%v last:%v, want %q/%q", got.FirstID, got.LastID, wantIDs[0], wantIDs[len(wantIDs)-1])
+	}
+	if got.Data[0].DisplayName != "Claude Opus 4.6" {
+		t.Errorf("display_name = %q, want unchanged Copilot display name", got.Data[0].DisplayName)
 	}
 }

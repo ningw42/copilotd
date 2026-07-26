@@ -11,6 +11,14 @@ schema fidelity plus honest Copilot values over value-level provider parity,
 because fabricating the provider's numbers would violate the no-fabrication rule
 (Phase 3 §10.2) that governs everything copilotd puts on the wire.
 
+One opt-in exception applies to Anthropic model-ID spelling. With
+`--anthropic-catalog-model-id-normalization-enabled=true`, the Anthropic catalog
+replaces dots in Copilot's IDs with hyphens (for example, `claude-opus-4.8` →
+`claude-opus-4-8`) and uses the normalized values for `first_id` and `last_id`.
+Live inference accepts both spellings and returns the hyphenated ID, so this is an
+evidence-backed Alteration rather than fabrication. The default remains `false`,
+preserving Copilot's values, and inference forwarding is unchanged.
+
 ## Considered options
 
 - **Provider-identical values** — map token limits from the context window, emit
@@ -38,6 +46,8 @@ The accepted, enumerated divergences from the genuine provider (design §5.5):
 - `owned_by` is Copilot's `vendor` verbatim (`"Azure OpenAI"`, `"Microsoft"`), not
   OpenAI's `"openai"`/`"system"` convention.
 - List order is Copilot's `data[]` order, not "most recently released first."
+- When Anthropic model-ID normalization is enabled, the Anthropic catalog's IDs
+  use the provider's hyphenated spelling instead of Copilot's dotted spelling.
 
 Catalog membership is keyed on the wire-Surface, not vendor: `/openai/v1/models`
 lists every model forwardable on the Responses Surface, including non-OpenAI-vendor
