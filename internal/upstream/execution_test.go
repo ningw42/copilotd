@@ -319,6 +319,45 @@ func TestCallerReadBoundedClassifiesTheBoundUpstreamCallContext(t *testing.T) {
 	}
 }
 
+func TestCallerReadBoundedKeepsOverCapClassificationAcrossBoundContextCauses(t *testing.T) {
+	tests := []struct {
+		name  string
+		cause error
+	}{
+		{name: "inbound cancellation", cause: context.Canceled},
+		{name: "caller-owned deadline", cause: context.DeadlineExceeded},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancelCause(context.Background())
+			cancel(tc.cause)
+			body := &contextBoundResponseBody{
+				ReadCloser: io.NopCloser(strings.NewReader("123456789")),
+				ctx:        ctx,
+			}
+			caller := executionCaller(nil, nil, 0, 8, slog.Default())
+
+			contents, failure := caller.ReadBounded(body)
+
+			if contents != nil {
+				t.Errorf("ReadBounded() body = %q, want nil", contents)
+			}
+			if failure == nil {
+				t.Fatal("ReadBounded() failure = nil, want over-cap failure")
+			}
+			if failure.Kind != apierror.BadGateway || failure.Message != "upstream response body exceeds the maximum allowed size" || failure.ClientGone {
+				t.Errorf("ReadBounded() failure = (%v, %q, ClientGone=%v), want (BadGateway, over-cap message, false)", failure.Kind, failure.Message, failure.ClientGone)
+			}
+
+			recorder := httptest.NewRecorder()
+			if wrote := failure.RespondTo(recorder, endpoint.OpenAI); !wrote || recorder.Code != http.StatusBadGateway {
+				t.Errorf("RespondTo() = wrote %v status %d, want wrote true status 502", wrote, recorder.Code)
+			}
+		})
+	}
+}
+
 func TestReadBoundedProbesOnlyOneByteBeyondCap(t *testing.T) {
 	reader := &executionByteCountingReader{reader: strings.NewReader("0123456789abcdef")}
 

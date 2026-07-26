@@ -47,6 +47,7 @@ func TestForwardClientAttemptsHTTP2(t *testing.T) {
 }
 
 func TestPassthroughPreservesRawQueryAndForceQuery(t *testing.T) {
+	ep := endpoint.Models()
 	tests := []struct {
 		name       string
 		target     string
@@ -65,8 +66,10 @@ func TestPassthroughPreservesRawQueryAndForceQuery(t *testing.T) {
 		for _, method := range []string{http.MethodGet, http.MethodHead} {
 			t.Run(method+"/"+tc.name, func(t *testing.T) {
 				var gotTarget string
+				var gotPath string
 				upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					gotTarget = r.RequestURI
+					gotPath = r.URL.Path
 					w.WriteHeader(http.StatusNoContent)
 				}))
 				defer upstream.Close()
@@ -75,13 +78,16 @@ func TestPassthroughPreservesRawQueryAndForceQuery(t *testing.T) {
 				req := httptest.NewRequest(method, tc.target, nil)
 				rec := newDeadlineRecorder()
 
-				f.PassthroughHandler(endpoint.Models())(rec, req)
+				f.PassthroughHandler(ep)(rec, req)
 
 				if rec.Code != http.StatusNoContent {
 					t.Fatalf("status = %d, want 204", rec.Code)
 				}
 				if gotTarget != tc.wantTarget {
 					t.Errorf("upstream request target = %q, want %q", gotTarget, tc.wantTarget)
+				}
+				if gotPath != string(ep.Upstream()) {
+					t.Errorf("upstream Route = %q, want contract route %q", gotPath, ep.Upstream())
 				}
 			})
 		}

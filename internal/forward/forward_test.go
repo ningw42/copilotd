@@ -54,6 +54,7 @@ func (s *requestMutationShim) TransformRequest(_ context.Context, r *shim.Reques
 }
 
 func TestForwardRequestShimMutationsReachUpstreamAndQueryStaysCoreOwned(t *testing.T) {
+	ep := endpoint.AnthropicMessages()
 	var gotBody []byte
 	var gotContentLength int64
 	var gotHeader http.Header
@@ -84,18 +85,19 @@ func TestForwardRequestShimMutationsReachUpstreamAndQueryStaysCoreOwned(t *testi
 	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages?tag=first&escaped=%2f%2F&flag", strings.NewReader(`{"original":true}`))
 	rec := newDeadlineRecorder()
 
-	f.Handler(endpoint.AnthropicMessages())(rec, req)
+	f.Handler(ep)(rec, req)
 
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("status = %d, want upstream 204", rec.Code)
 	}
-	if gotSurface != endpoint.Anthropic || gotRoute != "/v1/messages" {
-		t.Errorf("shim factory Surface/Route = (%v, %q), want (Anthropic, /v1/messages)", gotSurface, gotRoute)
+	if gotSurface != endpoint.Anthropic || gotRoute != ep.Upstream() {
+		t.Errorf("shim factory Surface/Route = (%v, %q), want (Anthropic, %q)", gotSurface, gotRoute, ep.Upstream())
 	}
 	if instance.query != "tag=first&escaped=%2f%2F&flag" {
 		t.Errorf("shim Query() = %q, want exact inbound raw query", instance.query)
 	}
-	if gotRequestURI != "/v1/messages?tag=first&escaped=%2f%2F&flag" {
+	wantRequestURI := string(ep.Upstream()) + "?tag=first&escaped=%2f%2F&flag"
+	if gotRequestURI != wantRequestURI {
 		t.Errorf("upstream RequestURI = %q, want core-owned verbatim query", gotRequestURI)
 	}
 	if gotMethod != http.MethodPost {
@@ -115,6 +117,30 @@ func TestForwardRequestShimMutationsReachUpstreamAndQueryStaysCoreOwned(t *testi
 	}
 	if gotHeader.Get("Accept-Encoding") != "identity" {
 		t.Errorf("Accept-Encoding = %q, want identity", gotHeader.Get("Accept-Encoding"))
+	}
+}
+
+func TestForwardPreservesBareQuestionMarkFromEndpointContract(t *testing.T) {
+	ep := endpoint.AnthropicMessages()
+	var gotPath string
+	var gotRawQuery string
+	var gotForceQuery bool
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		gotPath = r.URL.Path
+		gotRawQuery = r.URL.RawQuery
+		gotForceQuery = r.URL.ForceQuery
+		return &http.Response{StatusCode: http.StatusNoContent, Header: make(http.Header), Body: http.NoBody, Request: r}, nil
+	})}
+	f := newTestForwarder(readyStub("https://upstream.invalid"), client, time.Second, time.Second, time.Second, time.Second, 1<<20, 1<<20, nil)
+	recorder := newDeadlineRecorder()
+
+	f.Handler(ep)(recorder, httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages?", strings.NewReader(`{}`)))
+
+	if recorder.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", recorder.Code)
+	}
+	if gotPath != string(ep.Upstream()) || gotRawQuery != "" || !gotForceQuery {
+		t.Errorf("upstream URL = path %q raw query %q force query %v, want contract path %q with bare question mark", gotPath, gotRawQuery, gotForceQuery, ep.Upstream())
 	}
 }
 
@@ -2251,6 +2277,53 @@ func TestHTTPHandlersKeepClientCancelDuringCallSilent(t *testing.T) {
 				t.Errorf("client-cancel response = status %d body %q, want no write", writer.status, writer.written)
 			}
 		})
+	}
+}
+
+func TestForwardClientCancelPropagatesToRealUpstreamServer(t *testing.T) {
+	upstreamStarted := make(chan struct{})
+	upstreamCancelled := make(chan struct{})
+	upstreamServer := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		// Drain the request so cancellation of the in-flight response wait is
+		// observable by the real upstream server connection.
+		_, _ = io.Copy(io.Discard, r.Body)
+		close(upstreamStarted)
+		select {
+		case <-r.Context().Done():
+			close(upstreamCancelled)
+		case <-time.After(3 * time.Second):
+		}
+	}))
+	defer upstreamServer.Close()
+
+	f := newTestForwarder(readyStub(upstreamServer.URL), NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	request := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{}`)).WithContext(ctx)
+	writer := &failingResponseWriter{header: make(http.Header)}
+	done := make(chan struct{})
+	go func() {
+		f.Handler(endpoint.AnthropicMessages())(writer, request)
+		close(done)
+	}()
+
+	select {
+	case <-upstreamStarted:
+	case <-time.After(3 * time.Second):
+		t.Fatal("upstream server did not receive the request")
+	}
+	cancel()
+	select {
+	case <-upstreamCancelled:
+	case <-time.After(3 * time.Second):
+		t.Fatal("upstream server did not observe client cancellation")
+	}
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("handler did not return after client cancellation")
+	}
+	if writer.status != 0 || len(writer.written) != 0 {
+		t.Errorf("client-cancel response = status %d body %q, want no write", writer.status, writer.written)
 	}
 }
 

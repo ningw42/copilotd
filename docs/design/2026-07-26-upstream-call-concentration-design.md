@@ -16,9 +16,10 @@ sites keep transport-specific execution where necessary and their response tail.
 
 Four of the drifts are live defects, fixed here rather than preserved: a dropped
 client header set on the WebSocket transport, two missing client-cancel branches,
-and a disagreement over the status for an over-cap upstream body. Two further
-changes follow from the unified URL join and the unified failure vocabulary. All
-six are enumerated once, in [Behaviour changes](#behaviour-changes).
+and a disagreement over the status for an over-cap upstream body. Four further
+changes follow from the unified URL join, failure vocabulary, timeout
+classification, and response cleanup policy. All eight are enumerated once, in
+[Behaviour changes](#behaviour-changes).
 
 The change also removes the `forward` → `catalog` import: `catalog` currently
 declares the `Fetcher` interface that `forward` implements, while `forward`
@@ -515,7 +516,7 @@ the two handlers.
 
 ## Behaviour changes
 
-Six, all deliberate.
+Eight, all deliberate.
 
 **1. WebSocket forwards inbound client headers.** Under the shared strip policy,
 extended with `Sec-WebSocket-*`. The two transports of `/openai/v1/responses`
@@ -550,10 +551,21 @@ change 2, on the other path. `Buffered` now classifies it as `ClientGone`. On th
 `catalog` path this *preserves* current behaviour, which `handler.go:37`'s guard
 already provided; on the `forward` path it is new.
 
+**7. A `forward` buffered read interrupted by its outbound timer returns 504,
+not 502.** The timer now supplies `context.DeadlineExceeded` as its cancellation
+cause, so the shared read classifier distinguishes an upstream timeout from a
+genuine read failure.
+
+**8. The inference response tail cancels before closing the upstream body.** The
+old defer registration closed the body first despite the intended
+cancel-before-close policy. One ordered cleanup defer now matches the passthrough
+tail and prevents a blocking `Close` from waiting on still-live upstream work.
+
 One message refinement follows from the shared table: `catalog`'s single 502 text
-`"could not fetch the upstream models catalog"` splits into the three specific
-messages above. **Every status code `catalog` returns today is preserved** — 503
-for a missing credential, 504 for a timeout, 502 for the rest.
+`"could not fetch the upstream models catalog"` splits into four specific shared
+messages: request construction, unreachable upstream, response read, and
+over-cap response. **Every status code `catalog` returns today is preserved** —
+503 for a missing credential, 504 for a timeout, 502 for the rest.
 
 One new observable, not a behaviour change on the wire: `Caller` logs the
 underlying cause once per classified failure (see [`Failure`](#failure)).
@@ -597,7 +609,7 @@ Migrations:
 - `forward/models_fetch_test.go` (488 lines) moves to `upstream` largely intact
   as the `Buffered` suite.
 - `catalog/handler_test.go` rewrites its error table onto `*upstream.Failure`
-  stubs. Every status expectation carries over unchanged; three 502 messages
+  stubs. Every status expectation carries over unchanged; four 502 messages
   become more specific. The `"unknown fetch error"` row is deleted rather than
   rewritten — it exercised `writeFetchError`'s `default` branch, and `*Failure`
   is total, so the case it covered can no longer be constructed.
@@ -646,7 +658,8 @@ Each step compiles and passes the full suite before the next begins.
    `*Caller` method and the outbound header policy is unreachable without one;
    `provider`, `client`, and `maxBufferedResponseBytes` stay for now.
 3. **The two HTTP handlers onto `Do`.** `PassthroughHandler` and `forward`.
-   Behaviour changes 3 and 4 land here, with their tests. No constructor change.
+   Behaviour changes 3, 4, 7, and 8 land here, with their tests. No constructor
+   change.
 4. **`Buffered` and `catalog.Source`.** Delete `catalog/fetch.go`,
    `forward.FetchModels`, and the `catalog` import; add **import guard 2**.
    Behaviour change 6 lands here, with its tests. **`forward.New` drops

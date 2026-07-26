@@ -42,6 +42,9 @@ func withExtra(base map[string]bool, extra ...string) map[string]bool {
 }
 
 func authenticatedOutboundHeaders(ctx context.Context, call Call, token string, credentialHeaders http.Header) http.Header {
+	// Policy order is significant: copy permitted client headers; install bearer
+	// authorization; overlay credential headers without filtering; set the
+	// resolved request id; then opt into identity encoding when requested.
 	result := make(http.Header, len(call.ClientHeader)+len(credentialHeaders)+3)
 	connection := connectionTokens(call.ClientHeader)
 	for name, values := range call.ClientHeader {

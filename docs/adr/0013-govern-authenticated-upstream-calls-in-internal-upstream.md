@@ -50,15 +50,16 @@ different response tails.
 - Credential use, URL joining, header policy, request-id correlation, bounded
   reading, and failure classification have one implementation and one test
   surface across the Forwarder, WebSocket forwarder, and Catalog.
-- `X-Request-Id` has one declaration, `upstream.RequestIDHeader`, consumed by the
-  server and every upstream transport. The duplicated correlation helpers and
-  Catalog failure vocabulary are removed.
+- `X-Request-Id` has one declaration, `upstream.RequestIDHeader`. Server
+  middleware reads it directly; upstream transports consume it transitively
+  through `Caller.Prepare` and `Caller.Correlate`. The duplicated correlation
+  helpers and Catalog failure vocabulary are removed.
 - Failure classification and response remain inseparable through
-  `Failure.RespondTo`, including silent client cancellation. `Caller` logs the
-  classified cause exposed by the credential provider exactly once and never
-  renders it to clients. For `identity.Manager`, ADR-0001 continues to govern
-  that provider boundary: tokens, raw exchange bodies, underlying exchange
-  errors, and raw mint internals remain omitted, while `Caller` records the
+  `Failure.RespondTo`, including silent client cancellation. `Caller` logs every
+  classified cause exactly once and never renders it to clients. For credential
+  acquisition it logs the cause exposed by the provider; `identity.Manager`
+  remains governed by ADR-0001, so tokens, raw exchange bodies, underlying
+  exchange errors, and raw mint internals are omitted while `Caller` records the
   sanitized cause the Manager returns.
 - Consumers keep interpreting successful responses. In particular,
   `internal/upstream` does not pump streams, upgrade WebSockets, decode catalogs,

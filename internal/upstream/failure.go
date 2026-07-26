@@ -12,10 +12,10 @@ import (
 // Failure is one classified upstream call failure, already mapped to the
 // copilotd-originated signal that answers it.
 type Failure struct {
-	Kind       apierror.Kind
-	Message    string
-	ClientGone bool
-	Err        error
+	Kind       apierror.Kind // signal to render; not consulted when ClientGone is set
+	Message    string        // human-readable text, rendered in the Surface's dialect
+	ClientGone bool          // caller disconnected; nothing may be written
+	Err        error         // underlying cause; logged once at classification, never rendered
 }
 
 // RespondTo renders f on w in surface's dialect and reports whether it wrote.

@@ -12,10 +12,10 @@ import (
 
 // Call describes one authenticated upstream call, independent of transport.
 type Call struct {
-	Route      endpoint.Route
-	Method     string
-	Query      string
-	ForceQuery bool
+	Route      endpoint.Route // exact upstream path, joined onto the credential's base URL
+	Method     string         // method used for the upstream call; WebSocket callers pass GET
+	Query      string         // inbound RawQuery, forwarded verbatim and never normalized
+	ForceQuery bool           // preserves a bare "?" from the inbound URL
 
 	// ClientHeader is the inbound header set to forward under the strip policy.
 	// A nil value forwards no client header.
@@ -23,14 +23,17 @@ type Call struct {
 	// Body is the outbound body. A nil or http.NoBody value is wrapped so the
 	// Transport treats an otherwise bodyless request as single-attempt.
 	Body io.Reader
-	// ContentLength is assigned only when non-zero, preserving the length and
-	// GetBody that http.NewRequestWithContext derives for a sized body.
+	// ContentLength is assigned only when non-zero, so a sized body keeps the
+	// length and GetBody that http.NewRequestWithContext derives for it. A caller
+	// streaming an inbound body passes r.ContentLength, including -1 for unknown.
 	ContentLength int64
-	// AcceptIdentityEncoding forces an undecoded upstream response body.
+	// AcceptIdentityEncoding sets Accept-Encoding: identity so the caller receives
+	// an undecoded body it may inspect or stream.
 	AcceptIdentityEncoding bool
 }
 
-// Prepare builds the authenticated outbound request without executing it.
+// Prepare builds the authenticated request for an upstream call without
+// executing it.
 func (c *Caller) Prepare(ctx context.Context, call Call) (*http.Request, *Failure) {
 	credential, err := c.provider.Current(ctx)
 	if err != nil {

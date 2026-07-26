@@ -76,6 +76,18 @@ func TestCallerClassifyMapsExecutionFailures(t *testing.T) {
 			wantKind:    apierror.GatewayTimeout,
 			wantMessage: "the upstream request timed out",
 		},
+		{
+			name: "deadline cause takes precedence over cancelled context error",
+			context: func(t *testing.T) context.Context {
+				ctx, cancel := context.WithCancelCause(context.Background())
+				cancel(context.DeadlineExceeded)
+				t.Cleanup(func() { cancel(context.Canceled) })
+				return ctx
+			},
+			err:         genericCause,
+			wantKind:    apierror.GatewayTimeout,
+			wantMessage: "the upstream request timed out",
+		},
 	}
 
 	for _, tc := range tests {

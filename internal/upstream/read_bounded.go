@@ -16,10 +16,6 @@ type contextBoundResponseBody struct {
 	ctx context.Context
 }
 
-func (b *contextBoundResponseBody) upstreamCallContext() context.Context {
-	return b.ctx
-}
-
 // ReadBounded reads body under max. It is context-free so the owner of the
 // request context can classify a read interrupted by its own cancellation.
 func ReadBounded(body io.Reader, max int64) ([]byte, *Failure) {
@@ -54,8 +50,14 @@ func (c *Caller) ReadBounded(body io.Reader) ([]byte, *Failure) {
 	}
 
 	ctx := context.Background()
-	if bound, ok := body.(interface{ upstreamCallContext() context.Context }); ok {
-		ctx = bound.upstreamCallContext()
+	if bound, ok := body.(*contextBoundResponseBody); ok {
+		ctx = bound.ctx
+	}
+	// An over-cap read completed successfully far enough to establish its own
+	// failure. A cancellation racing after that observation must not replace the
+	// specified BadGateway classification with ClientGone or GatewayTimeout.
+	if errors.Is(failure.Err, errResponseBodyTooLarge) {
+		return nil, c.failure(ctx, failure.Kind, failure.Message, false, failure.Err)
 	}
 	cause := context.Cause(ctx)
 	switch {
