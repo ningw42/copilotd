@@ -19,7 +19,8 @@ type Failure struct {
 }
 
 // RespondTo renders f on w in surface's dialect and reports whether it wrote.
-// A ClientGone failure writes nothing and reports false.
+// A ClientGone failure writes nothing and reports false, so callers can skip
+// metrics and logging that only a rendered failure warrants.
 func (f *Failure) RespondTo(w http.ResponseWriter, surface endpoint.Surface) bool {
 	if f.ClientGone {
 		return false
