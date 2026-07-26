@@ -66,11 +66,11 @@ the SSE pump.
 ### Decisions
 
 1. **Persist to SQLite** via pure-Go `modernc.org/sqlite`. Amends ROADMAP
-   principle #4 (ADR-0013).
+   principle #4 (ADR-0014).
 2. **Only completed turns are recorded.** A turn that never delivers a
    usage-bearing terminal event writes nothing.
 3. **One table per Surface, fields verbatim.** No unified columns, no derived
-   totals. Interpretation lives in Go source (ADR-0014).
+   totals. Interpretation lives in Go source (ADR-0015).
 4. **Capture every token-count field the Surface's spec defines**, including
    subsets. Dropping a spec field is itself an interpretation.
 5. **The meter is a pure observer.** Every hook returns its input unchanged;
@@ -463,7 +463,7 @@ stalling on a slow disk would be a far worse defect than a missing meter row.
 
 Two honest costs:
 
-- **WAL means three files at rest, not one** — `usage.db`, `-wal`, `-shm`. ADR-0013
+- **WAL means three files at rest, not one** — `usage.db`, `-wal`, `-shm`. ADR-0014
   states this. Mitigation follows `identity/tokenfile.go`: the parent directory is
   `0700`, so sidecars SQLite creates under the process umask are protected by the
   directory regardless of their own mode.
@@ -536,10 +536,17 @@ Fixed as part of the change, not discovered later:
 Implementing `BufferedTransformer` opts the response into whole-body buffering:
 `forward.go:406` streams the body with `io.Copy` unless a buffered hook exists,
 and otherwise reads it under `maxBufferedResponseBytes`. So a non-streaming
-response **above the cap passes through with the meter off and returns 413 with it
+response **above the cap passes through with the meter off and is rejected with it
 on**. Messages and Responses non-stream bodies are small and the meter is opt-in,
 so this is accepted — but it is a real, user-visible consequence, and it gets a
 regression test (§12).
+
+The rejection status depends on which design lands first. Today `forward`'s
+buffered branch returns 413; the
+[upstream call concentration](2026-07-26-upstream-call-concentration-design.md)
+changes it to 502 (its behaviour change 3, on the grounds that 413 describes the
+inbound request entity, not an upstream response), and that design is ordered
+**before** this one. So the expected status here is **502**.
 
 The same line also skips the buffered hook when the response is not
 identity-encoded, so a compressed non-stream response is not metered. The outbound
@@ -611,7 +618,7 @@ Table-driven over recorded frames in `testdata/`, mirroring
 - Client disconnect mid-stream produces **no row but a normal access-log
   outcome**, proving §11.2's recoverability claim rather than asserting it.
 - **Regression:** a non-stream response above `maxBufferedResponseBytes` passes
-  through with the meter off and 413s with it on (§11.1).
+  through with the meter off and 502s with it on (§11.1).
 
 ---
 
@@ -619,11 +626,11 @@ Table-driven over recorded frames in `testdata/`, mirroring
 
 ### ADRs
 
-- **ADR-0013 — Persist token usage in a local SQLite database.** Amends ROADMAP
+- **ADR-0014 — Persist token usage in a local SQLite database.** Amends ROADMAP
   principle #4. Records: SQLite over JSONL or in-memory; why pure-Go
   `modernc.org/sqlite` is required (cgo breaks the single-static-binary,
   four-target story); WAL meaning three files at rest; opt-in and off by default.
-- **ADR-0014 — Per-Surface usage tables with verbatim fields.** The policy a
+- **ADR-0015 — Per-Surface usage tables with verbatim fields.** The policy a
   future contributor needs: capture each Surface's native token fields verbatim,
   no unified or derived columns, interpretation in Go. Motivated by the cache
   nesting asymmetry, with both worked examples recorded so it is not re-litigated.
@@ -632,7 +639,7 @@ Table-driven over recorded frames in `testdata/`, mirroring
 
 - **`CONTEXT.md`** — add **Usage meter** and **Turn**; amend **Shim** (see §14).
 - **`ROADMAP.md`** — principle #4 currently asserts "no database," which this makes
-  false; it gains a pointer to ADR-0013.
+  false; it gains a pointer to ADR-0014.
 - **`CONFIGURATION.md`** — both settings, per the `c8c373f` precedent.
 - **`docs/divergence-ledger.md`** — deliberately **unchanged** (§4.2).
 
