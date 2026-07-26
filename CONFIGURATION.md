@@ -1,6 +1,6 @@
 # Configuration
 
-Configuration precedence is shown from left to right in the table below: an
+Configuration precedence is shown from left to right in the tables below: an
 explicit command-line flag overrides an environment variable, which overrides
 the selected TOML file, which overrides the built-in default.
 
@@ -15,41 +15,53 @@ prints the same string. The canonical unit is presentation only: any Go duration
 form is accepted as input, so `--stream-idle-timeout 5m` and
 `--stream-idle-timeout 300s` are equivalent.
 
-| CLI flag (highest precedence) | Environment variable | TOML key | Default (lowest precedence) | Command |
-| --- | --- | --- | --- | --- |
-| [`--config <PATH>`](#--config) | `COPILOTD_CONFIG` | — | No file | `serve`, `login` |
-| [`--log-level <LEVEL>`](#--log-level) | `COPILOTD_LOG_LEVEL` | `log-level` | `info` | `serve`, `login` |
-| [`--log-format <FORMAT>`](#--log-format) | `COPILOTD_LOG_FORMAT` | `log-format` | `text` | `serve`, `login` |
-| [`--log-file <PATH>`](#--log-file) | `COPILOTD_LOG_FILE` | `log-file` | Empty (stderr) | `serve`, `login` |
-| [`--github-oauth-token-file <PATH>`](#--github-oauth-token-file) | `COPILOTD_GITHUB_OAUTH_TOKEN_FILE` | `github-oauth-token-file` | `<user config dir>/copilotd/github-oauth-token` | `serve`, `login` |
-| [`--addr <HOST:PORT>`](#--addr) | `COPILOTD_ADDR` | `addr` | `127.0.0.1:8080` | `serve` |
-| [`--shutdown-timeout <DURATION>`](#--shutdown-timeout) | `COPILOTD_SHUTDOWN_TIMEOUT` | `shutdown-timeout` | `10s` | `serve` |
-| [`--apikey <KEY>`](#--apikey) | `COPILOTD_APIKEY` | `apikey` | Required | `serve` |
-| [`--outbound-timeout <DURATION>`](#--outbound-timeout) | `COPILOTD_OUTBOUND_TIMEOUT` | `outbound-timeout` | `600s` | `serve` |
-| [`--stream-idle-timeout <DURATION>`](#--stream-idle-timeout) | `COPILOTD_STREAM_IDLE_TIMEOUT` | `stream-idle-timeout` | `600s` | `serve` |
-| [`--stream-keepalive-interval <DURATION>`](#--stream-keepalive-interval) | `COPILOTD_STREAM_KEEPALIVE_INTERVAL` | `stream-keepalive-interval` | `15s` | `serve` |
-| [`--write-timeout <DURATION>`](#--write-timeout) | `COPILOTD_WRITE_TIMEOUT` | `write-timeout` | `90s` | `serve` |
-| [`--response-header-timeout <DURATION>`](#--response-header-timeout) | `COPILOTD_RESPONSE_HEADER_TIMEOUT` | `response-header-timeout` | `600s` | `serve` |
-| [`--ws-handshake-timeout <DURATION>`](#--ws-handshake-timeout) | `COPILOTD_WS_HANDSHAKE_TIMEOUT` | `ws-handshake-timeout` | `10s` | `serve` |
-| [`--max-request-bytes <BYTES>`](#--max-request-bytes) | `COPILOTD_MAX_REQUEST_BYTES` | `max-request-bytes` | `33554432` (32 MiB) | `serve` |
-| [`--max-buffered-response-bytes <BYTES>`](#--max-buffered-response-bytes) | `COPILOTD_MAX_BUFFERED_RESPONSE_BYTES` | `max-buffered-response-bytes` | `33554432` (32 MiB) | `serve` |
-| [`--anthropic-catalog-model-id-normalization-enabled=<BOOL>`](#--anthropic-catalog-model-id-normalization-enabled) | `COPILOTD_ANTHROPIC_CATALOG_MODEL_ID_NORMALIZATION_ENABLED` | `anthropic-catalog-model-id-normalization-enabled` | `false` | `serve` |
-| [`--shim-nop-enabled=<BOOL>`](#--shim-nop-enabled) | `COPILOTD_SHIM_NOP_ENABLED` | `shim-nop-enabled` | `false` | `serve` |
-| [`--shim-responses-item-id-stabilizer-enabled=<BOOL>`](#--shim-responses-item-id-stabilizer-enabled) | `COPILOTD_SHIM_RESPONSES_ITEM_ID_STABILIZER_ENABLED` | `shim-responses-item-id-stabilizer-enabled` | `false` | `serve` |
-| [`--codex-catalog-enabled=<BOOL>`](#--codex-catalog-enabled) | `COPILOTD_CODEX_CATALOG_ENABLED` | `codex-catalog-enabled` | `false` | `serve` |
-| [`--codex-auto-review-model <SLUG>`](#--codex-auto-review-model) | `COPILOTD_CODEX_AUTO_REVIEW_MODEL` | `codex-auto-review-model` | Empty | `serve` |
-| [`--codex-auto-review-model-overrides <MAP>`](#--codex-auto-review-model-overrides) | `COPILOTD_CODEX_AUTO_REVIEW_MODEL_OVERRIDES` | `codex-auto-review-model-overrides` | Empty | `serve` |
-| [`--codex-catalog-override-limits=<BOOL>`](#--codex-catalog-override-limits) | `COPILOTD_CODEX_CATALOG_OVERRIDE_LIMITS` | `codex-catalog-override-limits` | `false` | `serve` |
-| [`--codex-catalog-refresh-interval <DURATION>`](#--codex-catalog-refresh-interval) | `COPILOTD_CODEX_CATALOG_REFRESH_INTERVAL` | `codex-catalog-refresh-interval` | `24h` | `serve` |
-| [`--github-oauth-token <TOKEN>`](#--github-oauth-token) | `COPILOTD_GITHUB_OAUTH_TOKEN` | `github-oauth-token` | Empty | `serve` |
-| [`--startup-mint-retries <COUNT>`](#--startup-mint-retries) | `COPILOTD_STARTUP_MINT_RETRIES` | `startup-mint-retries` | `3` | `serve` |
-| [`--vscode-version <VERSION>`](#--vscode-version) | `COPILOTD_VSCODE_VERSION` | `vscode-version` | `1.104.1` | `serve` |
-| [`--plugin-version <VERSION>`](#--plugin-version) | `COPILOTD_PLUGIN_VERSION` | `plugin-version` | `0.26.7` | `serve` |
-| [`--copilot-integration-id <ID>`](#--copilot-integration-id) | `COPILOTD_COPILOT_INTEGRATION_ID` | `copilot-integration-id` | `vscode-chat` | `serve` |
-| [`--github-api-version <VERSION>`](#--github-api-version) | `COPILOTD_GITHUB_API_VERSION` | `github-api-version` | `2025-04-01` | `serve` |
-| [`--impersonation-refresh-interval <DURATION>`](#--impersonation-refresh-interval) | `COPILOTD_IMPERSONATION_REFRESH_INTERVAL` | `impersonation-refresh-interval` | `24h` | `serve` |
-| [`--github-client-id <ID>`](#--github-client-id) | `COPILOTD_GITHUB_CLIENT_ID` | `github-client-id` | `Iv1.b507a08c87ecfe98` | `login` |
-| [`--github-scope <SCOPE>`](#--github-scope) | `COPILOTD_GITHUB_SCOPE` | `github-scope` | `read:user` | `login` |
+## `login`
+
+| CLI flag (highest precedence) | Environment variable | TOML key | Default (lowest precedence) |
+| --- | --- | --- | --- |
+| [`--config <PATH>`](#--config) | `COPILOTD_CONFIG` | — | No file |
+| [`--log-level <LEVEL>`](#--log-level) | `COPILOTD_LOG_LEVEL` | `log-level` | `info` |
+| [`--log-format <FORMAT>`](#--log-format) | `COPILOTD_LOG_FORMAT` | `log-format` | `text` |
+| [`--log-file <PATH>`](#--log-file) | `COPILOTD_LOG_FILE` | `log-file` | Empty (stderr) |
+| [`--github-oauth-token-file <PATH>`](#--github-oauth-token-file) | `COPILOTD_GITHUB_OAUTH_TOKEN_FILE` | `github-oauth-token-file` | `<user config dir>/copilotd/github-oauth-token` |
+| [`--github-client-id <ID>`](#--github-client-id) | `COPILOTD_GITHUB_CLIENT_ID` | `github-client-id` | `Iv1.b507a08c87ecfe98` |
+| [`--github-scope <SCOPE>`](#--github-scope) | `COPILOTD_GITHUB_SCOPE` | `github-scope` | `read:user` |
+
+## `serve`
+
+| CLI flag (highest precedence) | Environment variable | TOML key | Default (lowest precedence) |
+| --- | --- | --- | --- |
+| [`--config <PATH>`](#--config) | `COPILOTD_CONFIG` | — | No file |
+| [`--shim-responses-item-id-stabilizer-enabled=<BOOL>`](#--shim-responses-item-id-stabilizer-enabled) | `COPILOTD_SHIM_RESPONSES_ITEM_ID_STABILIZER_ENABLED` | `shim-responses-item-id-stabilizer-enabled` | `false` |
+| [`--shim-nop-enabled=<BOOL>`](#--shim-nop-enabled) | `COPILOTD_SHIM_NOP_ENABLED` | `shim-nop-enabled` | `false` |
+| [`--anthropic-catalog-model-id-normalization-enabled=<BOOL>`](#--anthropic-catalog-model-id-normalization-enabled) | `COPILOTD_ANTHROPIC_CATALOG_MODEL_ID_NORMALIZATION_ENABLED` | `anthropic-catalog-model-id-normalization-enabled` | `false` |
+| [`--codex-catalog-enabled=<BOOL>`](#--codex-catalog-enabled) | `COPILOTD_CODEX_CATALOG_ENABLED` | `codex-catalog-enabled` | `false` |
+| [`--codex-auto-review-model <SLUG>`](#--codex-auto-review-model) | `COPILOTD_CODEX_AUTO_REVIEW_MODEL` | `codex-auto-review-model` | Empty |
+| [`--codex-auto-review-model-overrides <MAP>`](#--codex-auto-review-model-overrides) | `COPILOTD_CODEX_AUTO_REVIEW_MODEL_OVERRIDES` | `codex-auto-review-model-overrides` | Empty |
+| [`--codex-catalog-override-limits=<BOOL>`](#--codex-catalog-override-limits) | `COPILOTD_CODEX_CATALOG_OVERRIDE_LIMITS` | `codex-catalog-override-limits` | `false` |
+| [`--codex-catalog-refresh-interval <DURATION>`](#--codex-catalog-refresh-interval) | `COPILOTD_CODEX_CATALOG_REFRESH_INTERVAL` | `codex-catalog-refresh-interval` | `24h` |
+| [`--log-level <LEVEL>`](#--log-level) | `COPILOTD_LOG_LEVEL` | `log-level` | `info` |
+| [`--log-format <FORMAT>`](#--log-format) | `COPILOTD_LOG_FORMAT` | `log-format` | `text` |
+| [`--log-file <PATH>`](#--log-file) | `COPILOTD_LOG_FILE` | `log-file` | Empty (stderr) |
+| [`--github-oauth-token-file <PATH>`](#--github-oauth-token-file) | `COPILOTD_GITHUB_OAUTH_TOKEN_FILE` | `github-oauth-token-file` | `<user config dir>/copilotd/github-oauth-token` |
+| [`--addr <HOST:PORT>`](#--addr) | `COPILOTD_ADDR` | `addr` | `127.0.0.1:8080` |
+| [`--shutdown-timeout <DURATION>`](#--shutdown-timeout) | `COPILOTD_SHUTDOWN_TIMEOUT` | `shutdown-timeout` | `10s` |
+| [`--apikey <KEY>`](#--apikey) | `COPILOTD_APIKEY` | `apikey` | Required |
+| [`--outbound-timeout <DURATION>`](#--outbound-timeout) | `COPILOTD_OUTBOUND_TIMEOUT` | `outbound-timeout` | `600s` |
+| [`--stream-idle-timeout <DURATION>`](#--stream-idle-timeout) | `COPILOTD_STREAM_IDLE_TIMEOUT` | `stream-idle-timeout` | `600s` |
+| [`--stream-keepalive-interval <DURATION>`](#--stream-keepalive-interval) | `COPILOTD_STREAM_KEEPALIVE_INTERVAL` | `stream-keepalive-interval` | `15s` |
+| [`--write-timeout <DURATION>`](#--write-timeout) | `COPILOTD_WRITE_TIMEOUT` | `write-timeout` | `90s` |
+| [`--response-header-timeout <DURATION>`](#--response-header-timeout) | `COPILOTD_RESPONSE_HEADER_TIMEOUT` | `response-header-timeout` | `600s` |
+| [`--ws-handshake-timeout <DURATION>`](#--ws-handshake-timeout) | `COPILOTD_WS_HANDSHAKE_TIMEOUT` | `ws-handshake-timeout` | `10s` |
+| [`--max-request-bytes <BYTES>`](#--max-request-bytes) | `COPILOTD_MAX_REQUEST_BYTES` | `max-request-bytes` | `33554432` (32 MiB) |
+| [`--max-buffered-response-bytes <BYTES>`](#--max-buffered-response-bytes) | `COPILOTD_MAX_BUFFERED_RESPONSE_BYTES` | `max-buffered-response-bytes` | `33554432` (32 MiB) |
+| [`--github-oauth-token <TOKEN>`](#--github-oauth-token) | `COPILOTD_GITHUB_OAUTH_TOKEN` | `github-oauth-token` | Empty |
+| [`--startup-mint-retries <COUNT>`](#--startup-mint-retries) | `COPILOTD_STARTUP_MINT_RETRIES` | `startup-mint-retries` | `3` |
+| [`--vscode-version <VERSION>`](#--vscode-version) | `COPILOTD_VSCODE_VERSION` | `vscode-version` | `1.104.1` |
+| [`--plugin-version <VERSION>`](#--plugin-version) | `COPILOTD_PLUGIN_VERSION` | `plugin-version` | `0.26.7` |
+| [`--copilot-integration-id <ID>`](#--copilot-integration-id) | `COPILOTD_COPILOT_INTEGRATION_ID` | `copilot-integration-id` | `vscode-chat` |
+| [`--github-api-version <VERSION>`](#--github-api-version) | `COPILOTD_GITHUB_API_VERSION` | `github-api-version` | `2025-04-01` |
+| [`--impersonation-refresh-interval <DURATION>`](#--impersonation-refresh-interval) | `COPILOTD_IMPERSONATION_REFRESH_INTERVAL` | `impersonation-refresh-interval` | `24h` |
 
 ## Options
 
