@@ -131,7 +131,9 @@ reports `vendor:"Anthropic"` and the ID begins `claude-`; for example,
 `claude-opus-4.8` becomes `claude-opus-4-8`. Other vendors and non-Claude IDs
 remain verbatim. The catalog's `first_id` and `last_id` use the same normalized
 IDs. This setting affects only `/anthropic/v1/models`; inference requests and
-responses remain unchanged. Disabled by default, preserving Copilot's IDs.
+responses remain unchanged. If normalization would produce duplicate model IDs,
+the catalog fails closed with HTTP `502` instead of emitting ambiguous IDs.
+Disabled by default, preserving Copilot's IDs.
 
 ### `--shim-nop-enabled`
 
