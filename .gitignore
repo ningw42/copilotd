@@ -7,3 +7,5 @@
 /.direnv/
 # brainstorming visual-companion mockups
 /.superpowers/
+# pi agent state
+/.pi/
