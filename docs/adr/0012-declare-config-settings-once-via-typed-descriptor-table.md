@@ -62,12 +62,14 @@ typed row makes the compiler, not discipline, the thing that keeps them agreeing
 - As the one structural change, the Codex settings flatten onto `ServeConfig` and
   the renderer receives its own projected `catalog.CodexDescriptor`, so no
   `config.*` type crosses the render seam.
-- The change is runtime behavior-preserving: precedence, resolved values, error
-  text, help output, `LogValue` redaction, and the rendered Codex catalog are all
-  unchanged; `config_test.go` is the safety net (its compile-time
-  `CodexConfig`/`got.Codex` accesses migrate mechanically in the flatten slice,
-  with assertion strings unchanged, and it remains unchanged through the later
-  table-engine slices).
+- Apart from that structural change, the original declare-once migration was
+  runtime behavior-preserving. Follow-up issue #132 deliberately changed
+  malformed reviewer-override handling: every supplied layer is parsed eagerly,
+  lower-precedence errors are fatal, and TOML/environment errors identify their
+  source. Valid-value precedence and resolved maps, help output, logging and
+  redaction, reviewer selection, and Codex catalog rendering remain unchanged;
+  focused config tests pin both the changed failure behavior and these preserved
+  invariants.
 
 See `docs/design/2026-07-24-config-declare-once-design.md` for the historical
 rollout design. Its two-phase reviewer-override carve-out and finalization phase
