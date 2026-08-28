@@ -754,8 +754,9 @@ design exists to remove.
   post-commit stream path this module deliberately does not touch.
 - ADR-0013 (**new, with this design**) — the shared policy for every authenticated
   call to GitHub Copilot is governed by `internal/upstream`.
-- [Token usage meter](2026-07-26-token-usage-meter-design.md) — **in flight, and
-  ordered after this one**, taking ADR-0014. Behaviour change 3 settles ground the
+- [Token usage meter](2026-07-26-token-usage-meter-design.md) — **in flight and
+  ordered after this one**. ADR-0014 now occupies the next slot, so the meter's
+  two decisions take ADR-0015 and ADR-0016. Behaviour change 3 settles ground the
   meter stands on: its §11.1 already expects **502** for an over-cap non-stream
   response, explicitly conditioned on this design landing first. Landing this
   first makes that expectation good rather than provisional, and means the meter

@@ -1,6 +1,6 @@
 # Phase 3 — Middleware framework (the shim onion) — Design
 
-Status: proposed design (refined via brainstorming + adversarial critique), pending implementation plan
+Status: implemented; post-commit hook contract amended by [ADR-0014](../adr/0014-infallible-post-commit-shim-hooks.md)
 Date: 2026-07-16
 Roadmap reference: `ROADMAP.md` §7 "Phase 3 — Middleware framework"
 Builds on: `docs/design/2026-07-15-phase-2-sse-streaming-engine-design.md`,
@@ -86,7 +86,7 @@ client), `shim3` innermost (nearest the forwarder).
   transformer preserves today's byte-exact verbatim path at zero cost.
 - **Divergence-ledger extension** in `internal/apierror`: an `Error` carrier for a
   shim's deliberate pre-commit rejection, a default `ShimError` kind, and a
-  `StreamShimFailed` stream reason for the post-commit terminal.
+  `StreamShimFailed` stream reason for the panic-only post-commit terminal.
 - **Config:** per-shim enable/disable and the buffered-response cap via the
   existing `ff/v4` conventions.
 - **No-fabrication invariant** and the **no-double-up invariant** written into the
@@ -107,8 +107,8 @@ client), `shim3` innermost (nearest the forwarder).
   separate transport copilotd does not forward — an explicit non-goal.
 - **Configurable ordering.** Order is registration order; a config-driven reorder
   waits until the catalog is large enough to need it.
-- **Per-shim / per-event metrics** beyond the new outcome label, the suppressed-error
-  counter (§12), and a startup chain log.
+- **Per-shim / per-event metrics** beyond the new outcome label, the
+  suppressed-shim-panic counter (§12), and a startup chain log.
 - **Structural repair** (emitting a protocol frame upstream dropped) as a
   capability — see §10.2.
 - **Stream-side envelope revision** — a stream shim cannot buffer-then-change the
@@ -143,10 +143,10 @@ copilotd/
     │                      control-point relocation (terminal+keepalive → output side; stall stays input side);
     │                      finalize-and-re-evaluate on pre-terminal teardown; + Outcome value `shim_error`
     │                      (a doc-comment ties the name to the injected FrameTransformer — in production the shim chain);
-    │                      + off-band counter for a shim error suppressed post-terminal (§8.4/§12)
+    │                      + off-band counter for a shim panic suppressed post-terminal (§8.4/§12)
     ├── forward/    [CHG]  + injected shim registry dependency; build a per-request Chain (surface, route); run request half
     │                      before Do(); prelude pass at commit; buffered path gains the buffering-mode switch; stream path
-    │                      passes the sseAdapter (or nil) into Pump; streamPolicy.RenderError maps OutcomeShimError → StreamShimFailed
+    │                      passes the sseAdapter (or nil) into Pump; panic-only OutcomeShimError maps to StreamShimFailed
     ├── apierror/   [CHG]  + Error{Kind,Msg} carrier + Reject(kind,msg) (shim-shaped pre-commit rejection); + ShimError
     │                      Kind (default 500/api_error); + InvalidRequest Kind (400); + StreamShimFailed StreamReason
     │                      (streamMessages "copilotd: shim failed") rendered through the existing WriteStreamError
@@ -163,7 +163,7 @@ Each new/changed unit — *what it does · how it is used · what it depends on*
   Exposes the canonical ordered registry (§5.4). Copilot-agnostic; depends on
   `context`, `net/http`, `apierror`, and `sse`. Knows nothing about credentials.
 - **`internal/sse`** [CHG] — gains a `FrameTransformer` seam the pump applies via a
-  new parameter, plus the control-point relocations and the suppressed-error
+  new parameter, plus the control-point relocations and the suppressed-panic
   counter. Still payload-opaque; a `nil` transformer is the byte-exact Phase-2 path.
 - **`internal/forward`** [CHG] — gains an injected shim registry; builds the
   per-request `Chain`, runs the request half before `Do()`, runs the prelude pass,
@@ -199,13 +199,14 @@ type BufferedTransformer interface {
 }
 
 // Per SSE event (stream path only). Returns 0..n frames, all derived from real content.
+// A shim that cannot interpret the frame returns it unchanged.
 type EventTransformer interface {
-    TransformEvent(ctx context.Context, f sse.Frame) ([]sse.Frame, error)
+    TransformEvent(ctx context.Context, f sse.Frame) []sse.Frame
 }
 
 // End of a stream (stream path only). Flush any HELD frames; no new information.
 type StreamFinalizer interface {
-    Finalize(ctx context.Context) ([]sse.Frame, error)
+    Finalize(ctx context.Context) []sse.Frame
 }
 ```
 
@@ -375,16 +376,18 @@ Over the size cap → a provider-shaped error before commit (reuses the
 
 ```go
 type FrameTransformer interface {
-    Transform(ctx context.Context, f Frame) ([]Frame, error)  // 0..n frames
-    Finalize(ctx context.Context) ([]Frame, error)            // held frames at stream end
+    Transform(ctx context.Context, f Frame) []Frame  // 0..n frames
+    Finalize(ctx context.Context) []Frame            // held frames at stream end
 }
 ```
 
 `internal/shim` supplies an `sseAdapter` that folds the enabled `EventTransformer`
 / `StreamFinalizer` instances (in onion order) into one `FrameTransformer`,
-closing over the request context. `forward` passes the adapter into `Pump` — **or
-`nil`** when no enabled shim implements either stream hook, selecting the Phase-2
-verbatim fast path unchanged.
+closing over the request context. These post-commit hooks are infallible under
+[ADR-0014](../adr/0014-infallible-post-commit-shim-hooks.md): a shim that cannot
+interpret a frame returns it unchanged. `forward` passes the adapter into `Pump` —
+**or `nil`** when no enabled shim implements either stream hook, selecting the
+Phase-2 verbatim fast path unchanged.
 
 **Composition semantics (N ≥ 1 event shims).**
 
@@ -437,10 +440,10 @@ follows (non-nil transformer; a `nil` transformer is exactly Phase 2):
 
 | Loop event | Action |
 | --- | --- |
-| **upstream frame** | stall stopwatch **stops on receipt** (input side); `out, err := transformer.Transform(ctx, frame)`; on err → **error rule** (§8.3); else for each `f` in `out`: write `f.Raw` + flush, and on the **output side** set `sawTerminal` if `terminal(f.Type)` and reset the keepalive timer; then **re-arm stall**. `out == []` (drop/hold) writes nothing, sets no terminal, resets no keepalive. |
+| **upstream frame** | stall stopwatch **stops on receipt** (input side); `out := transformer.Transform(ctx, frame)`; a contained panic follows the **panic rule** (§8.3); otherwise for each `f` in `out`: write `f.Raw` + flush, and on the **output side** set `sawTerminal` if `terminal(f.Type)` and reset the keepalive timer; then **re-arm stall**. `out == []` (drop/hold) writes nothing, sets no terminal, resets no keepalive. |
 | **keepalive tick** | timer fires on interval. If `sawTerminal` → return **`clean`** (no ping, no `Finalize`; the client's stream is complete). Else write `:\n\n` + flush and continue — a `hold` shim creates this client-idle gap while upstream is busy. Does not touch stall. |
 | **stall fires** | upstream silence (`--stream-idle-timeout`, excludes our write time). If `sawTerminal` → **`clean`**; else **pre-terminal teardown** (§8.3) with cause `stall`. |
-| **ctx.Done / write error / write-deadline** | `client_cancel`; **discard** held frames (client is gone); cancel + join. The only path that skips `Finalize` regardless of `sawTerminal`. |
+| **ctx.Done / write error / write-deadline** | `client_cancel`; **discard** held frames (client is gone); cancel + join. Skips `Finalize` regardless of `sawTerminal`, as does the panic rule (§8.3). |
 | **reader done** (EOF or read-error) | If `sawTerminal` → **`clean`**; else **pre-terminal teardown** (§8.3) with cause EOF (⇒ `synthesized` if unterminated) or read-error (⇒ `upstream_error`). |
 
 The **cancel-then-join** lifecycle and the deadline-bounded writer are unchanged.
@@ -454,25 +457,22 @@ own coalescing choice, not a framework stall.
 both produce output byte-exact with Phase 2 — asserted frame-for-frame including
 flush boundaries (§13), not merely by concatenation.
 
-### 8.3 Teardown & error precedence
+### 8.3 Teardown & panic precedence
 
 **Pre-terminal teardown (a stall or reader-done exit taken while `!sawTerminal`).**
 Run `transformer.Finalize(ctx)`; write its returned frames (output-side terminal
-check each, so a held terminal counts toward `sawTerminal`); then, in precedence
-order:
-1. `sawTerminal` (over the emitted stream, incl. finalize output) → **`clean`**,
-   suppressing all synthesis (no-double-up). *(Fixes held-terminal-⇒-stall.)*
-2. else if `Finalize` errored → **`shim_error`** (synthesize + teardown).
-3. else synthesize the cause's terminal: EOF ⇒ **`synthesized`**; read-error ⇒
-   **`upstream_error`**; stall ⇒ **`stall`**.
+check each, so a held terminal counts toward `sawTerminal`); then resolve
+`sawTerminal` to **`clean`** or synthesize the cause's terminal: EOF ⇒
+**`synthesized`**; read-error ⇒ **`upstream_error`**; stall ⇒ **`stall`**. There is
+no routine finalize-error branch: `Finalize` is infallible.
 
-**Error rule (a `Transform` error mid-stream).** A shim is in a suspect state, so
-`Finalize` is **not** run — which means the whole chain's in-flight held frames
-(including those of *healthy* outer shims) are discarded. This is the conservative
-choice (the monolithic sweep is all-or-nothing and the stream is terminating in
-error), stated so reviewers don't assume healthy shims get to flush. Precedence:
-`sawTerminal` → **`clean`** (no-double-up, but see §8.4 observability); else →
-**`shim_error`**. Then cancel + join.
+**Panic rule.** The pump contains a panic from either post-commit hook and aborts
+that invocation outright; no partial return value is available and `Finalize` is
+not attempted after a transform panic. If `sawTerminal` is false, the pump emits
+exactly one native shim-failure terminal and classifies **`shim_error`**. If
+`sawTerminal` is true, it emits nothing further, preserves the **`clean`** wire
+outcome, and records the suppressed panic off-band (§8.4). Every path still follows
+cancel-then-join and releases the upstream connection.
 
 ### 8.4 What the framework does *not* enforce (stated, not silently assumed)
 
@@ -484,12 +484,12 @@ error), stated so reviewers don't assume healthy shims get to flush. Precedence:
   do **not** drop post-terminal frames, because that would diverge the nil path
   from Phase 2's verbatim passthrough and break the regression anchor. The §13
   hold/coalesce doubles are the guard against this authoring mistake.
-- **Suppressed post-terminal errors are still recorded off-band.** When the error
-  rule or a post-terminal `Finalize` error is suppressed to `clean` by no-double-up,
-  the wire stays `clean` (correct), but the `sse` layer emits a **warn log + a
-  `suppressed post-terminal shim error` counter** (§12). This decouples *what
-  the client sees* (clean) from *what operators see* (a real shim failure), closing
-  the observability hole the suppression would otherwise open.
+- **Suppressed post-terminal panics are still recorded off-band.** When a
+  transform panic occurs after a terminal, no-double-up keeps the wire `clean`, but
+  the `sse` layer emits a metadata-only **warn log + a `suppressed post-terminal
+  shim error` counter** (§12). This decouples *what the client sees* (clean) from
+  *what operators see* (a programmer bug), closing the observability hole the
+  suppression would otherwise open.
 - **Hook promptness.** `TransformEvent` and `StreamFinalizer.Finalize` run
   synchronously inside the pump loop, outside `select`: on frame receipt the stall
   stopwatch and keepalive timer are both stopped, the write-deadline bounds only
@@ -546,26 +546,24 @@ if err != nil {
 | ShimError (default) | a pre-commit hook returned a bare error | 500 | `api_error` | `api_error` |
 | Shim-shaped rejection | a hook returned `apierror.Reject(kind, …)` | per kind | per kind | per kind |
 
-### 9.2 Tier 2 — post-commit `shim_error` terminal
+### 9.2 Tier 2 — panic-only post-commit `shim_error` terminal
 
-An `EventTransformer` / `StreamFinalizer` error **after commit** cannot change the
-locked HTTP status, so it routes through the synthesized-terminal machinery as a
-new outcome — **but only when no valid terminal has already reached the client**
-(§8.2/§8.3 no-double-up). This requires two additions the render vehicle lacks
-today (it is *reused*, not sufficient as-is):
+The post-commit `EventTransformer` and `StreamFinalizer` hooks are infallible by
+[ADR-0014](../adr/0014-infallible-post-commit-shim-hooks.md), so ordinary
+uncertainty is passthrough and never enters error rendering. A hook panic is a
+programmer bug contained by the SSE pump. When no valid terminal has reached the
+client, the pump routes that panic through the existing synthesized-terminal
+machinery; after a terminal, no-double-up emits nothing further.
 
-- `apierror` gains a **`StreamShimFailed`** `StreamReason` with a
-  `streamMessages` entry `copilotd: shim failed`, rendered through the
-  existing `WriteStreamError`.
-- `forward`'s `streamPolicy.RenderError` gains a **case mapping**
-  `sse.OutcomeShimError → apierror.StreamShimFailed`. The switch
-  default is `StreamEnded`; without this case the new outcome would silently emit
-  "upstream stream ended before a terminal event" — the wrong signal.
+- `apierror` provides **`StreamShimFailed`** with the message `copilotd: shim
+  failed`, rendered through `WriteStreamError`.
+- `forward` maps `sse.OutcomeShimError → apierror.StreamShimFailed`; the outcome
+  and bounded metric bucket survive specifically for the panic path.
 
 | Trigger | Wire | Metric outcome | Off-band |
 | --- | --- | --- | --- |
-| stream hook failed, client had **not** seen a terminal | `event: error` (`shim failed`) | `shim_error` (warn) | log + metric |
-| stream hook failed, a terminal had **already** reached the client | *(nothing — no-double-up)* | `clean` | **warn log + suppressed-error counter** (§8.4) |
+| stream hook panicked, client had **not** seen a terminal | `event: error` (`shim failed`) | `shim_error` (warn) | log + metric |
+| stream hook panicked, a terminal had **already** reached the client | *(nothing — no-double-up)* | `clean` | **metadata-only warn log + suppressed-error counter** (§8.4) |
 
 A `client_cancel` still emits nothing (and records nothing beyond the existing
 cancel accounting).
@@ -620,10 +618,10 @@ Within the redaction discipline (no bodies, no frame contents, no secrets):
   also requires a case in `streamOutcomeIndexes` (`internal/server/metrics.go`) and
   the access-log warn switch (`internal/server/middleware.go`), or the bounded
   counter silently drops it and the line stays `info`.
-- **Suppressed post-terminal errors (§8.4):** a shim error suppressed to `clean` by
-  no-double-up still emits a **warn log + a distinct counter** at the `sse` layer,
-  so a shim failure after the terminal is never invisible even though the
-  wire outcome is `clean`.
+- **Suppressed post-terminal panics (§8.4):** a hook panic suppressed to `clean`
+  by no-double-up still emits a **metadata-only warn log + a distinct counter** at
+  the `sse` layer, so a programmer bug after the terminal is never invisible even
+  though the wire outcome is `clean`.
 - **Deferred:** per-shim / per-event latency metrics. The seam exists; YAGNI until
   the catalog grows.
 
@@ -650,13 +648,13 @@ on **both** of its arms:
 - **held-but-complete ⇒ `clean`, on BOTH arms:** hold every frame incl. terminal,
   assert `clean` + full held stream delivered — once via **EOF** (upstream closes
   after the held terminal) and once via **stall** (idle-without-EOF past the clock).
-- **mid-stream `Transform` error (the error rule), BOTH branches:** terminal
-  already written ⇒ `clean`, no synthesized frame, **and the held frame is NOT
-  flushed** (proves `Finalize` skipped); no terminal yet ⇒ exactly one
-  `shim_error` via `StreamShimFailed`.
-- **`Finalize` error, BOTH branches:** after a delivered terminal ⇒ `clean`, no
-  duplicate, **suppressed-error counter incremented** (§8.4); before any terminal ⇒
-  `shim_error`.
+- **mid-stream `Transform` panic, BOTH branches:** terminal already written ⇒
+  `clean`, no synthesized frame, metadata-only warning, and the suppressed-error
+  counter increments; no terminal yet ⇒ exactly one `shim_error` via
+  `StreamShimFailed`. In both cases `Finalize` is skipped and no partial output is
+  composed.
+- **`Finalize` panic:** before any terminal ⇒ exactly one `shim_error`; the panic
+  aborts the sweep and no partial return value reaches the writer.
 - **finalize-sweep re-transform** → inner `hold` releases `X` at `Finalize`, outer
   `alter` maps `X→X′`; assert the client receives **`X′`** (a naive per-shim-finalize
   concatenation emits `X` and fails).
@@ -674,11 +672,12 @@ on **both** of its arms:
   bare error → 500 `api_error`; on the **buffered path** (deferred commit) the error
   renders as HTTP, not a half-written body; a `RequestTransformer` rejection hits
   the Copilot stub **zero** times (short-circuit).
-- **lifecycle (`-race`)** → the two new error exits (`Transform`/`Finalize` error)
-  join the reader and release the upstream connection, like the Phase-2 exits.
-- **observability** → the access line for a post-commit failure carries
-  `shim_error` + `warn`; a suppressed post-terminal error increments the §8.4
-  counter.
+- **lifecycle (`-race`)** → the two panic exits (`Transform`/`Finalize`) join the
+  reader and release the upstream connection, like the Phase-2 exits.
+- **observability** → the access line for a pre-terminal post-commit panic carries
+  `shim_error` + `warn`; a suppressed post-terminal panic increments the §8.4
+  counter without exposing the panic value, frame content, or a client-visible
+  stack.
 - **end-to-end** → server + API key + stubbed identity + stub Copilot, identity
   double enabled, whole request survives a full chain unchanged on both a buffered
   and a streamed response.
@@ -758,13 +757,14 @@ Hardened by an adversarial critic panel across six lenses (completeness,
 contract-soundness, consistency, seed-shim-fit, test-adequacy, and a focused
 soundness re-check of the reworked sections), each finding verified against the
 source before acceptance. **Design/logic fixes folded in:** the
-held-terminal-discarded-as-`stall` bug and the finalize-error-vs-terminal
-precedence bug (§8.2/§8.3, via finalize-before-terminal + no-double-up); the
+held-terminal-discarded-as-`stall` bug (§8.2/§8.3, via
+finalize-before-terminal + no-double-up); the original finalize-error precedence
+was later deleted with the fallible contract by ADR-0014; the
 `apierror.Error`/`Reject` carrier and `ShimError`/`InvalidRequest` kinds
 (§9.1); the `StreamShimFailed` reason + `RenderError` mapping (§9.2);
 multi-shim stream composition semantics (§8.1); the registry origin/injection
 wiring (§5.4); the `route` argument to `New` closing the `count_tokens`/path gap
-(§5.2/§14); the off-band recording of suppressed post-terminal errors (§8.4/§12);
+(§5.2/§14); the off-band recording of suppressed post-terminal panics (§8.4/§12);
 the keepalive-after-terminal third clean exit (§8.2); and honest reframing of §14
 (codex-auto-review reclassified fit-unknown/possibly-non-shim; the fitting seeds
 only exercise commuting alters, so §8.1's machinery is validated by tests alone).

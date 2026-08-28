@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -277,8 +276,8 @@ func TestProxyDroppedClientMessageIsNotForwardedOrCounted(t *testing.T) {
 		Name:    "drop-client-message",
 		Enabled: true,
 		New: func(context.Context, endpoint.Surface, endpoint.Route) any {
-			return clientMessageTransformFunc(func(_ context.Context, message *shim.Message) (bool, error) {
-				return string(message.Data) != "drop", nil
+			return clientMessageTransformFunc(func(_ context.Context, message *shim.Message) bool {
+				return string(message.Data) != "drop"
 			})
 		},
 	}}
@@ -338,8 +337,8 @@ func TestProxyDroppedServerMessageIsNotForwardedOrCounted(t *testing.T) {
 		Name:    "drop-server-message",
 		Enabled: true,
 		New: func(context.Context, endpoint.Surface, endpoint.Route) any {
-			return serverMessageTransformFunc(func(_ context.Context, message *shim.Message) (bool, error) {
-				return string(message.Data) != "drop", nil
+			return serverMessageTransformFunc(func(_ context.Context, message *shim.Message) bool {
+				return string(message.Data) != "drop"
 			})
 		},
 	}}
@@ -378,72 +377,19 @@ func TestProxyDroppedServerMessageIsNotForwardedOrCounted(t *testing.T) {
 	}
 }
 
-func TestProxyClientTransformErrorClosesBothPeersWith1011AndRecordsErrorTerminal(t *testing.T) {
-	observed := &recordingWsMetrics{}
-	var logs bytes.Buffer
-	registry := shim.Registry{{
-		Name:    "failing-client-message",
-		Enabled: true,
-		New: func(context.Context, endpoint.Surface, endpoint.Route) any {
-			return clientMessageTransformFunc(func(context.Context, *shim.Message) (bool, error) {
-				return false, errors.New("transform failed")
-			})
-		},
-	}}
-	upstreamClosed := make(chan websocket.StatusCode, 1)
-	client, handlerDone, cleanup := startTelemetrySessionWithRegistry(
-		t,
-		slog.New(slog.NewTextHandler(&logs, nil)),
-		observed,
-		1<<20,
-		registry,
-		func(conn *websocket.Conn) {
-			_, _, err := conn.Read(context.Background())
-			upstreamClosed <- websocket.CloseStatus(err)
-		},
+func TestProxyClientMessageShimPanicIsWarnedAndRedacted(t *testing.T) {
+	const (
+		panicSecret   = "private-websocket-panic"
+		messageSecret = "private-websocket-message"
 	)
-	defer cleanup()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-	defer cancel()
-	if err := client.Write(ctx, websocket.MessageText, []byte("trigger")); err != nil {
-		t.Fatalf("write trigger message: %v", err)
-	}
-	_, _, err := client.Read(ctx)
-	if got := websocket.CloseStatus(err); got != websocket.StatusInternalError {
-		t.Errorf("client close status = %v, want 1011 (err: %v)", got, err)
-		_ = client.CloseNow()
-	}
-	select {
-	case got := <-upstreamClosed:
-		if got != websocket.StatusInternalError {
-			t.Errorf("upstream close status = %v, want 1011", got)
-		}
-	case <-time.After(time.Second):
-		t.Error("sibling upstream pump was not torn down")
-	}
-	waitForHandler(t, handlerDone)
-
-	_, terminals := observed.snapshot()
-	if len(terminals) != 1 || terminals[0] != SessionError {
-		t.Errorf("terminal observations = %v, want [error]", terminals)
-	}
-	for _, want := range []string{"level=WARN", "msgs_c2u=0", "close_code=1011", "terminal_reason=error"} {
-		if !strings.Contains(logs.String(), want) {
-			t.Errorf("session log missing %q:\n%s", want, logs.String())
-		}
-	}
-}
-
-func TestProxyServerTransformErrorClosesBothPeersWith1011AndRecordsErrorTerminal(t *testing.T) {
 	observed := &recordingWsMetrics{}
 	var logs bytes.Buffer
 	registry := shim.Registry{{
-		Name:    "failing-server-message",
+		Name:    "panicking-client-message",
 		Enabled: true,
 		New: func(context.Context, endpoint.Surface, endpoint.Route) any {
-			return serverMessageTransformFunc(func(context.Context, *shim.Message) (bool, error) {
-				return false, errors.New("transform failed")
+			return clientMessageTransformFunc(func(context.Context, *shim.Message) bool {
+				panic(panicSecret)
 			})
 		},
 	}}
@@ -455,10 +401,6 @@ func TestProxyServerTransformErrorClosesBothPeersWith1011AndRecordsErrorTerminal
 		1<<20,
 		registry,
 		func(conn *websocket.Conn) {
-			if err := conn.Write(context.Background(), websocket.MessageText, []byte("trigger")); err != nil {
-				upstreamClosed <- websocket.CloseStatus(err)
-				return
-			}
 			_, _, err := conn.Read(context.Background())
 			upstreamClosed <- websocket.CloseStatus(err)
 		},
@@ -467,18 +409,20 @@ func TestProxyServerTransformErrorClosesBothPeersWith1011AndRecordsErrorTerminal
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
+	if err := client.Write(ctx, websocket.MessageText, []byte(messageSecret)); err != nil {
+		t.Fatalf("write panic trigger: %v", err)
+	}
 	_, _, err := client.Read(ctx)
 	if got := websocket.CloseStatus(err); got != websocket.StatusInternalError {
-		t.Errorf("client close status = %v, want 1011 (err: %v)", got, err)
-		_ = client.CloseNow()
+		t.Fatalf("client close status = %v, want 1011 (err: %v)", got, err)
 	}
 	select {
 	case got := <-upstreamClosed:
 		if got != websocket.StatusInternalError {
 			t.Errorf("upstream close status = %v, want 1011", got)
 		}
-	case <-time.After(time.Second):
-		t.Error("upstream peer did not receive the fatal transform close")
+	case <-ctx.Done():
+		t.Fatal("upstream did not receive 1011 after client-message shim panic")
 	}
 	waitForHandler(t, handlerDone)
 
@@ -486,66 +430,16 @@ func TestProxyServerTransformErrorClosesBothPeersWith1011AndRecordsErrorTerminal
 	if len(terminals) != 1 || terminals[0] != SessionError {
 		t.Errorf("terminal observations = %v, want [error]", terminals)
 	}
-	for _, want := range []string{"level=WARN", "msgs_u2c=0", "bytes_u2c=0", "close_code=1011", "terminal_reason=error"} {
-		if !strings.Contains(logs.String(), want) {
-			t.Errorf("session log missing %q:\n%s", want, logs.String())
+	logText := logs.String()
+	for _, want := range []string{"level=WARN", "close_code=1011", "terminal_reason=error", "request_id=request-telemetry"} {
+		if !strings.Contains(logText, want) {
+			t.Errorf("session log missing %q:\n%s", want, logText)
 		}
 	}
-}
-
-func TestProxyClientDisconnectRacingTransformErrorUsesValidTerminalAndTearsDown(t *testing.T) {
-	observed := &recordingWsMetrics{}
-	transformEntered := make(chan struct{})
-	raceStart := make(chan struct{})
-	registry := shim.Registry{{
-		Name:    "racing-client-message",
-		Enabled: true,
-		New: func(context.Context, endpoint.Surface, endpoint.Route) any {
-			return clientMessageTransformFunc(func(context.Context, *shim.Message) (bool, error) {
-				close(transformEntered)
-				<-raceStart
-				return false, errors.New("transform failed during disconnect")
-			})
-		},
-	}}
-	upstreamDone := make(chan struct{})
-	client, handlerDone, cleanup := startTelemetrySessionWithRegistry(
-		t,
-		slog.New(slog.NewTextHandler(io.Discard, nil)),
-		observed,
-		1<<20,
-		registry,
-		func(conn *websocket.Conn) {
-			defer close(upstreamDone)
-			<-raceStart
-			_ = conn.Write(context.Background(), websocket.MessageText, []byte("concurrent-server-message"))
-			_, _, _ = conn.Read(context.Background())
-		},
-	)
-	defer cleanup()
-
-	if err := client.Write(context.Background(), websocket.MessageText, []byte("trigger")); err != nil {
-		t.Fatalf("write trigger message: %v", err)
-	}
-	select {
-	case <-transformEntered:
-	case <-time.After(time.Second):
-		t.Fatal("transform did not start")
-	}
-	if err := client.CloseNow(); err != nil {
-		t.Fatalf("disconnect client: %v", err)
-	}
-	close(raceStart)
-	waitForHandler(t, handlerDone)
-	select {
-	case <-upstreamDone:
-	case <-time.After(time.Second):
-		t.Error("upstream peer did not unwind after race")
-	}
-
-	_, terminals := observed.snapshot()
-	if len(terminals) != 1 || (terminals[0] != SessionClientClosed && terminals[0] != SessionError) {
-		t.Errorf("terminal observations = %v, want [client_closed] or [error]", terminals)
+	for _, secret := range []string{panicSecret, messageSecret, "private-copilot-token"} {
+		if strings.Contains(logText, secret) {
+			t.Errorf("session log leaked %q:\n%s", secret, logText)
+		}
 	}
 }
 

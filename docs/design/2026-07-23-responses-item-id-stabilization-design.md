@@ -1,6 +1,6 @@
 # Responses item-id stabilization shim (opt-in, cross-transport)
 
-Status: proposed 2026-07-23.
+Status: implemented; post-commit hook contract amended by [ADR-0014](../adr/0014-infallible-post-commit-shim-hooks.md).
 
 Design for copilotd's **first concrete shim**: an opt-in transform that stabilizes
 the churning per-item `id` GitHub Copilot emits on the OpenAI Responses stream, so
@@ -139,7 +139,7 @@ both transports stay byte-for-byte verbatim.
 | Pin source | **First-seen genuine upstream id for an `output_index`** | In practice the `output_item.added` id — exactly the id `id`-keyed clients store; no synthetic id, so within policy. |
 | Fields rewritten | **Every id surface present** (`item.id` and/or `item_id`) + terminal `response.output[i].id` by array position | The id surfaces per the OpenAI contract; rewriting all present surfaces (not one) closes a silent gap if an event ever carried both; keyed structurally on `output_index`, not an event-type allowlist, so future id-bearing events are covered. |
 | Fidelity | **Targeted rewrite** — decode top level to `map[string]json.RawMessage`, touch only id-bearing sub-objects | Every untouched field keeps its exact value; object key order within a rewritten event may reshuffle (semantically neutral JSON). |
-| Malformed input | **Forward verbatim, never error** | Matches the payload-opaque ethos; critical on WS, where a returned error is fatal to the session (1011). |
+| Malformed input | **Forward verbatim; decline by passthrough** | Matches the payload-opaque ethos. Under ADR-0014 the post-commit hooks are infallible, so uncertainty stays byte-verbatim; only a panic is session-fatal on WebSocket (1011). |
 | Default | **Off**, opt-in | Preserves byte-for-byte transparent forwarding; the first **Alteration** entry in the divergence ledger (§9), enabled per deployment for spec-strict clients. |
 | Packaging | **In package `shim`**, new file `responses_item_id.go` (`responsesItemIDStabilizer`) | Mirrors `NopShim`; lets `CanonicalRegistry()` reference the factory with no import cycle (remap core needs only `encoding/json` + `sse`). |
 
@@ -214,7 +214,7 @@ differs.
 
 ### 5.1 SSE — `EventTransformer`
 
-`TransformEvent(ctx, sse.Frame) ([]sse.Frame, error)` receives a frame whose `Raw`
+`TransformEvent(ctx, sse.Frame) []sse.Frame` receives a frame whose `Raw`
 is the exact bytes to re-emit (its `event:` line, `data:` line(s), and terminating
 blank line); `Type` is advisory. The adapter:
 
@@ -228,15 +228,16 @@ blank line); `Type` is advisory. The adapter:
    the `event:` line, any other lines, the line endings, and the terminating blank
    line, and returns the single reframed `sse.Frame` with the unchanged `Type`.
 
-It never returns a non-nil error: a Responses SSE frame is either rewritten or
-forwarded verbatim. This keeps the shim off the pump's shim-error path entirely.
+The infallible hook either rewrites a Responses SSE frame or declines by returning
+it verbatim. This keeps the shim off the pump's panic-only shim-error path entirely
+and is the canonical decline-by-passthrough behavior from ADR-0014.
 
 ### 5.2 WebSocket — `ServerMessageTransformer`
 
-`TransformServerMessage(ctx, *shim.Message) (emit bool, err error)` receives a
-message whose `Data` **is** the JSON payload (no SSE framing). The adapter sets
-`msg.Data = rewrite(msg.Data)` in place and returns `(true, nil)` — it never drops
-and never errors, so it can never close a session with 1011. The `rewrite` core
+`TransformServerMessage(ctx, *shim.Message) (emit bool)` receives a message whose
+`Data` **is** the JSON payload (no SSE framing). The adapter sets `msg.Data =
+rewrite(msg.Data)` in place and returns `true` — it never drops, and uncertainty
+passes through byte-verbatim rather than closing a session. The `rewrite` core
 reads the event type from the payload's own `"type"` field, so the same core serves
 both transports unchanged (on SSE the type is also on the frame's `event:` line, but
 the core does not depend on that).
@@ -333,11 +334,11 @@ that cannot confidently rewrite forwards the input verbatim:
 - A frame/message with no `output_index` and no `response.output[]` → unchanged.
 - A terminal `output[i]` whose index was never seen → left as upstream sent it.
 
-Consequently the SSE `EventTransformer` returns `error == nil` on every input (it
-never trips `OutcomeShimError`), and the WS `ServerMessageTransformer` returns
-`(true, nil)` on every input (it never triggers the seam's fatal-`1011` path). The
-only observable effect of enabling the shim is stabilized ids; a payload it does not
-understand is indistinguishable from the disabled path.
+Consequently the SSE `EventTransformer` returns the original frame whenever it
+cannot rewrite, and the WS `ServerMessageTransformer` returns `true` with the
+original message bytes. Neither enters the transports' panic-only failure paths.
+The only observable effect of enabling the shim is stabilized ids; a payload it
+does not understand is indistinguishable from the disabled path.
 
 Note the fail-safe protects against **malformed** input, not against the §1.1
 premises being wrong: a violated premise yields well-formed-but-wrong output that no
@@ -382,7 +383,7 @@ surfaces as a fixture diff.
    that the seam is inert); flag on → normalized on OpenAI `/responses`.
 7. **Fail-safe.** Malformed / `data:`-less / structurally-inert (**neither**
    `output_index` **nor** `response.output[]`) payloads forward untouched and produce
-   **no** error on either transport — asserting a WS session is never classified
+   no transport failure — asserting a WS session is never classified
    `SessionError`/closed `1011` by this shim.
 8. **Config/CLI.** The flag threads flags > env > TOML > default to the registry, and
    a TOML file omitting the key loads `false`; the shim appears in the enabled

@@ -81,7 +81,7 @@ func New(caller *upstream.Caller, outboundTimeout, writeTimeout, streamIdleTimeo
 	return f
 }
 
-// SuppressedShimErrorCount reports stream shim failures hidden from the wire by
+// SuppressedShimErrorCount reports stream shim panics hidden from the wire by
 // the post-terminal no-double-up rule.
 func (f *Forwarder) SuppressedShimErrorCount() uint64 {
 	return f.suppressedShimErrors.Count()

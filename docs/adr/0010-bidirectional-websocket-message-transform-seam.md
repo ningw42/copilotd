@@ -1,6 +1,12 @@
 # Add an opt-in bidirectional WebSocket message-transform seam
 
-**Status:** accepted
+**Status:** accepted; post-commit hook contract amended by ADR-0014
+
+**Amendment:** [ADR-0014](0014-infallible-post-commit-shim-hooks.md) makes the
+post-commit directional hooks infallible. A shim that cannot interpret a message
+passes it through unchanged; only a hook panic is a shim-originated fatal session
+failure. The bidirectional seam, fold order, one-to-at-most-one cardinality,
+payload opacity, and no-op fast path accepted here remain in force.
 
 copilotd extends its composable shim contract to the OpenAI Responses WebSocket
 transport. A shim gains two opt-in, per-direction hooks — `ClientMessageTransformer`
@@ -39,9 +45,10 @@ that opts in.
 - A transform maps one message to at most one message, or drops it. It may not hold
   an emission for later release, nor split one message into many. Coalescing is
   expressible through shim state keyed on an in-band terminal / per-item done marker.
-- A transform error is fatal to the session: both sockets close with 1011 and the
-  session terminal is classified an error, reusing the existing close-code and
-  terminal machinery.
+- A transform panic is fatal to the session: the pump contains it, both sockets
+  close with 1011, and the session terminal is classified an error, reusing the
+  existing close-code and terminal machinery. Routine transform errors are not
+  part of the post-commit hook contract under ADR-0014.
 - Shim-facing observability (a logger and a metrics emitter) is not introduced here;
   it is a separate, transport-agnostic decision.
 - ADR-0006 is amended, not superseded: its payload-opaque forwarding decision

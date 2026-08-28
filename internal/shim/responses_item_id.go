@@ -38,30 +38,30 @@ var (
 
 // TransformEvent adapts the shared JSON rewrite to SSE while retaining the
 // upstream frame whenever no confident rewrite is available.
-func (s *responsesItemIDStabilizer) TransformEvent(_ context.Context, frame sse.Frame) ([]sse.Frame, error) {
+func (s *responsesItemIDStabilizer) TransformEvent(_ context.Context, frame sse.Frame) []sse.Frame {
 	payload, fields := sseDataPayload(frame.Raw)
 	if len(fields) == 0 {
-		return []sse.Frame{frame}, nil
+		return []sse.Frame{frame}
 	}
 
 	rewritten := s.rewrite(payload)
 	if bytes.Equal(rewritten, payload) {
-		return []sse.Frame{frame}, nil
+		return []sse.Frame{frame}
 	}
 	reframed, ok := replaceSSEDataPayload(frame.Raw, fields, rewritten)
 	if !ok {
-		return []sse.Frame{frame}, nil
+		return []sse.Frame{frame}
 	}
 	frame.Raw = reframed
-	return []sse.Frame{frame}, nil
+	return []sse.Frame{frame}
 }
 
 // TransformServerMessage adapts the shared JSON rewrite to an upstream-to-
 // client WebSocket message. Unrecognized payloads remain byte-verbatim, and
 // every message is emitted so the stabilizer cannot fault a session.
-func (s *responsesItemIDStabilizer) TransformServerMessage(_ context.Context, message *Message) (bool, error) {
+func (s *responsesItemIDStabilizer) TransformServerMessage(_ context.Context, message *Message) bool {
 	message.Data = s.rewrite(message.Data)
-	return true, nil
+	return true
 }
 
 type sseDataField struct {

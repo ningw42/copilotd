@@ -17,20 +17,14 @@ func TestResponsesItemIDStabilizerTransformsSSEFrameWithoutDisturbingFraming(t *
 		Type: "response.output_item.added",
 		Raw:  []byte("event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"pinned-id\"}}\n\n"),
 	}
-	frames, err := stabilizer.TransformEvent(context.Background(), first)
-	if err != nil {
-		t.Fatalf("first TransformEvent() error = %v, want nil", err)
-	}
+	frames := stabilizer.TransformEvent(context.Background(), first)
 	if len(frames) != 1 || !bytes.Equal(frames[0].Raw, first.Raw) {
 		t.Fatalf("first TransformEvent() = %#v, want original frame untouched", frames)
 	}
 
 	const changedRaw = ": vendor metadata\r\nevent: response.output_item.done\r\nid: opaque\r\ndata: {\"type\":\"response.output_item.done\",\r\ndata: \"output_index\":0,\"item\":{\"id\":\"churned-id\",\"content\":[ 1, 2 ]}}\r\nretry: 1000\r\n\r\n"
 	changed := sse.Frame{Type: "advisory-type-must-stay", Raw: []byte(changedRaw)}
-	frames, err = stabilizer.TransformEvent(context.Background(), changed)
-	if err != nil {
-		t.Fatalf("changed TransformEvent() error = %v, want nil", err)
-	}
+	frames = stabilizer.TransformEvent(context.Background(), changed)
 	if len(frames) != 1 {
 		t.Fatalf("changed TransformEvent() frames = %d, want 1", len(frames))
 	}
@@ -62,10 +56,7 @@ func TestResponsesItemIDStabilizerSSEAdapterAlwaysFailsSafe(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			stabilizer := newResponsesItemIDStabilizer()
 			frame := sse.Frame{Type: "advisory", Raw: []byte(tt.raw)}
-			frames, err := stabilizer.TransformEvent(context.Background(), frame)
-			if err != nil {
-				t.Fatalf("TransformEvent() error = %v, want nil", err)
-			}
+			frames := stabilizer.TransformEvent(context.Background(), frame)
 			if len(frames) != 1 || frames[0].Type != frame.Type || !bytes.Equal(frames[0].Raw, frame.Raw) {
 				t.Fatalf("TransformEvent() = %#v, want original frame untouched", frames)
 			}
@@ -80,9 +71,8 @@ func TestResponsesItemIDStabilizerTransformsServerMessagesAndAlwaysEmits(t *test
 	stabilizer := newResponsesItemIDStabilizer()
 	added := []byte(`{"type":"response.output_item.added","output_index":0,"item":{"id":"pinned-id"}}`)
 	message := &Message{Kind: MessageText, Data: added}
-	emit, err := stabilizer.TransformServerMessage(context.Background(), message)
-	if err != nil || !emit {
-		t.Fatalf("first TransformServerMessage() = (emit %t, error %v), want (true, nil)", emit, err)
+	if emit := stabilizer.TransformServerMessage(context.Background(), message); !emit {
+		t.Fatal("first TransformServerMessage() = emit false, want true")
 	}
 	if !bytes.Equal(message.Data, added) {
 		t.Fatalf("first message Data = %s, want verbatim %s", message.Data, added)
@@ -90,9 +80,8 @@ func TestResponsesItemIDStabilizerTransformsServerMessagesAndAlwaysEmits(t *test
 
 	churned := []byte(`{"type":"response.output_text.delta","output_index":0,"item_id":"churned-id","delta":"hello"}`)
 	message = &Message{Kind: MessageBinary, Data: churned}
-	emit, err = stabilizer.TransformServerMessage(context.Background(), message)
-	if err != nil || !emit {
-		t.Fatalf("second TransformServerMessage() = (emit %t, error %v), want (true, nil)", emit, err)
+	if emit := stabilizer.TransformServerMessage(context.Background(), message); !emit {
+		t.Fatal("second TransformServerMessage() = emit false, want true")
 	}
 	if message.Kind != MessageBinary {
 		t.Errorf("message Kind = %v, want unchanged binary kind", message.Kind)
@@ -106,9 +95,8 @@ func TestResponsesItemIDStabilizerTransformsServerMessagesAndAlwaysEmits(t *test
 		[]byte(` { "type" : "vendor.metadata", "opaque" : [ 1 ] } `),
 	} {
 		message = &Message{Kind: MessageText, Data: payload}
-		emit, err = stabilizer.TransformServerMessage(context.Background(), message)
-		if err != nil || !emit {
-			t.Errorf("fail-safe TransformServerMessage(%s) = (emit %t, error %v), want (true, nil)", payload, emit, err)
+		if emit := stabilizer.TransformServerMessage(context.Background(), message); !emit {
+			t.Errorf("fail-safe TransformServerMessage(%s) = emit false, want true", payload)
 		}
 		if !bytes.Equal(message.Data, payload) {
 			t.Errorf("fail-safe message Data = %s, want verbatim %s", message.Data, payload)

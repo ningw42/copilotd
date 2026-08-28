@@ -115,9 +115,9 @@ func pump(ctx context.Context, source, destination *websocket.Conn, sourcePeer, 
 		}
 		if transform != nil {
 			message := shim.Message{Kind: kindFromType(messageType), Data: payload}
-			emit, transformErr := transform(ctx, &message)
-			if transformErr != nil {
-				return stats, pumpFailure{peer: sourcePeer, operation: transformOperation, err: transformErr}
+			emit, panicked := invokeMessageTransform(ctx, transform, &message)
+			if panicked {
+				return stats, pumpFailure{peer: sourcePeer, operation: transformOperation, err: errMessageTransformPanic}
 			}
 			if !emit {
 				continue
@@ -138,6 +138,18 @@ func pump(ctx context.Context, source, destination *websocket.Conn, sourcePeer, 
 		stats.messages++
 		stats.bytes += int64(len(payload))
 	}
+}
+
+var errMessageTransformPanic = errors.New("message transform panicked")
+
+func invokeMessageTransform(ctx context.Context, transform shim.MessageTransform, message *shim.Message) (emit bool, panicked bool) {
+	defer func() {
+		if recover() != nil {
+			emit = false
+			panicked = true
+		}
+	}()
+	return transform(ctx, message), false
 }
 
 func kindFromType(messageType websocket.MessageType) shim.MessageKind {

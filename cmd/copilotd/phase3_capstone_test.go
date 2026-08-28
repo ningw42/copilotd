@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -276,14 +275,14 @@ func (s *phase3IdentityShim) TransformBuffered(context.Context, *shim.Body) erro
 	return nil
 }
 
-func (s *phase3IdentityShim) TransformEvent(_ context.Context, frame sse.Frame) ([]sse.Frame, error) {
+func (s *phase3IdentityShim) TransformEvent(_ context.Context, frame sse.Frame) []sse.Frame {
 	s.calls.event.Add(1)
-	return []sse.Frame{frame}, nil
+	return []sse.Frame{frame}
 }
 
-func (s *phase3IdentityShim) Finalize(context.Context) ([]sse.Frame, error) {
+func (s *phase3IdentityShim) Finalize(context.Context) []sse.Frame {
 	s.calls.finalize.Add(1)
-	return nil, nil
+	return nil
 }
 
 func phase3IdentityRegistry(calls *phase3HookCalls) shim.Registry {
@@ -337,19 +336,30 @@ func TestPhase3IdentityDoublePreservesStreamFramesAndFlushEndToEnd(t *testing.T)
 	}
 }
 
-type phase3FailingEventShim struct{ err error }
+type phase3PanickingEventShim struct{}
 
-var _ shim.EventTransformer = (*phase3FailingEventShim)(nil)
+var _ shim.EventTransformer = (*phase3PanickingEventShim)(nil)
 
-func (s *phase3FailingEventShim) TransformEvent(context.Context, sse.Frame) ([]sse.Frame, error) {
-	return nil, s.err
+func (*phase3PanickingEventShim) TransformEvent(context.Context, sse.Frame) []sse.Frame {
+	panic("phase3-private-panic-value")
 }
 
-func TestPhase3PostCommitShimFailureIsWarnedCountedAndRedactedEndToEnd(t *testing.T) {
+type phase3PostTerminalPanickingShim struct{}
+
+var _ shim.EventTransformer = (*phase3PostTerminalPanickingShim)(nil)
+
+func (*phase3PostTerminalPanickingShim) TransformEvent(_ context.Context, frame sse.Frame) []sse.Frame {
+	if frame.Type == "message_stop" {
+		return []sse.Frame{frame}
+	}
+	panic("phase3-private-suppressed-panic")
+}
+
+func TestPhase3PostCommitShimPanicStaysOnStreamAndIsWarnedCountedAndRedacted(t *testing.T) {
 	const (
-		requestSecret = "phase3-private-request-body"
-		frameSecret   = "phase3-private-frame-content"
-		errorSecret   = "phase3-private-shim-error"
+		requestSecret = "phase3-private-panic-request"
+		frameSecret   = "phase3-private-panic-frame"
+		panicSecret   = "phase3-private-panic-value"
 	)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -359,10 +369,10 @@ func TestPhase3PostCommitShimFailureIsWarnedCountedAndRedactedEndToEnd(t *testin
 	t.Cleanup(upstream.Close)
 
 	registry := shim.Registry{{
-		Name:    "phase3-failing-event",
+		Name:    "phase3-panicking-event",
 		Enabled: true,
 		New: func(context.Context, endpoint.Surface, endpoint.Route) any {
-			return &phase3FailingEventShim{err: errors.New(errorSecret)}
+			return &phase3PanickingEventShim{}
 		},
 	}}
 	var logOutput bytes.Buffer
@@ -376,24 +386,24 @@ func TestPhase3PostCommitShimFailureIsWarnedCountedAndRedactedEndToEnd(t *testin
 
 	req, err := http.NewRequest(http.MethodPost, base+"/anthropic/v1/messages", strings.NewReader(requestSecret))
 	if err != nil {
-		t.Fatalf("build post-commit failure request: %v", err)
+		t.Fatalf("build post-commit panic request: %v", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+testAPIKey)
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Request-Id", "phase3-shim-error")
+	req.Header.Set("X-Request-Id", "phase3-shim-panic")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		t.Fatalf("post-commit failure request: %v", err)
+		t.Fatalf("post-commit panic request: %v", err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		t.Fatalf("read post-commit failure response: %v", err)
+		t.Fatalf("read post-commit panic response: %v", err)
 	}
 
 	const wantBody = "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"copilotd: shim failed\"}}\n\n"
 	if resp.StatusCode != http.StatusOK || string(body) != wantBody {
-		t.Errorf("post-commit response = status %d body %q, want committed 200 and native shim terminal %q", resp.StatusCode, body, wantBody)
+		t.Errorf("post-commit response = status %d body %q, want committed 200 and only native shim terminal %q", resp.StatusCode, body, wantBody)
 	}
 	if got := outcomes.Count("anthropic", sse.OutcomeShimError); got != 1 {
 		t.Errorf("shim_error outcome count = %d, want 1", got)
@@ -402,29 +412,18 @@ func TestPhase3PostCommitShimFailureIsWarnedCountedAndRedactedEndToEnd(t *testin
 	if !strings.Contains(logs, "level=WARN") || !strings.Contains(logs, "msg=access") || !strings.Contains(logs, "outcome=shim_error") {
 		t.Errorf("post-commit access log missing warn shim_error metadata:\n%s", logs)
 	}
-	for _, secret := range []string{requestSecret, frameSecret, errorSecret, testAPIKey, "stub-copilot-token"} {
+	for _, secret := range []string{requestSecret, frameSecret, panicSecret, testAPIKey, "stub-copilot-token"} {
 		if strings.Contains(logs, secret) {
 			t.Errorf("post-commit logs leaked %q:\n%s", secret, logs)
 		}
 	}
 }
 
-type phase3PostTerminalFailingShim struct{ err error }
-
-var _ shim.EventTransformer = (*phase3PostTerminalFailingShim)(nil)
-
-func (s *phase3PostTerminalFailingShim) TransformEvent(_ context.Context, frame sse.Frame) ([]sse.Frame, error) {
-	if frame.Type == "message_stop" {
-		return []sse.Frame{frame}, nil
-	}
-	return nil, s.err
-}
-
-func TestPhase3SuppressedPostTerminalShimFailureWarnsCountsAndRedactsEndToEnd(t *testing.T) {
+func TestPhase3PostTerminalShimPanicIsSuppressedCountedAndRedacted(t *testing.T) {
 	const (
 		requestSecret  = "phase3-private-suppressed-request"
 		trailingSecret = "phase3-private-trailing-frame"
-		errorSecret    = "phase3-private-suppressed-error"
+		panicSecret    = "phase3-private-suppressed-panic"
 		terminal       = "event: message_stop\ndata: {\"type\":\"message_stop\",\"opaque\":\"safe-wire-value\"}\n\n"
 	)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -435,10 +434,10 @@ func TestPhase3SuppressedPostTerminalShimFailureWarnsCountsAndRedactsEndToEnd(t 
 	t.Cleanup(upstream.Close)
 
 	registry := shim.Registry{{
-		Name:    "phase3-post-terminal-failure",
+		Name:    "phase3-post-terminal-panic",
 		Enabled: true,
 		New: func(context.Context, endpoint.Surface, endpoint.Route) any {
-			return &phase3PostTerminalFailingShim{err: errors.New(errorSecret)}
+			return &phase3PostTerminalPanickingShim{}
 		},
 	}}
 	var logOutput bytes.Buffer
@@ -452,38 +451,38 @@ func TestPhase3SuppressedPostTerminalShimFailureWarnsCountsAndRedactsEndToEnd(t 
 
 	req, err := http.NewRequest(http.MethodPost, base+"/anthropic/v1/messages", strings.NewReader(requestSecret))
 	if err != nil {
-		t.Fatalf("build suppressed failure request: %v", err)
+		t.Fatalf("build suppressed panic request: %v", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+testAPIKey)
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Request-Id", "phase3-suppressed-shim-error")
+	req.Header.Set("X-Request-Id", "phase3-suppressed-shim-panic")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		t.Fatalf("suppressed failure request: %v", err)
+		t.Fatalf("suppressed panic request: %v", err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		t.Fatalf("read suppressed failure response: %v", err)
+		t.Fatalf("read suppressed panic response: %v", err)
 	}
 
 	if resp.StatusCode != http.StatusOK || string(body) != terminal {
-		t.Errorf("suppressed failure response = status %d body %q, want the single upstream terminal %q", resp.StatusCode, body, terminal)
+		t.Errorf("suppressed panic response = status %d body %q, want only upstream terminal %q", resp.StatusCode, body, terminal)
 	}
 	if got := outcomes.Count("anthropic", sse.OutcomeClean); got != 1 {
 		t.Errorf("clean outcome count after suppression = %d, want 1", got)
 	}
 	if got := forwarder.SuppressedShimErrorCount(); got != 1 {
-		t.Errorf("dedicated suppressed-shim-error count = %d, want 1", got)
+		t.Errorf("suppressed shim panic count = %d, want 1", got)
 	}
 	logs := logOutput.String()
 	if !strings.Contains(logs, "level=WARN") || !strings.Contains(logs, "suppressed post-terminal shim error") || !strings.Contains(logs, "stage=transform") {
 		t.Errorf("suppression warning missing metadata:\n%s", logs)
 	}
 	if !strings.Contains(logs, "msg=access") || !strings.Contains(logs, "outcome=clean") {
-		t.Errorf("suppressed failure access line missing clean wire outcome:\n%s", logs)
+		t.Errorf("suppressed panic access line missing clean outcome:\n%s", logs)
 	}
-	for _, secret := range []string{requestSecret, trailingSecret, errorSecret, testAPIKey, "stub-copilot-token"} {
+	for _, secret := range []string{requestSecret, trailingSecret, panicSecret, testAPIKey, "stub-copilot-token"} {
 		if strings.Contains(logs, secret) {
 			t.Errorf("suppression logs leaked %q:\n%s", secret, logs)
 		}

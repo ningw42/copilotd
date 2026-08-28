@@ -66,11 +66,11 @@ the SSE pump.
 ### Decisions
 
 1. **Persist to SQLite** via pure-Go `modernc.org/sqlite`. Amends ROADMAP
-   principle #4 (ADR-0014).
+   principle #4 (ADR-0015).
 2. **Only completed turns are recorded.** A turn that never delivers a
    usage-bearing terminal event writes nothing.
 3. **One table per Surface, fields verbatim.** No unified columns, no derived
-   totals. Interpretation lives in Go source (ADR-0015).
+   totals. Interpretation lives in Go source (ADR-0016).
 4. **Capture every token-count field the Surface's spec defines**, including
    subsets. Dropping a spec field is itself an interpretation.
 5. **The meter is a pure observer.** Every hook returns its input unchanged;
@@ -124,7 +124,7 @@ forwarding, and there is none here. The ledger is left unchanged.
 ### 4.3 Hooks
 
 Three, not four. `StreamFinalizer` is unnecessary: `Chain.StreamAdapter()`
-(`shim.go:220`) includes an instance that implements `EventTransformer` *or*
+includes an instance that implements `EventTransformer` *or*
 `StreamFinalizer`, and the meter holds no frames and records only completed
 turns, so the terminal event itself is the completeness signal.
 
@@ -276,13 +276,13 @@ Each owns one spec's parser and nothing else. The Anthropic SSE half is the whol
 shape:
 
 ```go
-func (m *anthropicUsageMeter) TransformEvent(_ context.Context, f sse.Frame) ([]sse.Frame, error) {
+func (m *anthropicUsageMeter) TransformEvent(_ context.Context, f sse.Frame) []sse.Frame {
 	switch f.Type {
 	case "message_start": m.absorbStart(f.Raw)  // input + cache fields, and the message id
 	case "message_delta": m.absorbDelta(f.Raw)  // CUMULATIVE: last writer wins, never summed
 	case "message_stop":  m.flush()             // Record, then reset
 	}
-	return []sse.Frame{f}, nil // unchanged on every path
+	return []sse.Frame{f} // unchanged on every path
 }
 ```
 
@@ -463,7 +463,7 @@ stalling on a slow disk would be a far worse defect than a missing meter row.
 
 Two honest costs:
 
-- **WAL means three files at rest, not one** — `usage.db`, `-wal`, `-shm`. ADR-0014
+- **WAL means three files at rest, not one** — `usage.db`, `-wal`, `-shm`. ADR-0015
   states this. Mitigation follows `identity/tokenfile.go`: the parent directory is
   `0700`, so sidecars SQLite creates under the process umask are protected by the
   directory regardless of their own mode.
@@ -626,11 +626,11 @@ Table-driven over recorded frames in `testdata/`, mirroring
 
 ### ADRs
 
-- **ADR-0014 — Persist token usage in a local SQLite database.** Amends ROADMAP
+- **ADR-0015 — Persist token usage in a local SQLite database.** Amends ROADMAP
   principle #4. Records: SQLite over JSONL or in-memory; why pure-Go
   `modernc.org/sqlite` is required (cgo breaks the single-static-binary,
   four-target story); WAL meaning three files at rest; opt-in and off by default.
-- **ADR-0015 — Per-Surface usage tables with verbatim fields.** The policy a
+- **ADR-0016 — Per-Surface usage tables with verbatim fields.** The policy a
   future contributor needs: capture each Surface's native token fields verbatim,
   no unified or derived columns, interpretation in Go. Motivated by the cache
   nesting asymmetry, with both worked examples recorded so it is not re-litigated.
@@ -639,7 +639,7 @@ Table-driven over recorded frames in `testdata/`, mirroring
 
 - **`CONTEXT.md`** — add **Usage meter** and **Turn**; amend **Shim** (see §14).
 - **`ROADMAP.md`** — principle #4 currently asserts "no database," which this makes
-  false; it gains a pointer to ADR-0014.
+  false; it gains a pointer to ADR-0015.
 - **`CONFIGURATION.md`** — both settings, per the `c8c373f` precedent.
 - **`docs/divergence-ledger.md`** — deliberately **unchanged** (§4.2).
 

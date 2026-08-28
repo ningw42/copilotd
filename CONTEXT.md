@@ -153,10 +153,19 @@ A composable middleware layer that closes one specific parity gap (Phase 3+). No
 present in Phase 1. A shim spans transports through one registry: it may hook the
 inbound request, the response Prelude, the buffered body, the SSE stream, and —
 opt-in and bidirectional — individual WebSocket **Messages** in each direction. The
-WebSocket hooks hold nothing: one message maps to at most one message, or is dropped.
+post-commit stream and message hooks are infallible; the WebSocket hooks hold nothing
+and never split, so one message maps to at most one message, or is dropped.
 _Avoid_: middleware as the *name* of the mechanism — call it a shim (nested via the
 onion); "middleware" stays reserved for the `http.Handler` request pipeline. Also
 plugin, filter.
+
+**Decline by passthrough**:
+The required outcome when a post-commit shim cannot confidently interpret an SSE
+frame or WebSocket Message: return that input unchanged and continue the stream or
+session. This is distinct from an intentional drop or an SSE hold. The Responses item-id
+stabilizer is the canonical example — malformed or unrecognized payloads stay
+byte-verbatim rather than faulting the transport.
+_Avoid_: fail open, ignore the error
 
 **Prelude**:
 The response envelope — status line plus headers — treated as a unit distinct from

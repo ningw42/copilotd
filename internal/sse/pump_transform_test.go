@@ -3,7 +3,6 @@ package sse
 import (
 	"bytes"
 	"context"
-	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -73,9 +72,9 @@ func TestPumpHeldFrameDoesNotResetClientIdleKeepalive(t *testing.T) {
 	clock := newManualClock()
 	transformed := make(chan struct{})
 	transformer := frameTransformerFuncs{
-		transform: func(context.Context, Frame) ([]Frame, error) {
+		transform: func(context.Context, Frame) []Frame {
 			close(transformed)
-			return nil, nil
+			return nil
 		},
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -122,13 +121,13 @@ func TestPumpFinalizesHeldCompleteStreamAtEOF(t *testing.T) {
 	var held []Frame
 	finalized := false
 	transformer := frameTransformerFuncs{
-		transform: func(_ context.Context, frame Frame) ([]Frame, error) {
+		transform: func(_ context.Context, frame Frame) []Frame {
 			held = append(held, frame)
-			return nil, nil
+			return nil
 		},
-		finalize: func(context.Context) ([]Frame, error) {
+		finalize: func(context.Context) []Frame {
 			finalized = true
-			return held, nil
+			return held
 		},
 	}
 	dst := &operationResponseWriter{header: make(http.Header)}
@@ -159,62 +158,6 @@ func TestPumpFinalizesHeldCompleteStreamAtEOF(t *testing.T) {
 	}
 }
 
-func TestPumpRecordsTransformErrorSuppressedAfterWrittenTerminal(t *testing.T) {
-	const terminal = "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
-	const afterTerminal = "event: vendor.trailing\ndata: SECRET-FRAME-CONTENT\n\n"
-	finalized := false
-	transformer := frameTransformerFuncs{
-		transform: func(_ context.Context, frame Frame) ([]Frame, error) {
-			if frame.Type == "message_stop" {
-				return []Frame{frame}, nil
-			}
-			return nil, errors.New("SECRET-TRANSFORM-ERROR")
-		},
-		finalize: func(context.Context) ([]Frame, error) {
-			finalized = true
-			return []Frame{{Type: "held", Raw: []byte("SECRET-HELD-FRAME")}}, nil
-		},
-	}
-	var logs bytes.Buffer
-	counter := NewSuppressedShimErrorCounter()
-	dst := &operationResponseWriter{header: make(http.Header)}
-	ctx, cancel := context.WithCancel(context.Background())
-
-	result := Pump(ctx, cancel, io.NopCloser(strings.NewReader(terminal+afterTerminal)), dst, Policy{
-		Terminal: func(eventType string) bool { return eventType == "message_stop" },
-		RenderError: func(http.ResponseWriter, Outcome) error {
-			t.Error("suppressed transform error rendered a terminal")
-			return nil
-		},
-		WriteTimeout:         time.Second,
-		Clock:                RealClock{},
-		Logger:               slog.New(slog.NewTextHandler(&logs, nil)),
-		SuppressedShimErrors: counter,
-	}, transformer)
-
-	if result.Outcome != OutcomeClean {
-		t.Errorf("Outcome = %q, want %q", result.Outcome, OutcomeClean)
-	}
-	if finalized {
-		t.Error("Finalize ran after a Transform error")
-	}
-	if got := strings.Join(dst.ops, "|"); got != strings.Join([]string{"write:" + terminal, "flush"}, "|") {
-		t.Errorf("operations = %#v, want only the written terminal", dst.ops)
-	}
-	if counter.Count() != 1 {
-		t.Errorf("suppressed shim error count = %d, want 1", counter.Count())
-	}
-	logText := logs.String()
-	if !strings.Contains(logText, "suppressed post-terminal shim error") || !strings.Contains(logText, "stage=transform") {
-		t.Errorf("warning = %q, want suppression message and transform stage", logText)
-	}
-	for _, secret := range []string{"SECRET-TRANSFORM-ERROR", "SECRET-FRAME-CONTENT", "SECRET-HELD-FRAME"} {
-		if strings.Contains(logText, secret) {
-			t.Errorf("warning leaked %q: %s", secret, logText)
-		}
-	}
-}
-
 func TestPumpFinalizesHeldCompleteStreamOnStall(t *testing.T) {
 	const first = "event: message_start\ndata: {\"type\":\"message_start\"}\n\n"
 	const terminal = "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
@@ -223,12 +166,12 @@ func TestPumpFinalizesHeldCompleteStreamOnStall(t *testing.T) {
 	transformed := make(chan struct{}, 2)
 	var held []Frame
 	transformer := frameTransformerFuncs{
-		transform: func(_ context.Context, frame Frame) ([]Frame, error) {
+		transform: func(_ context.Context, frame Frame) []Frame {
 			held = append(held, frame)
 			transformed <- struct{}{}
-			return nil, nil
+			return nil
 		},
-		finalize: func(context.Context) ([]Frame, error) { return held, nil },
+		finalize: func(context.Context) []Frame { return held },
 	}
 	dst := &operationResponseWriter{header: make(http.Header)}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -269,10 +212,10 @@ func TestPumpStopsStallStopwatchBeforeSlowTransform(t *testing.T) {
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	transformer := frameTransformerFuncs{
-		transform: func(_ context.Context, frame Frame) ([]Frame, error) {
+		transform: func(_ context.Context, frame Frame) []Frame {
 			close(entered)
 			<-release
-			return []Frame{frame}, nil
+			return []Frame{frame}
 		},
 	}
 	dst := &operationResponseWriter{header: make(http.Header)}
@@ -321,7 +264,7 @@ func TestPumpDroppedTerminalDoesNotCountAsWrittenTerminal(t *testing.T) {
 		},
 		WriteTimeout: time.Second,
 		Clock:        RealClock{},
-	}, frameTransformerFuncs{transform: func(context.Context, Frame) ([]Frame, error) { return nil, nil }})
+	}, frameTransformerFuncs{transform: func(context.Context, Frame) []Frame { return nil }})
 
 	if result.Outcome != OutcomeSynthesized || rendered != 1 {
 		t.Errorf("Result = %#v, rendered = %d; want one synthesized terminal", result, rendered)
@@ -331,35 +274,29 @@ func TestPumpDroppedTerminalDoesNotCountAsWrittenTerminal(t *testing.T) {
 	}
 }
 
-func TestPumpTransformErrorBeforeTerminalSkipsFinalizeAndRendersShimError(t *testing.T) {
-	const first = "event: response.output_text.delta\ndata: {\"delta\":\"held\"}\n\n"
-	const second = "event: response.output_text.delta\ndata: {\"delta\":\"fails\"}\n\n"
-	transformCalls := 0
+func TestPumpTransformPanicBeforeTerminalRendersShimError(t *testing.T) {
+	const input = "event: response.output_text.delta\ndata: SECRET-FRAME-CONTENT\n\n"
+	const nativeTerminal = "native shim terminal"
 	finalized := false
 	transformer := frameTransformerFuncs{
-		transform: func(context.Context, Frame) ([]Frame, error) {
-			transformCalls++
-			if transformCalls == 1 {
-				return nil, nil
-			}
-			return nil, errors.New("transform failed")
+		transform: func(context.Context, Frame) []Frame {
+			panic("SECRET-PANIC-VALUE")
 		},
-		finalize: func(context.Context) ([]Frame, error) {
+		finalize: func(context.Context) []Frame {
 			finalized = true
-			return []Frame{{Type: "held", Raw: []byte("held must be discarded")}}, nil
+			return nil
 		},
 	}
-	rendered := 0
 	dst := &operationResponseWriter{header: make(http.Header)}
 	ctx, cancel := context.WithCancel(context.Background())
-	result := Pump(ctx, cancel, io.NopCloser(strings.NewReader(first+second)), dst, Policy{
+
+	result := Pump(ctx, cancel, io.NopCloser(strings.NewReader(input)), dst, Policy{
 		Terminal: func(string) bool { return false },
 		RenderError: func(w http.ResponseWriter, outcome Outcome) error {
-			rendered++
 			if outcome != OutcomeShimError {
 				t.Errorf("render outcome = %q, want %q", outcome, OutcomeShimError)
 			}
-			if _, err := io.WriteString(w, "native shim terminal"); err != nil {
+			if _, err := io.WriteString(w, nativeTerminal); err != nil {
 				return err
 			}
 			return http.NewResponseController(w).Flush()
@@ -368,67 +305,77 @@ func TestPumpTransformErrorBeforeTerminalSkipsFinalizeAndRendersShimError(t *tes
 		Clock:        RealClock{},
 	}, transformer)
 
-	if result.Outcome != OutcomeShimError || rendered != 1 {
-		t.Errorf("Result = %#v, rendered = %d; want exactly one shim_error", result, rendered)
+	if result.Outcome != OutcomeShimError || result.Frames != 0 {
+		t.Errorf("Result = %#v, want shim_error with no transformed frames", result)
 	}
 	if finalized {
-		t.Error("Finalize ran after a Transform error")
+		t.Error("Finalize ran after a Transform panic")
 	}
-	if got := strings.Join(dst.ops, "|"); got != "write:native shim terminal|flush" {
-		t.Errorf("operations = %#v, want only the synthesized shim terminal", dst.ops)
+	if got := strings.Join(dst.ops, "|"); got != "write:"+nativeTerminal+"|flush" {
+		t.Errorf("operations = %#v, want only the native shim terminal", dst.ops)
 	}
 }
 
-func TestPumpRecordsFinalizeErrorSuppressedByFinalizedTerminal(t *testing.T) {
-	const input = "event: response.output_text.delta\ndata: SECRET-INPUT-FRAME\n\n"
-	const terminal = "event: response.completed\ndata: {}\n\n"
+func TestPumpTransformPanicAfterTerminalIsSuppressed(t *testing.T) {
+	const terminal = "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+	const trailing = "event: vendor.trailing\ndata: SECRET-FRAME-CONTENT\n\n"
 	var logs bytes.Buffer
 	counter := NewSuppressedShimErrorCounter()
 	dst := &operationResponseWriter{header: make(http.Header)}
 	ctx, cancel := context.WithCancel(context.Background())
-	result := Pump(ctx, cancel, io.NopCloser(strings.NewReader(input)), dst, Policy{
-		Terminal:             func(eventType string) bool { return eventType == "response.completed" },
-		RenderError:          func(http.ResponseWriter, Outcome) error { t.Error("finalized terminal was doubled"); return nil },
+
+	result := Pump(ctx, cancel, io.NopCloser(strings.NewReader(terminal+trailing)), dst, Policy{
+		Terminal: func(eventType string) bool { return eventType == "message_stop" },
+		RenderError: func(http.ResponseWriter, Outcome) error {
+			t.Error("post-terminal panic rendered a second terminal")
+			return nil
+		},
 		WriteTimeout:         time.Second,
 		Clock:                RealClock{},
 		Logger:               slog.New(slog.NewTextHandler(&logs, nil)),
 		SuppressedShimErrors: counter,
 	}, frameTransformerFuncs{
-		transform: func(context.Context, Frame) ([]Frame, error) { return nil, nil },
-		finalize: func(context.Context) ([]Frame, error) {
-			return []Frame{{Type: "response.completed", Raw: []byte(terminal)}}, errors.New("SECRET-FINALIZE-ERROR")
+		transform: func(_ context.Context, frame Frame) []Frame {
+			if frame.Type == "message_stop" {
+				return []Frame{frame}
+			}
+			panic("SECRET-PANIC-VALUE")
 		},
 	})
 
 	if result.Outcome != OutcomeClean || result.Frames != 1 {
-		t.Errorf("Result = %#v, want one finalized terminal and clean outcome", result)
+		t.Errorf("Result = %#v, want one terminal frame and clean outcome", result)
+	}
+	if got := strings.Join(dst.ops, "|"); got != "write:"+terminal+"|flush" {
+		t.Errorf("operations = %#v, want only the upstream terminal", dst.ops)
 	}
 	if counter.Count() != 1 {
 		t.Errorf("suppressed shim error count = %d, want 1", counter.Count())
 	}
 	logText := logs.String()
-	if !strings.Contains(logText, "suppressed post-terminal shim error") || !strings.Contains(logText, "stage=finalize") {
-		t.Errorf("warning = %q, want suppression message and finalize stage", logText)
+	if !strings.Contains(logText, "suppressed post-terminal shim error") || !strings.Contains(logText, "stage=transform") {
+		t.Errorf("warning = %q, want suppression message and transform stage", logText)
 	}
-	for _, secret := range []string{"SECRET-INPUT-FRAME", "SECRET-FINALIZE-ERROR"} {
+	for _, secret := range []string{"SECRET-PANIC-VALUE", "SECRET-FRAME-CONTENT"} {
 		if strings.Contains(logText, secret) {
 			t.Errorf("warning leaked %q: %s", secret, logText)
 		}
 	}
 }
 
-func TestPumpFinalizeErrorWithoutTerminalRendersShimErrorAfterBatch(t *testing.T) {
-	const input = "event: response.output_text.delta\ndata: {}\n\n"
-	const finalized = "event: vendor.held\ndata: {}\n\n"
+func TestPumpFinalizePanicBeforeTerminalRendersShimError(t *testing.T) {
+	const input = "event: response.output_text.delta\ndata: SECRET-FRAME-CONTENT\n\n"
+	const nativeTerminal = "native shim terminal"
 	dst := &operationResponseWriter{header: make(http.Header)}
 	ctx, cancel := context.WithCancel(context.Background())
+
 	result := Pump(ctx, cancel, io.NopCloser(strings.NewReader(input)), dst, Policy{
 		Terminal: func(string) bool { return false },
 		RenderError: func(w http.ResponseWriter, outcome Outcome) error {
 			if outcome != OutcomeShimError {
 				t.Errorf("render outcome = %q, want %q", outcome, OutcomeShimError)
 			}
-			if _, err := io.WriteString(w, "native shim terminal"); err != nil {
+			if _, err := io.WriteString(w, nativeTerminal); err != nil {
 				return err
 			}
 			return http.NewResponseController(w).Flush()
@@ -436,18 +383,17 @@ func TestPumpFinalizeErrorWithoutTerminalRendersShimErrorAfterBatch(t *testing.T
 		WriteTimeout: time.Second,
 		Clock:        RealClock{},
 	}, frameTransformerFuncs{
-		transform: func(context.Context, Frame) ([]Frame, error) { return nil, nil },
-		finalize: func(context.Context) ([]Frame, error) {
-			return []Frame{{Type: "vendor.held", Raw: []byte(finalized)}}, errors.New("finalize failed")
+		transform: func(context.Context, Frame) []Frame { return nil },
+		finalize: func(context.Context) []Frame {
+			panic("SECRET-PANIC-VALUE")
 		},
 	})
 
-	if result.Outcome != OutcomeShimError || result.Frames != 1 {
-		t.Errorf("Result = %#v, want finalized non-terminal then shim_error", result)
+	if result.Outcome != OutcomeShimError || result.Frames != 0 {
+		t.Errorf("Result = %#v, want shim_error with no finalized frames", result)
 	}
-	wantOps := []string{"write:" + finalized, "flush", "write:native shim terminal", "flush"}
-	if strings.Join(dst.ops, "|") != strings.Join(wantOps, "|") {
-		t.Errorf("operations = %#v, want %#v", dst.ops, wantOps)
+	if got := strings.Join(dst.ops, "|"); got != "write:"+nativeTerminal+"|flush" {
+		t.Errorf("operations = %#v, want only the native shim terminal", dst.ops)
 	}
 }
 
@@ -468,16 +414,16 @@ func TestPumpClientDisconnectSkipsFinalizeRegardlessOfWrittenTerminal(t *testing
 			transformed := make(chan struct{}, 2)
 			finalized := false
 			transformer := frameTransformerFuncs{
-				transform: func(_ context.Context, frame Frame) ([]Frame, error) {
+				transform: func(_ context.Context, frame Frame) []Frame {
 					transformed <- struct{}{}
 					if frame.Type == "message_stop" {
-						return []Frame{frame}, nil
+						return []Frame{frame}
 					}
-					return nil, nil
+					return nil
 				},
-				finalize: func(context.Context) ([]Frame, error) {
+				finalize: func(context.Context) []Frame {
 					finalized = true
-					return nil, nil
+					return nil
 				},
 			}
 			dst := &operationResponseWriter{header: make(http.Header)}
@@ -512,24 +458,24 @@ func TestPumpClientDisconnectSkipsFinalizeRegardlessOfWrittenTerminal(t *testing
 
 type identityFrameTransformer struct{}
 
-func (identityFrameTransformer) Transform(_ context.Context, frame Frame) ([]Frame, error) {
-	return []Frame{frame}, nil
+func (identityFrameTransformer) Transform(_ context.Context, frame Frame) []Frame {
+	return []Frame{frame}
 }
 
-func (identityFrameTransformer) Finalize(context.Context) ([]Frame, error) { return nil, nil }
+func (identityFrameTransformer) Finalize(context.Context) []Frame { return nil }
 
 type frameTransformerFuncs struct {
-	transform func(context.Context, Frame) ([]Frame, error)
-	finalize  func(context.Context) ([]Frame, error)
+	transform func(context.Context, Frame) []Frame
+	finalize  func(context.Context) []Frame
 }
 
-func (f frameTransformerFuncs) Transform(ctx context.Context, frame Frame) ([]Frame, error) {
+func (f frameTransformerFuncs) Transform(ctx context.Context, frame Frame) []Frame {
 	return f.transform(ctx, frame)
 }
 
-func (f frameTransformerFuncs) Finalize(ctx context.Context) ([]Frame, error) {
+func (f frameTransformerFuncs) Finalize(ctx context.Context) []Frame {
 	if f.finalize == nil {
-		return nil, nil
+		return nil
 	}
 	return f.finalize(ctx)
 }

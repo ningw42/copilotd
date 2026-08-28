@@ -32,9 +32,9 @@ func TestProxyAppliesClientMessageShimAndPreservesKinds(t *testing.T) {
 		Name:    "prefix-client-message",
 		Enabled: true,
 		New: func(context.Context, endpoint.Surface, endpoint.Route) any {
-			return clientMessageTransformFunc(func(_ context.Context, message *shim.Message) (bool, error) {
+			return clientMessageTransformFunc(func(_ context.Context, message *shim.Message) bool {
 				message.Data = append([]byte("shim:"), message.Data...)
-				return true, nil
+				return true
 			})
 		},
 	}}
@@ -77,15 +77,61 @@ func TestProxyAppliesClientMessageShimAndPreservesKinds(t *testing.T) {
 	}
 }
 
+func TestProxyClientMessageShimPanicClosesBothSidesWith1011AndRecordsError(t *testing.T) {
+	observed := &recordingWsMetrics{}
+	upstreamClosed := make(chan websocket.StatusCode, 1)
+	registry := shim.Registry{{
+		Name:    "panicking-client-message",
+		Enabled: true,
+		New: func(context.Context, endpoint.Surface, endpoint.Route) any {
+			return clientMessageTransformFunc(func(context.Context, *shim.Message) bool {
+				panic("boom")
+			})
+		},
+	}}
+	client, sessionDone, cleanup := startSessionWithRegistryAndMetrics(t, 1<<20, time.Second, registry, WsMetrics{SessionTerminal: observed}, func(conn *websocket.Conn) {
+		_, _, err := conn.Read(context.Background())
+		upstreamClosed <- websocket.CloseStatus(err)
+	})
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := client.Write(ctx, websocket.MessageText, []byte("trigger")); err != nil {
+		t.Fatalf("write panic trigger: %v", err)
+	}
+	_, _, err := client.Read(ctx)
+	if got := websocket.CloseStatus(err); got != websocket.StatusInternalError {
+		t.Fatalf("client close status = %v, want 1011 (err: %v)", got, err)
+	}
+	select {
+	case got := <-upstreamClosed:
+		if got != websocket.StatusInternalError {
+			t.Errorf("upstream close status = %v, want 1011", got)
+		}
+	case <-ctx.Done():
+		t.Fatal("upstream did not receive 1011 after client-message shim panic")
+	}
+	select {
+	case <-sessionDone:
+	case <-ctx.Done():
+		t.Fatal("session did not stop after client-message shim panic")
+	}
+	_, terminals := observed.snapshot()
+	if len(terminals) != 1 || terminals[0] != SessionError {
+		t.Errorf("session terminals = %v, want [error]", terminals)
+	}
+}
+
 func TestProxyAppliesServerMessageShimWhileClientMessagesStayVerbatim(t *testing.T) {
 	upstreamReceived := make(chan []byte, 1)
 	registry := shim.Registry{{
 		Name:    "prefix-server-message",
 		Enabled: true,
 		New: func(context.Context, endpoint.Surface, endpoint.Route) any {
-			return serverMessageTransformFunc(func(_ context.Context, message *shim.Message) (bool, error) {
+			return serverMessageTransformFunc(func(_ context.Context, message *shim.Message) bool {
 				message.Data = append([]byte("shim:"), message.Data...)
-				return true, nil
+				return true
 			})
 		},
 	}}
@@ -116,6 +162,53 @@ func TestProxyAppliesServerMessageShimWhileClientMessagesStayVerbatim(t *testing
 	}
 	if kind != websocket.MessageText || !bytes.Equal(data, []byte("shim:server-origin")) {
 		t.Errorf("server message = (%v, %q), want (text, shim:server-origin)", kind, data)
+	}
+}
+
+func TestProxyServerMessageShimPanicClosesBothSidesWith1011AndRecordsError(t *testing.T) {
+	observed := &recordingWsMetrics{}
+	upstreamClosed := make(chan websocket.StatusCode, 1)
+	registry := shim.Registry{{
+		Name:    "panicking-server-message",
+		Enabled: true,
+		New: func(context.Context, endpoint.Surface, endpoint.Route) any {
+			return serverMessageTransformFunc(func(context.Context, *shim.Message) bool {
+				panic("boom")
+			})
+		},
+	}}
+	client, sessionDone, cleanup := startSessionWithRegistryAndMetrics(t, 1<<20, time.Second, registry, WsMetrics{SessionTerminal: observed}, func(conn *websocket.Conn) {
+		if err := conn.Write(context.Background(), websocket.MessageText, []byte("trigger")); err != nil {
+			upstreamClosed <- websocket.CloseStatus(err)
+			return
+		}
+		_, _, err := conn.Read(context.Background())
+		upstreamClosed <- websocket.CloseStatus(err)
+	})
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_, _, err := client.Read(ctx)
+	if got := websocket.CloseStatus(err); got != websocket.StatusInternalError {
+		t.Fatalf("client close status = %v, want 1011 (err: %v)", got, err)
+	}
+	select {
+	case got := <-upstreamClosed:
+		if got != websocket.StatusInternalError {
+			t.Errorf("upstream close status = %v, want 1011", got)
+		}
+	case <-ctx.Done():
+		t.Fatal("upstream did not receive 1011 after server-message shim panic")
+	}
+	select {
+	case <-sessionDone:
+	case <-ctx.Done():
+		t.Fatal("session did not stop after server-message shim panic")
+	}
+	_, terminals := observed.snapshot()
+	if len(terminals) != 1 || terminals[0] != SessionError {
+		t.Errorf("session terminals = %v, want [error]", terminals)
 	}
 }
 
@@ -295,7 +388,7 @@ func TestProxyHonorsClientMessageKindMutationsWithInvalidKindFallingBackToText(t
 		Name:    "mutate-client-message-kind",
 		Enabled: true,
 		New: func(context.Context, endpoint.Surface, endpoint.Route) any {
-			return clientMessageTransformFunc(func(_ context.Context, message *shim.Message) (bool, error) {
+			return clientMessageTransformFunc(func(_ context.Context, message *shim.Message) bool {
 				switch string(message.Data) {
 				case "to-binary":
 					message.Kind = shim.MessageBinary
@@ -304,7 +397,7 @@ func TestProxyHonorsClientMessageKindMutationsWithInvalidKindFallingBackToText(t
 				case "invalid":
 					message.Kind = shim.MessageKind(99)
 				}
-				return true, nil
+				return true
 			})
 		},
 	}}
@@ -350,14 +443,14 @@ func TestProxyHonorsServerMessageKindMutations(t *testing.T) {
 		Name:    "mutate-server-message-kind",
 		Enabled: true,
 		New: func(context.Context, endpoint.Surface, endpoint.Route) any {
-			return serverMessageTransformFunc(func(_ context.Context, message *shim.Message) (bool, error) {
+			return serverMessageTransformFunc(func(_ context.Context, message *shim.Message) bool {
 				switch string(message.Data) {
 				case "to-binary":
 					message.Kind = shim.MessageBinary
 				case "to-text":
 					message.Kind = shim.MessageText
 				}
-				return true, nil
+				return true
 			})
 		},
 	}}
@@ -385,19 +478,19 @@ func TestProxyComposesTwoBidirectionalShimsAndShortCircuitsDrops(t *testing.T) {
 			Enabled: true,
 			New: func(context.Context, endpoint.Surface, endpoint.Route) any {
 				return bidirectionalMessageTransformFuncs{
-					client: func(_ context.Context, message *shim.Message) (bool, error) {
+					client: func(_ context.Context, message *shim.Message) bool {
 						if string(message.Data) == "drop-client" {
-							return false, nil
+							return false
 						}
 						message.Data = []byte("outer(" + string(message.Data) + ")")
-						return true, nil
+						return true
 					},
-					server: func(_ context.Context, message *shim.Message) (bool, error) {
+					server: func(_ context.Context, message *shim.Message) bool {
 						if string(message.Data) == "drop-server" {
-							return false, errors.New("server drop did not short-circuit")
+							panic("server drop did not short-circuit")
 						}
 						message.Data = []byte("outer(" + string(message.Data) + ")")
-						return true, nil
+						return true
 					},
 				}
 			},
@@ -407,19 +500,19 @@ func TestProxyComposesTwoBidirectionalShimsAndShortCircuitsDrops(t *testing.T) {
 			Enabled: true,
 			New: func(context.Context, endpoint.Surface, endpoint.Route) any {
 				return bidirectionalMessageTransformFuncs{
-					client: func(_ context.Context, message *shim.Message) (bool, error) {
+					client: func(_ context.Context, message *shim.Message) bool {
 						if string(message.Data) == "drop-client" {
-							return false, errors.New("client drop did not short-circuit")
+							panic("client drop did not short-circuit")
 						}
 						message.Data = []byte("inner(" + string(message.Data) + ")")
-						return true, nil
+						return true
 					},
-					server: func(_ context.Context, message *shim.Message) (bool, error) {
+					server: func(_ context.Context, message *shim.Message) bool {
 						if string(message.Data) == "drop-server" {
-							return false, nil
+							return false
 						}
 						message.Data = []byte("inner(" + string(message.Data) + ")")
-						return true, nil
+						return true
 					},
 				}
 			},
@@ -568,7 +661,7 @@ func TestProxySnapshotsRegistryAndBuildsFreshContextualChainPerSession(t *testin
 			instance := instanceCount.Add(1)
 			requestID, _ := logging.RequestIDFrom(ctx)
 			messageCount := 0
-			return clientMessageTransformFunc(func(transformCtx context.Context, message *shim.Message) (bool, error) {
+			return clientMessageTransformFunc(func(transformCtx context.Context, message *shim.Message) bool {
 				messageCount++
 				transformRequestID := "none"
 				if value, ok := logging.RequestIDFrom(transformCtx); ok {
@@ -578,7 +671,7 @@ func TestProxySnapshotsRegistryAndBuildsFreshContextualChainPerSession(t *testin
 					"instance=%d message=%d request=%s transform_request=%s surface=%s route=%s",
 					instance, messageCount, requestID, transformRequestID, surface, route,
 				))
-				return true, nil
+				return true
 			})
 		},
 	}}
@@ -602,8 +695,8 @@ func TestProxySnapshotsRegistryAndBuildsFreshContextualChainPerSession(t *testin
 		}
 	}()
 	registry[0].New = func(context.Context, endpoint.Surface, endpoint.Route) any {
-		return clientMessageTransformFunc(func(context.Context, *shim.Message) (bool, error) {
-			return false, fmt.Errorf("mutated caller registry")
+		return clientMessageTransformFunc(func(context.Context, *shim.Message) bool {
+			panic("mutated caller registry")
 		})
 	}
 
@@ -659,16 +752,15 @@ func TestProxyShutdownCancelsRunningClientTransformAndSiblingPump(t *testing.T) 
 		Name:    "blocking-client-message",
 		Enabled: true,
 		New: func(context.Context, endpoint.Surface, endpoint.Route) any {
-			return clientMessageTransformFunc(func(ctx context.Context, _ *shim.Message) (bool, error) {
+			return clientMessageTransformFunc(func(ctx context.Context, _ *shim.Message) bool {
 				close(transformEntered)
 				select {
 				case <-ctx.Done():
 					transformResult <- ctx.Err()
-					return false, ctx.Err()
 				case <-time.After(300 * time.Millisecond):
 					transformResult <- nil
-					return false, nil
 				}
+				return false
 			})
 		},
 	}}
@@ -745,15 +837,15 @@ func TestProxyShutdownCancelsRunningClientTransformAndSiblingPump(t *testing.T) 
 	}
 }
 
-type clientMessageTransformFunc func(context.Context, *shim.Message) (bool, error)
+type clientMessageTransformFunc func(context.Context, *shim.Message) bool
 
-func (f clientMessageTransformFunc) TransformClientMessage(ctx context.Context, message *shim.Message) (bool, error) {
+func (f clientMessageTransformFunc) TransformClientMessage(ctx context.Context, message *shim.Message) bool {
 	return f(ctx, message)
 }
 
-type serverMessageTransformFunc func(context.Context, *shim.Message) (bool, error)
+type serverMessageTransformFunc func(context.Context, *shim.Message) bool
 
-func (f serverMessageTransformFunc) TransformServerMessage(ctx context.Context, message *shim.Message) (bool, error) {
+func (f serverMessageTransformFunc) TransformServerMessage(ctx context.Context, message *shim.Message) bool {
 	return f(ctx, message)
 }
 
@@ -762,11 +854,11 @@ type bidirectionalMessageTransformFuncs struct {
 	server shim.MessageTransform
 }
 
-func (f bidirectionalMessageTransformFuncs) TransformClientMessage(ctx context.Context, message *shim.Message) (bool, error) {
+func (f bidirectionalMessageTransformFuncs) TransformClientMessage(ctx context.Context, message *shim.Message) bool {
 	return f.client(ctx, message)
 }
 
-func (f bidirectionalMessageTransformFuncs) TransformServerMessage(ctx context.Context, message *shim.Message) (bool, error) {
+func (f bidirectionalMessageTransformFuncs) TransformServerMessage(ctx context.Context, message *shim.Message) bool {
 	return f.server(ctx, message)
 }
 
@@ -789,25 +881,25 @@ func newSynchronizedSessionStateShim() *synchronizedSessionStateShim {
 	}
 }
 
-func (s *synchronizedSessionStateShim) TransformClientMessage(ctx context.Context, message *shim.Message) (bool, error) {
+func (s *synchronizedSessionStateShim) TransformClientMessage(ctx context.Context, message *shim.Message) bool {
 	s.clientEnteredOnce.Do(func() { close(s.clientEntered) })
 	if err := waitForTransformSignal(ctx, s.serverEntered); err != nil {
-		return false, err
+		return false
 	}
 	if err := waitForTransformSignal(ctx, s.firstStateReady); err != nil {
-		return false, err
+		return false
 	}
 	s.mu.Lock()
 	tag := s.tag
 	s.mu.Unlock()
 	message.Data = []byte(fmt.Sprintf("tag-%d:%s", tag, message.Data))
-	return true, nil
+	return true
 }
 
-func (s *synchronizedSessionStateShim) TransformServerMessage(ctx context.Context, message *shim.Message) (bool, error) {
+func (s *synchronizedSessionStateShim) TransformServerMessage(ctx context.Context, message *shim.Message) bool {
 	s.serverEnteredOnce.Do(func() { close(s.serverEntered) })
 	if err := waitForTransformSignal(ctx, s.clientEntered); err != nil {
-		return false, err
+		return false
 	}
 	s.mu.Lock()
 	s.tag++
@@ -815,7 +907,7 @@ func (s *synchronizedSessionStateShim) TransformServerMessage(ctx context.Contex
 	s.mu.Unlock()
 	s.stateReadyOnce.Do(func() { close(s.firstStateReady) })
 	message.Data = []byte(fmt.Sprintf("tag-%d:%s", tag, message.Data))
-	return true, nil
+	return true
 }
 
 func waitForTransformSignal(ctx context.Context, signal <-chan struct{}) error {

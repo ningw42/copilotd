@@ -17,7 +17,7 @@ const (
 	OutcomeStall         Outcome = "stall"
 	OutcomeClientCancel  Outcome = "client_cancel"
 	OutcomeUpstreamError Outcome = "upstream_error"
-	// OutcomeShimError means the injected FrameTransformer failed before a
+	// OutcomeShimError means the injected FrameTransformer panicked before a
 	// terminal reached the client. In production, the transformer is the shim
 	// chain's stream adapter.
 	OutcomeShimError Outcome = "shim_error"
@@ -27,8 +27,8 @@ const (
 // engine. Transform maps one upstream frame to zero or more client-facing
 // frames; Finalize releases frames held until a pre-terminal stream teardown.
 type FrameTransformer interface {
-	Transform(context.Context, Frame) ([]Frame, error)
-	Finalize(context.Context) ([]Frame, error)
+	Transform(context.Context, Frame) []Frame
+	Finalize(context.Context) []Frame
 }
 
 // Result is the request-level summary returned by Pump. Frames counts
@@ -53,10 +53,10 @@ type Policy struct {
 	KeepaliveInterval time.Duration
 	Clock             Clock
 	OnFallback        func()
-	// Logger receives metadata-only warnings for FrameTransformer errors hidden
+	// Logger receives metadata-only warnings for FrameTransformer panics hidden
 	// from the wire by no-double-up. Nil uses slog.Default.
 	Logger *slog.Logger
-	// SuppressedShimErrors counts those same post-terminal errors when non-nil.
+	// SuppressedShimErrors counts those same post-terminal panics when non-nil.
 	SuppressedShimErrors *SuppressedShimErrorCounter
 }
 
@@ -157,11 +157,11 @@ func Pump(ctx context.Context, cancel context.CancelFunc, body io.ReadCloser, ds
 			result.Outcome = OutcomeClientCancel
 		}
 	}
-	recordSuppressedShimError := func(stage string) {
+	recordSuppressedShimPanic := func() {
 		if policy.SuppressedShimErrors != nil {
 			policy.SuppressedShimErrors.Increment()
 		}
-		logger.WarnContext(ctx, "suppressed post-terminal shim error", slog.String("stage", stage))
+		logger.WarnContext(ctx, "suppressed post-terminal shim error", slog.String("stage", "transform"))
 	}
 	writeKeepalive := func() bool {
 		if _, err := writer.Write([]byte(":\n\n")); err != nil {
@@ -177,25 +177,22 @@ func Pump(ctx context.Context, cancel context.CancelFunc, body io.ReadCloser, ds
 	}
 	finishPreTerminal := func(cause Outcome) {
 		if transformer != nil {
-			frames, err := transformer.Finalize(ctx)
+			frames, panicked := invokeFinalize(ctx, transformer)
 			// A disconnect is authoritative even if it arrives while Finalize is
 			// running. Its output is still held and must not reach the client.
 			if ctx.Err() != nil {
 				result.Outcome = OutcomeClientCancel
 				return
 			}
+			if panicked {
+				renderOutcome(OutcomeShimError)
+				return
+			}
 			if !writeFrames(frames) {
 				return
 			}
 			if sawTerminal {
-				if err != nil {
-					recordSuppressedShimError("finalize")
-				}
 				result.Outcome = OutcomeClean
-				return
-			}
-			if err != nil {
-				renderOutcome(OutcomeShimError)
 				return
 			}
 		}
@@ -325,19 +322,18 @@ func Pump(ctx context.Context, cancel context.CancelFunc, body io.ReadCloser, ds
 		}
 		frames := []Frame{read.frame}
 		if transformer != nil {
-			var err error
-			frames, err = transformer.Transform(ctx, read.frame)
+			var panicked bool
+			frames, panicked = invokeTransform(ctx, transformer, read.frame)
 			if ctx.Err() != nil {
 				result.Outcome = OutcomeClientCancel
 				return result
 			}
-			if err != nil {
-				result.Outcome = OutcomeShimError
+			if panicked {
 				if sawTerminal {
-					recordSuppressedShimError("transform")
+					recordSuppressedShimPanic()
 					result.Outcome = OutcomeClean
-				} else if renderErr := policy.RenderError(writer, result.Outcome); renderErr != nil {
-					result.Outcome = OutcomeClientCancel
+				} else {
+					renderOutcome(OutcomeShimError)
 				}
 				return result
 			}
@@ -357,6 +353,23 @@ func Pump(ctx context.Context, cancel context.CancelFunc, body io.ReadCloser, ds
 		if stall != nil {
 			resetTimer(stall, policy.IdleTimeout)
 		}
+	}
+}
+
+func invokeTransform(ctx context.Context, transformer FrameTransformer, frame Frame) (frames []Frame, panicked bool) {
+	defer recoverFrameTransformerPanic(&frames, &panicked)
+	return transformer.Transform(ctx, frame), false
+}
+
+func invokeFinalize(ctx context.Context, transformer FrameTransformer) (frames []Frame, panicked bool) {
+	defer recoverFrameTransformerPanic(&frames, &panicked)
+	return transformer.Finalize(ctx), false
+}
+
+func recoverFrameTransformerPanic(frames *[]Frame, panicked *bool) {
+	if recover() != nil {
+		*frames = nil
+		*panicked = true
 	}
 }
 

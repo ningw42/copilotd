@@ -1,6 +1,6 @@
 # WebSocket shim message transform (bidirectional, opt-in)
 
-Status: proposed 2026-07-22.
+Status: implemented; post-commit hook contract amended by [ADR-0014](../adr/0014-infallible-post-commit-shim-hooks.md).
 Design for extending copilotd's composable **shim** contract from the HTTP
 (buffered) and SSE paths to the OpenAI Responses **WebSocket** transport. It builds
 on the payload-opaque
@@ -46,7 +46,8 @@ general bidirectional seam.
 - **No emission-holding, no `Finalize`.** A transform decides each message
   synchronously: rewrite in place, or drop. There is no framework buffer that holds
   a message for later release, and therefore none of the SSE `StreamFinalizer`
-  interleaving machinery (which issue #38 exists to simplify). A shim may keep
+  interleaving machinery, which ADR-0014 reduced to a straight inner-to-outer
+  sweep. A shim may keep
   *knowledge* in its own fields; it may not make the framework hold an *emission*.
   Rationale in §5.
 - **No 1→N / splitting / injection.** A transform maps one message to at most one
@@ -79,7 +80,7 @@ general bidirectional seam.
 | Message unit | **Reassembled coder/websocket message**, named **Message** (not "Frame") | `coder/websocket` `Read` returns whole messages; `CONTEXT.md` reserves "frame" for SSE records. |
 | Message kind | **Neutral `shim.MessageKind`** (Text \| Binary) | Keeps the `coder/websocket` type out of `shim`; `wsforward` maps `websocket.MessageType` ↔ `MessageKind` at the seam. |
 | Default (no-op) path | **`nil` adapter → verbatim fast path** | Preserves the payload-opaque guarantee and current performance; mirrors `sse.Pump`'s nil-transformer fast path. |
-| Transform error | **Fatal to the session**: close `1011`, `SessionError` terminal | Post-upgrade there is no HTTP error channel; reuse the existing WS close-code / terminal machinery; mirrors the SSE pump treating a pre-terminal shim error as `OutcomeShimError`. |
+| Hook panic | **Fatal to the session**: close `1011`, `SessionError` terminal | Post-upgrade there is no HTTP error channel. Routine uncertainty is passthrough under ADR-0014; the existing close-code and terminal machinery is reserved for programmer bugs and transport failures. |
 
 ## 3. Package `shim`: carrier and interfaces
 
@@ -114,21 +115,23 @@ the other, or both):
 // (CPU-bound transformation only; no I/O or waiting). Return emit=false to drop
 // the message (it is not forwarded upstream). Mutate *Message in place.
 type ClientMessageTransformer interface {
-    TransformClientMessage(context.Context, *Message) (emit bool, err error)
+    TransformClientMessage(context.Context, *Message) (emit bool)
 }
 
 // ServerMessageTransformer transforms one upstream → client message, under the
 // same prompt/non-blocking and in-place-mutation rules. Return emit=false to drop
 // the message (it is not delivered to the client).
 type ServerMessageTransformer interface {
-    TransformServerMessage(context.Context, *Message) (emit bool, err error)
+    TransformServerMessage(context.Context, *Message) (emit bool)
 }
 ```
 
-The two returns are **distinct refusal paths**: `emit=false` is an intentional
-policy drop (the message is deliberately not forwarded), while a returned `err`
-signals an internal or impossible-state failure and is fatal to the session (§7).
-A shim that merely declines to forward a message must drop it, never error.
+The sole return controls intentional policy: `emit=false` deliberately drops the
+message. A shim that cannot confidently interpret a message instead declines by
+leaving it unchanged and returning `emit=true`. The compiler enforces the absence
+of a routine error channel; the passthrough discipline remains an authoring
+obligation governed by ADR-0014. A panic is a programmer bug and is contained by
+the pump (§7).
 
 These inherit the `shim` package's existing **policy invariants**: a transform may
 alter or drop information derived from a message but must not fabricate information
@@ -140,7 +143,7 @@ A single transform seam type lets the pump call an adapter uniformly:
 ```go
 // MessageTransform folds the enabled directional hooks for one direction into a
 // single call. nil means no shim participates in that direction (verbatim path).
-type MessageTransform func(context.Context, *Message) (emit bool, err error)
+type MessageTransform func(context.Context, *Message) (emit bool)
 ```
 
 ## 4. Package `shim`: chain adapters and fold order
@@ -168,8 +171,9 @@ transform yields at most one message:
   toward the client.
 
 A shim that returns `emit=false` **short-circuits** the remaining chain for that
-message (it is dropped and no outer/inner shim sees it). A shim that returns an
-error aborts the fold and propagates the error to the pump (§7). Fold semantics:
+message (it is dropped and no outer/inner shim sees it). Otherwise the infallible
+fold continues; uncertainty is represented by preserving the message. Fold
+semantics:
 
 ```go
 // WSClientAdapter (sketch); WSServerAdapter is the reverse traversal.
@@ -183,17 +187,13 @@ func (c *Chain) WSClientAdapter() MessageTransform {
     if len(participants) == 0 {
         return nil
     }
-    return func(ctx context.Context, m *Message) (bool, error) {
+    return func(ctx context.Context, m *Message) bool {
         for _, t := range participants {
-            emit, err := t.TransformClientMessage(ctx, m)
-            if err != nil {
-                return false, err
-            }
-            if !emit {
-                return false, nil
+            if !t.TransformClientMessage(ctx, m) {
+                return false
             }
         }
-        return true, nil
+        return true
     }
 }
 ```
@@ -250,9 +250,9 @@ func pump(ctx context.Context, source, destination *websocket.Conn,
         }
         if transform != nil {
             message := shim.Message{Kind: kindFromType(messageType), Data: payload}
-            emit, terr := transform(ctx, &message)
-            if terr != nil {
-                return stats, pumpFailure{peer: sourcePeer, operation: transformOperation, err: terr}
+            emit, panicked := invokeMessageTransform(ctx, transform, &message)
+            if panicked {
+                return stats, pumpFailure{peer: sourcePeer, operation: transformOperation, err: errMessageTransformPanic}
             }
             if !emit {
                 continue // dropped: read the next message, write nothing
@@ -268,9 +268,9 @@ func pump(ctx context.Context, source, destination *websocket.Conn,
 Only Text and Binary are valid, but `MessageKind` is an open integer, so `typeFromKind`
 is **total**: `MessageBinary` maps to binary and every other value — including an
 out-of-range kind a shim may set — maps to text, so an invalid kind can never panic
-the pump. A new `transformOperation` joins the existing
-`readOperation` / `writeOperation` so a transform failure is attributed to the
-originating peer rather than mislabeled as a read or write.
+the pump. A `transformOperation` joins the existing `readOperation` /
+`writeOperation` so a contained hook panic is attributed to the originating peer
+rather than mislabeled as a read or write.
 
 `runSession` builds the two transforms from the per-session chain and hands each to
 its pump ([session.go](../../internal/wsforward/session.go#L52-L94)):
@@ -325,38 +325,26 @@ verbatim path and the transport remains byte-for-byte opaque.
 `sse`, neither of which imports `wsforward`, so the dependency stays one-way
 (`wsforward → shim`), exactly like `forward → shim`. No cycle.
 
-## 7. Error handling and close codes
+## 7. Panic handling and close codes
 
-A transform error is **fatal to the session**. The pump returns a `pumpFailure`
-carrying a `transformOperation`; `runSession` then follows the existing terminal
-path ([session.go](../../internal/wsforward/session.go#L75-L94)):
+The post-commit directional hooks are infallible under ADR-0014. A hook that
+cannot interpret one message passes it through unchanged, so ordinary uncertainty
+cannot tear down a multi-turn session. A hook panic remains a programmer bug. The
+pump contains it and returns a `pumpFailure` carrying `transformOperation`;
+`runSession` then follows the existing terminal path:
 
 - Both sockets are closed with **`1011` (internal error)**.
 - The session terminal is classified `SessionError` (log level `warn`), and the
-  session-terminal metric records `error`.
-- `errgroup` cancellation tears down the sibling pump, as it does for any
-  half-failure today.
+  session-terminal metric records the existing bounded `error` value.
+- `errgroup` cancellation tears down and joins the sibling pump.
 
-This classification largely falls out of the existing terminal logic once
-`transformOperation` is a distinct operation value
-([session.go](../../internal/wsforward/session.go#L130-L173)): a transform error is
-not a sendable WebSocket close status, so `terminalClose` reaches its default and
-resolves to `StatusInternalError` (`1011`), and `terminalReason` classifies an
-abnormal close code as `SessionError`. The one thing the new value must guarantee is
-that a transform failure is **not** mistaken for an abrupt client disconnect —
-`isAbruptClientDisconnect` is gated on `readOperation`, so a `transformOperation`
-failure correctly bypasses it. No new close-code taxonomy and no new metric label
-are introduced — a transform failure reuses the existing `error` terminal. Because a
-transform runs inline in the pump, a client disconnect that races a transform is
-detectable by the pump's read/write error paths but not guaranteed to be the observed
-terminal. The two directions are independent goroutines meeting only at the terminal
-channel, so when a disconnect and a transform error occur concurrently the session is
-classified by whichever pump reports first — a benign, telemetry-only difference
-(`SessionClientClosed` vs. `SessionError`). If the transform error is reported first
-the disconnect may go **unobserved**; teardown is safe either way — both sockets close,
-and the client, already gone, observes neither close code. No deterministic winner is required or
-imposed; forcing disconnect precedence would need cross-pump coordination this design
-omits, unlike the single-loop SSE pump that re-checks client cancellation at each step.
+`transformOperation` ensures a panic is not mistaken for an abrupt client
+disconnect, which is gated on `readOperation`. The recovered panic value and
+message payload are not logged or rendered to either peer; session logging remains
+metadata-only. Read, write, timeout, and close-code failures retain their existing
+classification and 1011 fallback behavior. A disconnect racing a hook panic may be
+classified by whichever pump reports first, but both paths tear down both peers and
+join the session goroutines safely.
 
 ## 8. Telemetry
 
@@ -390,15 +378,16 @@ peers, extending the existing `wsforward` suite:
    server message is never delivered to the client; the forwarded count excludes it.
 5. **Fold order**: two participating shims compose 0 → n on client → upstream and
    n → 0 on upstream → client; a drop short-circuits the remaining chain.
-6. **Transform error → `1011`**: the session closes with internal-error, records the
-   `SessionError` terminal and `error` metric, tears down the sibling pump, and
-   leaks no goroutine.
+6. **Hook panic → `1011`**, in both directions: the session closes with
+   internal-error, records the `SessionError` terminal and bounded `error` metric,
+   tears down the sibling pump, leaks no goroutine, and exposes no payload or panic
+   value.
 7. **Kind preservation**: text and binary messages round-trip their kind through the
    transform seam.
 8. **Fresh chain per socket**: two sequential sessions get independent shim state.
 9. **Adapter unit tests** in `shim`: `WSClientAdapter` / `WSServerAdapter` return
-   `nil` with no participants, fold in the correct order, short-circuit on drop, and
-   propagate errors.
+   `nil` with no participants, accept the infallible hook signatures, fold in the
+   correct order, and short-circuit on drop.
 10. **Kind mutation**: a transform that flips a message's kind (Text→Binary and the
     reverse) is honored end-to-end — the destination peer observes the mutated kind,
     distinct from the kind-preservation guard above.

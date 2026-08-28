@@ -1089,61 +1089,52 @@ func (r *observedReadCloser) Close() error {
 	return nil
 }
 
-type failingEventShim struct {
-	err error
+type panickingEventShim struct{}
+
+func (*panickingEventShim) TransformEvent(context.Context, sse.Frame) []sse.Frame {
+	panic("SECRET-PANIC-VALUE")
 }
 
-type holdingStreamShim struct {
+type postTerminalPanickingEventShim struct{}
+
+func (*postTerminalPanickingEventShim) TransformEvent(_ context.Context, frame sse.Frame) []sse.Frame {
+	if frame.Type == "message_stop" {
+		return []sse.Frame{frame}
+	}
+	panic("SECRET-POST-TERMINAL-PANIC")
+}
+
+type holdingEventShim struct {
 	held []sse.Frame
 }
 
-func (s *holdingStreamShim) TransformEvent(_ context.Context, frame sse.Frame) ([]sse.Frame, error) {
+func (s *holdingEventShim) TransformEvent(_ context.Context, frame sse.Frame) []sse.Frame {
 	s.held = append(s.held, frame)
-	return nil, nil
+	return nil
 }
 
-func (s *holdingStreamShim) Finalize(context.Context) ([]sse.Frame, error) {
-	return s.held, nil
+func (s *holdingEventShim) Finalize(context.Context) []sse.Frame {
+	return s.held
 }
 
-type alteringFailingFinalizerShim struct {
-	err error
-}
+type prefixingEventShim struct{}
 
-type observingEventShim struct {
-	seen []sse.Frame
-}
-
-func (s *observingEventShim) TransformEvent(_ context.Context, frame sse.Frame) ([]sse.Frame, error) {
-	s.seen = append(s.seen, frame)
-	return []sse.Frame{frame}, nil
-}
-
-type failingFinalizerOnlyShim struct {
-	frames []sse.Frame
-	err    error
-}
-
-func (s *failingFinalizerOnlyShim) Finalize(context.Context) ([]sse.Frame, error) {
-	return s.frames, s.err
-}
-
-func (*alteringFailingFinalizerShim) TransformEvent(_ context.Context, frame sse.Frame) ([]sse.Frame, error) {
+func (*prefixingEventShim) TransformEvent(_ context.Context, frame sse.Frame) []sse.Frame {
 	frame.Raw = append([]byte(": outer-transform\n"), frame.Raw...)
-	return []sse.Frame{frame}, nil
+	return []sse.Frame{frame}
 }
 
-func (s *alteringFailingFinalizerShim) Finalize(context.Context) ([]sse.Frame, error) {
-	return nil, s.err
+type finalizePanickingEventShim struct{}
+
+func (*finalizePanickingEventShim) TransformEvent(context.Context, sse.Frame) []sse.Frame {
+	return nil
 }
 
-var _ shim.EventTransformer = (*failingEventShim)(nil)
-
-func (s *failingEventShim) TransformEvent(context.Context, sse.Frame) ([]sse.Frame, error) {
-	return nil, s.err
+func (*finalizePanickingEventShim) Finalize(context.Context) []sse.Frame {
+	panic("SECRET-FINALIZE-PANIC")
 }
 
-func TestForwardStreamShimFailureRendersNativeTerminalAndReleasesUpstream(t *testing.T) {
+func TestForwardStreamShimPanicRendersNativeTerminalAndReleasesUpstream(t *testing.T) {
 	const upstreamFrame = "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"secret\":\"must-not-leak\"}\n\n"
 	body := &observedReadCloser{reader: strings.NewReader(upstreamFrame)}
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
@@ -1154,12 +1145,11 @@ func TestForwardStreamShimFailureRendersNativeTerminalAndReleasesUpstream(t *tes
 			Request:    r,
 		}, nil
 	})}
-	instance := &failingEventShim{err: errors.New("private shim internals")}
 	registry := shim.Registry{{
-		Name:    "failing-event",
+		Name:    "panicking-event",
 		Enabled: true,
 		New: func(context.Context, endpoint.Surface, endpoint.Route) any {
-			return instance
+			return &panickingEventShim{}
 		},
 	}}
 	f := newTestForwarder(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, registry)
@@ -1179,13 +1169,14 @@ func TestForwardStreamShimFailureRendersNativeTerminalAndReleasesUpstream(t *tes
 		t.Errorf("stream result = %#v, %t, want shim_error with zero transformed frames", result, ok)
 	}
 	if !body.closed {
-		t.Error("upstream body is open after stream shim failure")
+		t.Error("upstream body is open after stream shim panic")
 	}
 }
 
-func TestForwardSuppressesOuterFinalizeErrorAfterFullyComposedTerminal(t *testing.T) {
-	const upstreamTerminal = "event: message_stop\ndata: {\"type\":\"message_stop\",\"payload\":\"frame-secret\"}\n\n"
-	body := &observedReadCloser{reader: strings.NewReader(upstreamTerminal)}
+func TestForwardSuppressesPostTerminalShimPanicAndRecordsIt(t *testing.T) {
+	const terminal = "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+	const trailing = "event: vendor.trailing\ndata: SECRET-TRAILING-CONTENT\n\n"
+	body := &observedReadCloser{reader: strings.NewReader(terminal + trailing)}
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		return &http.Response{
 			StatusCode: http.StatusOK,
@@ -1194,15 +1185,16 @@ func TestForwardSuppressesOuterFinalizeErrorAfterFullyComposedTerminal(t *testin
 			Request:    r,
 		}, nil
 	})}
-	outer := &alteringFailingFinalizerShim{err: errors.New("private-finalize-error")}
-	inner := &holdingStreamShim{}
-	registry := shim.Registry{
-		{Name: "outer", Enabled: true, New: func(context.Context, endpoint.Surface, endpoint.Route) any { return outer }},
-		{Name: "inner", Enabled: true, New: func(context.Context, endpoint.Surface, endpoint.Route) any { return inner }},
-	}
+	registry := shim.Registry{{
+		Name:    "post-terminal-panic",
+		Enabled: true,
+		New: func(context.Context, endpoint.Surface, endpoint.Route) any {
+			return &postTerminalPanickingEventShim{}
+		},
+	}}
 	f := newTestForwarder(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, registry)
-	var logOutput bytes.Buffer
-	f.logger = slog.New(slog.NewTextHandler(&logOutput, nil))
+	var logs bytes.Buffer
+	f.logger = slog.New(slog.NewTextHandler(&logs, nil))
 	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{"stream":true}`))
 	ctx := WithStreamResultHolder(req.Context())
 	req = req.WithContext(ctx)
@@ -1210,32 +1202,33 @@ func TestForwardSuppressesOuterFinalizeErrorAfterFullyComposedTerminal(t *testin
 
 	f.Handler(endpoint.AnthropicMessages())(rec, req)
 
-	if got, want := rec.Body.String(), ": outer-transform\n"+upstreamTerminal; got != want {
-		t.Errorf("body = %q, want fully composed terminal %q", got, want)
+	if got := rec.Body.String(); got != terminal {
+		t.Errorf("body = %q, want only upstream terminal %q", got, terminal)
 	}
 	result, ok := StreamResultFromContext(ctx)
 	if !ok || result.Outcome != sse.OutcomeClean || result.Frames != 1 {
-		t.Errorf("stream result = %#v, %t, want clean with one transformed frame", result, ok)
+		t.Errorf("stream result = %#v, %t, want clean with one terminal frame", result, ok)
 	}
-	if got := f.suppressedShimErrors.Count(); got != 1 {
-		t.Errorf("suppressed shim errors = %d, want 1", got)
+	if got := f.SuppressedShimErrorCount(); got != 1 {
+		t.Errorf("suppressed shim panic count = %d, want 1", got)
 	}
-	logText := logOutput.String()
-	if !strings.Contains(logText, "suppressed post-terminal shim error") || !strings.Contains(logText, "stage=finalize") {
+	logText := logs.String()
+	if !strings.Contains(logText, "suppressed post-terminal shim error") || !strings.Contains(logText, "stage=transform") {
 		t.Errorf("warning = %q, want suppression metadata", logText)
 	}
-	for _, secret := range []string{"frame-secret", "private-finalize-error"} {
+	for _, secret := range []string{"SECRET-POST-TERMINAL-PANIC", "SECRET-TRAILING-CONTENT"} {
 		if strings.Contains(logText, secret) {
 			t.Errorf("warning leaked %q: %s", secret, logText)
 		}
 	}
 	if !body.closed {
-		t.Error("upstream body is open after suppressed finalize failure")
+		t.Error("upstream body is open after suppressed shim panic")
 	}
 }
 
-func TestForwardDiscardsPartiallyComposedMiddleFinalizeOutput(t *testing.T) {
-	body := &observedReadCloser{reader: strings.NewReader("")}
+func TestForwardComposesHeldFinalizeOutputThroughOuterShim(t *testing.T) {
+	const terminal = "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+	body := &observedReadCloser{reader: strings.NewReader(terminal)}
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		return &http.Response{
 			StatusCode: http.StatusOK,
@@ -1244,17 +1237,49 @@ func TestForwardDiscardsPartiallyComposedMiddleFinalizeOutput(t *testing.T) {
 			Request:    r,
 		}, nil
 	})}
-	outer := &observingEventShim{}
-	middle := &failingFinalizerOnlyShim{
-		frames: []sse.Frame{{Type: "delta", Raw: []byte("partially-composed-secret")}},
-		err:    errors.New("middle failed"),
-	}
-	inner := &failingFinalizerOnlyShim{}
 	registry := shim.Registry{
-		{Name: "outer-A", Enabled: true, New: func(context.Context, endpoint.Surface, endpoint.Route) any { return outer }},
-		{Name: "middle-B", Enabled: true, New: func(context.Context, endpoint.Surface, endpoint.Route) any { return middle }},
-		{Name: "inner-C", Enabled: true, New: func(context.Context, endpoint.Surface, endpoint.Route) any { return inner }},
+		{Name: "outer-prefix", Enabled: true, New: func(context.Context, endpoint.Surface, endpoint.Route) any { return &prefixingEventShim{} }},
+		{Name: "inner-hold", Enabled: true, New: func(context.Context, endpoint.Surface, endpoint.Route) any { return &holdingEventShim{} }},
 	}
+	f := newTestForwarder(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, registry)
+	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{"stream":true}`))
+	ctx := WithStreamResultHolder(req.Context())
+	req = req.WithContext(ctx)
+	rec := newDeadlineRecorder()
+
+	f.Handler(endpoint.AnthropicMessages())(rec, req)
+
+	want := ": outer-transform\n" + terminal
+	if got := rec.Body.String(); got != want {
+		t.Errorf("body = %q, want fully composed held terminal %q", got, want)
+	}
+	result, ok := StreamResultFromContext(ctx)
+	if !ok || result.Outcome != sse.OutcomeClean || result.Frames != 1 {
+		t.Errorf("stream result = %#v, %t, want clean with one finalized frame", result, ok)
+	}
+	if !body.closed {
+		t.Error("upstream body is open after finalized stream")
+	}
+}
+
+func TestForwardFinalizePanicRendersNativeTerminalAndReleasesUpstream(t *testing.T) {
+	const upstreamFrame = "event: content_block_delta\ndata: {\"type\":\"content_block_delta\"}\n\n"
+	body := &observedReadCloser{reader: strings.NewReader(upstreamFrame)}
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": {"text/event-stream"}},
+			Body:       body,
+			Request:    r,
+		}, nil
+	})}
+	registry := shim.Registry{{
+		Name:    "finalize-panic",
+		Enabled: true,
+		New: func(context.Context, endpoint.Surface, endpoint.Route) any {
+			return &finalizePanickingEventShim{}
+		},
+	}}
 	f := newTestForwarder(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, registry)
 	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{"stream":true}`))
 	ctx := WithStreamResultHolder(req.Context())
@@ -1265,17 +1290,14 @@ func TestForwardDiscardsPartiallyComposedMiddleFinalizeOutput(t *testing.T) {
 
 	const want = "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"copilotd: shim failed\"}}\n\n"
 	if got := rec.Body.String(); got != want {
-		t.Errorf("body = %q, want shim terminal without partial frame %q", got, want)
-	}
-	if len(outer.seen) != 0 {
-		t.Errorf("outer event hook saw %#v, want middle output discarded at failure", outer.seen)
+		t.Errorf("body = %q, want one native shim terminal %q", got, want)
 	}
 	result, ok := StreamResultFromContext(ctx)
 	if !ok || result.Outcome != sse.OutcomeShimError || result.Frames != 0 {
 		t.Errorf("stream result = %#v, %t, want shim_error with no partial frames", result, ok)
 	}
 	if !body.closed {
-		t.Error("upstream body is open after middle finalize failure")
+		t.Error("upstream body is open after Finalize panic")
 	}
 }
 

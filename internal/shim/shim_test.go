@@ -2,7 +2,6 @@ package shim
 
 import (
 	"context"
-	"errors"
 	"net/http"
 	"reflect"
 	"testing"
@@ -262,55 +261,52 @@ func TestChainBuffersResponseOnlyWhenEnabledInstanceImplementsHook(t *testing.T)
 	}
 }
 
-type eventTransformFunc func(context.Context, sse.Frame) ([]sse.Frame, error)
+type eventTransformFunc func(context.Context, sse.Frame) []sse.Frame
 
-func (f eventTransformFunc) TransformEvent(ctx context.Context, frame sse.Frame) ([]sse.Frame, error) {
+func (f eventTransformFunc) TransformEvent(ctx context.Context, frame sse.Frame) []sse.Frame {
 	return f(ctx, frame)
 }
 
 type finalizingEventShim struct {
-	transform func(context.Context, sse.Frame) ([]sse.Frame, error)
-	finalize  func(context.Context) ([]sse.Frame, error)
+	transform func(context.Context, sse.Frame) []sse.Frame
+	finalize  func(context.Context) []sse.Frame
 }
 
-type streamFinalizerFunc func(context.Context) ([]sse.Frame, error)
+type streamFinalizerFunc func(context.Context) []sse.Frame
 
-func (f streamFinalizerFunc) Finalize(ctx context.Context) ([]sse.Frame, error) {
+func (f streamFinalizerFunc) Finalize(ctx context.Context) []sse.Frame {
 	return f(ctx)
 }
 
-func (s *finalizingEventShim) TransformEvent(ctx context.Context, frame sse.Frame) ([]sse.Frame, error) {
+func (s *finalizingEventShim) TransformEvent(ctx context.Context, frame sse.Frame) []sse.Frame {
 	return s.transform(ctx, frame)
 }
 
-func (s *finalizingEventShim) Finalize(ctx context.Context) ([]sse.Frame, error) {
+func (s *finalizingEventShim) Finalize(ctx context.Context) []sse.Frame {
 	return s.finalize(ctx)
 }
 
 func TestStreamAdapterFoldsInnerToOuterWithFanout(t *testing.T) {
 	wrap := func(name string) eventTransformFunc {
-		return func(_ context.Context, frame sse.Frame) ([]sse.Frame, error) {
-			return []sse.Frame{{Type: frame.Type, Raw: []byte(name + "(" + string(frame.Raw) + ")")}}, nil
+		return func(_ context.Context, frame sse.Frame) []sse.Frame {
+			return []sse.Frame{{Type: frame.Type, Raw: []byte(name + "(" + string(frame.Raw) + ")")}}
 		}
 	}
 	registry := Registry{
 		{Name: "outer", Enabled: true, New: func(context.Context, endpoint.Surface, endpoint.Route) any { return wrap("outer") }},
 		{Name: "fanout", Enabled: true, New: func(context.Context, endpoint.Surface, endpoint.Route) any {
-			return eventTransformFunc(func(_ context.Context, frame sse.Frame) ([]sse.Frame, error) {
+			return eventTransformFunc(func(_ context.Context, frame sse.Frame) []sse.Frame {
 				return []sse.Frame{
 					{Type: frame.Type, Raw: []byte("left(" + string(frame.Raw) + ")")},
 					{Type: frame.Type, Raw: []byte("right(" + string(frame.Raw) + ")")},
-				}, nil
+				}
 			})
 		}},
 		{Name: "inner", Enabled: true, New: func(context.Context, endpoint.Surface, endpoint.Route) any { return wrap("inner") }},
 	}
 	adapter := registry.NewChain(context.Background(), endpoint.Anthropic, endpoint.RouteAnthropicMessages).StreamAdapter()
 
-	frames, err := adapter.Transform(context.Background(), sse.Frame{Type: "delta", Raw: []byte("seed")})
-	if err != nil {
-		t.Fatalf("Transform: %v", err)
-	}
+	frames := adapter.Transform(context.Background(), sse.Frame{Type: "delta", Raw: []byte("seed")})
 	want := []sse.Frame{
 		{Type: "delta", Raw: []byte("outer(left(inner(seed)))")},
 		{Type: "delta", Raw: []byte("outer(right(inner(seed)))")},
@@ -323,14 +319,14 @@ func TestStreamAdapterFoldsInnerToOuterWithFanout(t *testing.T) {
 func TestStreamAdapterRetransformsInnerFinalizeOutputThroughOuterHooks(t *testing.T) {
 	held := []sse.Frame{}
 	inner := &finalizingEventShim{
-		transform: func(_ context.Context, frame sse.Frame) ([]sse.Frame, error) {
+		transform: func(_ context.Context, frame sse.Frame) []sse.Frame {
 			held = append(held, frame)
-			return nil, nil
+			return nil
 		},
-		finalize: func(context.Context) ([]sse.Frame, error) { return held, nil },
+		finalize: func(context.Context) []sse.Frame { return held },
 	}
-	outer := eventTransformFunc(func(_ context.Context, frame sse.Frame) ([]sse.Frame, error) {
-		return []sse.Frame{{Type: frame.Type, Raw: []byte("altered(" + string(frame.Raw) + ")")}}, nil
+	outer := eventTransformFunc(func(_ context.Context, frame sse.Frame) []sse.Frame {
+		return []sse.Frame{{Type: frame.Type, Raw: []byte("altered(" + string(frame.Raw) + ")")}}
 	})
 	registry := Registry{
 		{Name: "outer-alter", Enabled: true, New: func(context.Context, endpoint.Surface, endpoint.Route) any { return outer }},
@@ -338,107 +334,15 @@ func TestStreamAdapterRetransformsInnerFinalizeOutputThroughOuterHooks(t *testin
 	}
 	adapter := registry.NewChain(context.Background(), endpoint.Anthropic, endpoint.RouteAnthropicMessages).StreamAdapter()
 
-	frames, err := adapter.Transform(context.Background(), sse.Frame{Type: "message_stop", Raw: []byte("X")})
-	if err != nil || len(frames) != 0 {
-		t.Fatalf("Transform() = %#v, %v, want held frame", frames, err)
+	frames := adapter.Transform(context.Background(), sse.Frame{Type: "message_stop", Raw: []byte("X")})
+	if len(frames) != 0 {
+		t.Fatalf("Transform() = %#v, want held frame", frames)
 	}
-	frames, err = adapter.Finalize(context.Background())
-	if err != nil {
-		t.Fatalf("Finalize: %v", err)
-	}
+	frames = adapter.Finalize(context.Background())
 	want := []sse.Frame{{Type: "message_stop", Raw: []byte("altered(X)")}}
 	if !reflect.DeepEqual(frames, want) {
 		t.Errorf("final frames = %#v, want %#v", frames, want)
 	}
-}
-
-func TestStreamAdapterFinalizeErrorRetainsOnlyFullyComposedFrames(t *testing.T) {
-	t.Run("outer finalize error retains inner terminal after full traversal", func(t *testing.T) {
-		shimErr := errors.New("outer finalize failed")
-		held := []sse.Frame{}
-		outer := &finalizingEventShim{
-			transform: func(_ context.Context, frame sse.Frame) ([]sse.Frame, error) {
-				return []sse.Frame{{Type: frame.Type, Raw: []byte("outer(" + string(frame.Raw) + ")")}}, nil
-			},
-			finalize: func(context.Context) ([]sse.Frame, error) { return nil, shimErr },
-		}
-		inner := &finalizingEventShim{
-			transform: func(_ context.Context, frame sse.Frame) ([]sse.Frame, error) {
-				held = append(held, frame)
-				return nil, nil
-			},
-			finalize: func(context.Context) ([]sse.Frame, error) { return held, nil },
-		}
-		adapter := (Registry{
-			{Name: "outer", Enabled: true, New: func(context.Context, endpoint.Surface, endpoint.Route) any { return outer }},
-			{Name: "inner", Enabled: true, New: func(context.Context, endpoint.Surface, endpoint.Route) any { return inner }},
-		}).NewChain(context.Background(), endpoint.Anthropic, endpoint.RouteAnthropicMessages).StreamAdapter()
-		terminal := sse.Frame{Type: "message_stop", Raw: []byte("terminal")}
-		if frames, err := adapter.Transform(context.Background(), terminal); err != nil || len(frames) != 0 {
-			t.Fatalf("Transform() = %#v, %v, want held terminal", frames, err)
-		}
-
-		frames, err := adapter.Finalize(context.Background())
-		if !errors.Is(err, shimErr) {
-			t.Fatalf("Finalize error = %v, want %v", err, shimErr)
-		}
-		want := []sse.Frame{{Type: "message_stop", Raw: []byte("outer(terminal)")}}
-		if !reflect.DeepEqual(frames, want) {
-			t.Errorf("retained frames = %#v, want fully composed %#v", frames, want)
-		}
-	})
-
-	t.Run("middle finalize error discards frame before outer event hook", func(t *testing.T) {
-		shimErr := errors.New("middle finalize failed")
-		var outerSaw []sse.Frame
-		outer := eventTransformFunc(func(_ context.Context, frame sse.Frame) ([]sse.Frame, error) {
-			outerSaw = append(outerSaw, frame)
-			return []sse.Frame{frame}, nil
-		})
-		middle := streamFinalizerFunc(func(context.Context) ([]sse.Frame, error) {
-			return []sse.Frame{{Type: "delta", Raw: []byte("partially-composed-secret")}}, shimErr
-		})
-		inner := streamFinalizerFunc(func(context.Context) ([]sse.Frame, error) { return nil, nil })
-		adapter := (Registry{
-			{Name: "outer-A", Enabled: true, New: func(context.Context, endpoint.Surface, endpoint.Route) any { return outer }},
-			{Name: "middle-B", Enabled: true, New: func(context.Context, endpoint.Surface, endpoint.Route) any { return middle }},
-			{Name: "inner-C", Enabled: true, New: func(context.Context, endpoint.Surface, endpoint.Route) any { return inner }},
-		}).NewChain(context.Background(), endpoint.Anthropic, endpoint.RouteAnthropicMessages).StreamAdapter()
-
-		frames, err := adapter.Finalize(context.Background())
-		if !errors.Is(err, shimErr) {
-			t.Fatalf("Finalize error = %v, want %v", err, shimErr)
-		}
-		if len(frames) != 0 {
-			t.Errorf("retained frames = %#v, want partially composed frame discarded", frames)
-		}
-		if len(outerSaw) != 0 {
-			t.Errorf("outer hook saw %#v after middle failure, want no skipped traversal", outerSaw)
-		}
-	})
-
-	t.Run("outer event error retains same-call output after full traversal", func(t *testing.T) {
-		shimErr := errors.New("outer event failed after output")
-		outer := eventTransformFunc(func(_ context.Context, frame sse.Frame) ([]sse.Frame, error) {
-			return []sse.Frame{{Type: frame.Type, Raw: []byte("fully(" + string(frame.Raw) + ")")}}, shimErr
-		})
-		inner := streamFinalizerFunc(func(context.Context) ([]sse.Frame, error) {
-			return []sse.Frame{{Type: "delta", Raw: []byte("inner")}}, nil
-		})
-		adapter := (Registry{
-			{Name: "outer", Enabled: true, New: func(context.Context, endpoint.Surface, endpoint.Route) any { return outer }},
-			{Name: "inner", Enabled: true, New: func(context.Context, endpoint.Surface, endpoint.Route) any { return inner }},
-		}).NewChain(context.Background(), endpoint.Anthropic, endpoint.RouteAnthropicMessages).StreamAdapter()
-
-		frames, err := adapter.Finalize(context.Background())
-		if !errors.Is(err, shimErr) {
-			t.Fatalf("Finalize error = %v, want %v", err, shimErr)
-		}
-		want := []sse.Frame{{Type: "delta", Raw: []byte("fully(inner)")}}
-		if !reflect.DeepEqual(frames, want) {
-			t.Errorf("retained frames = %#v, want outermost same-call output %#v", frames, want)
-		}
-	})
 }
 
 func TestStreamAdapterSelectionAndHoldSemantics(t *testing.T) {
@@ -451,7 +355,7 @@ func TestStreamAdapterSelectionAndHoldSemantics(t *testing.T) {
 		Name:    "finalizer-only",
 		Enabled: true,
 		New: func(context.Context, endpoint.Surface, endpoint.Route) any {
-			return streamFinalizerFunc(func(context.Context) ([]sse.Frame, error) { return nil, nil })
+			return streamFinalizerFunc(func(context.Context) []sse.Frame { return nil })
 		},
 	}}
 	if adapter := finalizerOnly.NewChain(ctx, endpoint.Anthropic, endpoint.RouteAnthropicMessages).StreamAdapter(); adapter == nil {
@@ -459,18 +363,18 @@ func TestStreamAdapterSelectionAndHoldSemantics(t *testing.T) {
 	}
 
 	outerCalls := 0
-	outer := eventTransformFunc(func(_ context.Context, frame sse.Frame) ([]sse.Frame, error) {
+	outer := eventTransformFunc(func(_ context.Context, frame sse.Frame) []sse.Frame {
 		outerCalls++
-		return []sse.Frame{frame}, nil
+		return []sse.Frame{frame}
 	})
-	hold := eventTransformFunc(func(context.Context, sse.Frame) ([]sse.Frame, error) { return nil, nil })
+	hold := eventTransformFunc(func(context.Context, sse.Frame) []sse.Frame { return nil })
 	adapter := (Registry{
 		{Name: "outer", Enabled: true, New: func(context.Context, endpoint.Surface, endpoint.Route) any { return outer }},
 		{Name: "inner-hold", Enabled: true, New: func(context.Context, endpoint.Surface, endpoint.Route) any { return hold }},
 	}).NewChain(ctx, endpoint.Anthropic, endpoint.RouteAnthropicMessages).StreamAdapter()
-	frames, err := adapter.Transform(ctx, sse.Frame{Type: "delta", Raw: []byte("held")})
-	if err != nil || len(frames) != 0 || outerCalls != 0 {
-		t.Errorf("held Transform() = %#v, %v, outer calls %d; want no output/calls", frames, err, outerCalls)
+	frames := adapter.Transform(ctx, sse.Frame{Type: "delta", Raw: []byte("held")})
+	if len(frames) != 0 || outerCalls != 0 {
+		t.Errorf("held Transform() = %#v, outer calls %d; want no output/calls", frames, outerCalls)
 	}
 }
 

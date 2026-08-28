@@ -2,7 +2,6 @@ package shim_test
 
 import (
 	"context"
-	"errors"
 	"reflect"
 	"testing"
 
@@ -10,15 +9,15 @@ import (
 	"github.com/ningw42/copilotd/internal/shim"
 )
 
-type clientMessageTransformFunc func(context.Context, *shim.Message) (bool, error)
+type clientMessageTransformFunc func(context.Context, *shim.Message) bool
 
-func (f clientMessageTransformFunc) TransformClientMessage(ctx context.Context, message *shim.Message) (bool, error) {
+func (f clientMessageTransformFunc) TransformClientMessage(ctx context.Context, message *shim.Message) bool {
 	return f(ctx, message)
 }
 
-type serverMessageTransformFunc func(context.Context, *shim.Message) (bool, error)
+type serverMessageTransformFunc func(context.Context, *shim.Message) bool
 
-func (f serverMessageTransformFunc) TransformServerMessage(ctx context.Context, message *shim.Message) (bool, error) {
+func (f serverMessageTransformFunc) TransformServerMessage(ctx context.Context, message *shim.Message) bool {
 	return f(ctx, message)
 }
 
@@ -47,10 +46,10 @@ func TestWSClientAdapterFoldsParticipantsInRegistrationOrder(t *testing.T) {
 			Name:    name,
 			Enabled: true,
 			New: func(context.Context, endpoint.Surface, endpoint.Route) any {
-				return clientMessageTransformFunc(func(_ context.Context, message *shim.Message) (bool, error) {
+				return clientMessageTransformFunc(func(_ context.Context, message *shim.Message) bool {
 					message.Data = []byte(name + "(" + string(message.Data) + ")")
 					message.Kind = shim.MessageBinary
-					return true, nil
+					return true
 				})
 			},
 		})
@@ -61,10 +60,10 @@ func TestWSClientAdapterFoldsParticipantsInRegistrationOrder(t *testing.T) {
 	}
 	message := shim.Message{Kind: shim.MessageText, Data: []byte("seed")}
 
-	emit, err := adapter(context.Background(), &message)
+	emit := adapter(context.Background(), &message)
 
-	if err != nil || !emit {
-		t.Fatalf("adapter() = emit %t, error %v; want emit true, nil", emit, err)
+	if !emit {
+		t.Fatal("adapter() = emit false, want true")
 	}
 	if got, want := string(message.Data), "inner(middle(outer(seed)))"; got != want {
 		t.Errorf("message data = %q, want %q", got, want)
@@ -82,10 +81,10 @@ func TestWSServerAdapterFoldsParticipantsInReverseRegistrationOrder(t *testing.T
 			Name:    name,
 			Enabled: true,
 			New: func(context.Context, endpoint.Surface, endpoint.Route) any {
-				return serverMessageTransformFunc(func(_ context.Context, message *shim.Message) (bool, error) {
+				return serverMessageTransformFunc(func(_ context.Context, message *shim.Message) bool {
 					message.Data = []byte(name + "(" + string(message.Data) + ")")
 					message.Kind = shim.MessageText
-					return true, nil
+					return true
 				})
 			},
 		})
@@ -96,10 +95,10 @@ func TestWSServerAdapterFoldsParticipantsInReverseRegistrationOrder(t *testing.T
 	}
 	message := shim.Message{Kind: shim.MessageBinary, Data: []byte("seed")}
 
-	emit, err := adapter(context.Background(), &message)
+	emit := adapter(context.Background(), &message)
 
-	if err != nil || !emit {
-		t.Fatalf("adapter() = emit %t, error %v; want emit true, nil", emit, err)
+	if !emit {
+		t.Fatal("adapter() = emit false, want true")
 	}
 	if got, want := string(message.Data), "outer(middle(inner(seed)))"; got != want {
 		t.Errorf("message data = %q, want %q", got, want)
@@ -112,9 +111,9 @@ func TestWSServerAdapterFoldsParticipantsInReverseRegistrationOrder(t *testing.T
 func TestWSClientAdapterDropShortCircuitsRemainingParticipants(t *testing.T) {
 	calls := []string{}
 	clientTransform := func(name string, emit bool) clientMessageTransformFunc {
-		return func(context.Context, *shim.Message) (bool, error) {
+		return func(context.Context, *shim.Message) bool {
 			calls = append(calls, name)
-			return emit, nil
+			return emit
 		}
 	}
 	registry := shim.Registry{
@@ -130,10 +129,8 @@ func TestWSClientAdapterDropShortCircuitsRemainingParticipants(t *testing.T) {
 	}
 	adapter := registry.NewChain(context.Background(), endpoint.OpenAI, endpoint.RouteOpenAIResponses).WSClientAdapter()
 
-	emit, err := adapter(context.Background(), &shim.Message{})
-
-	if err != nil || emit {
-		t.Fatalf("adapter() = emit %t, error %v; want intentional drop", emit, err)
+	if emit := adapter(context.Background(), &shim.Message{}); emit {
+		t.Fatal("adapter() = emit true, want intentional drop")
 	}
 	if got, want := calls, []string{"first", "drop"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("calls = %v, want %v", got, want)
@@ -143,9 +140,9 @@ func TestWSClientAdapterDropShortCircuitsRemainingParticipants(t *testing.T) {
 func TestWSServerAdapterDropShortCircuitsRemainingParticipants(t *testing.T) {
 	calls := []string{}
 	serverTransform := func(name string, emit bool) serverMessageTransformFunc {
-		return func(context.Context, *shim.Message) (bool, error) {
+		return func(context.Context, *shim.Message) bool {
 			calls = append(calls, name)
-			return emit, nil
+			return emit
 		}
 	}
 	registry := shim.Registry{
@@ -161,68 +158,10 @@ func TestWSServerAdapterDropShortCircuitsRemainingParticipants(t *testing.T) {
 	}
 	adapter := registry.NewChain(context.Background(), endpoint.OpenAI, endpoint.RouteOpenAIResponses).WSServerAdapter()
 
-	emit, err := adapter(context.Background(), &shim.Message{})
-
-	if err != nil || emit {
-		t.Fatalf("adapter() = emit %t, error %v; want intentional drop", emit, err)
+	if emit := adapter(context.Background(), &shim.Message{}); emit {
+		t.Fatal("adapter() = emit true, want intentional drop")
 	}
 	if got, want := calls, []string{"first", "drop"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("calls = %v, want %v", got, want)
-	}
-}
-
-func TestWSClientAdapterPropagatesErrorAndAbortsFold(t *testing.T) {
-	wantErr := errors.New("client transform failed")
-	laterCalled := false
-	registry := shim.Registry{
-		{Name: "error", Enabled: true, New: func(context.Context, endpoint.Surface, endpoint.Route) any {
-			return clientMessageTransformFunc(func(context.Context, *shim.Message) (bool, error) {
-				return true, wantErr
-			})
-		}},
-		{Name: "later", Enabled: true, New: func(context.Context, endpoint.Surface, endpoint.Route) any {
-			return clientMessageTransformFunc(func(context.Context, *shim.Message) (bool, error) {
-				laterCalled = true
-				return true, nil
-			})
-		}},
-	}
-	adapter := registry.NewChain(context.Background(), endpoint.OpenAI, endpoint.RouteOpenAIResponses).WSClientAdapter()
-
-	emit, err := adapter(context.Background(), &shim.Message{})
-
-	if emit || !errors.Is(err, wantErr) {
-		t.Fatalf("adapter() = emit %t, error %v; want emit false, error %v", emit, err, wantErr)
-	}
-	if laterCalled {
-		t.Error("participant after client transform error was called")
-	}
-}
-
-func TestWSServerAdapterPropagatesErrorAndAbortsFold(t *testing.T) {
-	wantErr := errors.New("server transform failed")
-	laterCalled := false
-	registry := shim.Registry{
-		{Name: "later", Enabled: true, New: func(context.Context, endpoint.Surface, endpoint.Route) any {
-			return serverMessageTransformFunc(func(context.Context, *shim.Message) (bool, error) {
-				laterCalled = true
-				return true, nil
-			})
-		}},
-		{Name: "error", Enabled: true, New: func(context.Context, endpoint.Surface, endpoint.Route) any {
-			return serverMessageTransformFunc(func(context.Context, *shim.Message) (bool, error) {
-				return true, wantErr
-			})
-		}},
-	}
-	adapter := registry.NewChain(context.Background(), endpoint.OpenAI, endpoint.RouteOpenAIResponses).WSServerAdapter()
-
-	emit, err := adapter(context.Background(), &shim.Message{})
-
-	if emit || !errors.Is(err, wantErr) {
-		t.Fatalf("adapter() = emit %t, error %v; want emit false, error %v", emit, err, wantErr)
-	}
-	if laterCalled {
-		t.Error("participant after server transform error was called")
 	}
 }

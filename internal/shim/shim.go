@@ -99,28 +99,31 @@ type BufferedTransformer interface {
 
 // ClientMessageTransformer transforms one client-to-upstream WebSocket
 // message. It runs synchronously and must be prompt and non-blocking. Return
-// emit=false to drop the message.
+// emit=false to drop the message. A transformer that cannot interpret a message
+// declines by leaving it unchanged and returning emit=true.
 type ClientMessageTransformer interface {
-	TransformClientMessage(context.Context, *Message) (emit bool, err error)
+	TransformClientMessage(context.Context, *Message) (emit bool)
 }
 
 // ServerMessageTransformer transforms one upstream-to-client WebSocket
 // message under the same rules as ClientMessageTransformer.
 type ServerMessageTransformer interface {
-	TransformServerMessage(context.Context, *Message) (emit bool, err error)
+	TransformServerMessage(context.Context, *Message) (emit bool)
 }
 
 // MessageTransform folds the enabled directional hooks for one direction into
 // one call. Nil means no shim participates in that direction.
-type MessageTransform func(context.Context, *Message) (emit bool, err error)
+type MessageTransform func(context.Context, *Message) (emit bool)
 
 // EventTransformer transforms one upstream SSE frame into zero or more frames.
 // It runs synchronously in the SSE pump and must be prompt and non-blocking
-// (CPU-bound transformation only; no I/O or waiting). A transformer that holds
-// content must also hold its terminal so Finalize can release both in order;
-// terminal position is the shim author's obligation, not framework policing.
+// (CPU-bound transformation only; no I/O or waiting). A transformer that cannot
+// interpret a frame declines by returning that frame unchanged. A transformer
+// that holds content must also hold its terminal so Finalize can release both in
+// order; terminal position is the shim author's obligation, not framework
+// policing.
 type EventTransformer interface {
-	TransformEvent(context.Context, sse.Frame) ([]sse.Frame, error)
+	TransformEvent(context.Context, sse.Frame) []sse.Frame
 }
 
 // StreamFinalizer releases frames held by a stream shim at stream end. It runs
@@ -128,7 +131,7 @@ type EventTransformer interface {
 // content and its terminal must be released together in valid wire order;
 // terminal position is the shim author's obligation.
 type StreamFinalizer interface {
-	Finalize(context.Context) ([]sse.Frame, error)
+	Finalize(context.Context) []sse.Frame
 }
 
 // Registration describes one ordered shim and its instance factory. HTTP
@@ -243,17 +246,13 @@ func (c *Chain) WSClientAdapter() MessageTransform {
 	if len(participants) == 0 {
 		return nil
 	}
-	return func(ctx context.Context, message *Message) (bool, error) {
+	return func(ctx context.Context, message *Message) bool {
 		for _, transformer := range participants {
-			emit, err := transformer.TransformClientMessage(ctx, message)
-			if err != nil {
-				return false, err
-			}
-			if !emit {
-				return false, nil
+			if !transformer.TransformClientMessage(ctx, message) {
+				return false
 			}
 		}
-		return true, nil
+		return true
 	}
 }
 
@@ -268,17 +267,13 @@ func (c *Chain) WSServerAdapter() MessageTransform {
 	if len(participants) == 0 {
 		return nil
 	}
-	return func(ctx context.Context, message *Message) (bool, error) {
+	return func(ctx context.Context, message *Message) bool {
 		for i := len(participants) - 1; i >= 0; i-- {
-			emit, err := participants[i].TransformServerMessage(ctx, message)
-			if err != nil {
-				return false, err
-			}
-			if !emit {
-				return false, nil
+			if !participants[i].TransformServerMessage(ctx, message) {
+				return false
 			}
 		}
-		return true, nil
+		return true
 	}
 }
 
@@ -290,73 +285,40 @@ var _ sse.FrameTransformer = (*sseAdapter)(nil)
 
 // Transform folds one frame from the innermost shim to the outermost. Each
 // output from one hook is independently fed to the next outer hook.
-func (a *sseAdapter) Transform(ctx context.Context, frame sse.Frame) ([]sse.Frame, error) {
+func (a *sseAdapter) Transform(ctx context.Context, frame sse.Frame) []sse.Frame {
 	frames := []sse.Frame{frame}
 	for i := len(a.instances) - 1; i >= 0; i-- {
 		transformer, ok := a.instances[i].(EventTransformer)
 		if !ok {
 			continue
 		}
-		var transformed []sse.Frame
-		for _, input := range frames {
-			output, err := transformer.TransformEvent(ctx, input)
-			if err != nil {
-				return nil, err
-			}
-			transformed = append(transformed, output...)
-		}
-		frames = transformed
+		frames = transformFrames(ctx, transformer, frames)
 	}
-	return frames, nil
+	return frames
 }
 
 // Finalize sweeps inner to outer. Pending output from inner finalizers passes
 // through each outer event hook before that outer shim appends its own finalizer
-// output. On error, only frames that completed the entire onion are retained;
-// partially composed frames are discarded. This conservative rule can drop
-// valid inner output when a middle finalizer fails; issue #38 tracks making the
-// stream hooks infallible and eliminating that interleaving. Output returned
-// together with an error is therefore retained only at the outermost hook,
-// where it has completed every required traversal.
-func (a *sseAdapter) Finalize(ctx context.Context) ([]sse.Frame, error) {
+// output, so every emitted frame completes the whole onion.
+func (a *sseAdapter) Finalize(ctx context.Context) []sse.Frame {
 	var pending []sse.Frame
 	for i := len(a.instances) - 1; i >= 0; i-- {
 		if transformer, ok := a.instances[i].(EventTransformer); ok {
-			var transformed []sse.Frame
-			for _, input := range pending {
-				output, err := transformer.TransformEvent(ctx, input)
-				if i == 0 {
-					transformed = append(transformed, output...)
-				}
-				if err != nil {
-					if i == 0 {
-						return transformed, err
-					}
-					return nil, err
-				}
-				if i != 0 {
-					transformed = append(transformed, output...)
-				}
-			}
-			pending = transformed
+			pending = transformFrames(ctx, transformer, pending)
 		}
-
 		if finalizer, ok := a.instances[i].(StreamFinalizer); ok {
-			finalized, err := finalizer.Finalize(ctx)
-			if i == 0 {
-				pending = append(pending, finalized...)
-				if err != nil {
-					return pending, err
-				}
-			} else {
-				if err != nil {
-					return nil, err
-				}
-				pending = append(pending, finalized...)
-			}
+			pending = append(pending, finalizer.Finalize(ctx)...)
 		}
 	}
-	return pending, nil
+	return pending
+}
+
+func transformFrames(ctx context.Context, transformer EventTransformer, frames []sse.Frame) []sse.Frame {
+	var transformed []sse.Frame
+	for _, frame := range frames {
+		transformed = append(transformed, transformer.TransformEvent(ctx, frame)...)
+	}
+	return transformed
 }
 
 // NopShim is the canonical no-op. It intentionally implements no hook.

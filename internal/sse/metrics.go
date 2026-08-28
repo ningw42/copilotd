@@ -24,7 +24,7 @@ func (c *FallbackCounter) Increment() { c.counter.increment() }
 // Count returns the number of fallback attempts observed so far.
 func (c *FallbackCounter) Count() uint64 { return c.counter.value() }
 
-// SuppressedShimErrorCounter records FrameTransformer failures hidden from the
+// SuppressedShimErrorCounter records FrameTransformer panics hidden from the
 // wire by the post-terminal no-double-up rule.
 type SuppressedShimErrorCounter struct {
 	counter counter
@@ -35,8 +35,8 @@ func NewSuppressedShimErrorCounter() *SuppressedShimErrorCounter {
 	return &SuppressedShimErrorCounter{}
 }
 
-// Increment records one post-terminal FrameTransformer failure.
+// Increment records one post-terminal FrameTransformer panic.
 func (c *SuppressedShimErrorCounter) Increment() { c.counter.increment() }
 
-// Count returns the number of suppressed post-terminal failures observed.
+// Count returns the number of suppressed post-terminal panics observed.
 func (c *SuppressedShimErrorCounter) Count() uint64 { return c.counter.value() }
