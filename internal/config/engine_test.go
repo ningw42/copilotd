@@ -1,10 +1,8 @@
 package config
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
 	"testing"
 	"time"
 
@@ -52,7 +50,7 @@ func TestResolveAppliesPrecedenceInOrder(t *testing.T) {
 				return value, ok
 			}
 			var got target
-			if err := resolve(specs, fs, &got, tc.path, lookupEnv, nil); err != nil {
+			if err := resolve(specs, fs, &got, tc.path, lookupEnv); err != nil {
 				t.Fatalf("resolve() error = %v", err)
 			}
 			if got.value != tc.want {
@@ -62,51 +60,13 @@ func TestResolveAppliesPrecedenceInOrder(t *testing.T) {
 			// A registered table is reusable: resolving another target must retain
 			// the same parsed flag storage and precedence behavior.
 			var reused target
-			if err := resolve(specs, fs, &reused, tc.path, lookupEnv, nil); err != nil {
+			if err := resolve(specs, fs, &reused, tc.path, lookupEnv); err != nil {
 				t.Fatalf("resolve() reused error = %v", err)
 			}
 			if reused.value != tc.want {
 				t.Errorf("reused value = %q, want %q", reused.value, tc.want)
 			}
 		})
-	}
-}
-
-func TestResolveFinalizesFlagValueBeforeValidation(t *testing.T) {
-	type target struct {
-		value string
-	}
-
-	var events []string
-	fs := ff.NewFlagSet("test")
-	specs := []spec[target]{
-		stringField("value", "default", func(c *target) *string { return &c.value }, func(_ string, value string) error {
-			events = append(events, "validate:"+value)
-			if value != "finalized" {
-				return fmt.Errorf("validate saw %q", value)
-			}
-			return nil
-		}, "test value"),
-	}
-	for _, s := range specs {
-		s.register(fs)
-	}
-	if err := ff.Parse(fs, []string{"--value", "flag"}); err != nil {
-		t.Fatalf("parse flags: %v", err)
-	}
-
-	var got target
-	err := resolve(specs, fs, &got, "", func(string) (string, bool) { return "", false }, func(c *target) error {
-		events = append(events, "finalize:"+c.value)
-		c.value = "finalized"
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("resolve() error = %v", err)
-	}
-	wantEvents := []string{"finalize:flag", "validate:finalized"}
-	if !slices.Equal(events, wantEvents) {
-		t.Errorf("events = %v, want %v", events, wantEvents)
 	}
 }
 
@@ -162,7 +122,7 @@ func TestTypedFieldsResolveValues(t *testing.T) {
 	if err := resolve(specs, fs, &got, path, func(key string) (string, bool) {
 		value, ok := env[key]
 		return value, ok
-	}, nil); err != nil {
+	}); err != nil {
 		t.Fatalf("resolve() error = %v", err)
 	}
 	want := target{

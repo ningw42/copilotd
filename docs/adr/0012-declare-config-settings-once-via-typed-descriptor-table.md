@@ -8,8 +8,8 @@ once**, as a typed descriptor — a generic `field[C, T]` behind a type-erased
 aspect from that one row: default value, `ff` flag registration, env/TOML overlay
 and parse, precedence, `LogValue` redaction, and validation. Precedence
 (`flags > env > file > default`) and the resolve order
-(`default → file → env → flag → finalize → validate`) are written once in the
-engine, not re-encoded per field. The mechanism uses **compiler-checked generics
+(`default → file → env → flag → validate`) are written once in the engine, not
+re-encoded per field. The mechanism uses **compiler-checked generics
 — no reflection, no struct tags, no code generation**.
 
 ## Why
@@ -46,12 +46,12 @@ typed row makes the compiler, not discipline, the thing that keeps them agreeing
   enforces that all of its aspects agree. The exact emitted-log-key test remains
   an intentional safety review gate: a newly logged non-secret key must also be
   approved in that test's closed expected set.
-- Two settings stay out of the generic path as small, named carve-outs rather
-  than widening `field`: `--config` (bootstrap-only; a registration-only spec that
-  holds help ordering) and `codex-auto-review-model-overrides` (the sole
-  two-phase field — a raw scalar staged across the layers and parsed once by the
-  engine's `finalize` hook, before `validate`). Whether that hook can later be
-  removed is tracked in issue #110.
+- `--config` stays out of the generic value path as a small, named carve-out: it
+  is bootstrap-only, so a registration-only spec holds its help position while
+  selecting the TOML file before resolution. `codex-auto-review-model-overrides`
+  is an ordinary map-valued descriptor: every supplied TOML, environment, and
+  flag value is parsed when its layer is applied, and each valid higher layer
+  replaces the complete map.
 - The engine introduces a small generic surface (`field[C, T]`, `spec[C]`, the
   per-type constructors, shared validators). That surface is the deliberate
   readability boundary chosen instead of reflection; if a setting needs a bespoke
@@ -69,4 +69,7 @@ typed row makes the compiler, not discipline, the thing that keeps them agreeing
   with assertion strings unchanged, and it remains unchanged through the later
   table-engine slices).
 
-See `docs/design/2026-07-24-config-declare-once-design.md`.
+See `docs/design/2026-07-24-config-declare-once-design.md` for the historical
+rollout design. Its two-phase reviewer-override carve-out and finalization phase
+were superseded by issues #132 and #133; this ADR states the live engine
+contract.

@@ -148,10 +148,6 @@ type ServeConfig struct {
 	CodexAutoReviewModelOverrides map[string]string
 	CodexOverrideLimits           bool
 
-	// autoReviewModelOverridesRaw carries the winning scalar config value until
-	// Resolve parses it into CodexAutoReviewModelOverrides after all layers apply.
-	autoReviewModelOverridesRaw string
-
 	// CodexCatalogRefreshInterval controls best-effort refresh of Codex's
 	// models.json cached value. Zero pins the embedded floor.
 	CodexCatalogRefreshInterval time.Duration
@@ -228,24 +224,50 @@ func commonFields[C any](targets commonTargets[C]) ([]spec[C], *configPathField[
 	}, configPath
 }
 
-type codexAutoReviewModelOverridesField struct {
-	*field[ServeConfig, string]
+type codexAutoReviewModelOverridesFlagValue struct {
+	stored *map[string]string
 }
 
-func newCodexAutoReviewModelOverridesField() spec[ServeConfig] {
-	return &codexAutoReviewModelOverridesField{
-		field: newStringField(
-			"codex-auto-review-model-overrides",
-			"",
-			func(c *ServeConfig) *string { return &c.autoReviewModelOverridesRaw },
-			nil,
-			"per-main-model reviewer overrides (main=reviewer,...)",
-		),
+func (v *codexAutoReviewModelOverridesFlagValue) String() string {
+	if v == nil || v.stored == nil {
+		return ""
 	}
+	return formatAutoReviewModelOverrides(*v.stored)
 }
 
-func (f *codexAutoReviewModelOverridesField) logAttr(target *ServeConfig) (slog.Attr, bool) {
-	return slog.String(f.name, formatAutoReviewModelOverrides(target.CodexAutoReviewModelOverrides)), true
+func (v *codexAutoReviewModelOverridesFlagValue) Set(raw string) error {
+	parsed, err := parseAutoReviewModelOverrides(raw)
+	if err != nil {
+		return err
+	}
+	*v.stored = parsed
+	return nil
+}
+
+func registerCodexAutoReviewModelOverrides(fs *ff.FlagSet, name string, def map[string]string, usage string) *map[string]string {
+	stored := def
+	if _, err := fs.AddFlag(ff.FlagConfig{
+		LongName:    name,
+		Usage:       usage,
+		Value:       &codexAutoReviewModelOverridesFlagValue{stored: &stored},
+		Placeholder: "STRING",
+	}); err != nil {
+		panic(err)
+	}
+	return &stored
+}
+
+func codexAutoReviewModelOverridesField() spec[ServeConfig] {
+	return &field[ServeConfig, map[string]string]{
+		name:  "codex-auto-review-model-overrides",
+		usage: "per-main-model reviewer overrides (main=reviewer,...)",
+		get:   func(c *ServeConfig) *map[string]string { return &c.CodexAutoReviewModelOverrides },
+		parse: parseAutoReviewModelOverrides,
+		reg:   registerCodexAutoReviewModelOverrides,
+		logf: func(key string, value map[string]string) slog.Attr {
+			return slog.String(key, formatAutoReviewModelOverrides(value))
+		},
+	}
 }
 
 // serveSpecs declares every serve setting once, in registration order. Each
@@ -276,7 +298,7 @@ func serveSpecs() ([]spec[ServeConfig], *configPathField[ServeConfig]) {
 		boolField("shim-responses-item-id-stabilizer-enabled", defaultShimResponsesItemIDStabilizerEnabled, func(c *ServeConfig) *bool { return &c.ShimResponsesItemIDStabilizerEnabled }, "stabilize churning OpenAI Responses item ids (opt-in)"),
 		boolField("codex-catalog-enabled", defaultCodexCatalogEnabled, func(c *ServeConfig) *bool { return &c.CodexCatalogEnabled }, "enable the Codex client-shaped catalog"),
 		stringField("codex-auto-review-model", defaultCodexAutoReviewModel, func(c *ServeConfig) *string { return &c.CodexAutoReviewModel }, nil, "reviewer model injected into the Codex catalog"),
-		newCodexAutoReviewModelOverridesField(),
+		codexAutoReviewModelOverridesField(),
 		boolField("codex-catalog-override-limits", defaultCodexOverrideLimits, func(c *ServeConfig) *bool { return &c.CodexOverrideLimits }, "override Codex catalog limits with live Copilot limits"),
 		durationField("codex-catalog-refresh-interval", defaultCodexCatalogRefreshInterval, inHours, func(c *ServeConfig) *time.Duration { return &c.CodexCatalogRefreshInterval }, nonNegative, "Codex models.json refresh cadence (0 pins the embedded floor)"),
 		secretStringField("github-oauth-token", func(c *ServeConfig) *string { return &c.GithubOAuthToken }, nil, "inline GitHub OAuth token (secret; precedence over the GitHub OAuth token file)"),
@@ -328,22 +350,11 @@ func (f *ServeFlags) Resolve(lookupEnv func(string) (string, bool)) (ServeConfig
 		&cfg,
 		path,
 		lookupEnv,
-		finalizeServe,
 	)
 	if err != nil {
 		return ServeConfig{}, err
 	}
 	return cfg, nil
-}
-
-func finalizeServe(cfg *ServeConfig) error {
-	overrides, err := parseAutoReviewModelOverrides(cfg.autoReviewModelOverridesRaw)
-	if err != nil {
-		return err
-	}
-	cfg.autoReviewModelOverridesRaw = ""
-	cfg.CodexAutoReviewModelOverrides = overrides
-	return nil
 }
 
 func parseAutoReviewModelOverrides(raw string) (map[string]string, error) {
@@ -495,7 +506,7 @@ func (f *LoginFlags) Resolve(lookupEnv func(string) (string, bool)) (LoginConfig
 	set := setFlags(f.fs)
 	path := resolveConfigPath(set, f.specs.configPath.flagValue(), lookupEnv)
 	cfg := LoginConfig{}
-	if err := resolve(f.specs.order, f.fs, &cfg, path, lookupEnv, nil); err != nil {
+	if err := resolve(f.specs.order, f.fs, &cfg, path, lookupEnv); err != nil {
 		return LoginConfig{}, err
 	}
 	return cfg, nil

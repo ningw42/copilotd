@@ -1,8 +1,12 @@
 # Config: declare each setting once — Design
 
-Status: approved design (via brainstorming + grilling), pending implementation
-plan; mechanism recorded in ADR-0012
+Status: historical approved design; implemented and subsequently evolved
 Date: 2026-07-24
+
+> This dated document preserves the original rollout design. Its two-phase
+> reviewer-override carve-out and generic finalization phase were superseded by
+> issues #132 and #133. ADR-0012 records the live typed-descriptor engine
+> contract.
 Review reference: architecture review candidate 02, "Declare each config setting once"
 Affected: `internal/config/config.go`, `internal/config/config_test.go`,
 `cmd/copilotd/main.go`; plus `internal/server/{server,handler}.go`,

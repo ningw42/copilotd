@@ -306,8 +306,8 @@ func bareVersion(key, value string) error {
 }
 
 // resolve owns the complete config ordering in one place: defaults, TOML,
-// environment, flags, finalization, then validation.
-func resolve[C any](specs []spec[C], fs *ff.FlagSet, target *C, path string, lookupEnv func(string) (string, bool), finalize func(*C) error) error {
+// environment, flags, then validation.
+func resolve[C any](specs []spec[C], fs *ff.FlagSet, target *C, path string, lookupEnv func(string) (string, bool)) error {
 	for _, s := range specs {
 		s.applyDefault(target)
 	}
@@ -336,12 +336,6 @@ func resolve[C any](specs []spec[C], fs *ff.FlagSet, target *C, path string, loo
 	set := setFlags(fs)
 	for _, s := range specs {
 		s.applyFlag(target, set)
-	}
-
-	if finalize != nil {
-		if err := finalize(target); err != nil {
-			return err
-		}
 	}
 
 	for _, s := range specs {

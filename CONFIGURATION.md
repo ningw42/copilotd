@@ -187,8 +187,11 @@ is authoritative: if its reviewer cannot be advertised, copilotd skips that
 injection and warns instead of silently using the global reviewer.
 
 The exact configuration precedence is flag > environment variable > TOML file >
-default. The highest-precedence layer supplies the complete string; maps are
-replaced wholesale rather than merged across layers. The environment variable is
+default. Every supplied layer must contain a valid override string; a malformed
+TOML or environment value fails configuration resolution even when a valid
+higher-precedence value is also supplied. Among valid layers, the
+highest-precedence layer supplies the complete map, which is replaced wholesale
+rather than merged across layers. The environment variable is
 `COPILOTD_CODEX_AUTO_REVIEW_MODEL_OVERRIDES`, and the flat TOML string key is
 `codex-auto-review-model-overrides`.
 

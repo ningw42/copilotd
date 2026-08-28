@@ -148,9 +148,6 @@ func TestCodexAutoReviewModelOverridesResolvesFlag(t *testing.T) {
 	if gotCodex := resolvedCodexSettings(got); !reflect.DeepEqual(gotCodex, want) {
 		t.Errorf("Codex = %+v, want resolved config %+v", gotCodex, want)
 	}
-	if got.autoReviewModelOverridesRaw != "" {
-		t.Errorf("autoReviewModelOverridesRaw = %q, want cleared after finalize", got.autoReviewModelOverridesRaw)
-	}
 }
 
 func TestCodexAutoReviewModelOverridesNormalizesPairs(t *testing.T) {
@@ -189,6 +186,68 @@ func TestCodexAutoReviewModelOverridesRejectsMalformedPairs(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), "codex-auto-review-model-overrides") {
 				t.Errorf("error = %q, want key context", err)
+			}
+		})
+	}
+}
+
+func TestCodexAutoReviewModelOverridesRejectsMalformedLowerPrecedenceLayer(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "copilotd.toml")
+	if err := os.WriteFile(path, []byte(`codex-auto-review-model-overrides = "file-malformed"`+"\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	tests := []struct {
+		name       string
+		args       []string
+		env        map[string]string
+		wantSource string
+		wantRaw    string
+	}{
+		{
+			name: "TOML before valid environment",
+			args: []string{"--config", path},
+			env: map[string]string{
+				"COPILOTD_CODEX_AUTO_REVIEW_MODEL_OVERRIDES": "env-main=env-reviewer",
+			},
+			wantSource: "config file",
+			wantRaw:    "file-malformed",
+		},
+		{
+			name: "TOML before valid flag",
+			args: []string{
+				"--config", path,
+				"--codex-auto-review-model-overrides", "flag-main=flag-reviewer",
+			},
+			wantSource: "config file",
+			wantRaw:    "file-malformed",
+		},
+		{
+			name: "environment before valid flag",
+			args: []string{
+				"--codex-auto-review-model-overrides", "flag-main=flag-reviewer",
+			},
+			env: map[string]string{
+				"COPILOTD_CODEX_AUTO_REVIEW_MODEL_OVERRIDES": "env-malformed",
+			},
+			wantSource: "env",
+			wantRaw:    "env-malformed",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			env := map[string]string{"COPILOTD_APIKEY": testAPIKey}
+			for key, value := range tc.env {
+				env[key] = value
+			}
+			_, err := loadServe(tc.args, envFunc(env))
+			if err == nil {
+				t.Fatal("loadServe() error = nil, want malformed lower-precedence layer rejected")
+			}
+			want := fmt.Sprintf(`invalid codex-auto-review-model-overrides %q from %s:`, tc.wantRaw, tc.wantSource)
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error = %q, want source-attributed prefix %q", err, want)
 			}
 		})
 	}
