@@ -319,6 +319,15 @@ failed **validate** (the accept-gate) rejects the fetch and holds last-good.
 The process-wide aggregate that primes, launches, and observes all cached values.
 _Avoid_: cache (unqualified).
 
+### Logging
+
+**Component**:
+The Go package to which a log record is attributed, represented by its
+repository-relative import path — for example, `cmd/copilotd`,
+`internal/server`, or `internal/sse`. It is record metadata only and never a
+filtering axis.
+_Avoid_: package name alone (`main`, `server`); full module import path
+
 ### Runtime state
 
 **Ready / Not-ready**:
