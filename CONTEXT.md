@@ -322,10 +322,14 @@ _Avoid_: cache (unqualified).
 ### Logging
 
 **Component**:
-The Go package to which a log record is attributed, represented by its
+The copilotd Go package that owns a log record's emission, represented by its
 repository-relative import path — for example, `cmd/copilotd`,
-`internal/server`, or `internal/sse`. It is record metadata only and never a
-filtering axis.
+`internal/server`, or `internal/sse`. A record keeps its owner's Component when
+it reports work done for another package or includes facts originating in other
+packages; Component does not name the caller, beneficiary, or fact origin.
+Unadapted records emitted inside external dependencies have no Component and
+are not attributed to the integrating copilotd package. Component is record
+metadata only and never a filtering axis.
 _Avoid_: package name alone (`main`, `server`); full module import path
 
 ### Runtime state
