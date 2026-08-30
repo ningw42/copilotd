@@ -1076,11 +1076,11 @@ Each step compiles and passes the full suite before the next begins.
 3. **Required injection: `cache`, `sse`, `forward`, `catalog`.** Two
    `WithLogger` options, `sse.Policy.Logger`, `catalog.Rendering.Logger` and its
    nil guard, three `slog.Default()` fallbacks; `server.New` gains the catalog
-   logger it forwards; the cache key rename; the five stale comments in these
+   logger it forwards; the cache key rename; the three stale comments in these
    packages.
 4. **Required injection and levels: `identity`.** Both `Logger` fields, both
    `slog.Default()` fallbacks, `logMint`'s context parameter and its collapse
-   onto `failure_class`, the level mapping, the two stale comments.
+   onto `failure_class`, the level mapping, the five stale comments.
 5. **Matched scope and the access record.** `logging.With` scope from the typed
    registration wrappers, the server-owned handoff, the probe classification,
    both sentinels' removal in `internal/server`, the hardcoded `ws` comparison's
