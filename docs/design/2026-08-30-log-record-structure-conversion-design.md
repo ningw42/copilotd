@@ -328,38 +328,66 @@ func ForComponent(base *slog.Logger, component string) *slog.Logger {
 **Decoration happens only in `cmd/copilotd`.** Every other package receives an
 already-decorated logger as a required positional argument and passes it on
 verbatim; no package may re-decorate a logger it was handed, because ordinary
-slog's append semantics offer no safe relabel. This single rule makes the
-closed inventory below both complete and syntactically checkable.
+slog's append semantics offer no safe relabel. That rule is what lets the
+inventory below sit in one place and be checked syntactically, within the limit
+stated under [the AST test](#the-ast-test).
 
 ### The closed inventory
 
-Eleven decoration sites, eight components:
+The base originates at the two `logging.New` calls — `main.go:279` in `runServe`
+and `main.go:520` in `runLogin` — and must reach three more `cmd/copilotd`
+functions, because that is where the sinks are constructed. Each of those three
+already carries one `logger *slog.Logger`; the parameter is renamed `base` and
+changes meaning, not arity. Their thirteen existing test call sites (eight,
+three, and two respectively) already pass an undecorated `logging.NewWithWriter`
+logger, so they keep compiling unchanged.
 
-| # | Enclosing function | Sink | Component |
+**Base-carrying functions.** A closed list; the base may be passed to nothing
+else.
+
+| Function | Parameter | Receives from |
+|---|---|---|
+| `runBoundServe` | `base` | `runServe` (`main.go:327`) |
+| `buildServeProvider` | `base` | `runServe` (`main.go:302`) |
+| `configuredCodexModels` | `base` | `runServe` (`main.go:309`) |
+
+Decoration then happens inline, at each sink. Twelve sites, eight components:
+
+| # | Enclosing function | Consumer | Component |
 |---|---|---|---|
-| 1 | `runServe` | `cmd/copilotd`'s own records | `cmd/copilotd` |
-| 2 | `runBoundServe` | `upstream.New` | `internal/upstream` |
-| 3 | `runBoundServe` | `forward.New` (pump logger) | **`internal/sse`** |
-| 4 | `runBoundServe` | `wsforward.New` | `internal/wsforward` |
-| 5 | `runBoundServe` | `server.New` (server logger) | `internal/server` |
-| 6 | `runBoundServe` | `server.New` (catalog logger) | `internal/catalog` |
-| 7 | `buildServeProvider` | `identity.NewManager` | `internal/identity` |
-| 8 | `buildServeProvider` | `impersonation.New` (cache logger) | **`internal/cache`** |
-| 9 | `configuredCodexModels` | `catalog.NewModelsCache` (cache logger) | **`internal/cache`** |
-| 10 | `runLogin` | `cmd/copilotd`'s own record | `cmd/copilotd` |
-| 11 | `runLogin` | `identity.Login` | `internal/identity` |
+| 1 | `runServe` | local, for this package's own records | `cmd/copilotd` |
+| 2 | `runBoundServe` | `runServeStartup` | `cmd/copilotd` |
+| 3 | `runBoundServe` | `upstream.New` | `internal/upstream` |
+| 4 | `runBoundServe` | `forward.New` (pump logger) | **`internal/sse`** |
+| 5 | `runBoundServe` | `wsforward.New` | `internal/wsforward` |
+| 6 | `runBoundServe` | `server.New` (server logger) | `internal/server` |
+| 7 | `runBoundServe` | `server.New` (catalog logger) | `internal/catalog` |
+| 8 | `buildServeProvider` | `identity.NewManager` | `internal/identity` |
+| 9 | `buildServeProvider` | `impersonation.New` (cache logger) | **`internal/cache`** |
+| 10 | `configuredCodexModels` | `catalog.NewModelsCache` (cache logger) | **`internal/cache`** |
+| 11 | `runLogin` | local, for this package's own record | `cmd/copilotd` |
+| 12 | `runLogin` | `identity.Login` | `internal/identity` |
 
-Rows 3, 8, and 9 are the ownership rule doing work: the parameter is named for
+Row 2 is why `runBoundServe` needs the base and not a child: the startup
+cached-value summary at `main.go:389` is emitted by
+`logCachedValueStartupOutcomes`, reached only through `runServeStartup`
+(`main.go:340` → `:382` → `:387`), so `cmd/copilotd`'s own child is derived a
+second time on that path. `runServe`'s child (row 1) reaches
+`logCodexCatalogStaging` (`main.go:292`) and `logShimChain` (`main.go:294`) as
+an ordinary argument: **children propagate freely; only the base is
+restricted.**
+
+Rows 4, 9, and 10 are the ownership rule doing work: the parameter is named for
 the owner it carries (`sseLogger`, `cacheLogger`), not for the package
 receiving it. `internal/catalog` receives two differently decorated loggers at
-two boundaries — its own for the skipped-reviewer warning (row 6, forwarded by
+two boundaries — its own for the skipped-reviewer warning (row 7, forwarded by
 `internal/server`), and a cache-decorated one for the Codex models cached value
-(row 9). `internal/forward` and `internal/impersonation` own no record and are
+(row 10). `internal/forward` and `internal/impersonation` own no record and are
 never decorated.
 
 ### Required positional injection
 
-Eleven boundaries take a `*slog.Logger`. Six change shape:
+Eleven construction boundaries take a `*slog.Logger`. Six change shape:
 
 | Boundary | Today | After |
 |---|---|---|
@@ -415,6 +443,17 @@ func DependencyErrorLog(base *slog.Logger, level slog.Level) *log.Logger {
 `internal/server` then holds no undecorated `*slog.Logger` at all, and the base
 never leaves the composition root except through `slog.SetDefault` and this one
 adapter. Level stays Warn, as today.
+
+Two details are deliberate. The `level` parameter stays at the **call site**
+rather than being hardcoded inside the helper: ADR-0015 puts level with the site
+that knows the operational consequence and keeps level policy out of
+`internal/logging`, and it is the composition root — not the logging package —
+that judges net/http's error stream to be a contained abnormality. And the
+helper exists at all, rather than an inline
+`slog.NewLogLogger(base.Handler(), …)`, because it gives the base a third
+*nameable* permitted use: AST rule 2 restricts the base to `slog.SetDefault`,
+`logging.ForComponent`, and this function, and a bare `base.Handler()` at the
+root would otherwise have to be exempted by shape or allowed generally.
 
 ## Request scope
 
@@ -494,9 +533,10 @@ equivalent to reading `r.Pattern` after the fact, and the difference is a live
 defect. `net/http`'s `ServeMux.findHandler` (`server.go:2689-2697`) sets
 `r.Pattern` from the node that matched the *cleaned* path before returning a
 `RedirectHandler`. A request to `//openai/v1/models` is therefore answered
-`301` by the mux itself, our handler never runs — and today's access record
-still reports `route="GET /openai/v1/models"`, labelling an endpoint that served
-nothing.
+`307` by the mux itself — every redirect in that dispatch path uses
+`StatusTemporaryRedirect` (`server.go:2671`, `:2687`, `:2696`) — our handler
+never runs, and today's access record still reports
+`route="GET /openai/v1/models"`, labelling an endpoint that served nothing.
 
 Under the wrapper, nothing is published and `inbound` is absent. The same holds
 for `404` (`patStr = ""`) and for `405`, where a path matches but the method
@@ -551,8 +591,12 @@ consults `ctx.Err()`. A cancelled context logs exactly like a live one.
 
 ### The `wsforward` result holder
 
-`internal/wsforward` gains a result holder analogous to
-`forward.StreamResult` and `catalog.CatalogShape`:
+`internal/wsforward` gains the store-once/read-once holder the other two
+result-carrying packages already have — an unexported holder behind a private
+context key, with a `With…Holder` / `Store…` / `…FromContext` trio
+(`forward/stream_result.go:31,49,37`; `catalog/shape_result.go:26,43,31`). Only
+the carried value differs: `forward.StreamResult` is a struct,
+`catalog.CatalogShape` a bare string type, and `wsforward`'s is a struct.
 
 ```go
 type SessionResult struct {
@@ -836,16 +880,37 @@ every rule below is syntactic.
 component-free base for unadapted dependencies.
 
 **2. Closed construction inventory.** Every `logging.ForComponent` call in
-production must live in `cmd/copilotd` and must match, exactly, the eleven-row
+production must live in `cmd/copilotd` and must match, exactly, the twelve-row
 table in [The closed inventory](#the-closed-inventory) — enclosing function,
-the constructor it is an argument to, and the component literal. Set equality is
-asserted in both directions, so a missing sink fails as loudly as an
-unexpected one, and a changed owner is an explicit test edit. The base logger —
-the variable assigned from `logging.New` / `logging.NewWithWriter` — may be used
-only at `slog.SetDefault`, `logging.ForComponent`, and
-`logging.DependencyErrorLog`; any other use fails, which is what closes the gap
-a purely syntactic check would otherwise leave for a newly added, undecorated
-sink.
+consumer, and component literal. Set equality is asserted in both directions, so
+a missing sink fails as loudly as an unexpected one, and a changed owner is an
+explicit test edit.
+
+The base is then restricted, which is what stops a new sink from being fed an
+undecorated logger. A **base-carrying identifier** is either a variable assigned
+from `logging.New` / `logging.NewWithWriter`, or the declared parameter of a
+function in the three-row base-carrying table. Inside those five functions,
+every use of a base-carrying identifier must be one of:
+
+- `slog.SetDefault(base)`;
+- `logging.ForComponent(base, "<literal>")`;
+- `logging.DependencyErrorLog(base, <level>)`;
+- an argument to a base-carrying function, at that function's declared base
+  parameter.
+
+Any other use fails, and the base-carrying table is itself closed — passing the
+base to an unlisted function is not a permitted use — so the propagation cannot
+grow silently either. Nothing is traced through a call: the table *declares* the
+three destinations, and each declared parameter is then checked by name inside
+its own function body. Five function bodies in one package, no types, no
+inter-procedural analysis.
+
+**The residual, stated plainly.** A new sink fed by a *child*-carrying parameter
+— a constructor added inside `runServeStartup`, say, which holds a
+`cmd/copilotd` child — mentions neither the base nor `ForComponent`, and no
+syntactic rule sees it. ADR-0015 already accepts that limit: "The Component
+clause is not self-enforcing, so that closed inventory is its review gate, in
+ADR-0012's spirit: a new sink or changed owner is an explicit test edit."
 
 **3. No package-level slog emission.** `slog.Info`, `slog.WarnContext`,
 `slog.Log`, and the rest of the package-level emission functions fail.
@@ -853,9 +918,11 @@ sink.
 **4. Registry provenance for keys.** At every `slog` attribute constructor call
 (`slog.String`, `slog.Int`, `slog.Any`, `slog.Group`, …) the key argument must
 be a `logging.<Ident>Key` selector, or a bare registry identifier inside
-`internal/logging` itself. String literals, dynamic expressions, and
-package-local aliases fail. The same rule applies to any string literal in a
-key position of an emission call's variadic `...any` arguments. Two documented
+`internal/logging` itself. The same requirement covers the two other legal
+spellings of a top-level key: a string literal in a key position of an emission
+call's variadic `...any` arguments, and an `slog.Attr` composite literal, whose
+`Key` field is checked exactly like a constructor's first argument. String
+literals, dynamic expressions, and package-local aliases fail. Two documented
 exclusions: `internal/logging`'s own registry declaration, and `internal/config`,
 whose nested setting names are produced by ADR-0012's descriptor table inside
 `LogValue` and are governed there — and which the closed inventory and rule 3
@@ -938,7 +1005,7 @@ access, where it was previously unavailable.
 **7. `route` becomes `inbound`, and the `unmatched` sentinel disappears** from
 both `internal/server` and `internal/wsforward`. Absence is the unmatched state.
 
-**8. A mux-answered redirect no longer reports a binding.** A cleaned-path `301`
+**8. A mux-answered redirect no longer reports a binding.** A cleaned-path `307`
 that our handler never served currently logs the pattern it would have matched;
 it now omits `inbound` and `surface`.
 
@@ -993,11 +1060,17 @@ Each step compiles and passes the full suite before the next begins.
    `With`, the handler's scope rendering, `DependencyErrorLog`, the package doc
    and the `contextHandler` comment correction, and the composition tests. No
    call site converts. Nothing else can start without it.
-2. **The composition root split.** `logging.New`'s result becomes the base;
-   `slog.SetDefault` keeps it; `cmd/copilotd` takes a `cmd/copilotd` child for
-   its own eight records (with registry keys and the two cache renames);
+2. **The composition root split.** `logging.New`'s result becomes the base and
+   `slog.SetDefault` keeps it; `runServe` and `runLogin` derive a
+   `cmd/copilotd` child for their own records (with registry keys and the two
+   cache renames); `runBoundServe`, `buildServeProvider`, and
+   `configuredCodexModels` rename their `logger` parameter to `base` — same
+   arity, new meaning — and decorate inline at every sink they construct;
+   `runBoundServe` derives a second `cmd/copilotd` child for `runServeStartup`;
    `upstream.New`, `wsforward.New`, and `server.New` — already positional — take
    decorated children; the `ErrorLog` bridge moves onto `DependencyErrorLog`.
+   The thirteen test call sites of the three renamed functions already pass an
+   undecorated logger and need no edit.
 3. **Required injection: `cache`, `sse`, `forward`, `catalog`.** Two
    `WithLogger` options, `sse.Policy.Logger`, `catalog.Rendering.Logger` and its
    nil guard, three `slog.Default()` fallbacks; `server.New` gains the catalog
@@ -1088,6 +1161,23 @@ implicit at the site that must prove no client-controlled value enters a record.
 its terminal facts into, replacing the five handoffs. Rejected: that is the
 mutable attribute bag #146 forbids, and it would make one package the owner of
 every other's vocabulary.
+
+**A shared generic holder** — one `Holder[T]` the five packages instantiate,
+instead of five copies of the store-once/read-once trio. This is a different
+proposal from the record builder above: it keeps package ownership and
+immutability, and is rejected for narrower reasons. First, the values are not
+logging's to own: `forward.StreamResult` carries `Surface` and `Outcome` into
+`ObserveStreamOutcome` at `middleware.go:66-67`, a **metric** observer, and
+`wsforward`'s terminal is observed at `proxy.go:229`, so `internal/logging` —
+whose job is record structure — is the wrong home, and no neutral one exists
+yet. Second, two of the five are working code ADR-0015 does not touch
+(`forward/stream_result.go`, `catalog/shape_result.go`); refactoring them
+belongs outside a sweep #147 forces to land as one commit. The duplication is
+real, but each copy is mechanical and already differs where its owner's
+vocabulary does — `StoreCatalogShape` rejects a value outside its two-constant
+enum (`shape_result.go:44-46`), `StoreStreamResult` validates nothing — which a
+shared mechanism would have to accommodate anyway. If a sixth appears,
+concentrating them in a neutral package is a clean follow-up.
 
 **Threading a `retryFollows` flag into the singleflight closure** so `logMint`
 could distinguish "transient, will retry" from "transient, exhausted" directly.
