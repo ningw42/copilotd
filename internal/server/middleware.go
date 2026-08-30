@@ -11,6 +11,7 @@ import (
 	"github.com/ningw42/copilotd/internal/logging"
 	"github.com/ningw42/copilotd/internal/sse"
 	"github.com/ningw42/copilotd/internal/upstream"
+	"github.com/ningw42/copilotd/internal/wsforward"
 )
 
 // requestID resolves the correlation id — honoring a well-formed inbound value,
@@ -26,12 +27,19 @@ func requestID(next http.Handler) http.Handler {
 	})
 }
 
-// accessLog emits exactly one structured line per request. It labels by route
-// template (r.Pattern) to keep the label low-cardinality, with an "unmatched"
-// fallback on 404. For streamed responses it adds the pump summary and observes
-// the terminal-outcome metric. The quiet health route logs at debug so constant
-// polling does not flood info. The request_id attribute is injected by the
-// logging context handler.
+// scoped derives registration-owned logging scope, publishes it for the
+// after-handler access record, and runs next with that immutable child context.
+func scoped(attrs []slog.Attr, probe bool, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := logging.With(r.Context(), attrs...)
+		publishMatchedScope(r.Context(), matchedScope{ctx: ctx, probe: probe})
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+// accessLog emits the sole terminal request summary after the registered
+// handler returns. Registration scope is absent when no registered handler ran;
+// streamed response facts are added from their package-owned result holder.
 func accessLog(logger *slog.Logger, streamOutcomes StreamOutcomeObserver, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
@@ -41,56 +49,84 @@ func accessLog(logger *slog.Logger, streamOutcomes StreamOutcomeObserver, next h
 			suppressBodyBytes: r.Method == http.MethodHead,
 		}
 
-		ctx := catalog.WithShapeResultHolder(forward.WithStreamResultHolder(r.Context()))
-		requestWithHolder := r.WithContext(ctx)
-		next.ServeHTTP(sw, requestWithHolder)
+		ctx := forward.WithStreamResultHolder(r.Context())
+		ctx = catalog.WithShapeResultHolder(ctx)
+		ctx = withMatchedScopeHolder(ctx)
+		ctx = wsforward.WithSessionResultHolder(ctx)
+		ctx = upstream.WithCorrelationHolder(ctx)
+		next.ServeHTTP(sw, r.WithContext(ctx))
 
-		route := requestWithHolder.Pattern
-		if route == "" {
-			route = "unmatched"
+		logCtx := r.Context()
+		probe := false
+		matched, matchedOK := matchedScopeFromContext(ctx)
+		if matchedOK {
+			probe = matched.probe
+		}
+		if correlated, ok := upstream.CorrelatedContextFromContext(ctx); ok {
+			logCtx = correlated
+		} else if matchedOK {
+			logCtx = matched.ctx
 		}
 		level := slog.LevelInfo
-		if r.URL.Path == healthPath {
+		if probe {
 			level = slog.LevelDebug
 		}
 		attrs := []slog.Attr{
-			slog.String("method", r.Method),
-			slog.String("route", route),
-			slog.Int("status", sw.status),
-			slog.Int64("bytes", sw.bytes),
-			slog.Duration("duration", time.Since(start)),
-		}
-		if route == "GET /openai/v1/responses" {
-			attrs = append(attrs, slog.Bool("ws", true))
+			slog.String(logging.MethodKey, r.Method),
+			slog.Int(logging.StatusKey, sw.status),
+			slog.Int64(logging.BytesKey, sw.bytes),
+			slog.Duration(logging.DurationKey, time.Since(start)),
 		}
 		if result, ok := forward.StreamResultFromContext(ctx); ok {
 			streamOutcomes.ObserveStreamOutcome(result.Surface, result.Outcome)
-			switch result.Outcome {
-			case sse.OutcomeSynthesized, sse.OutcomeStall, sse.OutcomeUpstreamError, sse.OutcomeShimError:
-				level = slog.LevelWarn
+			if !probe {
+				switch result.Outcome {
+				case sse.OutcomeSynthesized, sse.OutcomeStall, sse.OutcomeUpstreamError, sse.OutcomeShimError:
+					level = slog.LevelWarn
+				}
 			}
 			attrs = append(attrs,
-				slog.String("outcome", string(result.Outcome)),
-				slog.Int("frames", result.Frames),
-				slog.Int("fallbacks", result.Fallbacks),
+				slog.String(logging.OutcomeKey, string(result.Outcome)),
+				slog.Int(logging.FramesKey, result.Frames),
+				slog.Int(logging.FallbacksKey, result.Fallbacks),
 			)
 		}
 		if shape, ok := catalog.ShapeResultFromContext(ctx); ok {
-			attrs = append(attrs, slog.String("catalog_shape", string(shape)))
+			attrs = append(attrs, slog.String(logging.CatalogShapeKey, string(shape)))
 		}
-		logger.LogAttrs(r.Context(), level, "access", attrs...)
+		if result, ok := wsforward.SessionResultFromContext(ctx); ok {
+			if !probe && result.Terminal == wsforward.SessionError {
+				level = slog.LevelWarn
+			}
+			attrs = append(attrs,
+				slog.String(logging.TerminalReasonKey, string(result.Terminal)),
+				slog.Int(logging.CloseCodeKey, result.CloseCode),
+				slog.Int64(logging.MsgsC2UKey, result.MsgsC2U),
+				slog.Int64(logging.MsgsU2CKey, result.MsgsU2C),
+				slog.Int64(logging.BytesC2UKey, result.BytesC2U),
+				slog.Int64(logging.BytesU2CKey, result.BytesU2C),
+			)
+		}
+		if !probe && sw.status >= http.StatusInternalServerError {
+			level = slog.LevelWarn
+		}
+		logger.LogAttrs(logCtx, level, "access", attrs...)
 	})
 }
 
 // recoverMW turns a handler panic into a generic 500 with no stack and no JSON
-// envelope, logged with its request-id. Client-side correlation is via the
-// X-Request-Id response header set by the outer requestID middleware.
+// envelope, logged with its request and matched-registration scope. Client-side
+// correlation is via the X-Request-Id header set by the outer requestID middleware.
 func recoverMW(logger *slog.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if rec := recover(); rec != nil {
-				logger.LogAttrs(r.Context(), slog.LevelError, "panic recovered",
-					slog.Any("panic", rec),
+				logCtx := r.Context()
+				if matched, ok := matchedScopeFromContext(r.Context()); ok {
+					logCtx = matched.ctx
+				}
+				logger.LogAttrs(logCtx, slog.LevelError, "panic recovered",
+					slog.Any(logging.PanicKey, rec),
 				)
 				w.WriteHeader(http.StatusInternalServerError)
 				_, _ = io.WriteString(w, "internal server error")

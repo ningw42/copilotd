@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ningw42/copilotd/internal/logging"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -71,7 +72,7 @@ type exchangeResponse struct {
 // retries and signal the operator to check the Copilot subscription.
 type exchangeError struct {
 	transient bool
-	authClass bool  // true for 401/403/404 — used only to shape the log message
+	authClass bool  // true for 401/403/404 — shapes failure_class and level
 	status    int   // HTTP status, or 0 for a transport-level failure
 	err       error // underlying transport/decode error, if any
 }
@@ -126,9 +127,6 @@ type ManagerConfig struct {
 	// default is capped exponential. Injected as a constant zero in tests to keep
 	// startup-retry tests fast and deterministic.
 	Backoff func(attempt int) time.Duration
-	// Logger records mint triggers, outcomes, and startup retry lifecycle
-	// (default slog.Default()). Secrets are never passed to it.
-	Logger *slog.Logger
 }
 
 // Manager mints and caches the short-lived Copilot token, implementing the
@@ -162,8 +160,9 @@ type Manager struct {
 // Verify Manager is a drop-in for the Provider seam the forwarder/server use.
 var _ Provider = (*Manager)(nil)
 
-// NewManager builds a Manager from cfg, applying defaults for any zero field.
-func NewManager(cfg ManagerConfig) *Manager {
+// NewManager builds a Manager from logger and cfg, applying defaults for any
+// zero configuration field.
+func NewManager(logger *slog.Logger, cfg ManagerConfig) *Manager {
 	m := &Manager{
 		oauthToken:      cfg.OAuthToken,
 		githubBaseURL:   cfg.GitHubBaseURL,
@@ -174,7 +173,7 @@ func NewManager(cfg ManagerConfig) *Manager {
 		safetyMargin:    cfg.SafetyMargin,
 		clock:           cfg.Clock,
 		backoff:         cfg.Backoff,
-		logger:          cfg.Logger,
+		logger:          logger,
 		localReady:      strings.TrimSpace(cfg.OAuthToken) != "",
 	}
 	if m.githubBaseURL == "" {
@@ -202,9 +201,6 @@ func NewManager(cfg ManagerConfig) *Manager {
 	}
 	if m.backoff == nil {
 		m.backoff = defaultBackoff
-	}
-	if m.logger == nil {
-		m.logger = slog.Default()
 	}
 	if m.startupRetries < 0 {
 		m.startupRetries = 0
@@ -250,15 +246,15 @@ func (m *Manager) StartupMint(ctx context.Context) {
 		}
 		if !isTransient(err) {
 			// Auth-class / permanent: retrying cannot help. The closure already
-			// logged the distinct "check the Copilot subscription" error.
+			// logged failure_class=auth or non_transient at Error.
 			m.logger.Warn("startup mint short-circuited on a permanent failure; on-demand mint remains available")
 			return
 		}
 		m.logger.Debug("startup mint attempt failed (transient), will retry",
-			slog.Int("attempt", attempt+1), slog.Int("attempts", attempts))
+			slog.Int(logging.AttemptKey, attempt+1), slog.Int(logging.AttemptsKey, attempts))
 	}
 	m.logger.Warn("startup mint exhausted its retries; a later request can mint on demand",
-		slog.Int("attempts", attempts))
+		slog.Int(logging.AttemptsKey, attempts))
 }
 
 // mint routes both triggers through the single singleflight key. The exchange
@@ -275,7 +271,7 @@ func (m *Manager) mint(ctx context.Context, trigger string) (Credential, error) 
 		if err == nil {
 			m.store(tok)
 		}
-		m.logMint(trigger, tok, err)
+		m.logMint(ctx, trigger, tok, err)
 		return tok, err
 	})
 
@@ -391,39 +387,55 @@ func normalizeCopilotOrigin(raw string) (string, error) {
 	return scheme + "://" + parsed.Host, nil
 }
 
-// logMint records the single mint outcome, with a distinct auth-class message so
-// a permanent credential problem is not mistaken for a flaky exchange. Tokens
-// (OAuth and Copilot), raw response bodies, and underlying errors are never
-// included.
-func (m *Manager) logMint(trigger string, tok copilotToken, err error) {
+type failureClass string
+
+const (
+	failureClassTransient    failureClass = "transient"
+	failureClassAuth         failureClass = "auth"
+	failureClassNonTransient failureClass = "non_transient"
+	failureClassUnclassified failureClass = "unclassified"
+)
+
+// logMint records one classified mint outcome. Tokens, raw response bodies, and
+// underlying errors are never included.
+func (m *Manager) logMint(ctx context.Context, trigger string, tok copilotToken, err error) {
 	if err == nil {
-		m.logger.Info("minted copilot token",
-			slog.String("trigger", trigger),
-			slog.Time("expires_at", tok.expiresAt),
-			slog.Duration("refresh_in", tok.refreshIn))
+		m.logger.InfoContext(ctx, "minted copilot token",
+			slog.String(logging.TriggerKey, trigger),
+			slog.Time(logging.ExpiresAtKey, tok.expiresAt),
+			slog.Duration(logging.RefreshInKey, tok.refreshIn))
 		return
 	}
+
+	class := failureClassUnclassified
+	level := slog.LevelError
+	status := 0
 	var ee *exchangeError
-	if !errors.As(err, &ee) {
-		m.logger.Warn("copilot token exchange failed",
-			slog.String("trigger", trigger))
-		return
+	if errors.As(err, &ee) {
+		status = ee.status
+		switch {
+		case ee.authClass:
+			class = failureClassAuth
+		case ee.transient:
+			class = failureClassTransient
+			if trigger == "startup" {
+				level = slog.LevelDebug
+			} else {
+				level = slog.LevelWarn
+			}
+		default:
+			class = failureClassNonTransient
+		}
 	}
-	if ee.authClass {
-		m.logger.Error("copilot token exchange failed: not transient — check the Copilot subscription",
-			slog.String("trigger", trigger),
-			slog.Int("status", ee.status))
-		return
+
+	attrs := []slog.Attr{
+		slog.String(logging.TriggerKey, trigger),
+		slog.String(logging.FailureClassKey, string(class)),
 	}
-	attrs := []any{
-		slog.String("trigger", trigger),
-		slog.Int("status", ee.status),
+	if status != 0 {
+		attrs = append(attrs, slog.Int(logging.StatusKey, status))
 	}
-	if ee.transient {
-		m.logger.Warn("copilot token exchange failed (transient)", attrs...)
-		return
-	}
-	m.logger.Error("copilot token exchange failed (permanent)", attrs...)
+	m.logger.LogAttrs(ctx, level, "copilot token exchange failed", attrs...)
 }
 
 // freshCached returns the cached token if present and still fresh at clock().

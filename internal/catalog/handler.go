@@ -9,6 +9,7 @@ import (
 	"github.com/ningw42/copilotd/internal/apierror"
 	"github.com/ningw42/copilotd/internal/cache"
 	"github.com/ningw42/copilotd/internal/endpoint"
+	"github.com/ningw42/copilotd/internal/logging"
 	"github.com/ningw42/copilotd/internal/upstream"
 )
 
@@ -17,7 +18,6 @@ import (
 type Rendering struct {
 	Render func([]Model) ([]byte, error)
 	Codex  CodexDescriptor
-	Logger *slog.Logger
 }
 
 // RenderDescriptors contains the complete renderer-specific contracts projected
@@ -37,18 +37,18 @@ type CodexDescriptor struct {
 }
 
 // Source performs one upstream call for the current Copilot model Catalog and
-// returns its bounded bytes.
+// returns its bounded bytes with the response-path context.
 type Source interface {
-	Buffered(ctx context.Context, call upstream.Call) (int, []byte, *upstream.Failure)
+	Buffered(ctx context.Context, call upstream.Call) (int, []byte, context.Context, *upstream.Failure)
 }
 
 var _ Source = (*upstream.Caller)(nil)
 
 // Handler obtains one current Copilot Catalog and renders it for a Surface.
 // Credential/transport details stay behind the narrow Source interface.
-func Handler(ep endpoint.Catalog, rendering Rendering, source Source) http.HandlerFunc {
+func Handler(logger *slog.Logger, ep endpoint.Catalog, rendering Rendering, source Source) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		status, body, failure := source.Buffered(r.Context(), upstream.Call{
+		status, body, responseCtx, failure := source.Buffered(r.Context(), upstream.Call{
 			Route:                  ep.Upstream(),
 			Method:                 http.MethodGet,
 			AcceptIdentityEncoding: true,
@@ -82,11 +82,11 @@ func Handler(ep endpoint.Catalog, rendering Rendering, source Source) http.Handl
 			if err == nil {
 				representation, outcome, err = RenderCodex(codexModels, filtered, rendering.Codex.RenderConfig)
 			}
-			if err == nil && rendering.Logger != nil {
+			if err == nil {
 				for _, skipped := range outcome.SkippedReviewers {
-					rendering.Logger.WarnContext(r.Context(), "Codex catalog reviewer was skipped",
-						slog.String("model", skipped.Model),
-						slog.String("reviewer", skipped.Reviewer))
+					logger.WarnContext(responseCtx, "Codex catalog reviewer was skipped",
+						slog.String(logging.ModelKey, skipped.Model),
+						slog.String(logging.ReviewerKey, skipped.Reviewer))
 				}
 			}
 		} else {

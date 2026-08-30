@@ -19,6 +19,7 @@ import (
 	"github.com/ningw42/copilotd/internal/catalog"
 	"github.com/ningw42/copilotd/internal/forward"
 	"github.com/ningw42/copilotd/internal/impersonation"
+	"github.com/ningw42/copilotd/internal/logging"
 	"github.com/ningw42/copilotd/internal/server"
 )
 
@@ -222,8 +223,8 @@ func TestServeLifecycleCarriesFallbackAndDiscoveredVersionsOnWire(t *testing.T) 
 			}
 			assertVersionHeaders(t, exchange, tc.wantVSCode, tc.wantPlugin)
 
-			fwd := newTestForwarderWithLogger(mgr, forward.NewClient(cfg.ResponseHeaderTimeout), cfg.OutboundTimeout, cfg.WriteTimeout, cfg.StreamIdleTimeout, cfg.StreamKeepaliveInterval, cfg.MaxRequestBytes, cfg.MaxBufferedResponseBytes, logger, nil, forward.WithLogger(logger))
-			base := startTestServer(t, server.New(cfg, logger, mgr, server.ReadyObservers{
+			fwd := newTestForwarderWithLogger(mgr, forward.NewClient(cfg.ResponseHeaderTimeout), cfg.OutboundTimeout, cfg.WriteTimeout, cfg.StreamIdleTimeout, cfg.StreamKeepaliveInterval, cfg.MaxRequestBytes, cfg.MaxBufferedResponseBytes, logger, nil)
+			base := startTestServer(t, server.New(cfg, logging.ForComponent(logger, "internal/server"), logging.ForComponent(logger, "internal/catalog"), newTestDependencyErrorLog(), mgr, server.ReadyObservers{
 				Impersonation: imp,
 				Caches:        cacheRegistry,
 			}, fwd, newTestCatalogSource(mgr), newTestWSProxy(mgr), server.NewStreamOutcomeCounter(), catalog.RenderDescriptors{}))
@@ -239,10 +240,18 @@ func TestServeLifecycleCarriesFallbackAndDiscoveredVersionsOnWire(t *testing.T) 
 				t.Errorf("Microsoft discovery calls = %d, want hit=%t", got, tc.wantDiscoveryHit)
 			}
 			logOutput := logs.String()
+			wantCacheRefreshRecords := 0
+			if tc.wantDiscoveryHit {
+				wantCacheRefreshRecords = 2
+			}
+			cacheRefreshRecords := phase4LogLinesContaining(logOutput, "cached value refresh", "component=internal/cache")
+			if len(cacheRefreshRecords) != wantCacheRefreshRecords {
+				t.Errorf("internal/cache refresh records = %d, want %d:\n%s", len(cacheRefreshRecords), wantCacheRefreshRecords, logOutput)
+			}
 			if !strings.Contains(logOutput, "level=INFO") ||
 				!strings.Contains(logOutput, "startup cached value refresh outcome") ||
-				!strings.Contains(logOutput, "cached_value=vscode source="+tc.wantSource) ||
-				!strings.Contains(logOutput, "cached_value=copilot_chat source="+tc.wantSource) {
+				!strings.Contains(logOutput, "cached_value=vscode cached_value_source="+tc.wantSource) ||
+				!strings.Contains(logOutput, "cached_value=copilot_chat cached_value_source="+tc.wantSource) {
 				t.Errorf("startup logs = %q, want info cached value outcomes with %s sources", logOutput, tc.wantSource)
 			}
 		})

@@ -11,6 +11,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/ningw42/copilotd/internal/logging"
 )
 
 // Device-flow endpoints and defaults for `copilotd login` (§6.6). login obtains
@@ -63,8 +65,6 @@ type DeviceFlowConfig struct {
 	TokenFilePath string
 	// Stdout receives the user-facing prompts and confirmations.
 	Stdout io.Writer
-	// Logger records each step (default slog.Default()); tokens are never logged.
-	Logger *slog.Logger
 	// Sleep waits d honoring ctx (default sleepCtx); injected in tests to make
 	// polling fast and deterministic and to record the intervals used.
 	Sleep func(ctx context.Context, d time.Duration) error
@@ -98,28 +98,29 @@ type githubUser struct {
 
 // Login runs the GitHub OAuth device flow and writes the resulting raw token to
 // the OAuth-token file (§6.6). It obtains ONLY the GitHub OAuth token; it
-// performs no exchange. Zero DeviceFlowConfig fields take documented defaults.
+// performs no exchange. Every zero DeviceFlowConfig field takes its documented
+// default.
 //
 // Steps: request a device code; print the verification URI + user code; poll for
 // the access token at the returned interval (handling authorization_pending,
 // slow_down back-off, and the terminal expired_token / access_denied errors);
 // confirm the authenticated username via GET <api>/user; then write the token
 // (0600, atomic) via WriteTokenFile, noting when an existing file is replaced.
-func Login(ctx context.Context, cfg DeviceFlowConfig) error {
+func Login(ctx context.Context, logger *slog.Logger, cfg DeviceFlowConfig) error {
 	cfg = cfg.withDefaults()
 
 	dc, err := requestDeviceCode(ctx, cfg)
 	if err != nil {
 		return err
 	}
-	cfg.Logger.Info("device code requested",
-		slog.String("verification_uri", dc.VerificationURI),
-		slog.Int("expires_in", dc.ExpiresIn))
+	logger.Info("device code requested",
+		slog.String(logging.VerificationURIKey, dc.VerificationURI),
+		slog.Int(logging.ExpiresInKey, dc.ExpiresIn))
 
 	fmt.Fprintf(cfg.Stdout, "To authorize copilotd, visit:\n\n    %s\n\nand enter the code: %s\n\nWaiting for authorization...\n",
 		dc.VerificationURI, dc.UserCode)
 
-	token, err := pollForToken(ctx, cfg, dc)
+	token, err := pollForToken(ctx, logger, cfg, dc)
 	if err != nil {
 		return err
 	}
@@ -128,7 +129,7 @@ func Login(ctx context.Context, cfg DeviceFlowConfig) error {
 	if err != nil {
 		return err
 	}
-	cfg.Logger.Info("device flow authorized", slog.String("login", username))
+	logger.Info("device flow authorized", slog.String(logging.LoginKey, username))
 	fmt.Fprintf(cfg.Stdout, "Authorized as %s.\n", username)
 
 	if _, err := os.Stat(cfg.TokenFilePath); err == nil {
@@ -137,13 +138,13 @@ func Login(ctx context.Context, cfg DeviceFlowConfig) error {
 	if err := WriteTokenFile(cfg.TokenFilePath, token); err != nil {
 		return fmt.Errorf("write token file: %w", err)
 	}
-	cfg.Logger.Info("wrote github oauth token", slog.String("path", cfg.TokenFilePath))
+	logger.Info("wrote github oauth token", slog.String(logging.PathKey, cfg.TokenFilePath))
 	fmt.Fprintf(cfg.Stdout, "Wrote GitHub OAuth token to %s\n", cfg.TokenFilePath)
 	return nil
 }
 
-// withDefaults returns a copy of cfg with every zero field replaced by its
-// documented default, so Login never dereferences a nil dependency.
+// withDefaults returns a copy of cfg with every remaining zero field replaced
+// by its documented default, so Login never dereferences a nil dependency.
 func (cfg DeviceFlowConfig) withDefaults() DeviceFlowConfig {
 	if cfg.GitHubBaseURL == "" {
 		cfg.GitHubBaseURL = defaultGitHubWebBaseURL
@@ -162,9 +163,6 @@ func (cfg DeviceFlowConfig) withDefaults() DeviceFlowConfig {
 	}
 	if cfg.Stdout == nil {
 		cfg.Stdout = io.Discard
-	}
-	if cfg.Logger == nil {
-		cfg.Logger = slog.Default()
 	}
 	if cfg.Sleep == nil {
 		cfg.Sleep = sleepCtx
@@ -196,7 +194,7 @@ func requestDeviceCode(ctx context.Context, cfg DeviceFlowConfig) (deviceCodeRes
 // device-code interval, honoring authorization_pending / slow_down and
 // terminating cleanly (with a non-nil error) on expired_token / access_denied.
 // The caller's ctx is respected via the injected Sleep.
-func pollForToken(ctx context.Context, cfg DeviceFlowConfig, dc deviceCodeResponse) (string, error) {
+func pollForToken(ctx context.Context, logger *slog.Logger, cfg DeviceFlowConfig, dc deviceCodeResponse) (string, error) {
 	interval := time.Duration(dc.Interval) * time.Second
 	if interval < minPollInterval {
 		interval = minPollInterval
@@ -224,7 +222,7 @@ func pollForToken(ctx context.Context, cfg DeviceFlowConfig, dc deviceCodeRespon
 		switch at.Error {
 		case "authorization_pending":
 			// The user has not yet authorized; keep polling at the interval.
-			cfg.Logger.Debug("authorization pending", slog.Duration("interval", interval))
+			logger.Debug("authorization pending", slog.Duration(logging.IntervalKey, interval))
 		case "slow_down":
 			// Back off: add the increment, and honor a larger interval if GitHub
 			// returned one.
@@ -232,7 +230,7 @@ func pollForToken(ctx context.Context, cfg DeviceFlowConfig, dc deviceCodeRespon
 			if ni := time.Duration(at.Interval) * time.Second; ni > interval {
 				interval = ni
 			}
-			cfg.Logger.Debug("slow down; backing off", slog.Duration("interval", interval))
+			logger.Debug("slow down; backing off", slog.Duration(logging.IntervalKey, interval))
 		case "expired_token":
 			return "", fmt.Errorf("device code expired before authorization; re-run `copilotd login`")
 		case "access_denied":

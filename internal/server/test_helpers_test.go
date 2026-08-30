@@ -2,13 +2,18 @@ package server
 
 import (
 	"io"
+	"log"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/ningw42/copilotd/internal/cache"
+	"github.com/ningw42/copilotd/internal/catalog"
+	"github.com/ningw42/copilotd/internal/config"
 	"github.com/ningw42/copilotd/internal/forward"
 	"github.com/ningw42/copilotd/internal/identity"
+	"github.com/ningw42/copilotd/internal/logging"
 	"github.com/ningw42/copilotd/internal/shim"
 	"github.com/ningw42/copilotd/internal/upstream"
 	"github.com/ningw42/copilotd/internal/wsforward"
@@ -19,6 +24,41 @@ type staticImpersonationObserver struct {
 }
 
 func (s staticImpersonationObserver) Header() http.Header { return s.header.Clone() }
+
+func newTestDependencyErrorLog() *log.Logger { return log.New(io.Discard, "", 0) }
+
+func serverLogLinesContaining(output string, fragments ...string) []string {
+	var matched []string
+	for _, line := range strings.Split(output, "\n") {
+		include := true
+		for _, fragment := range fragments {
+			if !strings.Contains(line, fragment) {
+				include = false
+				break
+			}
+		}
+		if include {
+			matched = append(matched, line)
+		}
+	}
+	return matched
+}
+
+func newTestServer(cfg config.ServeConfig, serverLogger, catalogLogger *slog.Logger, provider identity.Provider, observers ReadyObservers, fwd *forward.Forwarder, source catalog.Source, wsProxy *wsforward.Proxy, streamOutcomes StreamOutcomeObserver, catalogs catalog.RenderDescriptors) *Server {
+	return New(cfg, serverLogger, catalogLogger, newTestDependencyErrorLog(), provider, observers, fwd, source, wsProxy, streamOutcomes, catalogs)
+}
+
+func newTestServerFromBase(cfg config.ServeConfig, base *slog.Logger, provider identity.Provider, observers ReadyObservers, fwd *forward.Forwarder, source catalog.Source, wsProxy *wsforward.Proxy, streamOutcomes StreamOutcomeObserver, catalogs catalog.RenderDescriptors) *Server {
+	serverLogger := logging.ForComponent(base, "internal/server")
+	catalogLogger := logging.ForComponent(base, "internal/catalog")
+	return newTestServer(cfg, serverLogger, catalogLogger, provider, observers, fwd, source, wsProxy, streamOutcomes, catalogs)
+}
+
+func newTestHandler(apikey string, provider identity.Provider, observers ReadyObservers, fwd *forward.Forwarder, source catalog.Source, base *slog.Logger, streamOutcomes StreamOutcomeObserver, catalogs catalog.RenderDescriptors, wsProxy *wsforward.Proxy) http.Handler {
+	serverLogger := logging.ForComponent(base, "internal/server")
+	catalogLogger := logging.ForComponent(base, "internal/catalog")
+	return newHandler(apikey, provider, observers, fwd, source, serverLogger, catalogLogger, streamOutcomes, catalogs, wsProxy)
+}
 
 func newTestReadyObservers() ReadyObservers {
 	return ReadyObservers{Impersonation: staticImpersonationObserver{header: http.Header{
@@ -37,13 +77,14 @@ func (s staticCacheObserver) Observe() []cache.Status {
 }
 
 func newTestForwarder(provider identity.Provider, client *http.Client, outboundTimeout, writeTimeout, streamIdleTimeout, streamKeepaliveInterval time.Duration, maxRequestBytes, maxBufferedResponseBytes int64, registry shim.Registry, options ...forward.Option) *forward.Forwarder {
-	caller := upstream.New(provider, client, outboundTimeout, maxBufferedResponseBytes, slog.Default())
-	return forward.New(caller, outboundTimeout, writeTimeout, streamIdleTimeout, streamKeepaliveInterval, maxRequestBytes, registry, options...)
+	logger := slog.Default()
+	caller := upstream.New(provider, client, outboundTimeout, maxBufferedResponseBytes, logger)
+	return forward.New(caller, outboundTimeout, writeTimeout, streamIdleTimeout, streamKeepaliveInterval, maxRequestBytes, registry, logger, options...)
 }
 
 func newTestForwarderWithLogger(provider identity.Provider, client *http.Client, outboundTimeout, writeTimeout, streamIdleTimeout, streamKeepaliveInterval time.Duration, maxRequestBytes, maxBufferedResponseBytes int64, logger *slog.Logger, registry shim.Registry, options ...forward.Option) *forward.Forwarder {
 	caller := upstream.New(provider, client, outboundTimeout, maxBufferedResponseBytes, logger)
-	return forward.New(caller, outboundTimeout, writeTimeout, streamIdleTimeout, streamKeepaliveInterval, maxRequestBytes, registry, options...)
+	return forward.New(caller, outboundTimeout, writeTimeout, streamIdleTimeout, streamKeepaliveInterval, maxRequestBytes, registry, logger, options...)
 }
 
 func newTestCatalogSource(provider identity.Provider) *upstream.Caller {

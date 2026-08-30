@@ -43,8 +43,8 @@ type ModelsEdge struct {
 
 // NewModelsCache constructs and registers the Codex models.json cached value.
 // The embedded floor remains the guaranteed-parseable vendored snapshot.
-func NewModelsCache(cfg ModelsCacheConfig, edge ModelsEdge, registry *cache.Registry, logger *slog.Logger) *cache.Value[[]byte] {
-	value := cache.New(cache.Cacheable[[]byte]{
+func NewModelsCache(cfg ModelsCacheConfig, edge ModelsEdge, registry *cache.Registry, cacheLogger *slog.Logger) *cache.Value[[]byte] {
+	value := cache.New(cacheLogger, cache.Cacheable[[]byte]{
 		Fallback:        embeddedCodexModels,
 		FallbackVersion: embeddedCodexModelsVersion,
 		TTL:             cfg.RefreshInterval,
@@ -56,7 +56,7 @@ func NewModelsCache(cfg ModelsCacheConfig, edge ModelsEdge, registry *cache.Regi
 			return err
 		},
 		Name: codexModelsCacheName,
-	}, cache.WithLogger(logger))
+	})
 	registry.Register(value)
 	return value
 }

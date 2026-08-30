@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ningw42/copilotd/internal/impersonation"
+	"github.com/ningw42/copilotd/internal/bareversion"
 	"github.com/peterbourgon/ff/v4"
 	"github.com/peterbourgon/ff/v4/fftoml"
 )
@@ -299,7 +299,7 @@ func validAddr(key, value string) error {
 }
 
 func bareVersion(key, value string) error {
-	if !impersonation.IsBareVersion(value) {
+	if !bareversion.Valid(value) {
 		return fmt.Errorf("invalid %s %q: must be major.minor.patch with optional prerelease or build suffixes", key, value)
 	}
 	return nil

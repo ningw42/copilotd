@@ -14,10 +14,14 @@ import (
 	"github.com/ningw42/copilotd/internal/cache"
 )
 
+func discardLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
 func TestValueColdServesFallback(t *testing.T) {
 	t.Parallel()
 
-	value := cache.New(cache.Cacheable[string]{
+	value := cache.New(discardLogger(), cache.Cacheable[string]{
 		Name:            "release_notes",
 		Fallback:        "embedded",
 		FallbackVersion: "v1",
@@ -52,7 +56,7 @@ func TestValueColdServesFallback(t *testing.T) {
 func TestValueAttemptAtZeroTimeIsNotNeverAttempted(t *testing.T) {
 	t.Parallel()
 
-	value := cache.New(cache.Cacheable[string]{
+	value := cache.New(discardLogger(), cache.Cacheable[string]{
 		Fallback:        "embedded",
 		FallbackVersion: "v1",
 		TTL:             time.Hour,
@@ -76,7 +80,7 @@ func TestValueRefreshLogsSuccessAndFailureLevels(t *testing.T) {
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	attempts := 0
-	value := cache.New(cache.Cacheable[string]{
+	value := cache.New(logger, cache.Cacheable[string]{
 		Name:            "release_notes",
 		Fallback:        "embedded",
 		FallbackVersion: "v1",
@@ -89,7 +93,7 @@ func TestValueRefreshLogsSuccessAndFailureLevels(t *testing.T) {
 			return "", "", errors.New("upstream unavailable")
 		},
 		Hash: func(value string) string { return value },
-	}, cache.WithLogger(logger))
+	})
 	registry := cache.NewRegistry()
 	registry.Register(value)
 
@@ -114,6 +118,12 @@ func TestValueRefreshLogsSuccessAndFailureLevels(t *testing.T) {
 		if record["cached_value"] != "release_notes" {
 			t.Fatalf("cached value log attribute = %v, want release_notes", record["cached_value"])
 		}
+		if want.level == "DEBUG" && record["cached_value_version"] != "v2" {
+			t.Fatalf("cached value version = %v, want v2", record["cached_value_version"])
+		}
+		if _, ok := record["version"]; ok {
+			t.Fatalf("cached value record retained ambiguous version key: %#v", record)
+		}
 	}
 	var extra map[string]any
 	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
@@ -127,7 +137,7 @@ func TestValueRunWaitsForTickerAndStopsOnCancellation(t *testing.T) {
 	created := make(chan time.Duration, 1)
 	ticker := &fakeTicker{ticks: make(chan time.Time), stopped: make(chan struct{})}
 	fetches := make(chan struct{}, 1)
-	value := cache.New(cache.Cacheable[string]{
+	value := cache.New(discardLogger(), cache.Cacheable[string]{
 		Fallback:        "embedded",
 		FallbackVersion: "v1",
 		TTL:             37 * time.Minute,
@@ -183,7 +193,7 @@ func TestValueRunWaitsForTickerAndStopsOnCancellation(t *testing.T) {
 func TestValueDisabledTTLDoesNotPrimeOrRun(t *testing.T) {
 	t.Parallel()
 
-	value := cache.New(cache.Cacheable[string]{
+	value := cache.New(discardLogger(), cache.Cacheable[string]{
 		Fallback:        "embedded",
 		FallbackVersion: "v1",
 		TTL:             0,
@@ -218,7 +228,7 @@ func TestValueDisabledTTLDoesNotPrimeOrRun(t *testing.T) {
 func TestValueConcurrentCurrentAndRefresh(t *testing.T) {
 	t.Parallel()
 
-	value := cache.New(cache.Cacheable[string]{
+	value := cache.New(discardLogger(), cache.Cacheable[string]{
 		Fallback:        "embedded",
 		FallbackVersion: "v1",
 		TTL:             time.Hour,
@@ -278,7 +288,7 @@ func TestValueWarmFetchFailureKeepsLastGood(t *testing.T) {
 	firstSuccess := time.Date(2026, 7, 22, 9, 30, 0, 0, time.UTC)
 	now := firstSuccess
 	attempts := 0
-	value := cache.New(cache.Cacheable[string]{
+	value := cache.New(discardLogger(), cache.Cacheable[string]{
 		Fallback:        "embedded",
 		FallbackVersion: "v1",
 		TTL:             time.Hour,
@@ -317,7 +327,7 @@ func TestValueUnchangedVersionSkipsFetchAndRecordsAttempt(t *testing.T) {
 	attemptCompleted := time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)
 	versionCalls := 0
 	clockCalls := 0
-	value := cache.New(cache.Cacheable[string]{
+	value := cache.New(discardLogger(), cache.Cacheable[string]{
 		Fallback:        "embedded",
 		FallbackVersion: "v1",
 		TTL:             time.Hour,
@@ -366,7 +376,7 @@ func TestValueChangedVersionContinuesThroughFetchHashAndValidate(t *testing.T) {
 	fetchCompleted := false
 	validateCompleted := false
 	clockObservedCompletion := false
-	value := cache.New(cache.Cacheable[string]{
+	value := cache.New(discardLogger(), cache.Cacheable[string]{
 		Fallback:        "embedded",
 		FallbackVersion: "v1",
 		TTL:             time.Hour,
@@ -414,7 +424,7 @@ func TestValueVersionFailureSkipsFetchAndKeepsLastGood(t *testing.T) {
 	t.Parallel()
 
 	attemptCompleted := time.Date(2026, 7, 22, 10, 20, 0, 0, time.UTC)
-	value := cache.New(cache.Cacheable[string]{
+	value := cache.New(discardLogger(), cache.Cacheable[string]{
 		Fallback:        "embedded",
 		FallbackVersion: "v1",
 		TTL:             time.Hour,
@@ -454,7 +464,7 @@ func TestValueRefreshLadderRekeysThenDropsFetchedValueBackToFloor(t *testing.T) 
 	}
 	fetchIndex := 0
 	validated := 0
-	value := cache.New(cache.Cacheable[[]byte]{
+	value := cache.New(discardLogger(), cache.Cacheable[[]byte]{
 		Fallback:        floor,
 		FallbackVersion: "v1",
 		TTL:             time.Hour,
@@ -502,7 +512,7 @@ func TestValueRejectedFetchKeepsLastGood(t *testing.T) {
 	firstSuccess := time.Date(2026, 7, 22, 10, 30, 0, 0, time.UTC)
 	now := firstSuccess
 	fetches := 0
-	value := cache.New(cache.Cacheable[string]{
+	value := cache.New(discardLogger(), cache.Cacheable[string]{
 		Fallback:        "embedded",
 		FallbackVersion: "v1",
 		TTL:             time.Hour,
@@ -553,7 +563,7 @@ func TestValuePrimeServesDistinctValidatedFetch(t *testing.T) {
 
 	now := time.Date(2026, 7, 22, 8, 30, 0, 0, time.UTC)
 	validated := 0
-	value := cache.New(cache.Cacheable[string]{
+	value := cache.New(discardLogger(), cache.Cacheable[string]{
 		Name:            "release_notes",
 		Fallback:        "embedded",
 		FallbackVersion: "v1",
@@ -595,7 +605,7 @@ func TestValuePrimeKeepsFallbackWhenFetchHasFloorHash(t *testing.T) {
 
 	now := time.Date(2026, 7, 22, 9, 0, 0, 0, time.UTC)
 	validated := 0
-	value := cache.New(cache.Cacheable[string]{
+	value := cache.New(discardLogger(), cache.Cacheable[string]{
 		Name:            "release_notes",
 		Fallback:        "embedded",
 		FallbackVersion: "v1",
@@ -651,7 +661,7 @@ func TestNewPanicsWhenRequiredFunctionIsNil(t *testing.T) {
 					t.Fatalf("New with nil %s did not panic", name)
 				}
 			}()
-			cache.New(recipe)
+			cache.New(discardLogger(), recipe)
 		})
 	}
 }

@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"net/http"
 	"time"
+
+	"github.com/ningw42/copilotd/internal/logging"
 )
 
 // Outcome describes how an SSE stream ended.
@@ -53,10 +55,8 @@ type Policy struct {
 	KeepaliveInterval time.Duration
 	Clock             Clock
 	OnFallback        func()
-	// Logger receives metadata-only warnings for FrameTransformer panics hidden
-	// from the wire by no-double-up. Nil uses slog.Default.
-	Logger *slog.Logger
-	// SuppressedShimErrors counts those same post-terminal panics when non-nil.
+	// SuppressedShimErrors counts post-terminal FrameTransformer panics hidden
+	// from the wire by no-double-up when non-nil.
 	SuppressedShimErrors *SuppressedShimErrorCounter
 }
 
@@ -71,14 +71,10 @@ type readResult struct {
 // frames verbatim when transformer is nil. Every exit follows cancel-then-join:
 // cancel the upstream context, close the response body, then wait for the reader
 // goroutine to exit.
-func Pump(ctx context.Context, cancel context.CancelFunc, body io.ReadCloser, dst http.ResponseWriter, policy Policy, transformer FrameTransformer) (result Result) {
+func Pump(ctx context.Context, cancel context.CancelFunc, body io.ReadCloser, dst http.ResponseWriter, logger *slog.Logger, policy Policy, transformer FrameTransformer) (result Result) {
 	clock := policy.Clock
 	if clock == nil {
 		clock = RealClock{}
-	}
-	logger := policy.Logger
-	if logger == nil {
-		logger = slog.Default()
 	}
 	writer := NewWriter(dst, policy.WriteTimeout, clock.Now)
 	controller := http.NewResponseController(writer)
@@ -161,7 +157,7 @@ func Pump(ctx context.Context, cancel context.CancelFunc, body io.ReadCloser, ds
 		if policy.SuppressedShimErrors != nil {
 			policy.SuppressedShimErrors.Increment()
 		}
-		logger.WarnContext(ctx, "suppressed post-terminal shim error", slog.String("stage", "transform"))
+		logger.WarnContext(ctx, "suppressed post-terminal shim error", slog.String(logging.StageKey, "transform"))
 	}
 	writeKeepalive := func() bool {
 		if _, err := writer.Write([]byte(":\n\n")); err != nil {

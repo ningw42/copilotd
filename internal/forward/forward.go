@@ -30,8 +30,8 @@ import (
 
 // Forwarder forwards inbound Surface endpoint requests upstream. Its dependencies
 // are injected so it stays Copilot-agnostic and unit-testable: the shared
-// upstream Caller, the per-request context deadline, the inbound body cap, and
-// the ordered shim registry.
+// upstream Caller, the per-request context deadline, the inbound body cap, the
+// ordered shim registry, and the internal/sse-owned pump logger.
 type Forwarder struct {
 	caller                  *upstream.Caller
 	outboundTimeout         time.Duration
@@ -40,27 +40,18 @@ type Forwarder struct {
 	streamKeepaliveInterval time.Duration
 	clock                   sse.Clock
 	fallbacks               *sse.FallbackCounter
-	logger                  *slog.Logger
-	suppressedShimErrors    *sse.SuppressedShimErrorCounter
-	maxRequestBytes         int64
-	registry                shim.Registry
+	// sseLogger belongs to internal/sse, the only package that emits through it.
+	sseLogger            *slog.Logger
+	suppressedShimErrors *sse.SuppressedShimErrorCounter
+	maxRequestBytes      int64
+	registry             shim.Registry
 }
 
 // Option configures an optional Forwarder dependency.
 type Option func(*Forwarder)
 
-// WithLogger routes Forwarder-owned records through logger. A nil logger keeps
-// the process default captured by New.
-func WithLogger(logger *slog.Logger) Option {
-	return func(f *Forwarder) {
-		if logger != nil {
-			f.logger = logger
-		}
-	}
-}
-
 // New builds a Forwarder from its injected dependencies.
-func New(caller *upstream.Caller, outboundTimeout, writeTimeout, streamIdleTimeout, streamKeepaliveInterval time.Duration, maxRequestBytes int64, registry shim.Registry, options ...Option) *Forwarder {
+func New(caller *upstream.Caller, outboundTimeout, writeTimeout, streamIdleTimeout, streamKeepaliveInterval time.Duration, maxRequestBytes int64, registry shim.Registry, sseLogger *slog.Logger, options ...Option) *Forwarder {
 	registry = append(shim.Registry(nil), registry...)
 	f := &Forwarder{
 		caller:                  caller,
@@ -70,7 +61,7 @@ func New(caller *upstream.Caller, outboundTimeout, writeTimeout, streamIdleTimeo
 		streamKeepaliveInterval: streamKeepaliveInterval,
 		clock:                   sse.RealClock{},
 		fallbacks:               sse.NewFallbackCounter(),
-		logger:                  slog.Default(),
+		sseLogger:               sseLogger,
 		suppressedShimErrors:    sse.NewSuppressedShimErrorCounter(),
 		maxRequestBytes:         maxRequestBytes,
 		registry:                registry,
@@ -146,7 +137,7 @@ func (f *Forwarder) PassthroughHandler(ep endpoint.Passthrough) http.HandlerFunc
 		ctx, cancel := context.WithCancel(r.Context())
 		defer cancel()
 
-		resp, failure := f.caller.Do(ctx, upstream.Call{
+		resp, _, failure := f.caller.Do(ctx, upstream.Call{
 			Route:                  upstreamRoute,
 			Method:                 r.Method,
 			Query:                  r.URL.RawQuery,
@@ -229,7 +220,7 @@ func (f *Forwarder) forward(w http.ResponseWriter, r *http.Request, header http.
 	ctx, cancelCause := context.WithCancelCause(r.Context())
 	cancel := context.CancelFunc(func() { cancelCause(context.Canceled) })
 
-	resp, failure := f.caller.Do(ctx, upstream.Call{
+	resp, responseCtx, failure := f.caller.Do(ctx, upstream.Call{
 		Route:                  upstreamRoute,
 		Method:                 http.MethodPost,
 		Query:                  r.URL.RawQuery,
@@ -282,9 +273,8 @@ func (f *Forwarder) forward(w http.ResponseWriter, r *http.Request, header http.
 		w.Header().Del("Content-Length")
 		w.WriteHeader(status)
 		policy := streamPolicy(ep.Surface(), f.writeTimeout, f.streamIdleTimeout, f.streamKeepaliveInterval, f.clock, f.fallbacks.Increment)
-		policy.Logger = f.logger
 		policy.SuppressedShimErrors = f.suppressedShimErrors
-		result := sse.Pump(ctx, cancel, resp.Body, w, policy, chain.StreamAdapter())
+		result := sse.Pump(responseCtx, cancel, resp.Body, w, f.sseLogger, policy, chain.StreamAdapter())
 		StoreStreamResult(r.Context(), StreamResult{
 			Surface:   ep.Surface().String(),
 			Outcome:   result.Outcome,

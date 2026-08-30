@@ -54,7 +54,7 @@ func testHandler(t *testing.T, logger *slog.Logger) http.Handler {
 	t.Helper()
 	prov := readyStub("")
 	fwd := newTestForwarder(prov, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
-	return newHandler(testAPIKey, prov, newTestReadyObservers(), fwd, newTestCatalogSource(prov), logger, NewStreamOutcomeCounter(), catalog.RenderDescriptors{}, newTestWSProxy(prov))
+	return newTestHandler(testAPIKey, prov, newTestReadyObservers(), fwd, newTestCatalogSource(prov), logger, NewStreamOutcomeCounter(), catalog.RenderDescriptors{}, newTestWSProxy(prov))
 }
 
 // bufferLogger returns a logger writing to an in-memory buffer at the given
@@ -155,7 +155,7 @@ func TestRequestIDGeneratedAndEchoed(t *testing.T) {
 }
 
 func TestAccessLogHealthzAtDebug(t *testing.T) {
-	t.Run("emitted once at debug with route template and fields", func(t *testing.T) {
+	t.Run("emitted once at debug with matched binding and fields", func(t *testing.T) {
 		logger, buf := bufferLogger(t, "debug")
 		h := testHandler(t, logger)
 		rec := httptest.NewRecorder()
@@ -170,7 +170,7 @@ func TestAccessLogHealthzAtDebug(t *testing.T) {
 		for _, want := range []string{
 			"level=DEBUG",
 			"method=GET",
-			`route="GET /healthz"`,
+			`inbound="GET /healthz"`,
 			"status=200",
 			"bytes=",
 			"duration=",
@@ -193,7 +193,30 @@ func TestAccessLogHealthzAtDebug(t *testing.T) {
 	})
 }
 
-func TestAccessLogUnmatchedRoute(t *testing.T) {
+func TestAccessLogReadyProbeStaysDebugWhenNotReady(t *testing.T) {
+	logger, buf := bufferLogger(t, "debug")
+	provider := identity.NewStatic(identity.Credential{}, false)
+	forwarder := newTestForwarder(provider, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
+	handler := newTestHandler(testAPIKey, provider, newTestReadyObservers(), forwarder, newTestCatalogSource(provider), logger, NewStreamOutcomeCounter(), catalog.RenderDescriptors{}, newTestWSProxy(provider))
+	recorder := httptest.NewRecorder()
+
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", recorder.Code)
+	}
+	out := buf.String()
+	for _, want := range []string{"level=DEBUG", `inbound="GET /readyz"`, "status=503"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("not-ready probe access missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "surface=") {
+		t.Errorf("probe access unexpectedly carries a Surface:\n%s", out)
+	}
+}
+
+func TestAccessLogUnmatchedRequestCarriesNoBinding(t *testing.T) {
 	logger, buf := bufferLogger(t, "info")
 	h := testHandler(t, logger)
 	rec := httptest.NewRecorder()
@@ -206,8 +229,8 @@ func TestAccessLogUnmatchedRoute(t *testing.T) {
 	if n := strings.Count(out, "msg=access"); n != 1 {
 		t.Fatalf("want exactly one access line, got %d:\n%s", n, out)
 	}
-	if !strings.Contains(out, "route=unmatched") {
-		t.Errorf("unmatched route should be labeled 'unmatched':\n%s", out)
+	if strings.Contains(out, "inbound=") || strings.Contains(out, "surface=") || strings.Contains(out, "route=") || strings.Contains(out, "unmatched") {
+		t.Errorf("unmatched request should carry no binding scope:\n%s", out)
 	}
 	if !strings.Contains(out, "status=404") {
 		t.Errorf("access line missing status=404:\n%s", out)
@@ -216,6 +239,85 @@ func TestAccessLogUnmatchedRoute(t *testing.T) {
 		if strings.Contains(out, streamOnly) {
 			t.Errorf("non-stream Phase 1 access line unexpectedly contains %q:\n%s", streamOnly, out)
 		}
+	}
+}
+
+func TestAccessLogScopeComesFromMatchedRegistration(t *testing.T) {
+	tests := []struct {
+		name           string
+		method         string
+		target         string
+		wantStatus     int
+		wantScope      []string
+		forbiddenScope []string
+	}{
+		{
+			name:           "Anthropic endpoint rejected by auth",
+			method:         http.MethodPost,
+			target:         "/anthropic/v1/messages",
+			wantStatus:     http.StatusUnauthorized,
+			wantScope:      []string{`inbound="POST /anthropic/v1/messages"`, "surface=anthropic"},
+			forbiddenScope: []string{"ws="},
+		},
+		{
+			name:       "typed WebSocket endpoint rejected before upgrade",
+			method:     http.MethodGet,
+			target:     "/openai/v1/responses",
+			wantStatus: http.StatusUnauthorized,
+			wantScope:  []string{`inbound="GET /openai/v1/responses"`, "surface=openai", "ws=true"},
+		},
+		{
+			name:           "HTTP endpoint does not acquire WebSocket scope",
+			method:         http.MethodPost,
+			target:         "/openai/v1/responses",
+			wantStatus:     http.StatusUnauthorized,
+			wantScope:      []string{`inbound="POST /openai/v1/responses"`, "surface=openai"},
+			forbiddenScope: []string{"ws="},
+		},
+		{
+			name:           "wrong method has no matched binding",
+			method:         http.MethodPost,
+			target:         "/openai/v1/models",
+			wantStatus:     http.StatusMethodNotAllowed,
+			forbiddenScope: []string{"inbound=", "surface=", "ws="},
+		},
+		{
+			name:           "mux redirect has no matched binding",
+			method:         http.MethodGet,
+			target:         "http://example.test//openai/v1/models",
+			wantStatus:     http.StatusTemporaryRedirect,
+			forbiddenScope: []string{"inbound=", "surface=", "ws="},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			logger, buf := bufferLogger(t, "info")
+			h := testHandler(t, logger)
+			recorder := httptest.NewRecorder()
+
+			h.ServeHTTP(recorder, httptest.NewRequest(tc.method, tc.target, nil))
+
+			if recorder.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d", recorder.Code, tc.wantStatus)
+			}
+			out := buf.String()
+			accessLines := serverLogLinesContaining(out, "msg=access")
+			if len(accessLines) != 1 {
+				t.Fatalf("access records = %d, want one:\n%s", len(accessLines), out)
+			}
+			accessLine := accessLines[0]
+			for _, want := range append(tc.wantScope, "component=internal/server") {
+				if !strings.Contains(accessLine, want) {
+					t.Errorf("access record missing scope %q: %s", want, accessLine)
+				}
+			}
+			for _, forbidden := range tc.forbiddenScope {
+				if strings.Contains(out, forbidden) {
+					t.Errorf("access record contains forbidden scope %q:\n%s", forbidden, out)
+				}
+			}
+		})
 	}
 }
 
@@ -367,6 +469,21 @@ func TestAccessLogUsesOutcomeSeverity(t *testing.T) {
 	}
 }
 
+func TestAccessLogUsesWarnForServerFailure(t *testing.T) {
+	logger, buf := bufferLogger(t, "info")
+	inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	})
+	handler := accessLog(logger, NewStreamOutcomeCounter(), inner)
+
+	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/failure", nil))
+
+	out := buf.String()
+	if !strings.Contains(out, "level=WARN") || !strings.Contains(out, "status=502") {
+		t.Errorf("server failure access is not Warn:\n%s", out)
+	}
+}
+
 func TestAccessLogDoesNotLogStreamBodiesOrSecrets(t *testing.T) {
 	logger, buf := bufferLogger(t, "info")
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -469,7 +586,7 @@ func TestLifecycleSmoke(t *testing.T) {
 	}
 	provider := readyStub("")
 	forwarder := newTestForwarder(provider, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
-	srv := New(testConfig(), discardLogger(t), provider, newTestReadyObservers(), forwarder, newTestCatalogSource(provider), newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.RenderDescriptors{})
+	srv := newTestServerFromBase(testConfig(), discardLogger(t), provider, newTestReadyObservers(), forwarder, newTestCatalogSource(provider), newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.RenderDescriptors{})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	runErr := make(chan error, 1)

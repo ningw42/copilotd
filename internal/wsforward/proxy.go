@@ -130,7 +130,6 @@ func (p *Proxy) Handler(ep endpoint.WSForward) http.HandlerFunc {
 		stopForceCancel := context.AfterFunc(p.baseCtx, cancelPhase)
 		defer stopForceCancel()
 		defer cancelPhase()
-		requestID, _ := logging.RequestIDFrom(r.Context())
 		if p.draining.Load() {
 			apierror.Write(w, surface, apierror.NotReady, "the server is shutting down")
 			p.metrics.observeAccept(AcceptRejected)
@@ -186,7 +185,7 @@ func (p *Proxy) Handler(ep endpoint.WSForward) http.HandlerFunc {
 			}
 			return
 		}
-		p.caller.Correlate(r.Context(), response.Header)
+		responseCtx := p.caller.Correlate(r.Context(), response.Header)
 		defer func() { _ = upstreamConn.CloseNow() }()
 
 		clientResponseWriter := &capturingResponseWriter{ResponseWriter: w}
@@ -200,18 +199,9 @@ func (p *Proxy) Handler(ep endpoint.WSForward) http.HandlerFunc {
 		}
 		defer func() { _ = client.CloseNow() }()
 		chain := p.registry.NewChain(r.Context(), surface, upstreamRoute)
-		sessionStart := time.Now()
-		route := r.Pattern
-		if route == "" {
-			route = "unmatched"
-		}
-		p.logger.LogAttrs(r.Context(), slog.LevelInfo, "websocket established",
-			slog.String("method", r.Method),
-			slog.String("route", route),
-			slog.Int("status", http.StatusSwitchingProtocols),
-			slog.Int64("bytes", 0),
-			slog.Bool("ws", true),
-			slog.Duration("duration", time.Since(handshakeStart)),
+		p.logger.LogAttrs(responseCtx, slog.LevelInfo, "websocket established",
+			slog.Int(logging.StatusKey, http.StatusSwitchingProtocols),
+			slog.Duration(logging.HandshakeDurationKey, time.Since(handshakeStart)),
 		)
 		p.metrics.observeAccept(AcceptEstablished)
 
@@ -225,7 +215,14 @@ func (p *Proxy) Handler(ep endpoint.WSForward) http.HandlerFunc {
 		defer p.untrackSession(session)
 
 		result := runSession(p.drainCtx, p.baseCtx, client, upstreamConn, p.writeTimeout, p.maxMessageBytes, chain.WSClientAdapter(), chain.WSServerAdapter())
-		p.logSession(requestID, time.Since(sessionStart), result)
+		StoreSessionResult(r.Context(), SessionResult{
+			Terminal:  result.terminal,
+			CloseCode: int(result.closeCode),
+			MsgsC2U:   result.messagesClientToUpstream,
+			MsgsU2C:   result.messagesUpstreamToClient,
+			BytesC2U:  result.bytesClientToUpstream,
+			BytesU2C:  result.bytesUpstreamToClient,
+		})
 		p.metrics.observeSessionTerminal(result.terminal)
 	}
 }
@@ -235,27 +232,6 @@ func acceptOutcome(failure *upstream.Failure) AcceptOutcome {
 		return AcceptRejected
 	}
 	return AcceptDialFailed
-}
-
-func (p *Proxy) logSession(requestID string, duration time.Duration, result sessionResult) {
-	level := slog.LevelInfo
-	if result.terminal == SessionError {
-		level = slog.LevelWarn
-	}
-	attrs := make([]slog.Attr, 0, 9)
-	if requestID != "" {
-		attrs = append(attrs, slog.String("request_id", requestID))
-	}
-	attrs = append(attrs,
-		slog.Int64("msgs_c2u", result.messagesClientToUpstream),
-		slog.Int64("msgs_u2c", result.messagesUpstreamToClient),
-		slog.Int64("bytes_c2u", result.bytesClientToUpstream),
-		slog.Int64("bytes_u2c", result.bytesUpstreamToClient),
-		slog.Int("close_code", int(result.closeCode)),
-		slog.String("terminal_reason", string(result.terminal)),
-		slog.Duration("duration", duration),
-	)
-	p.logger.LogAttrs(context.Background(), level, "websocket session", attrs...)
 }
 
 func (p *Proxy) trackSession(session *activeSession) {

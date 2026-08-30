@@ -276,18 +276,20 @@ func runServe(ctx context.Context, flags *config.ServeFlags, lookupEnv func(stri
 		return err
 	}
 
-	logger, closer, err := logging.New(cfg)
+	base, closer, err := logging.New(cfg)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = closer.Close() }()
 
-	// Route stray global slog calls and dependency logs through our handler.
-	slog.SetDefault(logger)
+	// Route stray global slog calls and dependency logs through the component-free
+	// base so unadapted dependency records are not falsely attributed.
+	slog.SetDefault(base)
+	logger := logging.ForComponent(base, "cmd/copilotd")
 
 	logger.Info("starting copilotd",
-		slog.String("build", build.String()),
-		slog.Any("config", cfg),
+		slog.String(logging.BuildKey, build.String()),
+		slog.Any(logging.ConfigKey, cfg),
 	)
 	logCodexCatalogStaging(logger, cfg)
 	registry := configuredShimRegistry(cfg)
@@ -299,19 +301,19 @@ func runServe(ctx context.Context, flags *config.ServeFlags, lookupEnv func(stri
 	// api.github.com) with a dedicated client; the e2e test injects stubs via the
 	// same buildServeProvider seam.
 	cacheRegistry := cache.NewRegistry()
-	mgr, imp, err := buildServeProvider(cfg, logger, "", newExchangeClient(), productionDiscoveryEdge(), cacheRegistry)
+	mgr, imp, err := buildServeProvider(cfg, base, "", newExchangeClient(), productionDiscoveryEdge(), cacheRegistry)
 	if err != nil {
 		// Already carries the "run copilotd login" guidance when no source yields a
 		// token; reported through the logger, then a silent non-zero exit.
-		logger.Error("cannot start: resolving the GitHub OAuth token failed", slog.Any("error", err))
+		logger.Error("cannot start: resolving the GitHub OAuth token failed", slog.Any(logging.ErrorKey, err))
 		return errServeFailed
 	}
-	codexModels := configuredCodexModels(cfg, productionCodexModelsEdge(), cacheRegistry, logger)
+	codexModels := configuredCodexModels(cfg, productionCodexModelsEdge(), cacheRegistry, base)
 
 	ln, err := net.Listen("tcp", cfg.Addr)
 	if err != nil {
 		// Distinct from a serve error: the process never began serving.
-		logger.Error("bind failed", slog.String("addr", cfg.Addr), slog.Any("error", err))
+		logger.Error("bind failed", slog.String(logging.AddrKey, cfg.Addr), slog.Any(logging.ErrorKey, err))
 		return errServeFailed
 	}
 
@@ -324,8 +326,8 @@ func runServe(ctx context.Context, flags *config.ServeFlags, lookupEnv func(stri
 		stop()
 	}()
 
-	if err := runBoundServe(serveCtx, cfg, logger, mgr, imp, codexModels, cacheRegistry, ln); err != nil {
-		logger.Error("server error", slog.Any("error", err))
+	if err := runBoundServe(serveCtx, cfg, base, mgr, imp, codexModels, cacheRegistry, ln); err != nil {
+		logger.Error("server error", slog.Any(logging.ErrorKey, err))
 		return errServeFailed
 	}
 	return nil
@@ -336,8 +338,8 @@ func runServe(ctx context.Context, flags *config.ServeFlags, lookupEnv func(stri
 // /healthz and the locally-ready /readyz available while bounded startup
 // discovery is in progress. Neither discovery nor startup mint outcomes gate
 // readiness or request admission.
-func runBoundServe(ctx context.Context, cfg config.ServeConfig, logger *slog.Logger, mgr *identity.Manager, imp *impersonation.Set, codexModels *cache.Value[[]byte], cacheRegistry *cache.Registry, ln net.Listener) error {
-	go runServeStartup(ctx, cacheRegistry, mgr, logger)
+func runBoundServe(ctx context.Context, cfg config.ServeConfig, base *slog.Logger, mgr *identity.Manager, imp *impersonation.Set, codexModels *cache.Value[[]byte], cacheRegistry *cache.Registry, ln net.Listener) error {
+	go runServeStartup(ctx, cacheRegistry, mgr, logging.ForComponent(base, "cmd/copilotd"))
 	catalogs := catalog.RenderDescriptors{
 		Anthropic: catalog.AnthropicRenderConfig{
 			ModelIDNormalizationEnabled: cfg.AnthropicCatalogModelIDNormalizationEnabled,
@@ -355,18 +357,18 @@ func runBoundServe(ctx context.Context, cfg config.ServeConfig, logger *slog.Log
 
 	registry := configuredShimRegistry(cfg)
 	forwardClient := forward.NewClient(cfg.ResponseHeaderTimeout)
-	caller := upstream.New(mgr, forwardClient, cfg.OutboundTimeout, cfg.MaxBufferedResponseBytes, logger)
-	fwd := forward.New(caller, cfg.OutboundTimeout, cfg.WriteTimeout, cfg.StreamIdleTimeout, cfg.StreamKeepaliveInterval, cfg.MaxRequestBytes, registry, forward.WithLogger(logger))
+	caller := upstream.New(mgr, forwardClient, cfg.OutboundTimeout, cfg.MaxBufferedResponseBytes, logging.ForComponent(base, "internal/upstream"))
+	fwd := forward.New(caller, cfg.OutboundTimeout, cfg.WriteTimeout, cfg.StreamIdleTimeout, cfg.StreamKeepaliveInterval, cfg.MaxRequestBytes, registry, logging.ForComponent(base, "internal/sse"))
 	wsDialClient := &http.Client{Transport: &http.Transport{Proxy: http.ProxyFromEnvironment}}
 	wsAccepts := server.NewWsAcceptCounter()
 	wsTerminals := server.NewWsSessionTerminalCounter()
-	wsProxy := wsforward.New(caller, wsDialClient, cfg.WebSocketHandshakeTimeout, cfg.WriteTimeout, cfg.MaxRequestBytes, registry, logger, wsforward.WsMetrics{
+	wsProxy := wsforward.New(caller, wsDialClient, cfg.WebSocketHandshakeTimeout, cfg.WriteTimeout, cfg.MaxRequestBytes, registry, logging.ForComponent(base, "internal/wsforward"), wsforward.WsMetrics{
 		Accept:          wsAccepts,
 		SessionTerminal: wsTerminals,
 	})
 	streamOutcomes := server.NewStreamOutcomeCounter()
 
-	return server.New(cfg, logger, mgr, server.ReadyObservers{
+	return server.New(cfg, logging.ForComponent(base, "internal/server"), logging.ForComponent(base, "internal/catalog"), logging.DependencyErrorLog(base, slog.LevelWarn), mgr, server.ReadyObservers{
 		Impersonation: imp,
 		Caches:        cacheRegistry,
 	}, fwd, caller, wsProxy, streamOutcomes, catalogs).Run(ctx, ln)
@@ -387,9 +389,9 @@ func runServeStartup(ctx context.Context, cacheRegistry *cache.Registry, mgr *id
 func logCachedValueStartupOutcomes(logger *slog.Logger, observed []cache.Status) {
 	for _, status := range observed {
 		logger.Info("startup cached value refresh outcome",
-			slog.String("cached_value", status.Name),
-			slog.String("source", status.Source),
-			slog.String("version", status.Version))
+			slog.String(logging.CachedValueKey, status.Name),
+			slog.String(logging.CachedValueSourceKey, status.Source),
+			slog.String(logging.CachedValueVersionKey, status.Version))
 	}
 }
 
@@ -398,7 +400,7 @@ func logCodexCatalogStaging(logger *slog.Logger, cfg config.ServeConfig) {
 		return
 	}
 	logger.Info("Codex reviewer is staged while the Codex catalog is disabled",
-		slog.String("reviewer", cfg.CodexAutoReviewModel))
+		slog.String(logging.ReviewerKey, cfg.CodexAutoReviewModel))
 }
 
 func configuredShimRegistry(cfg config.ServeConfig) shim.Registry {
@@ -421,7 +423,7 @@ func logShimChain(logger *slog.Logger, registry shim.Registry) {
 			enabled = append(enabled, registration.Name)
 		}
 	}
-	logger.Info("configured shim chain", slog.Any("enabled_shims", enabled))
+	logger.Info("configured shim chain", slog.Any(logging.EnabledShimsKey, enabled))
 }
 
 // buildServeProvider assembles the real credential Provider and live
@@ -435,7 +437,7 @@ func logShimChain(logger *slog.Logger, registry shim.Registry) {
 // production uses GitHub plus the two public Microsoft origins with separate
 // plain clients, while tests point them at stubs. Every other Manager
 // timing/clock knob is left to NewManager's production defaults.
-func buildServeProvider(cfg config.ServeConfig, logger *slog.Logger, githubBaseURL string, httpClient *http.Client, discoveryEdge impersonation.Edge, cacheRegistry *cache.Registry) (*identity.Manager, *impersonation.Set, error) {
+func buildServeProvider(cfg config.ServeConfig, base *slog.Logger, githubBaseURL string, httpClient *http.Client, discoveryEdge impersonation.Edge, cacheRegistry *cache.Registry) (*identity.Manager, *impersonation.Set, error) {
 	oauthToken, err := identity.ResolveOAuthToken(cfg.GithubOAuthToken, cfg.GithubOAuthTokenFile)
 	if err != nil {
 		return nil, nil, err
@@ -446,8 +448,8 @@ func buildServeProvider(cfg config.ServeConfig, logger *slog.Logger, githubBaseU
 		CopilotIntegrationID:  cfg.CopilotIntegrationID,
 		GithubAPIVersion:      cfg.GithubAPIVersion,
 		RefreshInterval:       cfg.ImpersonationRefreshInterval,
-	}, discoveryEdge, cacheRegistry, logger)
-	mgr := identity.NewManager(identity.ManagerConfig{
+	}, discoveryEdge, cacheRegistry, logging.ForComponent(base, "internal/cache"))
+	mgr := identity.NewManager(logging.ForComponent(base, "internal/identity"), identity.ManagerConfig{
 		OAuthToken:    oauthToken,
 		GitHubBaseURL: githubBaseURL,
 		HTTPClient:    httpClient,
@@ -455,7 +457,6 @@ func buildServeProvider(cfg config.ServeConfig, logger *slog.Logger, githubBaseU
 		// satisfies identity.Impersonation without reversing package dependencies.
 		Impersonation:      imp,
 		StartupMintRetries: cfg.StartupMintRetries,
-		Logger:             logger,
 	})
 	return mgr, imp, nil
 }
@@ -485,13 +486,13 @@ func productionCodexModelsEdge() catalog.ModelsEdge {
 
 // configuredCodexModels keeps the opt-in boundary at the composition root: a
 // disabled Codex catalog registers no cached value and performs no GitHub read.
-func configuredCodexModels(cfg config.ServeConfig, edge catalog.ModelsEdge, registry *cache.Registry, logger *slog.Logger) *cache.Value[[]byte] {
+func configuredCodexModels(cfg config.ServeConfig, edge catalog.ModelsEdge, registry *cache.Registry, base *slog.Logger) *cache.Value[[]byte] {
 	if !cfg.CodexCatalogEnabled {
 		return nil
 	}
 	return catalog.NewModelsCache(catalog.ModelsCacheConfig{
 		RefreshInterval: cfg.CodexCatalogRefreshInterval,
-	}, edge, registry, logger)
+	}, edge, registry, logging.ForComponent(base, "internal/cache"))
 }
 
 // newDiscoveryClient returns a dedicated plain client for the two public
@@ -517,7 +518,7 @@ func runLogin(ctx context.Context, flags *config.LoginFlags, lookupEnv func(stri
 	}
 
 	// login reuses the shared logger, which reads only the logging fields.
-	logger, closer, err := logging.New(config.ServeConfig{
+	base, closer, err := logging.New(config.ServeConfig{
 		LogLevel:  cfg.LogLevel,
 		LogFormat: cfg.LogFormat,
 		LogFile:   cfg.LogFile,
@@ -526,24 +527,24 @@ func runLogin(ctx context.Context, flags *config.LoginFlags, lookupEnv func(stri
 		return err
 	}
 	defer func() { _ = closer.Close() }()
-	slog.SetDefault(logger)
+	slog.SetDefault(base)
+	logger := logging.ForComponent(base, "cmd/copilotd")
 
 	logger.Info("starting device-flow login",
-		slog.String("build", build.String()),
-		slog.Any("config", cfg),
+		slog.String(logging.BuildKey, build.String()),
+		slog.Any(logging.ConfigKey, cfg),
 	)
 
 	// Production defaults: the empty base URLs resolve to https://github.com and
 	// https://api.github.com inside identity.Login; a dedicated client and the
 	// real ctx-honoring sleep are used. The e2e/unit tests inject stubs + a fast
 	// sleep through the same DeviceFlowConfig seam.
-	return identity.Login(ctx, identity.DeviceFlowConfig{
+	return identity.Login(ctx, logging.ForComponent(base, "internal/identity"), identity.DeviceFlowConfig{
 		HTTPClient:    newLoginClient(),
 		ClientID:      cfg.GithubClientID,
 		Scope:         cfg.GithubScope,
 		TokenFilePath: cfg.GithubOAuthTokenFile,
 		Stdout:        stdout,
-		Logger:        logger,
 	})
 }
 

@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"sync"
 	"time"
+
+	"github.com/ningw42/copilotd/internal/logging"
 )
 
 type source string
@@ -56,7 +58,6 @@ type Option func(*options)
 
 type options struct {
 	clock     func() time.Time
-	logger    *slog.Logger
 	newTicker func(time.Duration) Ticker
 }
 
@@ -66,15 +67,6 @@ func WithClock(clock func() time.Time) Option {
 	return func(opts *options) {
 		if clock != nil {
 			opts.clock = clock
-		}
-	}
-}
-
-// WithLogger replaces the logger used for refresh outcomes.
-func WithLogger(logger *slog.Logger) Option {
-	return func(opts *options) {
-		if logger != nil {
-			opts.logger = logger
 		}
 	}
 }
@@ -122,14 +114,14 @@ type Value[V any] struct {
 
 // New constructs a cached value. Refreshing remains inert until the value is
 // primed through a Registry or Run is called.
-func New[V any](src Cacheable[V], configure ...Option) *Value[V] {
+func New[V any](logger *slog.Logger, src Cacheable[V], configure ...Option) *Value[V] {
 	if src.Hash == nil {
 		panic("cache: nil Hash")
 	}
 	if src.Fetch == nil {
 		panic("cache: nil Fetch")
 	}
-	opts := options{clock: time.Now, logger: slog.Default(), newTicker: newRealTicker}
+	opts := options{clock: time.Now, newTicker: newRealTicker}
 	for _, option := range configure {
 		option(&opts)
 	}
@@ -137,7 +129,7 @@ func New[V any](src Cacheable[V], configure ...Option) *Value[V] {
 	return &Value[V]{
 		src:            src,
 		clock:          opts.clock,
-		logger:         opts.logger,
+		logger:         logger,
 		newTicker:      opts.newTicker,
 		floorHash:      floorHash,
 		currentHash:    floorHash,
@@ -257,7 +249,7 @@ func (v *Value[V]) attempt(ctx context.Context) error {
 
 func (v *Value[V]) succeeded(ctx context.Context, version string) {
 	v.logger.DebugContext(ctx, "cached value refresh succeeded",
-		slog.String("cached_value", v.src.Name), slog.String("version", version))
+		slog.String(logging.CachedValueKey, v.src.Name), slog.String(logging.CachedValueVersionKey, version))
 }
 
 func (v *Value[V]) failed(ctx context.Context, err error) error {
@@ -265,7 +257,7 @@ func (v *Value[V]) failed(ctx context.Context, err error) error {
 	v.recordAttemptLocked(v.clock(), err)
 	v.mu.Unlock()
 	v.logger.WarnContext(ctx, "cached value refresh failed",
-		slog.String("cached_value", v.src.Name), slog.Any("error", err))
+		slog.String(logging.CachedValueKey, v.src.Name), slog.Any(logging.ErrorKey, err))
 	return err
 }
 

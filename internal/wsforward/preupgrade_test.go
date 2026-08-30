@@ -237,7 +237,7 @@ func TestProxyLogsUpstreamRequestIDFromSuccessfulHandshake(t *testing.T) {
 
 	output := logOutput.String()
 	for _, want := range []string{
-		`msg="upstream response correlation"`,
+		`msg="websocket established"`,
 		"request_id=downstream-request-456",
 		"upstream_request_id=upstream-handshake-123",
 	} {

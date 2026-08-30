@@ -1,17 +1,23 @@
 package catalog
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/ningw42/copilotd/internal/apierror"
 	"github.com/ningw42/copilotd/internal/cache"
+	"github.com/ningw42/copilotd/internal/config"
 	"github.com/ningw42/copilotd/internal/endpoint"
+	"github.com/ningw42/copilotd/internal/logging"
 	"github.com/ningw42/copilotd/internal/upstream"
 )
 
@@ -19,21 +25,21 @@ type stubSource struct {
 	status   int
 	body     []byte
 	failure  *upstream.Failure
-	buffered func(context.Context, upstream.Call) (int, []byte, *upstream.Failure)
+	buffered func(context.Context, upstream.Call) (int, []byte, context.Context, *upstream.Failure)
 }
 
 type routeRecordingSource struct {
 	call upstream.Call
 }
 
-func (s *routeRecordingSource) Buffered(_ context.Context, call upstream.Call) (int, []byte, *upstream.Failure) {
+func (s *routeRecordingSource) Buffered(ctx context.Context, call upstream.Call) (int, []byte, context.Context, *upstream.Failure) {
 	s.call = call
-	return http.StatusOK, []byte(`{"data":[]}`), nil
+	return http.StatusOK, []byte(`{"data":[]}`), ctx, nil
 }
 
 func TestHandlerCallsTheCatalogContractsUpstreamRoute(t *testing.T) {
 	source := &routeRecordingSource{}
-	handler := Handler(endpoint.OpenAICatalog(), Rendering{Render: RenderOpenAI}, source)
+	handler := Handler(discardHandlerLogger(), endpoint.OpenAICatalog(), Rendering{Render: RenderOpenAI}, source)
 	recorder := httptest.NewRecorder()
 
 	handler(recorder, httptest.NewRequest(http.MethodGet, "/openai/v1/models", nil))
@@ -90,7 +96,7 @@ func TestHandlerNegotiatesCodexShapeOnlyWhenEveryGateIsOpen(t *testing.T) {
 					},
 				},
 			}
-			handler := Handler(endpoint.OpenAICatalog(), rendering, stubSource{status: http.StatusOK, body: upstreamBody})
+			handler := Handler(discardHandlerLogger(), endpoint.OpenAICatalog(), rendering, stubSource{status: http.StatusOK, body: upstreamBody})
 			target := "/openai/v1/models"
 			if tc.rawQuery != "" {
 				target += "?" + tc.rawQuery
@@ -129,7 +135,7 @@ func TestHandlerCodexHEADMatchesGETHeadersAndSuppressesBody(t *testing.T) {
 			},
 		},
 	}
-	handler := Handler(endpoint.OpenAICatalog(), rendering, stubSource{status: http.StatusOK, body: upstreamBody})
+	handler := Handler(discardHandlerLogger(), endpoint.OpenAICatalog(), rendering, stubSource{status: http.StatusOK, body: upstreamBody})
 
 	getRecorder := httptest.NewRecorder()
 	handler(getRecorder, httptest.NewRequest(http.MethodGet, "/openai/v1/models?client_version=secret-query-value", nil))
@@ -155,10 +161,51 @@ func TestHandlerCodexHEADMatchesGETHeadersAndSuppressesBody(t *testing.T) {
 	}
 }
 
+func TestHandlerLogsEverySkippedCodexReviewer(t *testing.T) {
+	var logs bytes.Buffer
+	logger, err := logging.NewWithWriter(&logs, config.ServeConfig{LogLevel: "info", LogFormat: "text"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	upstreamBody := []byte(`{"data":[{"id":"gpt-5.4","model_picker_enabled":true,"supported_endpoints":["/responses"]}]}`)
+	source := stubSource{buffered: func(ctx context.Context, _ upstream.Call) (int, []byte, context.Context, *upstream.Failure) {
+		responseCtx := logging.With(ctx, slog.String(logging.UpstreamRequestIDKey, "catalog-upstream-id"))
+		return http.StatusOK, upstreamBody, responseCtx, nil
+	}}
+	handler := Handler(logger, endpoint.OpenAICatalog(), Rendering{
+		Render: RenderOpenAI,
+		Codex: CodexDescriptor{
+			Enabled: true,
+			RenderConfig: CodexRenderConfig{
+				AutoReviewModel: "missing-reviewer",
+			},
+		},
+	}, source)
+	recorder := httptest.NewRecorder()
+	ctx := logging.WithRequestID(context.Background(), "catalog-request-id")
+	request := httptest.NewRequest(http.MethodGet, "/openai/v1/models?client_version=0.145.0", nil).WithContext(ctx)
+
+	handler(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", recorder.Code, recorder.Body.String())
+	}
+	out := logs.String()
+	for _, want := range []string{`msg="Codex catalog reviewer was skipped"`, "model=gpt-5.4", "reviewer=missing-reviewer", "request_id=catalog-request-id", "upstream_request_id=catalog-upstream-id"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("warning missing %q: %s", want, out)
+		}
+	}
+}
+
+func discardHandlerLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
 func TestHandlerRendersCodexFromCurrentCachedBytes(t *testing.T) {
 	fresh := validCodexModelsBytes(t, "fresh-model", "release prompt")
 	registry := cache.NewRegistry()
-	modelsValue := cache.New(cache.Cacheable[[]byte]{
+	modelsValue := cache.New(discardHandlerLogger(), cache.Cacheable[[]byte]{
 		Fallback:        embeddedCodexModels,
 		FallbackVersion: embeddedCodexModelsVersion,
 		TTL:             time.Hour,
@@ -175,7 +222,7 @@ func TestHandlerRendersCodexFromCurrentCachedBytes(t *testing.T) {
 	registry.Prime(context.Background())
 
 	upstreamBody := []byte(`{"data":[{"id":"fresh-model","model_picker_enabled":true,"supported_endpoints":["/responses"]}]}`)
-	handler := Handler(endpoint.OpenAICatalog(), Rendering{
+	handler := Handler(discardHandlerLogger(), endpoint.OpenAICatalog(), Rendering{
 		Render: RenderOpenAI,
 		Codex: CodexDescriptor{
 			Enabled: true,
@@ -198,11 +245,11 @@ func TestHandlerRendersCodexFromCurrentCachedBytes(t *testing.T) {
 	}
 }
 
-func (s stubSource) Buffered(ctx context.Context, call upstream.Call) (int, []byte, *upstream.Failure) {
+func (s stubSource) Buffered(ctx context.Context, call upstream.Call) (int, []byte, context.Context, *upstream.Failure) {
 	if s.buffered != nil {
 		return s.buffered(ctx, call)
 	}
-	return s.status, s.body, s.failure
+	return s.status, s.body, ctx, s.failure
 }
 
 func TestHandlerMapsEveryFailureInTheSelectedSurfaceDialect(t *testing.T) {
@@ -257,7 +304,7 @@ func TestHandlerMapsEveryFailureInTheSelectedSurfaceDialect(t *testing.T) {
 				if render == nil {
 					render = RenderOpenAI
 				}
-				handler := Handler(surface.ep, Rendering{Render: render}, tc.source)
+				handler := Handler(discardHandlerLogger(), surface.ep, Rendering{Render: render}, tc.source)
 				recorder := httptest.NewRecorder()
 
 				handler(recorder, httptest.NewRequest(http.MethodGet, "/models", nil))
@@ -288,12 +335,12 @@ func (w *writeSpy) Write(body []byte) (int, error) {
 
 func TestHandlerPropagatesCancellationWithoutWritingAReplacementError(t *testing.T) {
 	started := make(chan struct{})
-	source := stubSource{buffered: func(ctx context.Context, _ upstream.Call) (int, []byte, *upstream.Failure) {
+	source := stubSource{buffered: func(ctx context.Context, _ upstream.Call) (int, []byte, context.Context, *upstream.Failure) {
 		close(started)
 		<-ctx.Done()
-		return 0, nil, &upstream.Failure{ClientGone: true, Err: ctx.Err()}
+		return 0, nil, ctx, &upstream.Failure{ClientGone: true, Err: ctx.Err()}
 	}}
-	handler := Handler(endpoint.AnthropicCatalog(), Rendering{Render: RenderAnthropic}, source)
+	handler := Handler(discardHandlerLogger(), endpoint.AnthropicCatalog(), Rendering{Render: RenderAnthropic}, source)
 	ctx, cancel := context.WithCancel(context.Background())
 	request := httptest.NewRequest(http.MethodGet, "/anthropic/v1/models", nil).WithContext(ctx)
 	writer := &writeSpy{header: make(http.Header)}

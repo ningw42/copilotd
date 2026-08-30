@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/ningw42/copilotd/internal/bareversion"
 	"github.com/ningw42/copilotd/internal/cache"
 )
 
@@ -41,9 +42,9 @@ type Set struct {
 // New constructs a live impersonation set backed by the supplied public
 // discovery edge and registers both cached values with registry. Discovery is
 // inert until the registry is primed or started.
-func New(cfg Config, edge Edge, registry *cache.Registry, logger *slog.Logger) *Set {
+func New(cfg Config, edge Edge, registry *cache.Registry, cacheLogger *slog.Logger) *Set {
 	newVersion := func(name, fallback string, discover func(context.Context) (string, error)) *cache.Value[string] {
-		value := cache.New(cache.Cacheable[string]{
+		value := cache.New(cacheLogger, cache.Cacheable[string]{
 			Fallback:        fallback,
 			FallbackVersion: fallback,
 			TTL:             cfg.RefreshInterval,
@@ -54,7 +55,7 @@ func New(cfg Config, edge Edge, registry *cache.Registry, logger *slog.Logger) *
 			Hash:     hashVersion,
 			Validate: validateVersion,
 			Name:     name,
-		}, cache.WithLogger(logger))
+		})
 		registry.Register(value)
 		return value
 	}
@@ -91,7 +92,7 @@ func hashVersion(version string) string {
 }
 
 func validateVersion(version string) error {
-	if !IsBareVersion(version) {
+	if !bareversion.Valid(version) {
 		return fmt.Errorf("invalid version %q", version)
 	}
 	return nil

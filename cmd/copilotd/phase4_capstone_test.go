@@ -369,18 +369,10 @@ func TestPhase4ModelsOutcomeEndToEnd(t *testing.T) {
 			wantStatus = "status=206"
 			wantBytes = "bytes=0"
 		}
-		for _, want := range []string{"method=" + tc.method, `route="` + tc.method + ` /models"`, wantStatus, wantBytes, "duration="} {
+		for _, want := range []string{"method=" + tc.method, `inbound="` + tc.method + ` /models"`, wantStatus, wantBytes, "duration=", "upstream_request_id=" + phase4UpstreamReqID} {
 			if !strings.Contains(line, want) {
 				t.Errorf("access line for %s missing %q: %s", tc.requestID, want, line)
 			}
-		}
-		correlationLines := phase4LogLinesContaining(logOutput,
-			`msg="upstream response correlation"`,
-			"request_id="+tc.requestID,
-			"upstream_request_id="+phase4UpstreamReqID,
-		)
-		if len(correlationLines) != 1 {
-			t.Errorf("correlation lines for %s = %d, want one with upstream ID:\n%s", tc.requestID, len(correlationLines), strings.Join(correlationLines, "\n"))
 		}
 	}
 	for _, private := range []string{

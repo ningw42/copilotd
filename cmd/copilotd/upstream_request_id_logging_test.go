@@ -216,7 +216,7 @@ func TestForwardedResponsesDoNotLogAbsentOrIdenticalUpstreamRequestID(t *testing
 	}
 }
 
-func TestStreamingResponseLogsUpstreamRequestIDBeforeBodyCompletes(t *testing.T) {
+func TestStreamingResponseCarriesUpstreamRequestIDOnTerminalAccess(t *testing.T) {
 	const (
 		requestID  = "resolved-open-stream-request-id"
 		upstreamID = "upstream-open-stream-request-id"
@@ -255,12 +255,15 @@ func TestStreamingResponseLogsUpstreamRequestIDBeforeBodyCompletes(t *testing.T)
 		t.Fatalf("start streaming request: %v", err)
 	}
 
-	logOutput := logs.String()
-	if !strings.Contains(logOutput, "upstream_request_id="+upstreamID) || !strings.Contains(logOutput, "request_id="+requestID) {
-		t.Errorf("open stream lacks immediate upstream correlation:\n%s", logOutput)
+	if logOutput := logs.String(); strings.Contains(logOutput, "upstream_request_id=") {
+		t.Errorf("open stream emitted a terminal correlation fact before access:\n%s", logOutput)
 	}
 
 	close(releaseTerminal)
 	_, _ = io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
+	accessLines := phase4LogLinesContaining(logs.String(), "msg=access", "request_id="+requestID, "upstream_request_id="+upstreamID)
+	if len(accessLines) != 1 {
+		t.Errorf("terminal access records with both request IDs = %d, want one:\n%s", len(accessLines), logs.String())
+	}
 }

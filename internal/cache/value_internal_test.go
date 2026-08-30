@@ -3,6 +3,8 @@ package cache
 import (
 	"context"
 	"errors"
+	"io"
+	"log/slog"
 	"testing"
 	"time"
 )
@@ -13,7 +15,7 @@ func TestValueRecordsEveryAttemptOutcomeInternally(t *testing.T) {
 	failure := errors.New("upstream unavailable")
 	now := time.Date(2026, 7, 22, 13, 0, 0, 0, time.UTC)
 	attempts := 0
-	value := New(Cacheable[string]{
+	value := New(slog.New(slog.NewTextHandler(io.Discard, nil)), Cacheable[string]{
 		Fallback:        "embedded",
 		FallbackVersion: "v1",
 		TTL:             time.Hour,

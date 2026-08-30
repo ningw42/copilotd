@@ -16,7 +16,7 @@ func TestRegistryPrimeFansOutConcurrently(t *testing.T) {
 	started := make(chan string, 2)
 	release := make(chan struct{})
 	makeValue := func(name string) *cache.Value[string] {
-		return cache.New(cache.Cacheable[string]{
+		return cache.New(discardLogger(), cache.Cacheable[string]{
 			Name:            name,
 			Fallback:        "embedded",
 			FallbackVersion: "v1",
@@ -68,7 +68,7 @@ func TestRegistryPrimeReturnsEarlyOnContextCancellation(t *testing.T) {
 
 	started := make(chan struct{})
 	release := make(chan struct{})
-	value := cache.New(cache.Cacheable[string]{
+	value := cache.New(discardLogger(), cache.Cacheable[string]{
 		Fallback:        "embedded",
 		FallbackVersion: "v1",
 		TTL:             time.Hour,
@@ -111,7 +111,7 @@ func TestRegistryStartLaunchesEachValuesOwnLoop(t *testing.T) {
 	created := make(chan time.Duration, 2)
 	fetched := make(chan string, 2)
 	makeValue := func(name string, ttl time.Duration, ticker cache.Ticker) *cache.Value[string] {
-		return cache.New(cache.Cacheable[string]{
+		return cache.New(discardLogger(), cache.Cacheable[string]{
 			Name:            name,
 			Fallback:        "embedded",
 			FallbackVersion: "v1",
@@ -176,7 +176,7 @@ func TestRegistryObserveCollectsOnlyPublishingEntries(t *testing.T) {
 	t.Parallel()
 
 	makeValue := func(name string) *cache.Value[string] {
-		return cache.New(cache.Cacheable[string]{
+		return cache.New(discardLogger(), cache.Cacheable[string]{
 			Name:            name,
 			Fallback:        "embedded",
 			FallbackVersion: "v1",
@@ -210,7 +210,7 @@ func TestRegistryConcurrentRegisterAndObserve(t *testing.T) {
 	go func() {
 		defer workers.Done()
 		for i := range 200 {
-			registry.Register(cache.New(cache.Cacheable[string]{
+			registry.Register(cache.New(discardLogger(), cache.Cacheable[string]{
 				Name:            fmt.Sprintf("entry_%d", i),
 				Fallback:        "embedded",
 				FallbackVersion: "v1",

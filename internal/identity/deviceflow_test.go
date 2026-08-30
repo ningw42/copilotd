@@ -125,7 +125,7 @@ func TestLoginDeviceFlowSuccess(t *testing.T) {
 	var out bytes.Buffer
 	var slept []time.Duration
 
-	err := Login(context.Background(), DeviceFlowConfig{
+	err := Login(context.Background(), quietLogger(), DeviceFlowConfig{
 		GitHubBaseURL: web.URL,
 		APIBaseURL:    api.URL,
 		HTTPClient:    web.Client(),
@@ -133,7 +133,6 @@ func TestLoginDeviceFlowSuccess(t *testing.T) {
 		Scope:         "read:user",
 		TokenFilePath: path,
 		Stdout:        &out,
-		Logger:        quietLogger(),
 		Sleep:         recordingSleep(&slept),
 	})
 	if err != nil {
@@ -221,13 +220,12 @@ func TestLoginDeviceFlowSlowDownBacksOff(t *testing.T) {
 	api := newUserStub(t, "octocat", &au, &ua, &ac)
 
 	var slept []time.Duration
-	err := Login(context.Background(), DeviceFlowConfig{
+	err := Login(context.Background(), quietLogger(), DeviceFlowConfig{
 		GitHubBaseURL: web.URL,
 		APIBaseURL:    api.URL,
 		HTTPClient:    web.Client(),
 		TokenFilePath: filepath.Join(t.TempDir(), "tok"),
 		Stdout:        io.Discard,
-		Logger:        quietLogger(),
 		Sleep:         recordingSleep(&slept),
 	})
 	if err != nil {
@@ -257,10 +255,10 @@ func TestLoginDeviceFlowHonorsReturnedSlowDownInterval(t *testing.T) {
 	api := newUserStub(t, "octocat", &au, &ua, &ac)
 
 	var slept []time.Duration
-	if err := Login(context.Background(), DeviceFlowConfig{
+	if err := Login(context.Background(), quietLogger(), DeviceFlowConfig{
 		GitHubBaseURL: web.URL, APIBaseURL: api.URL, HTTPClient: web.Client(),
 		TokenFilePath: filepath.Join(t.TempDir(), "tok"), Stdout: io.Discard,
-		Logger: quietLogger(), Sleep: recordingSleep(&slept),
+		Sleep: recordingSleep(&slept),
 	}); err != nil {
 		t.Fatalf("Login() error = %v", err)
 	}
@@ -294,9 +292,9 @@ func TestLoginDeviceFlowTerminalErrors(t *testing.T) {
 
 			path := filepath.Join(t.TempDir(), "tok")
 			var slept []time.Duration
-			err := Login(context.Background(), DeviceFlowConfig{
+			err := Login(context.Background(), quietLogger(), DeviceFlowConfig{
 				GitHubBaseURL: web.URL, APIBaseURL: api.URL, HTTPClient: web.Client(),
-				TokenFilePath: path, Stdout: io.Discard, Logger: quietLogger(),
+				TokenFilePath: path, Stdout: io.Discard,
 				Sleep: recordingSleep(&slept),
 			})
 			if err == nil {
@@ -332,9 +330,9 @@ func TestLoginDeviceFlowReplacesExistingTokenWithNotice(t *testing.T) {
 
 	var out bytes.Buffer
 	var slept []time.Duration
-	if err := Login(context.Background(), DeviceFlowConfig{
+	if err := Login(context.Background(), quietLogger(), DeviceFlowConfig{
 		GitHubBaseURL: web.URL, APIBaseURL: api.URL, HTTPClient: web.Client(),
-		TokenFilePath: path, Stdout: &out, Logger: quietLogger(), Sleep: recordingSleep(&slept),
+		TokenFilePath: path, Stdout: &out, Sleep: recordingSleep(&slept),
 	}); err != nil {
 		t.Fatalf("Login() error = %v", err)
 	}
@@ -361,10 +359,9 @@ func TestLoginDeviceFlowRespectsContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // already cancelled: the first Sleep must return ctx.Err()
 
-	err := Login(ctx, DeviceFlowConfig{
+	err := Login(ctx, quietLogger(), DeviceFlowConfig{
 		GitHubBaseURL: web.URL, APIBaseURL: api.URL, HTTPClient: web.Client(),
 		TokenFilePath: filepath.Join(t.TempDir(), "tok"), Stdout: io.Discard,
-		Logger: quietLogger(),
 		// default Sleep (sleepCtx) honors the cancelled ctx immediately
 	})
 	if err == nil {

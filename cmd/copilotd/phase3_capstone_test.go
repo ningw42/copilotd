@@ -22,6 +22,7 @@ import (
 	"github.com/ningw42/copilotd/internal/server"
 	"github.com/ningw42/copilotd/internal/shim"
 	"github.com/ningw42/copilotd/internal/sse"
+	"github.com/ningw42/copilotd/internal/upstream"
 )
 
 const (
@@ -56,23 +57,26 @@ func startPhase3CapstoneServerWithObservers(
 			"Editor-Version":         {"vscode/1.104.1"},
 		},
 	}, true)
-	previousDefault := slog.Default()
-	slog.SetDefault(logger)
-	forwarder := newTestForwarderWithLogger(
+	caller := upstream.New(
 		provider,
 		forward.NewClient(cfg.ResponseHeaderTimeout),
+		cfg.OutboundTimeout,
+		cfg.MaxBufferedResponseBytes,
+		logging.ForComponent(logger, "internal/upstream"),
+	)
+	forwarder := forward.New(
+		caller,
 		cfg.OutboundTimeout,
 		cfg.WriteTimeout,
 		cfg.StreamIdleTimeout,
 		cfg.StreamKeepaliveInterval,
 		cfg.MaxRequestBytes,
-		cfg.MaxBufferedResponseBytes,
-		logger,
 		registry,
-		forward.WithLogger(logger))
-
-	slog.SetDefault(previousDefault)
-	return startTestServer(t, server.New(cfg, logger, provider, newTestReadyObservers(), forwarder, newTestCatalogSource(provider), newTestWSProxy(provider), outcomes, catalog.RenderDescriptors{})), forwarder
+		logging.ForComponent(logger, "internal/sse"),
+	)
+	serverLogger := logging.ForComponent(logger, "internal/server")
+	catalogLogger := logging.ForComponent(logger, "internal/catalog")
+	return startTestServer(t, server.New(cfg, serverLogger, catalogLogger, newTestDependencyErrorLog(), provider, newTestReadyObservers(), forwarder, newTestCatalogSource(provider), newTestWSProxy(provider), outcomes, catalog.RenderDescriptors{})), forwarder
 }
 
 type phase3BufferedTranscript struct {
@@ -476,11 +480,13 @@ func TestPhase3PostTerminalShimPanicIsSuppressedCountedAndRedacted(t *testing.T)
 		t.Errorf("suppressed shim panic count = %d, want 1", got)
 	}
 	logs := logOutput.String()
-	if !strings.Contains(logs, "level=WARN") || !strings.Contains(logs, "suppressed post-terminal shim error") || !strings.Contains(logs, "stage=transform") {
-		t.Errorf("suppression warning missing metadata:\n%s", logs)
+	warningLines := phase4LogLinesContaining(logs, "level=WARN", "suppressed post-terminal shim error", "stage=transform", "component=internal/sse")
+	if len(warningLines) != 1 {
+		t.Errorf("SSE-owned suppression warnings = %d, want one:\n%s", len(warningLines), logs)
 	}
-	if !strings.Contains(logs, "msg=access") || !strings.Contains(logs, "outcome=clean") {
-		t.Errorf("suppressed panic access line missing clean outcome:\n%s", logs)
+	accessLines := phase4LogLinesContaining(logs, "msg=access", "outcome=clean", "component=internal/server")
+	if len(accessLines) != 1 {
+		t.Errorf("server-owned clean access records = %d, want one:\n%s", len(accessLines), logs)
 	}
 	for _, secret := range []string{requestSecret, trailingSecret, panicSecret, testAPIKey, "stub-copilot-token"} {
 		if strings.Contains(logs, secret) {

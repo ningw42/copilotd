@@ -53,7 +53,7 @@ func TestCodexCatalogPerModelReviewerOverRealListener(t *testing.T) {
 	}
 	provider := identity.NewStatic(identity.Credential{BaseURL: upstream.URL, Token: "copilot-token"}, true)
 	forwarder := newTestForwarder(provider, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
-	base := startServer(t, New(cfg, discardLogger(t), provider, newTestReadyObservers(), forwarder, newTestCatalogSource(provider), newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.RenderDescriptors{Codex: testCodexDescriptor(cfg)}))
+	base := startServer(t, newTestServerFromBase(cfg, discardLogger(t), provider, newTestReadyObservers(), forwarder, newTestCatalogSource(provider), newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.RenderDescriptors{Codex: testCodexDescriptor(cfg)}))
 	req, err := http.NewRequest(http.MethodGet, base+"/openai/v1/models?client_version=0.144.5", nil)
 	if err != nil {
 		t.Fatalf("build catalog request: %v", err)
@@ -155,7 +155,7 @@ func TestCodexCatalogOverRealListener(t *testing.T) {
 			Headers: http.Header{"Copilot-Integration-Id": {"vscode-chat"}},
 		}, ready)
 		forwarder := newTestForwarder(provider, forward.NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
-		return startServer(t, New(cfg, discardLogger(t), provider, newTestReadyObservers(), forwarder, newTestCatalogSource(provider), newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.RenderDescriptors{Codex: testCodexDescriptor(cfg)})), provider
+		return startServer(t, newTestServerFromBase(cfg, discardLogger(t), provider, newTestReadyObservers(), forwarder, newTestCatalogSource(provider), newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.RenderDescriptors{Codex: testCodexDescriptor(cfg)})), provider
 	}
 
 	requestCatalog := func(base, method, target, keyHeader, key, requestID string) (*http.Response, []byte) {
@@ -328,7 +328,7 @@ func TestCodexCatalogConfigWiringWarningAndAccessLogConfidentiality(t *testing.T
 	}
 	provider := identity.NewStatic(identity.Credential{BaseURL: upstream.URL, Token: copilotToken}, true)
 	forwarder := newTestForwarder(provider, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
-	base := startServer(t, New(cfg, logger, provider, newTestReadyObservers(), forwarder, newTestCatalogSourceWith(provider, forward.NewClient(time.Second), time.Second, 1<<20, logger), newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.RenderDescriptors{Codex: testCodexDescriptor(cfg)}))
+	base := startServer(t, newTestServerFromBase(cfg, logger, provider, newTestReadyObservers(), forwarder, newTestCatalogSourceWith(provider, forward.NewClient(time.Second), time.Second, 1<<20, logger), newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.RenderDescriptors{Codex: testCodexDescriptor(cfg)}))
 
 	requestCatalog := func(target string) (*http.Response, []byte) {
 		t.Helper()
@@ -364,20 +364,30 @@ func TestCodexCatalogConfigWiringWarningAndAccessLogConfidentiality(t *testing.T
 	}
 
 	output := logs.String()
-	if got := strings.Count(output, `msg="Codex catalog reviewer was skipped"`); got != 1 {
-		t.Errorf("reviewer-skip warning count = %d, want exactly 1:\n%s", got, output)
+	warningLines := serverLogLinesContaining(output, `msg="Codex catalog reviewer was skipped"`)
+	if len(warningLines) != 1 {
+		t.Fatalf("reviewer-skip warnings = %d, want exactly 1:\n%s", len(warningLines), output)
+	}
+	if !strings.Contains(warningLines[0], "component=internal/catalog") {
+		t.Errorf("reviewer-skip warning has wrong Component: %s", warningLines[0])
 	}
 	for _, want := range []string{
 		"level=WARN", "model=" + mainModel, "reviewer=" + reviewer,
 		"catalog_shape=codex", "catalog_shape=openai",
-		`route="GET /openai/v1/models"`,
+		`inbound="GET /openai/v1/models"`,
 	} {
 		if !strings.Contains(output, want) {
 			t.Errorf("catalog logs missing %q:\n%s", want, output)
 		}
 	}
-	if got := strings.Count(output, "msg=access"); got != 2 {
-		t.Errorf("access-log count = %d, want one per request:\n%s", got, output)
+	accessLines := serverLogLinesContaining(output, "msg=access")
+	if len(accessLines) != 2 {
+		t.Fatalf("access-log count = %d, want one per request:\n%s", len(accessLines), output)
+	}
+	for _, line := range accessLines {
+		if !strings.Contains(line, "component=internal/server") {
+			t.Errorf("access record has wrong Component: %s", line)
+		}
 	}
 	for _, forbidden := range []string{querySecret, modelBodySecret, vendorSecret, copilotToken, testAPIKey, string(codexBody), string(openAIBody)} {
 		if strings.Contains(output, forbidden) {
@@ -405,7 +415,7 @@ func TestOpenAIModelCatalogMapsFetchFailuresOverRealListener(t *testing.T) {
 				return nil, tt.upstreamErr
 			})}
 			forwarder := newTestForwarder(provider, client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
-			base := startServer(t, New(testConfig(), discardLogger(t), provider, newTestReadyObservers(), forwarder, newTestCatalogSourceWith(provider, client, time.Second, 1<<20, discardLogger(t)), newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.RenderDescriptors{}))
+			base := startServer(t, newTestServerFromBase(testConfig(), discardLogger(t), provider, newTestReadyObservers(), forwarder, newTestCatalogSourceWith(provider, client, time.Second, 1<<20, discardLogger(t)), newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.RenderDescriptors{}))
 
 			req, err := http.NewRequest(http.MethodGet, base+"/openai/v1/models", nil)
 			if err != nil {
@@ -462,7 +472,7 @@ func TestOpenAIModelCatalogOverRealListener(t *testing.T) {
 		Headers: http.Header{"Copilot-Integration-Id": {"vscode-chat"}},
 	}, true)
 	forwarder := newTestForwarder(provider, forward.NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
-	base := startServer(t, New(testConfig(), discardLogger(t), provider, newTestReadyObservers(), forwarder, newTestCatalogSource(provider), newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.RenderDescriptors{}))
+	base := startServer(t, newTestServerFromBase(testConfig(), discardLogger(t), provider, newTestReadyObservers(), forwarder, newTestCatalogSource(provider), newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.RenderDescriptors{}))
 
 	do := func(method, keyHeader, key string) (*http.Response, []byte) {
 		t.Helper()

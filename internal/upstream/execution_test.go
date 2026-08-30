@@ -40,7 +40,7 @@ func TestCallerDoUsesCallerContextVerbatimAndArmsNoTimer(t *testing.T) {
 	})}
 	caller := executionCaller(readyExecutionProvider("https://upstream.invalid"), client, outboundTimeout, 1<<20, slog.Default())
 
-	response, failure := caller.Do(ctx, executionCall())
+	response, _, failure := caller.Do(ctx, executionCall())
 
 	if failure != nil {
 		t.Fatalf("Do() failure = %#v, want success", failure)
@@ -62,7 +62,7 @@ func TestCallerDoPropagatesCallerCancellation(t *testing.T) {
 	t.Cleanup(cancel)
 	result := make(chan *Failure, 1)
 	go func() {
-		_, failure := caller.Do(ctx, executionCall())
+		_, _, failure := caller.Do(ctx, executionCall())
 		result <- failure
 	}()
 	<-started
@@ -88,7 +88,7 @@ func TestCallerDoClassifiesExecutionFailure(t *testing.T) {
 	})}
 	caller := executionCaller(readyExecutionProvider("https://upstream.invalid"), client, time.Second, 1<<20, slog.Default())
 
-	response, failure := caller.Do(context.Background(), executionCall())
+	response, _, failure := caller.Do(context.Background(), executionCall())
 
 	if response != nil {
 		t.Errorf("Do() response = %#v, want nil", response)
@@ -106,7 +106,7 @@ func TestCallerDoClassifiesExecutionFailure(t *testing.T) {
 
 func TestCallerDoCorrelatesSuccessfulResponse(t *testing.T) {
 	var logs bytes.Buffer
-	logger, err := logging.NewWithWriter(&logs, config.ServeConfig{LogLevel: "info", LogFormat: "text"})
+	logger, err := logging.NewWithWriter(&logs, config.ServeConfig{LogLevel: "debug", LogFormat: "text"})
 	if err != nil {
 		t.Fatalf("build logger: %v", err)
 	}
@@ -118,12 +118,16 @@ func TestCallerDoCorrelatesSuccessfulResponse(t *testing.T) {
 	caller := executionCaller(readyExecutionProvider("https://upstream.invalid"), client, time.Second, 1<<20, logger)
 	ctx := logging.WithRequestID(context.Background(), "copilotd-request-id")
 
-	response, failure := caller.Do(ctx, executionCall())
+	response, responseCtx, failure := caller.Do(ctx, executionCall())
 
 	if failure != nil || response == nil {
 		t.Fatalf("Do() = (%#v, %#v), want response and no failure", response, failure)
 	}
+	if responseCtx == ctx {
+		t.Error("Do returned the input context for a differing upstream id")
+	}
 	for _, want := range []string{
+		"level=DEBUG",
 		"request_id=copilotd-request-id",
 		"upstream_request_id=upstream-request-id",
 	} {
@@ -149,15 +153,14 @@ func TestCallerWithIdentityManagerLogsOnlySanitizedCredentialFailureCause(t *tes
 	if err != nil {
 		t.Fatalf("build logger: %v", err)
 	}
-	manager := identity.NewManager(identity.ManagerConfig{
+	manager := identity.NewManager(logger, identity.ManagerConfig{
 		OAuthToken:    oauthSecret,
 		GitHubBaseURL: exchange.URL,
 		HTTPClient:    exchange.Client(),
-		Logger:        logger,
 	})
 	caller := executionCaller(manager, exchange.Client(), time.Second, 1<<20, logger)
 
-	response, failure := caller.Do(context.Background(), executionCall())
+	response, _, failure := caller.Do(context.Background(), executionCall())
 
 	if response != nil {
 		t.Errorf("Do() response = %#v, want nil", response)
@@ -280,7 +283,7 @@ func TestCallerReadBoundedClassifiesTheBoundUpstreamCallContext(t *testing.T) {
 			client := executionBodyClient(upstreamBody, make(http.Header))
 			caller := executionCaller(readyExecutionProvider("https://upstream.invalid"), client, time.Hour, 1<<20, logger)
 			ctx, cancel := context.WithCancelCause(context.Background())
-			response, failure := caller.Do(ctx, executionCall())
+			response, _, failure := caller.Do(ctx, executionCall())
 			if failure != nil {
 				t.Fatalf("Do() failure = %#v, want response", failure)
 			}
@@ -396,7 +399,7 @@ func TestCallerBufferedReturnsOneCredentialedResponse(t *testing.T) {
 	caller := executionCaller(readyExecutionProvider("https://upstream.invalid"), client, time.Second, 1<<20, slog.Default())
 	ctx := logging.WithRequestID(context.Background(), "catalog-request-id")
 
-	status, body, failure := caller.Buffered(ctx, Call{
+	status, body, _, failure := caller.Buffered(ctx, Call{
 		Route:                  route,
 		Method:                 http.MethodGet,
 		AcceptIdentityEncoding: true,
@@ -493,7 +496,7 @@ func TestCallerBufferedClassifiesSetupAndExecutionFailures(t *testing.T) {
 			})}
 			caller := executionCaller(tc.provider, client, time.Second, 1<<20, slog.Default())
 
-			status, body, failure := caller.Buffered(context.Background(), executionCall())
+			status, body, _, failure := caller.Buffered(context.Background(), executionCall())
 
 			if status != 0 || body != nil {
 				t.Errorf("failure result = (%d, %q), want zero status and nil body", status, body)
@@ -525,7 +528,7 @@ func TestCallerBufferedUsesConfiguredResponseHeaderTimeout(t *testing.T) {
 	client := &http.Client{Transport: &http.Transport{ResponseHeaderTimeout: 10 * time.Millisecond}}
 	caller := executionCaller(readyExecutionProvider(server.URL), client, time.Second, 1<<20, slog.Default())
 
-	status, body, failure := caller.Buffered(context.Background(), executionCall())
+	status, body, _, failure := caller.Buffered(context.Background(), executionCall())
 
 	if status != 0 || body != nil {
 		t.Errorf("failure result = (%d, %q), want zero status and nil body", status, body)
@@ -554,7 +557,7 @@ func TestCallerBufferedArmsTimeoutAfterResponseAndInterruptsStalledRead(t *testi
 	caller := executionCaller(readyExecutionProvider("https://upstream.invalid"), client, outboundTimeout, 1<<20, slog.Default())
 	started := time.Now()
 
-	status, body, failure := caller.Buffered(parent, executionCall())
+	status, body, _, failure := caller.Buffered(parent, executionCall())
 
 	if status != 0 || body != nil {
 		t.Errorf("failure result = (%d, %q), want zero status and nil body", status, body)
@@ -587,7 +590,7 @@ func TestCallerBufferedClassifiesParentCancellationDuringReadAsClientGone(t *tes
 		cancel()
 	}()
 
-	status, body, failure := caller.Buffered(parent, executionCall())
+	status, body, _, failure := caller.Buffered(parent, executionCall())
 
 	if status != 0 || body != nil {
 		t.Errorf("failure result = (%d, %q), want zero status and nil body", status, body)
@@ -615,7 +618,7 @@ func TestCallerBufferedClassifiesPlainReadFailureWithoutPartialBody(t *testing.T
 	})}
 	caller := executionCaller(readyExecutionProvider("https://upstream.invalid"), client, time.Second, 1<<20, slog.Default())
 
-	status, body, failure := caller.Buffered(context.Background(), executionCall())
+	status, body, _, failure := caller.Buffered(context.Background(), executionCall())
 
 	if status != 0 || body != nil {
 		t.Errorf("failure result = (%d, %q), want zero status and nil body", status, body)
@@ -639,7 +642,7 @@ func TestCallerBufferedRejectsOversizedResponseWithoutReturningTruncatedBody(t *
 	const responseLimit = 8
 	caller := executionCaller(readyExecutionProvider("https://upstream.invalid"), client, time.Second, responseLimit, slog.Default())
 
-	status, body, failure := caller.Buffered(context.Background(), executionCall())
+	status, body, _, failure := caller.Buffered(context.Background(), executionCall())
 
 	if status != 0 || body != nil {
 		t.Errorf("failure result = (%d, %q), want zero status and nil body", status, body)
@@ -663,7 +666,7 @@ func TestCallerBufferedAcceptsResponseAtSizeBoundary(t *testing.T) {
 	})}
 	caller := executionCaller(readyExecutionProvider("https://upstream.invalid"), client, time.Second, int64(len(responseBody)), slog.Default())
 
-	status, body, failure := caller.Buffered(context.Background(), executionCall())
+	status, body, _, failure := caller.Buffered(context.Background(), executionCall())
 
 	if failure != nil {
 		t.Fatalf("Buffered() failure = %#v", failure)
@@ -685,7 +688,7 @@ func TestCallerBufferedLeavesSSELookingBodyOpaque(t *testing.T) {
 	})}
 	caller := executionCaller(readyExecutionProvider("https://upstream.invalid"), client, time.Second, 1<<20, slog.Default())
 
-	status, body, failure := caller.Buffered(context.Background(), executionCall())
+	status, body, _, failure := caller.Buffered(context.Background(), executionCall())
 
 	if failure != nil {
 		t.Fatalf("Buffered() failure = %#v", failure)
@@ -710,8 +713,8 @@ func TestCallerBufferedMakesIndependentUpstreamCalls(t *testing.T) {
 	})}
 	caller := executionCaller(provider, client, time.Second, 1<<20, slog.Default())
 
-	_, first, firstFailure := caller.Buffered(context.Background(), executionCall())
-	_, second, secondFailure := caller.Buffered(context.Background(), executionCall())
+	_, first, _, firstFailure := caller.Buffered(context.Background(), executionCall())
+	_, second, _, secondFailure := caller.Buffered(context.Background(), executionCall())
 
 	if firstFailure != nil || secondFailure != nil {
 		t.Fatalf("Buffered() failures = %#v, %#v", firstFailure, secondFailure)
@@ -741,7 +744,7 @@ func TestCallerBufferedDoesNotReplayAfterUpstreamResponseFailure(t *testing.T) {
 	ctx := httptrace.WithClientTrace(context.Background(), trace)
 	caller := executionCaller(readyExecutionProvider(server.URL), &http.Client{}, time.Second, 1<<20, slog.Default())
 
-	status, body, failure := caller.Buffered(ctx, executionCall())
+	status, body, _, failure := caller.Buffered(ctx, executionCall())
 
 	if status != 0 || body != nil {
 		t.Errorf("failure result = (%d, %q), want zero status and nil body", status, body)
@@ -757,7 +760,7 @@ func TestCallerBufferedDoesNotReplayAfterUpstreamResponseFailure(t *testing.T) {
 	}
 }
 
-func TestCallerBufferedLogsOnlyDifferentUpstreamRequestID(t *testing.T) {
+func TestCallerBufferedReturnsOnlyDifferentUpstreamRequestID(t *testing.T) {
 	const requestID = "resolved-catalog-request-id"
 	tests := []struct {
 		name              string
@@ -772,7 +775,7 @@ func TestCallerBufferedLogsOnlyDifferentUpstreamRequestID(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			var logs bytes.Buffer
-			logger, err := logging.NewWithWriter(&logs, config.ServeConfig{LogLevel: "info", LogFormat: "text"})
+			logger, err := logging.NewWithWriter(&logs, config.ServeConfig{LogLevel: "debug", LogFormat: "text"})
 			if err != nil {
 				t.Fatalf("build logger: %v", err)
 			}
@@ -786,7 +789,8 @@ func TestCallerBufferedLogsOnlyDifferentUpstreamRequestID(t *testing.T) {
 			caller := executionCaller(readyExecutionProvider("https://upstream.invalid"), client, time.Second, 1<<20, logger)
 			ctx := logging.WithRequestID(context.Background(), requestID)
 
-			if _, _, failure := caller.Buffered(ctx, executionCall()); failure != nil {
+			_, _, responseCtx, failure := caller.Buffered(ctx, executionCall())
+			if failure != nil {
 				t.Fatalf("Buffered() failure = %#v", failure)
 			}
 
@@ -795,8 +799,15 @@ func TestCallerBufferedLogsOnlyDifferentUpstreamRequestID(t *testing.T) {
 				if !strings.Contains(logOutput, "upstream_request_id="+tc.upstreamRequestID) || !strings.Contains(logOutput, "request_id="+requestID) {
 					t.Errorf("correlation log = %q, want upstream and resolved request IDs", logOutput)
 				}
-			} else if strings.Contains(logOutput, "upstream_request_id=") {
-				t.Errorf("absent or identical upstream ID produced a correlation log: %q", logOutput)
+				logs.Reset()
+				logger.InfoContext(responseCtx, "later buffered response path")
+				if !strings.Contains(logs.String(), "upstream_request_id="+tc.upstreamRequestID) {
+					t.Errorf("returned response context lacks upstream id: %q", logs.String())
+				}
+			} else {
+				if strings.Contains(logOutput, "upstream_request_id=") {
+					t.Errorf("absent or identical upstream ID produced a correlation log: %q", logOutput)
+				}
 			}
 		})
 	}

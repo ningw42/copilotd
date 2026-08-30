@@ -1,13 +1,15 @@
-// Package logging builds copilotd's structured logger and owns request-id
-// correlation. It deliberately imports no net/http so it stays reusable and
-// independently testable; the HTTP layer couples to it only through the context
-// helpers below.
+// Package logging builds copilotd's structured logger, declares its top-level
+// attribute keys, derives owner-named Component children from the process base,
+// and owns request-id correlation and context-carried log scope.
+// It deliberately imports no net/http so it stays reusable and independently
+// testable; the HTTP layer couples to it only through the context helpers below.
 package logging
 
 import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"log/slog"
 	"os"
 	"regexp"
@@ -79,10 +81,22 @@ func NewWithWriter(w io.Writer, cfg config.ServeConfig) (*slog.Logger, error) {
 	}
 
 	logger := slog.New(&contextHandler{inner: base}).With(
-		slog.String("service", serviceName),
-		slog.String("version", build.Version),
+		slog.String(ServiceKey, serviceName),
+		slog.String(VersionKey, build.Version),
 	)
 	return logger, nil
+}
+
+// ForComponent returns a child of base whose records name the copilotd package
+// that owns their emission, as a repository-relative import path.
+func ForComponent(base *slog.Logger, component string) *slog.Logger {
+	return base.With(slog.String(ComponentKey, component))
+}
+
+// DependencyErrorLog adapts an external dependency's *log.Logger sink onto the
+// component-free base, so its unadapted records keep no Component.
+func DependencyErrorLog(base *slog.Logger, level slog.Level) *log.Logger {
+	return slog.NewLogLogger(base.Handler(), level)
 }
 
 func parseLevel(s string) (slog.Level, error) {
@@ -100,10 +114,10 @@ func parseLevel(s string) (slog.Level, error) {
 	}
 }
 
-// contextHandler injects the request-id carried in the record's context as a
-// request_id attribute. It must implement all four slog.Handler methods and
-// re-wrap on WithAttrs/WithGroup: a wrapper that returned the inner handler
-// there would silently drop attributes and groups.
+// contextHandler injects the request-id and log scope carried in the record's
+// context. It must implement all four slog.Handler methods and re-wrap on
+// WithAttrs/WithGroup so the wrapper's context-carried attributes remain after
+// callers derive a logger.
 type contextHandler struct {
 	inner slog.Handler
 }
@@ -114,7 +128,10 @@ func (h *contextHandler) Enabled(ctx context.Context, level slog.Level) bool {
 
 func (h *contextHandler) Handle(ctx context.Context, r slog.Record) error {
 	if id, ok := RequestIDFrom(ctx); ok {
-		r.AddAttrs(slog.String("request_id", id))
+		r.AddAttrs(slog.String(RequestIDKey, id))
+	}
+	if attrs, ok := scopeAttrsFrom(ctx); ok {
+		r.AddAttrs(attrs...)
 	}
 	return h.inner.Handle(ctx, r)
 }
@@ -131,7 +148,25 @@ func (h *contextHandler) WithGroup(name string) slog.Handler {
 // other packages' context entries.
 type ctxKey int
 
-const requestIDKey ctxKey = iota
+const (
+	requestIDKey ctxKey = iota
+	scopeKey
+)
+
+// With returns a derived context carrying attrs in addition to any already in
+// scope. The parent is unchanged and nested calls append in scope order.
+func With(ctx context.Context, attrs ...slog.Attr) context.Context {
+	parent, _ := scopeAttrsFrom(ctx)
+	combined := make([]slog.Attr, len(parent)+len(attrs))
+	copy(combined, parent)
+	copy(combined[len(parent):], attrs)
+	return context.WithValue(ctx, scopeKey, combined)
+}
+
+func scopeAttrsFrom(ctx context.Context) ([]slog.Attr, bool) {
+	attrs, ok := ctx.Value(scopeKey).([]slog.Attr)
+	return attrs, ok
+}
 
 // WithRequestID returns a context carrying the request-id, so any *Context log
 // call made under it emits request_id with no explicit plumbing.

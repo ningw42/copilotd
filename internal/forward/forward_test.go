@@ -33,7 +33,7 @@ func newTestForwarder(provider identity.Provider, client *http.Client, outboundT
 
 func newTestForwarderWithLogger(provider identity.Provider, client *http.Client, outboundTimeout, writeTimeout, streamIdleTimeout, streamKeepaliveInterval time.Duration, maxRequestBytes, maxBufferedResponseBytes int64, logger *slog.Logger, registry shim.Registry, options ...Option) *Forwarder {
 	caller := upstreampolicy.New(provider, client, outboundTimeout, maxBufferedResponseBytes, logger)
-	return New(caller, outboundTimeout, writeTimeout, streamIdleTimeout, streamKeepaliveInterval, maxRequestBytes, registry, options...)
+	return New(caller, outboundTimeout, writeTimeout, streamIdleTimeout, streamKeepaliveInterval, maxRequestBytes, registry, logger, options...)
 }
 
 type requestMutationShim struct {
@@ -195,7 +195,7 @@ func TestHTTPHandlersTrimCredentialBaseURLTrailingSlash(t *testing.T) {
 
 func TestForwardDoCorrelatesThroughConfiguredCallerLogger(t *testing.T) {
 	var logs bytes.Buffer
-	logger, err := logging.NewWithWriter(&logs, config.ServeConfig{LogLevel: "info", LogFormat: "text"})
+	logger, err := logging.NewWithWriter(&logs, config.ServeConfig{LogLevel: "debug", LogFormat: "text"})
 	if err != nil {
 		t.Fatalf("build configured logger: %v", err)
 	}
@@ -207,7 +207,7 @@ func TestForwardDoCorrelatesThroughConfiguredCallerLogger(t *testing.T) {
 			Request:    r,
 		}, nil
 	})}
-	f := newTestForwarderWithLogger(readyStub("https://upstream.invalid"), client, time.Second, time.Second, time.Second, time.Second, 1<<20, 1<<20, logger, nil, WithLogger(logger))
+	f := newTestForwarderWithLogger(readyStub("https://upstream.invalid"), client, time.Second, time.Second, time.Second, time.Second, 1<<20, 1<<20, logger, nil)
 	request := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{}`))
 	request = request.WithContext(logging.WithRequestID(request.Context(), "copilotd-request-id"))
 
@@ -394,7 +394,7 @@ func TestForwardBufferedResponseOverCapRendersBeforeCommit(t *testing.T) {
 	provider := readyStub("https://upstream.invalid")
 	caller := upstreampolicy.New(provider, client, time.Second, 8, slog.Default())
 	// The inference path must use the cap owned by the shared Caller.
-	f := New(caller, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, registry)
+	f := New(caller, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, registry, slog.Default())
 	rec := newDeadlineRecorder()
 
 	f.Handler(endpoint.OpenAIResponsesHTTP())(rec, httptest.NewRequest(http.MethodPost, "/openai/v1/responses", strings.NewReader(`{}`)))
@@ -502,7 +502,7 @@ func TestForwardBufferedReadTimeoutRendersClassifiedGatewayTimeout(t *testing.T)
 			return &bufferedResponseShim{}
 		},
 	}}
-	f := newTestForwarderWithLogger(readyStub("https://upstream.invalid"), client, 20*time.Millisecond, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, logger, registry, WithLogger(logger))
+	f := newTestForwarderWithLogger(readyStub("https://upstream.invalid"), client, 20*time.Millisecond, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, logger, registry)
 	recorder := newDeadlineRecorder()
 
 	f.Handler(endpoint.OpenAIResponsesHTTP())(recorder, httptest.NewRequest(http.MethodPost, "/openai/v1/responses", strings.NewReader(`{}`)))
@@ -1176,13 +1176,18 @@ func TestForwardStreamShimPanicRendersNativeTerminalAndReleasesUpstream(t *testi
 func TestForwardSuppressesPostTerminalShimPanicAndRecordsIt(t *testing.T) {
 	const terminal = "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
 	const trailing = "event: vendor.trailing\ndata: SECRET-TRAILING-CONTENT\n\n"
+	const requestID = "suppressed-shim-request-id"
+	const upstreamRequestID = "suppressed-shim-upstream-id"
 	body := &observedReadCloser{reader: strings.NewReader(terminal + trailing)}
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		return &http.Response{
 			StatusCode: http.StatusOK,
-			Header:     http.Header{"Content-Type": {"text/event-stream"}},
-			Body:       body,
-			Request:    r,
+			Header: http.Header{
+				"Content-Type":                 {"text/event-stream"},
+				upstreampolicy.RequestIDHeader: {upstreamRequestID},
+			},
+			Body:    body,
+			Request: r,
 		}, nil
 	})}
 	registry := shim.Registry{{
@@ -1192,11 +1197,14 @@ func TestForwardSuppressesPostTerminalShimPanicAndRecordsIt(t *testing.T) {
 			return &postTerminalPanickingEventShim{}
 		},
 	}}
-	f := newTestForwarder(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, registry)
 	var logs bytes.Buffer
-	f.logger = slog.New(slog.NewTextHandler(&logs, nil))
+	logger, err := logging.NewWithWriter(&logs, config.ServeConfig{LogLevel: "info", LogFormat: "text"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := newTestForwarderWithLogger(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, logger, registry)
 	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{"stream":true}`))
-	ctx := WithStreamResultHolder(req.Context())
+	ctx := WithStreamResultHolder(logging.WithRequestID(req.Context(), requestID))
 	req = req.WithContext(ctx)
 	rec := newDeadlineRecorder()
 
@@ -1213,7 +1221,7 @@ func TestForwardSuppressesPostTerminalShimPanicAndRecordsIt(t *testing.T) {
 		t.Errorf("suppressed shim panic count = %d, want 1", got)
 	}
 	logText := logs.String()
-	if !strings.Contains(logText, "suppressed post-terminal shim error") || !strings.Contains(logText, "stage=transform") {
+	if !strings.Contains(logText, "suppressed post-terminal shim error") || !strings.Contains(logText, "stage=transform") || !strings.Contains(logText, "request_id="+requestID) || !strings.Contains(logText, "upstream_request_id="+upstreamRequestID) {
 		t.Errorf("warning = %q, want suppression metadata", logText)
 	}
 	for _, secret := range []string{"SECRET-POST-TERMINAL-PANIC", "SECRET-TRAILING-CONTENT"} {

@@ -41,14 +41,16 @@ currently non-context**, and every logger-bearing boundary in the binary. It
 Thirteen observable changes follow; they are enumerated once, in
 [Behaviour changes](#behaviour-changes).
 
-Three things the closed tickets did not anticipate turned up in the live tree
+Four things the closed tickets did not anticipate turned up in the live tree
 and are settled here rather than left to the implementer: net/http's `ErrorLog`
 bridge would silently acquire a false Component
 ([The one component-free consumer](#the-one-component-free-consumer)); today's
 access record labels a `ServeMux` redirect it never served
-([Absence is the unmatched state](#absence-is-the-unmatched-state)); and two
+([Absence is the unmatched state](#absence-is-the-unmatched-state)); two
 production records can already emit duplicate top-level keys
-([Two live key collisions](#two-live-key-collisions)).
+([Two live key collisions](#two-live-key-collisions)); and making the cache use
+the central registry closes an existing import chain into a cycle
+([The registry import cycle](#the-registry-import-cycle)).
 
 ## Motivation
 
@@ -295,6 +297,22 @@ After the renames no production record can produce a duplicate top-level key.
 That is a property of the call sites, not of the handler: logging still does
 nothing special about collisions, and a future one renders under native slog
 semantics.
+
+### The registry import cycle
+
+**Not anticipated by any ticket.** Registry provenance makes `internal/cache`
+import `internal/logging`, while `internal/logging.New` keeps its required
+`config.ServeConfig` signature. The starting tree's configuration validator
+imported `internal/impersonation` solely to reuse its bare-version predicate,
+and impersonation imports cache. Leaving that edge in place would therefore
+close `cache -> logging -> config -> impersonation -> cache`, which Go rejects.
+
+The bare semantic-version predicate moves unchanged into the dependency-leaf
+`internal/bareversion` package, and both configuration validation and
+impersonation discovery call it there. This removes the cycle without changing
+the accepted version grammar, configuration surface, defaults, or runtime
+behaviour; focused tests at the leaf plus the existing config and impersonation
+suites keep both consumers on the one predicate.
 
 ### `failure_class` values are not registry entries
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,10 @@ import (
 	"time"
 )
 
+func discardLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
 func TestPumpSilentUpstreamStallsAndJoinsReader(t *testing.T) {
 	body := newBlockingAfterFrameBody("")
 	dst := &deadlineResponseWriter{header: make(http.Header)}
@@ -21,7 +26,7 @@ func TestPumpSilentUpstreamStallsAndJoinsReader(t *testing.T) {
 	done := make(chan Result, 1)
 
 	go func() {
-		done <- Pump(ctx, cancel, body, dst, Policy{
+		done <- Pump(ctx, cancel, body, dst, discardLogger(), Policy{
 			Terminal: func(string) bool { return false },
 			RenderError: func(w http.ResponseWriter, outcome Outcome) error {
 				if outcome != OutcomeStall {
@@ -77,7 +82,7 @@ func TestPumpSlowDownstreamWriteIsExcludedFromStallStopwatch(t *testing.T) {
 	done := make(chan Result, 1)
 
 	go func() {
-		done <- Pump(ctx, cancel, upstream, dst, Policy{
+		done <- Pump(ctx, cancel, upstream, dst, discardLogger(), Policy{
 			Terminal:     func(eventType string) bool { return eventType == "message_stop" },
 			RenderError:  func(http.ResponseWriter, Outcome) error { return errors.New("unexpected synthesized terminal") },
 			WriteTimeout: time.Minute,
@@ -128,7 +133,7 @@ func TestPumpAnthropicPingFramesResetStallStopwatch(t *testing.T) {
 	done := make(chan Result, 1)
 
 	go func() {
-		done <- Pump(ctx, cancel, upstream, dst, Policy{
+		done <- Pump(ctx, cancel, upstream, dst, discardLogger(), Policy{
 			Terminal:     func(eventType string) bool { return eventType == "message_stop" || eventType == "error" },
 			RenderError:  func(http.ResponseWriter, Outcome) error { return errors.New("unexpected synthesized terminal") },
 			WriteTimeout: time.Minute,
@@ -177,7 +182,7 @@ func TestPumpInjectsKeepaliveAtEachOpenAIIdleGap(t *testing.T) {
 	done := make(chan Result, 1)
 
 	go func() {
-		done <- Pump(ctx, cancel, body, dst, Policy{
+		done <- Pump(ctx, cancel, body, dst, discardLogger(), Policy{
 			Terminal: func(string) bool { return false },
 			RenderError: func(http.ResponseWriter, Outcome) error {
 				t.Error("keepalive-only idle gap unexpectedly synthesized an error")
@@ -222,7 +227,7 @@ func TestPumpRealFramesResetOpenAIKeepaliveSchedule(t *testing.T) {
 	done := make(chan Result, 1)
 
 	go func() {
-		done <- Pump(ctx, cancel, upstream, dst, Policy{
+		done <- Pump(ctx, cancel, upstream, dst, discardLogger(), Policy{
 			Terminal:          func(eventType string) bool { return eventType == "response.completed" },
 			RenderError:       func(http.ResponseWriter, Outcome) error { return errors.New("unexpected synthesized terminal") },
 			WriteTimeout:      time.Minute,
@@ -267,7 +272,7 @@ func TestPumpOpenAIKeepalivesNeverDelayStall(t *testing.T) {
 	done := make(chan Result, 1)
 
 	go func() {
-		done <- Pump(ctx, cancel, body, dst, Policy{
+		done <- Pump(ctx, cancel, body, dst, discardLogger(), Policy{
 			Terminal: func(string) bool { return false },
 			RenderError: func(w http.ResponseWriter, outcome Outcome) error {
 				if outcome != OutcomeStall {
@@ -314,7 +319,7 @@ func TestPumpFrameArrivingDuringSlowKeepaliveBeatsStall(t *testing.T) {
 		done := make(chan Result, 1)
 
 		go func() {
-			done <- Pump(ctx, cancel, upstream, dst, Policy{
+			done <- Pump(ctx, cancel, upstream, dst, discardLogger(), Policy{
 				Terminal: func(eventType string) bool { return eventType == "response.completed" },
 				RenderError: func(w http.ResponseWriter, _ Outcome) error {
 					if _, err := io.WriteString(w, "stalled"); err != nil {
@@ -386,7 +391,7 @@ func TestPumpKeepaliveWriteFailureIsClientCancelWithNoFurtherOutput(t *testing.T
 	done := make(chan Result, 1)
 
 	go func() {
-		done <- Pump(ctx, cancel, body, dst, Policy{
+		done <- Pump(ctx, cancel, body, dst, discardLogger(), Policy{
 			Terminal: func(string) bool { return false },
 			RenderError: func(http.ResponseWriter, Outcome) error {
 				t.Error("keepalive write failure unexpectedly synthesized an error")
@@ -422,7 +427,7 @@ func TestPumpCancellationSuppressesReadyKeepaliveAndFurtherOutput(t *testing.T) 
 	done := make(chan Result, 1)
 
 	go func() {
-		done <- Pump(ctx, cancel, body, dst, Policy{
+		done <- Pump(ctx, cancel, body, dst, discardLogger(), Policy{
 			Terminal: func(string) bool { return false },
 			RenderError: func(http.ResponseWriter, Outcome) error {
 				t.Error("cancellation unexpectedly synthesized an error")
@@ -456,7 +461,7 @@ func TestPumpForwardsUpstreamErrorTerminalWithoutSynthesis(t *testing.T) {
 	dst := &deadlineResponseWriter{header: make(http.Header)}
 	ctx, cancel := context.WithCancel(context.Background())
 
-	result := Pump(ctx, cancel, io.NopCloser(strings.NewReader(terminal)), dst, Policy{
+	result := Pump(ctx, cancel, io.NopCloser(strings.NewReader(terminal)), dst, discardLogger(), Policy{
 		Terminal: func(eventType string) bool {
 			return eventType == "message_stop" || eventType == "error"
 		},
@@ -485,7 +490,7 @@ func TestPumpTerminalFollowedByReadErrorRemainsClean(t *testing.T) {
 	dst := &deadlineResponseWriter{header: make(http.Header)}
 	ctx, cancel := context.WithCancel(context.Background())
 
-	result := Pump(ctx, cancel, body, dst, Policy{
+	result := Pump(ctx, cancel, body, dst, discardLogger(), Policy{
 		Terminal: func(eventType string) bool { return eventType == "message_stop" },
 		RenderError: func(http.ResponseWriter, Outcome) error {
 			t.Error("read error after an upstream terminal was doubled with a synthesized error")
@@ -512,7 +517,7 @@ func TestPumpTerminalFollowedByIdleTimeoutRemainsClean(t *testing.T) {
 	done := make(chan Result, 1)
 
 	go func() {
-		done <- Pump(ctx, cancel, body, dst, Policy{
+		done <- Pump(ctx, cancel, body, dst, discardLogger(), Policy{
 			Terminal: func(eventType string) bool { return eventType == "message_stop" },
 			RenderError: func(http.ResponseWriter, Outcome) error {
 				t.Error("idle timeout after an upstream terminal was doubled with a synthesized error")
@@ -546,7 +551,7 @@ func TestPumpTerminalFollowedByKeepaliveTickRemainsClean(t *testing.T) {
 	done := make(chan Result, 1)
 
 	go func() {
-		done <- Pump(ctx, cancel, body, dst, Policy{
+		done <- Pump(ctx, cancel, body, dst, discardLogger(), Policy{
 			Terminal: func(eventType string) bool { return eventType == "response.completed" },
 			RenderError: func(http.ResponseWriter, Outcome) error {
 				t.Error("keepalive tick after an upstream terminal synthesized an error")
@@ -581,7 +586,7 @@ func TestPumpClientContextCancellationStopsUpstreamAndJoinsReader(t *testing.T) 
 
 	done := make(chan Result, 1)
 	go func() {
-		done <- Pump(ctx, cancel, body, dst, Policy{
+		done <- Pump(ctx, cancel, body, dst, discardLogger(), Policy{
 			Terminal: func(string) bool { return false },
 			RenderError: func(http.ResponseWriter, Outcome) error {
 				t.Error("client cancellation unexpectedly synthesized an error")
@@ -634,7 +639,7 @@ func TestPumpDownstreamWriteFailureIsClientCancelAndJoinsReader(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 
-	result := Pump(ctx, cancel, body, dst, Policy{
+	result := Pump(ctx, cancel, body, dst, discardLogger(), Policy{
 		Terminal: func(string) bool { return false },
 		RenderError: func(http.ResponseWriter, Outcome) error {
 			t.Error("write failure unexpectedly synthesized an error")
@@ -670,7 +675,7 @@ func TestPumpDownstreamFlushFailureIsClientCancelAndJoinsReader(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 
-	result := Pump(ctx, cancel, body, dst, Policy{
+	result := Pump(ctx, cancel, body, dst, discardLogger(), Policy{
 		Terminal: func(string) bool { return false },
 		RenderError: func(http.ResponseWriter, Outcome) error {
 			t.Error("flush failure unexpectedly synthesized an error")
@@ -706,7 +711,7 @@ func TestPumpSetWriteDeadlineFailureIsClientCancelWithNoWireOutput(t *testing.T)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 
-	result := Pump(ctx, cancel, body, dst, Policy{
+	result := Pump(ctx, cancel, body, dst, discardLogger(), Policy{
 		Terminal: func(string) bool { return false },
 		RenderError: func(http.ResponseWriter, Outcome) error {
 			t.Error("write-deadline failure unexpectedly synthesized an error")
@@ -742,7 +747,7 @@ func TestPumpExceededWriteDeadlineIsClientCancelWithNoWireOutput(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 
-	result := Pump(ctx, cancel, body, dst, Policy{
+	result := Pump(ctx, cancel, body, dst, discardLogger(), Policy{
 		Terminal: func(string) bool { return false },
 		RenderError: func(http.ResponseWriter, Outcome) error {
 			t.Error("exceeded write deadline unexpectedly synthesized an error")
@@ -772,7 +777,7 @@ func TestPumpSynthesizedTerminalWriteFailureBecomesClientCancel(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 
-	result := Pump(ctx, cancel, io.NopCloser(strings.NewReader("")), dst, Policy{
+	result := Pump(ctx, cancel, io.NopCloser(strings.NewReader("")), dst, discardLogger(), Policy{
 		Terminal: func(string) bool { return false },
 		RenderError: func(w http.ResponseWriter, _ Outcome) error {
 			if _, err := io.WriteString(w, "synthesized terminal"); err != nil {
@@ -799,7 +804,7 @@ func TestPumpCancellationWinsConcurrentUpstreamReadError(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan Result, 1)
 		go func() {
-			done <- Pump(ctx, cancel, body, dst, Policy{
+			done <- Pump(ctx, cancel, body, dst, discardLogger(), Policy{
 				Terminal: func(string) bool { return false },
 				RenderError: func(http.ResponseWriter, Outcome) error {
 					t.Error("concurrent cancellation rendered an upstream error")
@@ -830,7 +835,7 @@ func TestPumpCancellationWinsConcurrentStallTick(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan Result, 1)
 		go func() {
-			done <- Pump(ctx, cancel, body, dst, Policy{
+			done <- Pump(ctx, cancel, body, dst, discardLogger(), Policy{
 				Terminal: func(string) bool { return false },
 				RenderError: func(http.ResponseWriter, Outcome) error {
 					t.Error("concurrent cancellation rendered a stalled terminal")
@@ -893,7 +898,7 @@ func TestPumpWedgedClientWriteDeadlineIsClientCancelAndReleasesUpstream(t *testi
 			handlerErrors <- err
 			return
 		}
-		results <- Pump(ctx, cancel, resp.Body, w, Policy{
+		results <- Pump(ctx, cancel, resp.Body, w, discardLogger(), Policy{
 			Terminal: func(string) bool { return false },
 			RenderError: func(http.ResponseWriter, Outcome) error {
 				rendered <- struct{}{}
@@ -953,7 +958,7 @@ func TestPumpForwardsCleanStreamVerbatim(t *testing.T) {
 	dst := &deadlineResponseWriter{header: make(http.Header)}
 	ctx, cancel := context.WithCancel(context.Background())
 
-	result := Pump(ctx, cancel, io.NopCloser(strings.NewReader(first+terminal)), dst, Policy{
+	result := Pump(ctx, cancel, io.NopCloser(strings.NewReader(first+terminal)), dst, discardLogger(), Policy{
 		Terminal: func(eventType string) bool {
 			return eventType == "message_stop" || eventType == "error"
 		},
@@ -998,7 +1003,7 @@ func TestPumpSynthesizesTerminalOnUpstreamReadError(t *testing.T) {
 	dst := &deadlineResponseWriter{header: make(http.Header)}
 	ctx, cancel := context.WithCancel(context.Background())
 
-	result := Pump(ctx, cancel, body, dst, Policy{
+	result := Pump(ctx, cancel, body, dst, discardLogger(), Policy{
 		Terminal: func(eventType string) bool {
 			return eventType == "message_stop" || eventType == "error"
 		},
@@ -1035,7 +1040,7 @@ func TestPumpSynthesizesTerminalWhenEOFHasNoTerminal(t *testing.T) {
 	dst := &deadlineResponseWriter{header: make(http.Header)}
 	ctx, cancel := context.WithCancel(context.Background())
 
-	result := Pump(ctx, cancel, io.NopCloser(strings.NewReader(upstream)), dst, Policy{
+	result := Pump(ctx, cancel, io.NopCloser(strings.NewReader(upstream)), dst, discardLogger(), Policy{
 		Terminal: func(eventType string) bool {
 			return eventType == "message_stop" || eventType == "error"
 		},

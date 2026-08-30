@@ -16,6 +16,7 @@ import (
 	"github.com/ningw42/copilotd/internal/cache"
 	"github.com/ningw42/copilotd/internal/catalog"
 	"github.com/ningw42/copilotd/internal/config"
+	"github.com/ningw42/copilotd/internal/logging"
 )
 
 func noEnv() func(string) (string, bool) {
@@ -175,7 +176,11 @@ func TestProductionCodexModelsEdgeUsesGitHubAndDedicatedPlainClient(t *testing.T
 
 func TestLogCachedValueStartupOutcomesIncludesCodexModelsWhenRegistered(t *testing.T) {
 	var buf bytes.Buffer
-	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	base, err := logging.NewWithWriter(&buf, config.ServeConfig{LogLevel: "debug", LogFormat: "text"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	logger := logging.ForComponent(base, "cmd/copilotd")
 	logCachedValueStartupOutcomes(logger, []cache.Status{
 		{Name: "vscode", Source: "fetched"},
 		{Name: "copilot_chat", Source: "fallback"},
@@ -185,9 +190,10 @@ func TestLogCachedValueStartupOutcomesIncludesCodexModelsWhenRegistered(t *testi
 	out := buf.String()
 	for _, want := range []string{
 		"startup cached value refresh outcome",
-		"cached_value=vscode source=fetched",
-		"cached_value=copilot_chat source=fallback",
-		"cached_value=codex_models source=fallback version=rust-v0.144.5",
+		"component=cmd/copilotd",
+		"cached_value=vscode cached_value_source=fetched",
+		"cached_value=copilot_chat cached_value_source=fallback",
+		"cached_value=codex_models cached_value_source=fallback cached_value_version=rust-v0.144.5",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("startup log missing %q: %s", want, out)

@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"log/slog"
 	"net"
 	"net/http"
@@ -17,6 +18,7 @@ import (
 	"github.com/ningw42/copilotd/internal/config"
 	"github.com/ningw42/copilotd/internal/forward"
 	"github.com/ningw42/copilotd/internal/identity"
+	"github.com/ningw42/copilotd/internal/logging"
 	"github.com/ningw42/copilotd/internal/wsforward"
 )
 
@@ -60,16 +62,16 @@ type websocketDrainer interface {
 // metric. The listener is supplied later to Run, so main owns bind and the
 // server owns serve/shutdown.
 // Invariant: catalog settings cross the render seam only through catalogs, never through cfg.
-func New(cfg config.ServeConfig, logger *slog.Logger, provider identity.Provider, observers ReadyObservers, fwd *forward.Forwarder, source catalog.Source, wsProxy *wsforward.Proxy, streamOutcomes StreamOutcomeObserver, catalogs catalog.RenderDescriptors) *Server {
+func New(cfg config.ServeConfig, logger, catalogLogger *slog.Logger, dependencyErrorLog *log.Logger, provider identity.Provider, observers ReadyObservers, fwd *forward.Forwarder, source catalog.Source, wsProxy *wsforward.Proxy, streamOutcomes StreamOutcomeObserver, catalogs catalog.RenderDescriptors) *Server {
 	httpServer := &http.Server{
-		Handler:           newHandler(cfg.APIKey, provider, observers, fwd, source, logger, streamOutcomes, catalogs, wsProxy),
+		Handler:           newHandler(cfg.APIKey, provider, observers, fwd, source, logger, catalogLogger, streamOutcomes, catalogs, wsProxy),
 		ReadHeaderTimeout: readHeaderTimeout,
 		ReadTimeout:       readTimeout,
 		WriteTimeout:      writeTimeout,
 		IdleTimeout:       idleTimeout,
-		// Bridge the server's internal errors into the structured logger so
-		// all output shares one format and destination.
-		ErrorLog: slog.NewLogLogger(logger.Handler(), slog.LevelWarn),
+		// Bridge the server's dependency-owned errors into the shared format and
+		// destination without falsely attributing them to internal/server.
+		ErrorLog: dependencyErrorLog,
 	}
 	return &Server{
 		cfg:    cfg,
@@ -85,7 +87,7 @@ func New(cfg config.ServeConfig, logger *slog.Logger, provider identity.Provider
 func (s *Server) Run(ctx context.Context, ln net.Listener) error {
 	serveErr := make(chan error, 1)
 	go func() {
-		s.logger.InfoContext(ctx, "listening", slog.String("addr", ln.Addr().String()))
+		s.logger.InfoContext(ctx, "listening", slog.String(logging.AddrKey, ln.Addr().String()))
 		serveErr <- s.http.Serve(ln)
 	}()
 
@@ -101,7 +103,7 @@ func (s *Server) Run(ctx context.Context, ln net.Listener) error {
 }
 
 func (s *Server) shutdown() error {
-	s.logger.Info("shutting down", slog.Duration("timeout", s.cfg.ShutdownTimeout))
+	s.logger.Info("shutting down", slog.Duration(logging.TimeoutKey, s.cfg.ShutdownTimeout))
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), s.cfg.ShutdownTimeout)
 	defer cancel()
 	s.ws.StartDrain()

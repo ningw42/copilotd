@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -194,11 +193,11 @@ func TestProxyObservesOnePreUpgradeAcceptOutcome(t *testing.T) {
 	}
 }
 
-func TestProxyLogsClientClosedSessionWithDirectionalCounts(t *testing.T) {
+func TestProxyPublishesClientClosedSessionWithDirectionalCounts(t *testing.T) {
 	observed := &recordingWsMetrics{}
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logs, nil))
-	client, handlerDone, cleanup := startTelemetrySession(t, logger, observed, 1<<20, func(conn *websocket.Conn) {
+	client, handlerDone, resultContexts, cleanup := startTelemetrySession(t, logger, observed, 1<<20, func(conn *websocket.Conn) {
 		for {
 			messageType, payload, err := conn.Read(context.Background())
 			if err != nil {
@@ -244,23 +243,27 @@ func TestProxyLogsClientClosedSessionWithDirectionalCounts(t *testing.T) {
 		t.Errorf("terminal observations = %v, want [client_closed]", terminals)
 	}
 
-	totalBytes := len(messages[0]) + len(messages[1])
+	totalBytes := int64(len(messages[0]) + len(messages[1]))
+	result := publishedSessionResult(t, resultContexts)
+	wantResult := SessionResult{
+		Terminal:  SessionClientClosed,
+		CloseCode: int(websocket.StatusNormalClosure),
+		MsgsC2U:   2,
+		MsgsU2C:   2,
+		BytesC2U:  totalBytes,
+		BytesU2C:  totalBytes,
+	}
+	if result != wantResult {
+		t.Errorf("session result = %#v, want %#v", result, wantResult)
+	}
 	out := logs.String()
-	for _, want := range []string{
-		`msg="websocket session"`,
-		"level=INFO",
-		"request_id=request-telemetry",
-		"msgs_c2u=2",
-		"msgs_u2c=2",
-		fmt.Sprintf("bytes_c2u=%d", totalBytes),
-		fmt.Sprintf("bytes_u2c=%d", totalBytes),
-		"close_code=1000",
-		"terminal_reason=client_closed",
-		"duration=",
-	} {
+	for _, want := range []string{`msg="websocket established"`, "status=101", "handshake_duration="} {
 		if !strings.Contains(out, want) {
-			t.Errorf("session log missing %q:\n%s", want, out)
+			t.Errorf("establishment log missing %q:\n%s", want, out)
 		}
+	}
+	if strings.Contains(out, `msg="websocket session"`) {
+		t.Errorf("duplicate terminal session log emitted:\n%s", out)
 	}
 	for _, secret := range []string{"private-payload", "private-copilot-token"} {
 		if strings.Contains(out, secret) {
@@ -282,7 +285,7 @@ func TestProxyDroppedClientMessageIsNotForwardedOrCounted(t *testing.T) {
 		},
 	}}
 	received := make(chan string, 1)
-	client, handlerDone, cleanup := startTelemetrySessionWithRegistry(
+	client, handlerDone, resultContexts, cleanup := startTelemetrySessionWithRegistry(
 		t,
 		slog.New(slog.NewTextHandler(&logs, nil)),
 		observed,
@@ -323,10 +326,9 @@ func TestProxyDroppedClientMessageIsNotForwardedOrCounted(t *testing.T) {
 	}
 	waitForHandler(t, handlerDone)
 
-	for _, want := range []string{"msgs_c2u=1", "bytes_c2u=4"} {
-		if !strings.Contains(logs.String(), want) {
-			t.Errorf("session log missing %q:\n%s", want, logs.String())
-		}
+	result := publishedSessionResult(t, resultContexts)
+	if result.MsgsC2U != 1 || result.BytesC2U != 4 {
+		t.Errorf("client-to-upstream session result = %#v, want one four-byte message", result)
 	}
 }
 
@@ -342,7 +344,7 @@ func TestProxyDroppedServerMessageIsNotForwardedOrCounted(t *testing.T) {
 			})
 		},
 	}}
-	client, handlerDone, cleanup := startTelemetrySessionWithRegistry(
+	client, handlerDone, resultContexts, cleanup := startTelemetrySessionWithRegistry(
 		t,
 		slog.New(slog.NewTextHandler(&logs, nil)),
 		observed,
@@ -370,10 +372,9 @@ func TestProxyDroppedServerMessageIsNotForwardedOrCounted(t *testing.T) {
 	}
 	waitForHandler(t, handlerDone)
 
-	for _, want := range []string{"msgs_u2c=1", "bytes_u2c=4"} {
-		if !strings.Contains(logs.String(), want) {
-			t.Errorf("session log missing %q:\n%s", want, logs.String())
-		}
+	result := publishedSessionResult(t, resultContexts)
+	if result.MsgsU2C != 1 || result.BytesU2C != 4 {
+		t.Errorf("upstream-to-client session result = %#v, want one four-byte message", result)
 	}
 }
 
@@ -394,7 +395,7 @@ func TestProxyClientMessageShimPanicIsWarnedAndRedacted(t *testing.T) {
 		},
 	}}
 	upstreamClosed := make(chan websocket.StatusCode, 1)
-	client, handlerDone, cleanup := startTelemetrySessionWithRegistry(
+	client, handlerDone, resultContexts, cleanup := startTelemetrySessionWithRegistry(
 		t,
 		slog.New(slog.NewTextHandler(&logs, nil)),
 		observed,
@@ -430,12 +431,11 @@ func TestProxyClientMessageShimPanicIsWarnedAndRedacted(t *testing.T) {
 	if len(terminals) != 1 || terminals[0] != SessionError {
 		t.Errorf("terminal observations = %v, want [error]", terminals)
 	}
-	logText := logs.String()
-	for _, want := range []string{"level=WARN", "close_code=1011", "terminal_reason=error", "request_id=request-telemetry"} {
-		if !strings.Contains(logText, want) {
-			t.Errorf("session log missing %q:\n%s", want, logText)
-		}
+	result := publishedSessionResult(t, resultContexts)
+	if result.Terminal != SessionError || result.CloseCode != int(websocket.StatusInternalError) {
+		t.Errorf("panic session result = %#v, want error/1011", result)
 	}
+	logText := logs.String()
 	for _, secret := range []string{panicSecret, messageSecret, "private-copilot-token"} {
 		if strings.Contains(logText, secret) {
 			t.Errorf("session log leaked %q:\n%s", secret, logText)
@@ -448,7 +448,7 @@ func TestProxyTreatsAbruptClientDisconnectAsCleanClientClosure(t *testing.T) {
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logs, nil))
 	upstreamClosed := make(chan websocket.StatusCode, 1)
-	client, handlerDone, cleanup := startTelemetrySession(t, logger, observed, 1<<20, func(conn *websocket.Conn) {
+	client, handlerDone, resultContexts, cleanup := startTelemetrySession(t, logger, observed, 1<<20, func(conn *websocket.Conn) {
 		_, _, err := conn.Read(context.Background())
 		upstreamClosed <- websocket.CloseStatus(err)
 	})
@@ -471,17 +471,16 @@ func TestProxyTreatsAbruptClientDisconnectAsCleanClientClosure(t *testing.T) {
 	if len(terminals) != 1 || terminals[0] != SessionClientClosed {
 		t.Errorf("terminal observations = %v, want [client_closed]", terminals)
 	}
-	for _, want := range []string{"level=INFO", "close_code=1001", "terminal_reason=client_closed"} {
-		if !strings.Contains(logs.String(), want) {
-			t.Errorf("session log missing %q:\n%s", want, logs.String())
-		}
+	result := publishedSessionResult(t, resultContexts)
+	if result.Terminal != SessionClientClosed || result.CloseCode != int(websocket.StatusGoingAway) {
+		t.Errorf("abrupt-close session result = %#v, want client_closed/1001", result)
 	}
 }
 
-func TestProxyLogsUpstreamCloseAsCleanTerminal(t *testing.T) {
+func TestProxyPublishesUpstreamCloseAsCleanTerminal(t *testing.T) {
 	observed := &recordingWsMetrics{}
 	var logs bytes.Buffer
-	client, handlerDone, cleanup := startTelemetrySession(
+	client, handlerDone, resultContexts, cleanup := startTelemetrySession(
 		t,
 		slog.New(slog.NewTextHandler(&logs, nil)),
 		observed,
@@ -502,18 +501,16 @@ func TestProxyLogsUpstreamCloseAsCleanTerminal(t *testing.T) {
 	if len(terminals) != 1 || terminals[0] != SessionUpstreamClosed {
 		t.Errorf("terminal observations = %v, want [upstream_closed]", terminals)
 	}
-	out := logs.String()
-	for _, want := range []string{"level=INFO", "close_code=4002", "terminal_reason=upstream_closed"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("session log missing %q:\n%s", want, out)
-		}
+	result := publishedSessionResult(t, resultContexts)
+	if result.Terminal != SessionUpstreamClosed || result.CloseCode != 4002 {
+		t.Errorf("upstream-close session result = %#v, want upstream_closed/4002", result)
 	}
 }
 
-func TestProxyLogsOversizeAsAbnormalTerminal(t *testing.T) {
+func TestProxyPublishesOversizeAsAbnormalTerminal(t *testing.T) {
 	observed := &recordingWsMetrics{}
 	var logs bytes.Buffer
-	client, handlerDone, cleanup := startTelemetrySession(
+	client, handlerDone, resultContexts, cleanup := startTelemetrySession(
 		t,
 		slog.New(slog.NewTextHandler(&logs, nil)),
 		observed,
@@ -537,20 +534,18 @@ func TestProxyLogsOversizeAsAbnormalTerminal(t *testing.T) {
 	if len(terminals) != 1 || terminals[0] != SessionError {
 		t.Errorf("terminal observations = %v, want [error]", terminals)
 	}
-	out := logs.String()
-	for _, want := range []string{"level=WARN", "close_code=1009", "terminal_reason=error"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("session log missing %q:\n%s", want, out)
-		}
+	result := publishedSessionResult(t, resultContexts)
+	if result.Terminal != SessionError || result.CloseCode != int(websocket.StatusMessageTooBig) {
+		t.Errorf("oversize session result = %#v, want error/1009", result)
 	}
 }
 
-func startTelemetrySession(t *testing.T, logger *slog.Logger, observed *recordingWsMetrics, maxMessageBytes int64, serveUpstream func(*websocket.Conn)) (*websocket.Conn, <-chan struct{}, func()) {
+func startTelemetrySession(t *testing.T, logger *slog.Logger, observed *recordingWsMetrics, maxMessageBytes int64, serveUpstream func(*websocket.Conn)) (*websocket.Conn, <-chan struct{}, <-chan context.Context, func()) {
 	t.Helper()
 	return startTelemetrySessionWithRegistry(t, logger, observed, maxMessageBytes, nil, serveUpstream)
 }
 
-func startTelemetrySessionWithRegistry(t *testing.T, logger *slog.Logger, observed *recordingWsMetrics, maxMessageBytes int64, registry shim.Registry, serveUpstream func(*websocket.Conn)) (*websocket.Conn, <-chan struct{}, func()) {
+func startTelemetrySessionWithRegistry(t *testing.T, logger *slog.Logger, observed *recordingWsMetrics, maxMessageBytes int64, registry shim.Registry, serveUpstream func(*websocket.Conn)) (*websocket.Conn, <-chan struct{}, <-chan context.Context, func()) {
 	t.Helper()
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -577,8 +572,10 @@ func startTelemetrySessionWithRegistry(t *testing.T, logger *slog.Logger, observ
 		WsMetrics{Accept: observed, SessionTerminal: observed},
 	)
 	handlerDone := make(chan struct{})
+	resultContexts := make(chan context.Context, 1)
 	downstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ctx := logging.WithRequestID(r.Context(), "request-telemetry")
+		ctx := WithSessionResultHolder(logging.WithRequestID(r.Context(), "request-telemetry"))
+		resultContexts <- ctx
 		proxy.Handler(endpoint.OpenAIResponsesWS()).ServeHTTP(w, r.WithContext(ctx))
 		close(handlerDone)
 	}))
@@ -603,7 +600,17 @@ func startTelemetrySessionWithRegistry(t *testing.T, logger *slog.Logger, observ
 		downstream.Close()
 		upstream.Close()
 	}
-	return client, handlerDone, cleanup
+	return client, handlerDone, resultContexts, cleanup
+}
+
+func publishedSessionResult(t *testing.T, contexts <-chan context.Context) SessionResult {
+	t.Helper()
+	ctx := <-contexts
+	result, ok := SessionResultFromContext(ctx)
+	if !ok {
+		t.Fatal("WebSocket handler published no session result")
+	}
+	return result
 }
 
 func waitForHandler(t *testing.T, handlerDone <-chan struct{}) {

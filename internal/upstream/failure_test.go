@@ -160,28 +160,43 @@ func TestCallerCorrelateLogsOnlyDifferentResolvedRequestIDs(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var logs bytes.Buffer
 			logger, err := logging.NewWithWriter(&logs, config.ServeConfig{
-				LogLevel:  "info",
+				LogLevel:  "debug",
 				LogFormat: "text",
 			})
 			if err != nil {
 				t.Fatalf("new logger: %v", err)
 			}
 			caller := &Caller{logger: logger}
+			input := WithCorrelationHolder(tc.ctx)
 			header := make(http.Header)
 			if tc.upstreamRequestID != "" {
 				header.Set("X-Request-Id", tc.upstreamRequestID)
 			}
 
-			caller.Correlate(tc.ctx, header)
+			got := caller.Correlate(input, header)
 
 			logOutput := logs.String()
 			if !tc.wantLog {
+				if got != input {
+					t.Error("absent or equal upstream id derived a new context")
+				}
+				if _, ok := CorrelatedContextFromContext(input); ok {
+					t.Error("absent or equal upstream id published a correlated context")
+				}
 				if logOutput != "" {
 					t.Errorf("correlation log = %q, want none", logOutput)
 				}
 				return
 			}
+			if got == input {
+				t.Error("differing upstream id returned the input context")
+			}
+			published, ok := CorrelatedContextFromContext(input)
+			if !ok || published != got {
+				t.Error("differing upstream id did not publish the returned context")
+			}
 			for _, want := range []string{
+				"level=DEBUG",
 				`msg="upstream response correlation"`,
 				"request_id=copilotd-123",
 				"upstream_request_id=upstream-456",
@@ -190,8 +205,12 @@ func TestCallerCorrelateLogsOnlyDifferentResolvedRequestIDs(t *testing.T) {
 					t.Errorf("correlation log = %q, want %q", logOutput, want)
 				}
 			}
-			if got := strings.Count(logOutput, "\n"); got != 1 {
-				t.Errorf("correlation log records = %d, want 1: %q", got, logOutput)
+			logs.Reset()
+			logger.InfoContext(got, "later response path")
+			for _, want := range []string{"request_id=copilotd-123", "upstream_request_id=upstream-456"} {
+				if !strings.Contains(logs.String(), want) {
+					t.Errorf("later response-path record = %q, want %q", logs.String(), want)
+				}
 			}
 		})
 	}

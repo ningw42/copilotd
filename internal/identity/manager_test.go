@@ -8,10 +8,14 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/ningw42/copilotd/internal/config"
+	"github.com/ningw42/copilotd/internal/logging"
 )
 
 // Manager must satisfy the same Provider seam the Static stub does.
@@ -132,12 +136,11 @@ func TestManagerCurrentMintsCredential(t *testing.T) {
 	}
 
 	t.Run("endpoints.api becomes the credential origin", func(t *testing.T) {
-		m := NewManager(ManagerConfig{
+		m := NewManager(slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), ManagerConfig{
 			OAuthToken:    oauth,
 			GitHubBaseURL: s.server.URL,
 			HTTPClient:    s.server.Client(),
 			Impersonation: testImpersonation(),
-			Logger:        slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
 		})
 		cred, err := m.Current(context.Background())
 		if err != nil {
@@ -181,14 +184,13 @@ func TestManagerReadsLiveImpersonationForEachMintAndCredential(t *testing.T) {
 	s.handler = func(w http.ResponseWriter, r *http.Request) {
 		writeToken(w, "copilot-token", clk.now().Add(25*time.Minute), 1500, "https://api.githubcopilot.com")
 	}
-	m := NewManager(ManagerConfig{
+	m := NewManager(slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), ManagerConfig{
 		OAuthToken:    "gho",
 		GitHubBaseURL: s.server.URL,
 		HTTPClient:    s.server.Client(),
 		Impersonation: impersonation,
 		SafetyMargin:  2 * time.Minute,
 		Clock:         clk.now,
-		Logger:        slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
 	})
 
 	first, err := m.Current(context.Background())
@@ -222,12 +224,11 @@ func TestManagerUsesBuiltInOriginWhenExchangeOmitsIt(t *testing.T) {
 	s.handler = func(w http.ResponseWriter, r *http.Request) {
 		writeToken(w, "copilot-token", time.Now().Add(25*time.Minute), 1500, "")
 	}
-	m := NewManager(ManagerConfig{
+	m := NewManager(slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), ManagerConfig{
 		OAuthToken:    "gho",
 		GitHubBaseURL: s.server.URL,
 		HTTPClient:    s.server.Client(),
 		Impersonation: testImpersonation(),
-		Logger:        slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
 	})
 
 	cred, err := m.Current(context.Background())
@@ -244,12 +245,11 @@ func TestManagerCanonicalizesExchangeOrigin(t *testing.T) {
 	s.handler = func(w http.ResponseWriter, r *http.Request) {
 		writeToken(w, "copilot-token", time.Now().Add(25*time.Minute), 1500, "https://api.individual.githubcopilot.com/")
 	}
-	m := NewManager(ManagerConfig{
+	m := NewManager(slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), ManagerConfig{
 		OAuthToken:    "gho",
 		GitHubBaseURL: s.server.URL,
 		HTTPClient:    s.server.Client(),
 		Impersonation: testImpersonation(),
-		Logger:        slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
 	})
 
 	cred, err := m.Current(context.Background())
@@ -282,12 +282,11 @@ func TestManagerRejectsInvalidExchangeOriginsBeforePublishingCredential(t *testi
 			s.handler = func(w http.ResponseWriter, r *http.Request) {
 				writeToken(w, "copilot-token", time.Now().Add(25*time.Minute), 1500, tc.origin)
 			}
-			m := NewManager(ManagerConfig{
+			m := NewManager(slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), ManagerConfig{
 				OAuthToken:    "gho",
 				GitHubBaseURL: s.server.URL,
 				HTTPClient:    s.server.Client(),
 				Impersonation: testImpersonation(),
-				Logger:        slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
 			})
 
 			cred, err := m.Current(context.Background())
@@ -318,12 +317,11 @@ func TestManagerSingleInFlight(t *testing.T) {
 		<-release // block so concurrent callers pile up on the single key
 		writeToken(w, "copilot-token", time.Now().Add(25*time.Minute), 1500, "https://api.githubcopilot.com")
 	}
-	m := NewManager(ManagerConfig{
+	m := NewManager(slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), ManagerConfig{
 		OAuthToken:    "gho",
 		GitHubBaseURL: s.server.URL,
 		HTTPClient:    s.server.Client(),
 		Impersonation: testImpersonation(),
-		Logger:        slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
 	})
 
 	const n = 50
@@ -373,12 +371,11 @@ func TestManagerCancelOneWaiterDoesNotCancelExchange(t *testing.T) {
 		<-release
 		writeToken(w, "copilot-token", time.Now().Add(25*time.Minute), 1500, "https://api.githubcopilot.com")
 	}
-	m := NewManager(ManagerConfig{
+	m := NewManager(slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), ManagerConfig{
 		OAuthToken:    "gho",
 		GitHubBaseURL: s.server.URL,
 		HTTPClient:    s.server.Client(),
 		Impersonation: testImpersonation(),
-		Logger:        slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
 	})
 
 	ctxA, cancelA := context.WithCancel(context.Background())
@@ -432,14 +429,13 @@ func TestManagerCacheReuseAndSingleAttempt(t *testing.T) {
 		}
 		writeToken(w, "copilot-token", clk.now().Add(25*time.Minute), 1500, "https://api.githubcopilot.com")
 	}
-	m := NewManager(ManagerConfig{
+	m := NewManager(slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), ManagerConfig{
 		OAuthToken:    "gho",
 		GitHubBaseURL: s.server.URL,
 		HTTPClient:    s.server.Client(),
 		Impersonation: testImpersonation(),
 		SafetyMargin:  2 * time.Minute,
 		Clock:         clk.now,
-		Logger:        slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
 	})
 	ctx := context.Background()
 
@@ -510,10 +506,9 @@ func TestManagerExchangeIsOneWireAttempt(t *testing.T) {
 				Request:    r,
 			}, nil
 		})}
-		m := NewManager(ManagerConfig{
+		m := NewManager(slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), ManagerConfig{
 			OAuthToken: "gho",
 			HTTPClient: client,
-			Logger:     slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
 		})
 
 		if _, err := m.Current(context.Background()); err == nil {
@@ -534,11 +529,10 @@ func TestManagerExchangeIsOneWireAttempt(t *testing.T) {
 			}
 			writeToken(w, "redirected-token", time.Now().Add(25*time.Minute), 1500, "https://api.githubcopilot.com")
 		}
-		m := NewManager(ManagerConfig{
+		m := NewManager(slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), ManagerConfig{
 			OAuthToken:    "gho",
 			GitHubBaseURL: s.server.URL,
 			HTTPClient:    s.server.Client(),
-			Logger:        slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
 		})
 
 		if _, err := m.Current(context.Background()); err == nil {
@@ -558,14 +552,18 @@ func TestStartupMintRetryAndShortCircuit(t *testing.T) {
 		s.handler = func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusServiceUnavailable) // 503: transient
 		}
-		m := NewManager(ManagerConfig{
+		var logs bytes.Buffer
+		logger, err := logging.NewWithWriter(&logs, config.ServeConfig{LogLevel: "debug", LogFormat: "text"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		m := NewManager(logger, ManagerConfig{
 			OAuthToken:         "gho",
 			GitHubBaseURL:      s.server.URL,
 			HTTPClient:         s.server.Client(),
 			Impersonation:      testImpersonation(),
 			StartupMintRetries: 3,
 			Backoff:            zeroBackoff,
-			Logger:             slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
 		})
 		m.StartupMint(context.Background())
 		if got := s.hits.Load(); got != 4 {
@@ -574,6 +572,21 @@ func TestStartupMintRetryAndShortCircuit(t *testing.T) {
 		if !m.Ready() {
 			t.Errorf("Ready() = false after exhausted startup mint, want local readiness to remain true")
 		}
+		classified := 0
+		for _, line := range bytes.Split(logs.Bytes(), []byte("\n")) {
+			if bytes.Contains(line, []byte("failure_class=transient")) {
+				classified++
+				if !bytes.Contains(line, []byte("level=DEBUG")) {
+					t.Errorf("startup transient failure is not Debug: %s", line)
+				}
+				if bytes.Contains(line, []byte("request_id=")) {
+					t.Errorf("startup mint record carries request scope: %s", line)
+				}
+			}
+		}
+		if classified != 4 {
+			t.Errorf("classified startup failure records = %d, want 4:\n%s", classified, logs.String())
+		}
 	})
 
 	t.Run("auth-class short-circuits immediately", func(t *testing.T) {
@@ -581,14 +594,13 @@ func TestStartupMintRetryAndShortCircuit(t *testing.T) {
 		s.handler = func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusUnauthorized) // 401: auth-class, permanent
 		}
-		m := NewManager(ManagerConfig{
+		m := NewManager(slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), ManagerConfig{
 			OAuthToken:         "gho",
 			GitHubBaseURL:      s.server.URL,
 			HTTPClient:         s.server.Client(),
 			Impersonation:      testImpersonation(),
 			StartupMintRetries: 3,
 			Backoff:            zeroBackoff,
-			Logger:             slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
 		})
 		m.StartupMint(context.Background())
 		if got := s.hits.Load(); got != 1 {
@@ -605,14 +617,13 @@ func TestStartupMintRetryAndShortCircuit(t *testing.T) {
 			writeToken(w, "copilot-token", time.Now().Add(25*time.Minute), 1500, "https://api.githubcopilot.com")
 		}
 		var logs bytes.Buffer
-		m := NewManager(ManagerConfig{
+		m := NewManager(slog.New(slog.NewTextHandler(&logs, nil)), ManagerConfig{
 			OAuthToken:         "gho",
 			GitHubBaseURL:      s.server.URL,
 			HTTPClient:         s.server.Client(),
 			Impersonation:      testImpersonation(),
 			StartupMintRetries: 3,
 			Backoff:            zeroBackoff,
-			Logger:             slog.New(slog.NewTextHandler(&logs, nil)),
 		})
 		m.StartupMint(context.Background())
 		if got := s.hits.Load(); got != 1 {
@@ -630,7 +641,7 @@ func TestStartupMintRetryAndShortCircuit(t *testing.T) {
 // --- AC #4b: Ready() tracks local prerequisites, not mint outcomes -----------
 
 func TestReadyTracksLocalPrerequisitesNotMintOutcome(t *testing.T) {
-	missing := NewManager(ManagerConfig{})
+	missing := NewManager(quietLogger(), ManagerConfig{})
 	if missing.Ready() {
 		t.Fatal("Ready() = true without a resolved GitHub OAuth token, want false")
 	}
@@ -646,14 +657,13 @@ func TestReadyTracksLocalPrerequisitesNotMintOutcome(t *testing.T) {
 		}
 		writeToken(w, "copilot-token", clk.now().Add(25*time.Minute), 1500, "https://api.githubcopilot.com")
 	}
-	m := NewManager(ManagerConfig{
+	m := NewManager(slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), ManagerConfig{
 		OAuthToken:    "gho",
 		GitHubBaseURL: s.server.URL,
 		HTTPClient:    s.server.Client(),
 		Impersonation: testImpersonation(),
 		SafetyMargin:  2 * time.Minute,
 		Clock:         clk.now,
-		Logger:        slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
 	})
 	ctx := context.Background()
 
@@ -696,6 +706,27 @@ func TestReadyTracksLocalPrerequisitesNotMintOutcome(t *testing.T) {
 
 // --- AC #5: classified logging; tokens never logged -------------------------
 
+func TestLogMintUnclassifiedFailureIsErrorWithoutStatus(t *testing.T) {
+	var logs bytes.Buffer
+	logger, err := logging.NewWithWriter(&logs, config.ServeConfig{LogLevel: "debug", LogFormat: "text"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := NewManager(logger, ManagerConfig{})
+
+	manager.logMint(context.Background(), "on-demand", copilotToken{}, errors.New("unclassified failure"))
+
+	out := logs.String()
+	for _, want := range []string{"level=ERROR", `msg="copilot token exchange failed"`, "trigger=on-demand", "failure_class=unclassified"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("unclassified mint failure missing %q: %s", want, out)
+		}
+	}
+	if strings.Contains(out, "status=") {
+		t.Errorf("unclassified mint failure emitted an HTTP status: %s", out)
+	}
+}
+
 func TestExchangeClassificationAndSecretRedaction(t *testing.T) {
 	const (
 		oauth   = "gho-super-secret-oauth"
@@ -707,15 +738,19 @@ func TestExchangeClassificationAndSecretRedaction(t *testing.T) {
 		s.handler = func(w http.ResponseWriter, r *http.Request) {
 			writeToken(w, copilot, time.Now().Add(25*time.Minute), 1500, "https://api.githubcopilot.com")
 		}
-		logger, buf := bufLogger()
-		m := NewManager(ManagerConfig{
+		var buf bytes.Buffer
+		logger, err := logging.NewWithWriter(&buf, config.ServeConfig{LogLevel: "info", LogFormat: "text"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		m := NewManager(logger, ManagerConfig{
 			OAuthToken:    oauth,
 			GitHubBaseURL: s.server.URL,
 			HTTPClient:    s.server.Client(),
 			Impersonation: testImpersonation(),
-			Logger:        logger,
 		})
-		if _, err := m.Current(context.Background()); err != nil {
+		ctx := logging.WithRequestID(context.Background(), "mint-success-154")
+		if _, err := m.Current(ctx); err != nil {
 			t.Fatalf("Current() error = %v", err)
 		}
 		out := buf.String()
@@ -724,6 +759,9 @@ func TestExchangeClassificationAndSecretRedaction(t *testing.T) {
 		}
 		if !bytes.Contains(buf.Bytes(), []byte("trigger=on-demand")) {
 			t.Errorf("mint-success log does not identify the trigger: %s", out)
+		}
+		if !bytes.Contains(buf.Bytes(), []byte("request_id=mint-success-154")) {
+			t.Errorf("mint-success log lacks request scope: %s", out)
 		}
 		assertNoSecret(t, out, oauth, copilot)
 	})
@@ -734,22 +772,53 @@ func TestExchangeClassificationAndSecretRedaction(t *testing.T) {
 			w.WriteHeader(http.StatusBadGateway) // 502: transient
 			_, _ = w.Write([]byte(oauth + " " + copilot))
 		}
-		logger, buf := bufLogger()
-		m := NewManager(ManagerConfig{
+		var buf bytes.Buffer
+		logger, err := logging.NewWithWriter(&buf, config.ServeConfig{LogLevel: "debug", LogFormat: "text"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		m := NewManager(logger, ManagerConfig{
 			OAuthToken:    oauth,
 			GitHubBaseURL: s.server.URL,
 			HTTPClient:    s.server.Client(),
 			Impersonation: testImpersonation(),
-			Logger:        logger,
 		})
-		if _, err := m.Current(context.Background()); err == nil {
+		ctx := logging.WithRequestID(context.Background(), "mint-request-154")
+		if _, err := m.Current(ctx); err == nil {
 			t.Fatalf("expected error, got nil")
 		}
 		out := buf.String()
-		if !bytes.Contains(buf.Bytes(), []byte("transient")) {
-			t.Errorf("expected a transient-failure log line, got: %s", out)
+		for _, want := range []string{"level=WARN", `msg="copilot token exchange failed"`, "trigger=on-demand", "failure_class=transient", "status=502", "request_id=mint-request-154"} {
+			if !bytes.Contains(buf.Bytes(), []byte(want)) {
+				t.Errorf("mint failure log missing %q: %s", want, out)
+			}
 		}
 		assertNoSecret(t, out, oauth, copilot)
+	})
+
+	t.Run("network failure omits HTTP status", func(t *testing.T) {
+		logger, buf := bufLogger()
+		client := &http.Client{Transport: managerRoundTripFunc(func(*http.Request) (*http.Response, error) {
+			return nil, errors.New("network-secret")
+		})}
+		m := NewManager(logger, ManagerConfig{
+			OAuthToken:    oauth,
+			GitHubBaseURL: "https://github.invalid",
+			HTTPClient:    client,
+			Impersonation: testImpersonation(),
+		})
+
+		if _, err := m.Current(context.Background()); err == nil {
+			t.Fatal("expected error, got nil")
+		}
+		out := buf.String()
+		if !bytes.Contains(buf.Bytes(), []byte("failure_class=transient")) {
+			t.Errorf("network failure lacks transient classification: %s", out)
+		}
+		if bytes.Contains(buf.Bytes(), []byte("status=")) {
+			t.Errorf("network failure emitted a non-HTTP status: %s", out)
+		}
+		assertNoSecret(t, out, oauth, copilot, "network-secret")
 	})
 
 	t.Run("auth-class failure logged distinctly", func(t *testing.T) {
@@ -759,19 +828,20 @@ func TestExchangeClassificationAndSecretRedaction(t *testing.T) {
 			_, _ = w.Write([]byte(oauth + " " + copilot))
 		}
 		logger, buf := bufLogger()
-		m := NewManager(ManagerConfig{
+		m := NewManager(logger, ManagerConfig{
 			OAuthToken:    oauth,
 			GitHubBaseURL: s.server.URL,
 			HTTPClient:    s.server.Client(),
 			Impersonation: testImpersonation(),
-			Logger:        logger,
 		})
 		if _, err := m.Current(context.Background()); err == nil {
 			t.Fatalf("expected error, got nil")
 		}
 		out := buf.String()
-		if !bytes.Contains(buf.Bytes(), []byte("check the Copilot subscription")) {
-			t.Errorf("expected the distinct auth-class log line, got: %s", out)
+		for _, want := range []string{"level=ERROR", `msg="copilot token exchange failed"`, "trigger=on-demand", "failure_class=auth", "status=403"} {
+			if !bytes.Contains(buf.Bytes(), []byte(want)) {
+				t.Errorf("auth mint failure log missing %q: %s", want, out)
+			}
 		}
 		assertNoSecret(t, out, oauth, copilot)
 	})
@@ -783,31 +853,31 @@ func TestExchangeClassificationAndSecretRedaction(t *testing.T) {
 			_, _ = w.Write([]byte(oauth + " " + copilot))
 		}
 		logger, buf := bufLogger()
-		m := NewManager(ManagerConfig{
+		m := NewManager(logger, ManagerConfig{
 			OAuthToken:    oauth,
 			GitHubBaseURL: s.server.URL,
 			HTTPClient:    s.server.Client(),
 			Impersonation: testImpersonation(),
-			Logger:        logger,
 		})
 		if _, err := m.Current(context.Background()); err == nil {
 			t.Fatal("expected error, got nil")
 		}
 		out := buf.String()
-		if !bytes.Contains(buf.Bytes(), []byte("permanent")) || bytes.Contains(buf.Bytes(), []byte("transient")) {
-			t.Errorf("expected a permanent-failure log line, got: %s", out)
+		for _, want := range []string{"level=ERROR", `msg="copilot token exchange failed"`, "trigger=on-demand", "failure_class=non_transient", "status=400"} {
+			if !bytes.Contains(buf.Bytes(), []byte(want)) {
+				t.Errorf("non-transient mint failure log missing %q: %s", want, out)
+			}
 		}
 		assertNoSecret(t, out, oauth, copilot)
 	})
 }
 
-func assertNoSecret(t *testing.T, out, oauth, copilot string) {
+func assertNoSecret(t *testing.T, out string, secrets ...string) {
 	t.Helper()
-	if bytes.Contains([]byte(out), []byte(oauth)) {
-		t.Errorf("log output leaked the OAuth token\nfull: %s", out)
-	}
-	if bytes.Contains([]byte(out), []byte(copilot)) {
-		t.Errorf("log output leaked the Copilot token\nfull: %s", out)
+	for _, secret := range secrets {
+		if bytes.Contains([]byte(out), []byte(secret)) {
+			t.Errorf("log output leaked secret %q\nfull: %s", secret, out)
+		}
 	}
 }
 
@@ -831,12 +901,11 @@ func TestExchangeErrorClassification(t *testing.T) {
 		s := newStub(t)
 		status := tc.status
 		s.handler = func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(status) }
-		m := NewManager(ManagerConfig{
+		m := NewManager(slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), ManagerConfig{
 			OAuthToken:    "gho",
 			GitHubBaseURL: s.server.URL,
 			HTTPClient:    s.server.Client(),
 			Impersonation: testImpersonation(),
-			Logger:        slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
 		})
 		_, err := m.Current(context.Background())
 		if err == nil {

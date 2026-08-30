@@ -35,18 +35,18 @@ func New(provider identity.Provider, client *http.Client, outboundTimeout time.D
 	}
 }
 
-// Do executes call and returns the upstream response, or one classified
-// failure. ctx is used verbatim so the caller retains authority over
-// cancellation and any post-response deadline.
-func (c *Caller) Do(ctx context.Context, call Call) (*http.Response, *Failure) {
+// Do executes call and returns the upstream response plus its response-path
+// context, or one classified failure. ctx is used verbatim so the caller retains
+// authority over cancellation and any post-response deadline.
+func (c *Caller) Do(ctx context.Context, call Call) (*http.Response, context.Context, *Failure) {
 	request, failure := c.Prepare(ctx, call)
 	if failure != nil {
-		return nil, failure
+		return nil, ctx, failure
 	}
 
 	response, err := c.client.Do(request)
 	if err != nil {
-		return nil, c.Classify(ctx, err)
+		return nil, ctx, c.Classify(ctx, err)
 	}
 	if response.Body != nil {
 		response.Body = &contextBoundResponseBody{
@@ -54,19 +54,20 @@ func (c *Caller) Do(ctx context.Context, call Call) (*http.Response, *Failure) {
 			ctx:        request.Context(),
 		}
 	}
-	c.Correlate(ctx, response.Header)
-	return response, nil
+	responseCtx := c.Correlate(ctx, response.Header)
+	return response, responseCtx, nil
 }
 
-// Buffered executes call and reads the complete response under the configured
-// cap. It binds the request to a derived context before execution, then starts
-// the post-response timer only after Do returns successfully.
-func (c *Caller) Buffered(ctx context.Context, call Call) (int, []byte, *Failure) {
+// Buffered executes call, returns its response-path context, and reads the
+// complete response under the configured cap. It binds the request to a derived
+// context before execution, then starts the post-response timer only after Do
+// returns successfully.
+func (c *Caller) Buffered(ctx context.Context, call Call) (int, []byte, context.Context, *Failure) {
 	inner, cancel := context.WithCancelCause(ctx)
-	response, failure := c.Do(inner, call)
+	response, responseCtx, failure := c.Do(inner, call)
 	if failure != nil {
 		cancel(context.Canceled)
-		return 0, nil, failure
+		return 0, nil, responseCtx, failure
 	}
 	defer func() {
 		cancel(context.Canceled)
@@ -78,9 +79,9 @@ func (c *Caller) Buffered(ctx context.Context, call Call) (int, []byte, *Failure
 
 	body, readFailure := c.ReadBounded(response.Body)
 	if readFailure == nil {
-		return response.StatusCode, body, nil
+		return response.StatusCode, body, responseCtx, nil
 	}
-	return 0, nil, readFailure
+	return 0, nil, responseCtx, readFailure
 }
 
 // Classify maps an execution error to one Failure, consulting both err and
@@ -98,22 +99,25 @@ func (c *Caller) Classify(ctx context.Context, err error) *Failure {
 	}
 }
 
-// Correlate logs the upstream request id when it differs from copilotd's own.
-func (c *Caller) Correlate(ctx context.Context, header http.Header) {
+// Correlate adds a differing upstream request id to a response-path context,
+// publishes that context for after-handler access logging, and returns it.
+func (c *Caller) Correlate(ctx context.Context, header http.Header) context.Context {
 	requestID, ok := logging.RequestIDFrom(ctx)
 	if !ok {
-		return
+		return ctx
 	}
 	upstreamRequestID := header.Get(RequestIDHeader)
 	if upstreamRequestID == "" || upstreamRequestID == requestID {
-		return
+		return ctx
 	}
-	c.logger.InfoContext(ctx, "upstream response correlation",
-		slog.String("upstream_request_id", upstreamRequestID))
+	correlated := logging.With(ctx, slog.String(logging.UpstreamRequestIDKey, upstreamRequestID))
+	publishCorrelatedContext(ctx, correlated)
+	c.logger.DebugContext(correlated, "upstream response correlation")
+	return correlated
 }
 
 func (c *Caller) failure(ctx context.Context, kind apierror.Kind, message string, clientGone bool, err error) *Failure {
-	c.logger.WarnContext(ctx, "upstream call failed", slog.Any("error", err))
+	c.logger.WarnContext(ctx, "upstream call failed", slog.Any(logging.ErrorKey, err))
 	return &Failure{
 		Kind:       kind,
 		Message:    message,

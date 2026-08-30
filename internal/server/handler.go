@@ -9,6 +9,7 @@ import (
 	"github.com/ningw42/copilotd/internal/endpoint"
 	"github.com/ningw42/copilotd/internal/forward"
 	"github.com/ningw42/copilotd/internal/identity"
+	"github.com/ningw42/copilotd/internal/logging"
 	"github.com/ningw42/copilotd/internal/wsforward"
 )
 
@@ -17,21 +18,21 @@ const (
 	readyPath  = "/readyz"
 )
 
-// newHandler builds the router wrapped in the middleware chain
-// requestID -> accessLog -> recover (outermost to innermost). RequestID is
-// outermost so its context is visible to the inner two; recover is innermost so
-// the 500 it produces is what the access log records.
-//
-// Surface endpoints carry two additional inner wrappers — auth then local
-// readiness — applied per route, because Go's ServeMux has no subtree
-// middleware. The full order on a Surface endpoint is therefore requestID ->
-// accessLog -> recover -> auth -> local readiness -> forward. /healthz and
-// /readyz are never gated by auth or readiness.
+// newHandler builds the router wrapped in requestID -> accessLog -> recover.
+// Each registered binding then derives its logging scope between the mux and
+// the auth/readiness guards, so rejected Endpoint requests retain the binding's
+// scope. The full Endpoint order is requestID -> accessLog -> recover -> mux ->
+// scoped -> auth -> local readiness -> handler. Probes use scoped -> handler and
+// are never gated by auth or readiness.
 // Invariant: catalog settings cross the render seam only through catalogs.
-func newHandler(apikey string, provider identity.Provider, observers ReadyObservers, fwd *forward.Forwarder, source catalog.Source, logger *slog.Logger, streamOutcomes StreamOutcomeObserver, catalogs catalog.RenderDescriptors, wsProxy *wsforward.Proxy) http.Handler {
+func newHandler(apikey string, provider identity.Provider, observers ReadyObservers, fwd *forward.Forwarder, source catalog.Source, logger, catalogLogger *slog.Logger, streamOutcomes StreamOutcomeObserver, catalogs catalog.RenderDescriptors, wsProxy *wsforward.Proxy) http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET "+healthPath, handleHealth)
-	mux.HandleFunc("GET "+readyPath, handleReady(provider, observers.Impersonation, observers.Caches))
+	registerProbe := func(pattern string, handler http.Handler) {
+		attrs := []slog.Attr{slog.String(logging.InboundKey, pattern)}
+		mux.Handle(pattern, scoped(attrs, true, handler))
+	}
+	registerProbe("GET "+healthPath, http.HandlerFunc(handleHealth))
+	registerProbe("GET "+readyPath, handleReady(provider, observers.Impersonation, observers.Caches))
 
 	// guard applies the Surface-endpoint-specific inner wrappers in order: auth
 	// (outer) then local readiness (inner), so auth runs first.
@@ -41,14 +42,28 @@ func newHandler(apikey string, provider identity.Provider, observers ReadyObserv
 	mount := func(ep endpoint.Endpoint, h http.Handler) {
 		guarded := guard(ep.Surface(), h)
 		for _, pattern := range ep.Patterns() {
-			mux.Handle(pattern, guarded)
+			attrs := []slog.Attr{
+				slog.String(logging.InboundKey, pattern),
+				slog.String(logging.SurfaceKey, ep.Surface().String()),
+			}
+			mux.Handle(pattern, scoped(attrs, false, guarded))
 		}
 	}
 	registerForward := func(ep endpoint.HTTPForward) { mount(ep, fwd.Handler(ep)) }
-	registerWS := func(ep endpoint.WSForward) { mount(ep, wsProxy.Handler(ep)) }
+	registerWS := func(ep endpoint.WSForward) {
+		guarded := guard(ep.Surface(), wsProxy.Handler(ep))
+		for _, pattern := range ep.Patterns() {
+			attrs := []slog.Attr{
+				slog.String(logging.InboundKey, pattern),
+				slog.String(logging.SurfaceKey, ep.Surface().String()),
+				slog.Bool(logging.WSKey, true),
+			}
+			mux.Handle(pattern, scoped(attrs, false, guarded))
+		}
+	}
 	registerPassthrough := func(ep endpoint.Passthrough) { mount(ep, fwd.PassthroughHandler(ep)) }
 	registerCatalog := func(ep endpoint.Catalog, rendering catalog.Rendering) {
-		mount(ep, catalog.Handler(ep, rendering, source))
+		mount(ep, catalog.Handler(catalogLogger, ep, rendering, source))
 	}
 
 	registerForward(endpoint.AnthropicMessages())
@@ -59,7 +74,7 @@ func newHandler(apikey string, provider identity.Provider, observers ReadyObserv
 	registerCatalog(endpoint.AnthropicCatalog(), catalog.Rendering{Render: func(models []catalog.Model) ([]byte, error) {
 		return catalog.RenderAnthropicWithConfig(models, catalogs.Anthropic)
 	}})
-	registerCatalog(endpoint.OpenAICatalog(), catalog.Rendering{Render: catalog.RenderOpenAI, Codex: catalogs.Codex, Logger: logger})
+	registerCatalog(endpoint.OpenAICatalog(), catalog.Rendering{Render: catalog.RenderOpenAI, Codex: catalogs.Codex})
 
 	return requestID(accessLog(logger, streamOutcomes, recoverMW(logger, mux)))
 }

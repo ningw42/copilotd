@@ -37,7 +37,7 @@ func TestPumpNilAndIdentityTransformersPreserveReaderCorpusFrameForFrame(t *test
 			dst := &operationResponseWriter{header: make(http.Header)}
 			ctx, cancel := context.WithCancel(context.Background())
 
-			result := Pump(ctx, cancel, io.NopCloser(strings.NewReader(lfFrame+commentFrame+unknownFrame+terminalFrame)), dst, Policy{
+			result := Pump(ctx, cancel, io.NopCloser(strings.NewReader(lfFrame+commentFrame+unknownFrame+terminalFrame)), dst, discardLogger(), Policy{
 				Terminal: func(eventType string) bool { return eventType == "response.completed" },
 				RenderError: func(http.ResponseWriter, Outcome) error {
 					t.Fatal("complete corpus unexpectedly synthesized an error")
@@ -80,7 +80,7 @@ func TestPumpHeldFrameDoesNotResetClientIdleKeepalive(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan Result, 1)
 	go func() {
-		done <- Pump(ctx, cancel, upstream, dst, Policy{
+		done <- Pump(ctx, cancel, upstream, dst, discardLogger(), Policy{
 			Terminal:          func(string) bool { return false },
 			RenderError:       func(http.ResponseWriter, Outcome) error { return nil },
 			WriteTimeout:      time.Minute,
@@ -133,7 +133,7 @@ func TestPumpFinalizesHeldCompleteStreamAtEOF(t *testing.T) {
 	dst := &operationResponseWriter{header: make(http.Header)}
 	ctx, cancel := context.WithCancel(context.Background())
 
-	result := Pump(ctx, cancel, io.NopCloser(strings.NewReader(first+terminal)), dst, Policy{
+	result := Pump(ctx, cancel, io.NopCloser(strings.NewReader(first+terminal)), dst, discardLogger(), Policy{
 		Terminal: func(eventType string) bool { return eventType == "message_stop" },
 		RenderError: func(http.ResponseWriter, Outcome) error {
 			t.Error("held terminal at EOF unexpectedly synthesized an error")
@@ -177,7 +177,7 @@ func TestPumpFinalizesHeldCompleteStreamOnStall(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan Result, 1)
 	go func() {
-		done <- Pump(ctx, cancel, body, dst, Policy{
+		done <- Pump(ctx, cancel, body, dst, discardLogger(), Policy{
 			Terminal: func(eventType string) bool { return eventType == "message_stop" },
 			RenderError: func(http.ResponseWriter, Outcome) error {
 				t.Error("held terminal at stall unexpectedly synthesized an error")
@@ -222,7 +222,7 @@ func TestPumpStopsStallStopwatchBeforeSlowTransform(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan Result, 1)
 	go func() {
-		done <- Pump(ctx, cancel, body, dst, Policy{
+		done <- Pump(ctx, cancel, body, dst, discardLogger(), Policy{
 			Terminal:     func(string) bool { return false },
 			RenderError:  func(http.ResponseWriter, Outcome) error { return nil },
 			WriteTimeout: time.Minute,
@@ -253,7 +253,7 @@ func TestPumpDroppedTerminalDoesNotCountAsWrittenTerminal(t *testing.T) {
 	rendered := 0
 	dst := &operationResponseWriter{header: make(http.Header)}
 	ctx, cancel := context.WithCancel(context.Background())
-	result := Pump(ctx, cancel, io.NopCloser(strings.NewReader(terminal)), dst, Policy{
+	result := Pump(ctx, cancel, io.NopCloser(strings.NewReader(terminal)), dst, discardLogger(), Policy{
 		Terminal: func(eventType string) bool { return eventType == "message_stop" },
 		RenderError: func(_ http.ResponseWriter, outcome Outcome) error {
 			rendered++
@@ -290,7 +290,7 @@ func TestPumpTransformPanicBeforeTerminalRendersShimError(t *testing.T) {
 	dst := &operationResponseWriter{header: make(http.Header)}
 	ctx, cancel := context.WithCancel(context.Background())
 
-	result := Pump(ctx, cancel, io.NopCloser(strings.NewReader(input)), dst, Policy{
+	result := Pump(ctx, cancel, io.NopCloser(strings.NewReader(input)), dst, discardLogger(), Policy{
 		Terminal: func(string) bool { return false },
 		RenderError: func(w http.ResponseWriter, outcome Outcome) error {
 			if outcome != OutcomeShimError {
@@ -324,7 +324,8 @@ func TestPumpTransformPanicAfterTerminalIsSuppressed(t *testing.T) {
 	dst := &operationResponseWriter{header: make(http.Header)}
 	ctx, cancel := context.WithCancel(context.Background())
 
-	result := Pump(ctx, cancel, io.NopCloser(strings.NewReader(terminal+trailing)), dst, Policy{
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	result := Pump(ctx, cancel, io.NopCloser(strings.NewReader(terminal+trailing)), dst, logger, Policy{
 		Terminal: func(eventType string) bool { return eventType == "message_stop" },
 		RenderError: func(http.ResponseWriter, Outcome) error {
 			t.Error("post-terminal panic rendered a second terminal")
@@ -332,7 +333,6 @@ func TestPumpTransformPanicAfterTerminalIsSuppressed(t *testing.T) {
 		},
 		WriteTimeout:         time.Second,
 		Clock:                RealClock{},
-		Logger:               slog.New(slog.NewTextHandler(&logs, nil)),
 		SuppressedShimErrors: counter,
 	}, frameTransformerFuncs{
 		transform: func(_ context.Context, frame Frame) []Frame {
@@ -369,7 +369,7 @@ func TestPumpFinalizePanicBeforeTerminalRendersShimError(t *testing.T) {
 	dst := &operationResponseWriter{header: make(http.Header)}
 	ctx, cancel := context.WithCancel(context.Background())
 
-	result := Pump(ctx, cancel, io.NopCloser(strings.NewReader(input)), dst, Policy{
+	result := Pump(ctx, cancel, io.NopCloser(strings.NewReader(input)), dst, discardLogger(), Policy{
 		Terminal: func(string) bool { return false },
 		RenderError: func(w http.ResponseWriter, outcome Outcome) error {
 			if outcome != OutcomeShimError {
@@ -430,7 +430,7 @@ func TestPumpClientDisconnectSkipsFinalizeRegardlessOfWrittenTerminal(t *testing
 			ctx, cancel := context.WithCancel(context.Background())
 			done := make(chan Result, 1)
 			go func() {
-				done <- Pump(ctx, cancel, body, dst, Policy{
+				done <- Pump(ctx, cancel, body, dst, discardLogger(), Policy{
 					Terminal:     func(eventType string) bool { return eventType == "message_stop" },
 					RenderError:  func(http.ResponseWriter, Outcome) error { t.Error("disconnect synthesized an error"); return nil },
 					WriteTimeout: time.Second,

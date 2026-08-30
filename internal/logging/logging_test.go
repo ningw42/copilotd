@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"go/parser"
 	"go/token"
+	"log/slog"
 	"os"
 	"strings"
 	"testing"
@@ -65,6 +66,46 @@ func TestNewLoggerFormatSelection(t *testing.T) {
 	})
 }
 
+func TestForComponentAttachesComponentOnlyToChild(t *testing.T) {
+	var buf bytes.Buffer
+	base, err := NewWithWriter(&buf, textCfg("info"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	base.Info("base")
+	ForComponent(base, "internal/logging").Info("child")
+
+	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("got %d records, want 2:\n%s", len(lines), buf.String())
+	}
+	if strings.Contains(lines[0], "component=") {
+		t.Errorf("base record carries component:\n%s", lines[0])
+	}
+	if !strings.Contains(lines[1], "component=internal/logging") {
+		t.Errorf("child record missing component:\n%s", lines[1])
+	}
+}
+
+func TestDependencyErrorLogUsesBaseAtCallerSelectedLevel(t *testing.T) {
+	var buf bytes.Buffer
+	base, err := NewWithWriter(&buf, textCfg("debug"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	DependencyErrorLog(base, slog.LevelError).Print("dependency failed")
+
+	out := buf.String()
+	if !strings.Contains(out, "level=ERROR") {
+		t.Errorf("dependency record level is not caller-selected Error:\n%s", out)
+	}
+	if strings.Contains(out, "component=") {
+		t.Errorf("dependency record carries component:\n%s", out)
+	}
+}
+
 func TestNewLoggerAddsServiceAndVersion(t *testing.T) {
 	var buf bytes.Buffer
 	logger, err := NewWithWriter(&buf, textCfg("info"))
@@ -109,6 +150,35 @@ func TestContextHandlerInjectsRequestID(t *testing.T) {
 
 	if !strings.Contains(buf.String(), "request_id=req-123") {
 		t.Errorf("request_id not injected from context:\n%s", buf.String())
+	}
+}
+
+func TestWithDerivesImmutableAppendOnlyScope(t *testing.T) {
+	var buf bytes.Buffer
+	logger, err := NewWithWriter(&buf, textCfg("info"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	parent := With(context.Background(), slog.String("scope", "parent"))
+	left := With(parent, slog.String("scope", "left"))
+	right := With(parent, slog.String("branch", "right"))
+	logger.InfoContext(parent, "parent")
+	logger.InfoContext(left, "left")
+	logger.InfoContext(right, "right")
+
+	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("got %d records, want 3:\n%s", len(lines), buf.String())
+	}
+	if strings.Count(lines[0], "scope=") != 1 || !strings.Contains(lines[0], "scope=parent") {
+		t.Errorf("parent scope changed after deriving children:\n%s", lines[0])
+	}
+	if !strings.Contains(lines[1], "scope=parent scope=left") || strings.Contains(lines[1], "branch=") {
+		t.Errorf("left scope is not append-only and isolated:\n%s", lines[1])
+	}
+	if !strings.Contains(lines[2], "scope=parent branch=right") || strings.Contains(lines[2], "scope=left") {
+		t.Errorf("right sibling observed left sibling scope:\n%s", lines[2])
 	}
 }
 

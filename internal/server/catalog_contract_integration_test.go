@@ -105,7 +105,7 @@ func TestCatalogLocalFailuresHaveGETEquivalentHEADFramingOverRealListener(t *tes
 					responseLimit = 1 << 20
 				}
 				forwarder := newTestForwarder(provider, client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, responseLimit, nil)
-				base := startServer(t, New(testConfig(), discardLogger(t), provider, newTestReadyObservers(), forwarder, newTestCatalogSourceWith(provider, client, time.Second, responseLimit, discardLogger(t)), newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.RenderDescriptors{}))
+				base := startServer(t, newTestServerFromBase(testConfig(), discardLogger(t), provider, newTestReadyObservers(), forwarder, newTestCatalogSourceWith(provider, client, time.Second, responseLimit, discardLogger(t)), newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.RenderDescriptors{}))
 
 				do := func(method string) (*http.Response, []byte) {
 					t.Helper()
@@ -187,7 +187,7 @@ func TestCatalogClientCancellationPropagatesToCopilotOverRealListener(t *testing
 
 			provider := identity.NewStatic(identity.Credential{BaseURL: upstream.URL, Token: "copilot-token"}, true)
 			forwarder := newTestForwarder(provider, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
-			base := startServer(t, New(testConfig(), discardLogger(t), provider, newTestReadyObservers(), forwarder, newTestCatalogSource(provider), newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.RenderDescriptors{}))
+			base := startServer(t, newTestServerFromBase(testConfig(), discardLogger(t), provider, newTestReadyObservers(), forwarder, newTestCatalogSource(provider), newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.RenderDescriptors{}))
 			ctx, cancel := context.WithCancel(context.Background())
 			req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+path, nil)
 			if err != nil {
@@ -259,8 +259,8 @@ func TestCatalogCorrelationAccessLogsAndSecretRedaction(t *testing.T) {
 		t.Fatalf("build logger: %v", err)
 	}
 	provider := identity.NewStatic(identity.Credential{BaseURL: upstream.URL, Token: copilotToken}, true)
-	forwarder := newTestForwarderWithLogger(provider, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, logger, nil, forward.WithLogger(logger))
-	base := startServer(t, New(testConfig(), logger, provider, newTestReadyObservers(), forwarder, newTestCatalogSourceWith(provider, forward.NewClient(time.Second), time.Second, 1<<20, logger), newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.RenderDescriptors{}))
+	forwarder := newTestForwarderWithLogger(provider, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, logger, nil)
+	base := startServer(t, newTestServerFromBase(testConfig(), logger, provider, newTestReadyObservers(), forwarder, newTestCatalogSourceWith(provider, forward.NewClient(time.Second), time.Second, 1<<20, logger), newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.RenderDescriptors{}))
 
 	do := func(method, requestID string) (*http.Response, []byte) {
 		t.Helper()
@@ -299,16 +299,19 @@ func TestCatalogCorrelationAccessLogsAndSecretRedaction(t *testing.T) {
 
 	logs := logBuffer.String()
 	for _, want := range []string{
-		`msg="upstream response correlation"`, "upstream_request_id=" + upstreamPrimary,
-		`route="GET /openai/v1/models"`, `route="HEAD /openai/v1/models"`,
+		"upstream_request_id=" + upstreamPrimary,
+		`inbound="GET /openai/v1/models"`, `inbound="HEAD /openai/v1/models"`,
 		"status=200", "bytes=" + strconv.Itoa(len(getBody)), "bytes=0", "duration=", "request_id=" + resolvedGET, "request_id=" + resolvedHEAD,
 	} {
 		if !strings.Contains(logs, want) {
 			t.Errorf("logs missing %q:\n%s", want, logs)
 		}
 	}
-	if count := strings.Count(logs, `msg="upstream response correlation"`); count != 2 {
-		t.Errorf("correlation log count = %d, want 2:\n%s", count, logs)
+	for _, requestID := range []string{resolvedGET, resolvedHEAD} {
+		matched := serverLogLinesContaining(logs, "msg=access", "request_id="+requestID, "upstream_request_id="+upstreamPrimary)
+		if len(matched) != 1 {
+			t.Errorf("access records with both request ids for %q = %d, want one:\n%s", requestID, len(matched), logs)
+		}
 	}
 	for _, forbidden := range []string{testAPIKey, copilotToken, modelData, vendorData, queryData, upstreamSecondary} {
 		if strings.Contains(logs, forbidden) {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"io"
+	"log"
 	"log/slog"
 	"net/http"
 	"time"
@@ -30,6 +31,8 @@ func newTestImpersonationObserver() *impersonation.Set {
 
 func newTestCacheObserver() *cache.Registry { return cache.NewRegistry() }
 
+func newTestDependencyErrorLog() *log.Logger { return log.New(io.Discard, "", 0) }
+
 func newTestReadyObservers() server.ReadyObservers {
 	return server.ReadyObservers{
 		Impersonation: newTestImpersonationObserver(),
@@ -39,7 +42,7 @@ func newTestReadyObservers() server.ReadyObservers {
 
 func newTestForwarderWithLogger(provider identity.Provider, client *http.Client, outboundTimeout, writeTimeout, streamIdleTimeout, streamKeepaliveInterval time.Duration, maxRequestBytes, maxBufferedResponseBytes int64, logger *slog.Logger, registry shim.Registry, options ...forward.Option) *forward.Forwarder {
 	caller := upstream.New(provider, client, outboundTimeout, maxBufferedResponseBytes, logger)
-	return forward.New(caller, outboundTimeout, writeTimeout, streamIdleTimeout, streamKeepaliveInterval, maxRequestBytes, registry, options...)
+	return forward.New(caller, outboundTimeout, writeTimeout, streamIdleTimeout, streamKeepaliveInterval, maxRequestBytes, registry, logger, options...)
 }
 
 func newTestCatalogSource(provider identity.Provider) *upstream.Caller {
