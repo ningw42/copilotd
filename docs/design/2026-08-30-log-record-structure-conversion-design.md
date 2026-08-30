@@ -338,8 +338,9 @@ The base originates at the two `logging.New` calls — `main.go:279` in `runServ
 and `main.go:520` in `runLogin` — and must reach three more `cmd/copilotd`
 functions, because that is where the sinks are constructed. Each of those three
 already carries one `logger *slog.Logger`; the parameter is renamed `base` and
-changes meaning, not arity. Their thirteen existing test call sites (eight,
-three, and two respectively) already pass an undecorated `logging.NewWithWriter`
+changes meaning, not arity. Their thirteen existing test call sites — three for
+`runBoundServe`, eight for `buildServeProvider`, two for
+`configuredCodexModels` — already pass an undecorated `logging.NewWithWriter`
 logger, so they keep compiling unchanged.
 
 **Base-carrying functions.** A closed list; the base may be passed to nothing
@@ -450,10 +451,11 @@ that knows the operational consequence and keeps level policy out of
 `internal/logging`, and it is the composition root — not the logging package —
 that judges net/http's error stream to be a contained abnormality. And the
 helper exists at all, rather than an inline
-`slog.NewLogLogger(base.Handler(), …)`, because it gives the base a third
-*nameable* permitted use: AST rule 2 restricts the base to `slog.SetDefault`,
-`logging.ForComponent`, and this function, and a bare `base.Handler()` at the
-root would otherwise have to be exempted by shape or allowed generally.
+`slog.NewLogLogger(base.Handler(), …)`, because it gives the base a *nameable*
+permitted use alongside `slog.SetDefault` and `logging.ForComponent`: those
+three and passing the base to a declared base-carrying parameter are the only
+four rule 2 admits, so a bare `base.Handler()` at the root would otherwise have
+to be exempted by shape or allowed generally.
 
 ## Request scope
 
