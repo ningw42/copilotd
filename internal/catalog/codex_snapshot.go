@@ -69,7 +69,8 @@ type codexTruncationPolicy struct {
 }
 
 type codexModelMessages struct {
-	InstructionsTemplate  string            `json:"instructions_template"`
+	InstructionsTemplate string `json:"instructions_template"`
+	// Codex treats absent or null variables as literal-template mode.
 	InstructionsVariables map[string]string `json:"instructions_variables"`
 }
 
@@ -170,9 +171,6 @@ func validateCodexModel(index int, rawEntry json.RawMessage, fields map[string]j
 	}
 	if model.ModelMessages.InstructionsTemplate == "" {
 		return fmt.Errorf("models[%d] model_messages is missing instructions_template", index)
-	}
-	if model.ModelMessages.InstructionsVariables == nil {
-		return fmt.Errorf("models[%d] model_messages is missing instructions_variables", index)
 	}
 	return nil
 }

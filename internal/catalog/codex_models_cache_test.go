@@ -67,6 +67,40 @@ func TestModelsCacheServesLatestReleaseBytesWithoutCredentials(t *testing.T) {
 	}
 }
 
+func TestModelsCacheAcceptsNullInstructionsVariables(t *testing.T) {
+	t.Parallel()
+
+	const tag = "rust-v0.150.0"
+	fetched := codexModelsBytesWithInstructionsVariables(t, nil)
+	github := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case latestCodexReleasePath:
+			_, _ = io.WriteString(w, `{"tag_name":"`+tag+`"}`)
+		case codexModelsContentPath:
+			_, _ = w.Write(fetched)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(github.Close)
+
+	registry := cache.NewRegistry()
+	models := NewModelsCache(ModelsCacheConfig{RefreshInterval: time.Hour}, ModelsEdge{
+		BaseURL: github.URL,
+		Client:  github.Client(),
+	}, registry, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	registry.Prime(context.Background())
+
+	got, status := models.Current()
+	if !bytes.Equal(got, fetched) {
+		t.Fatalf("Current returned %d bytes, want exact %d-byte fetched release", len(got), len(fetched))
+	}
+	if status.Source != "fetched" || status.Version != tag || status.LastSuccess == nil {
+		t.Fatalf("status = %#v, want fetched %s with last success", status, tag)
+	}
+}
+
 func TestModelsCacheUnchangedReleaseSkipsModelsDownload(t *testing.T) {
 	t.Parallel()
 
@@ -235,7 +269,7 @@ func TestModelsCacheMalformedReleaseAfterWarmSuccessHoldsLastGood(t *testing.T) 
 
 	good := validCodexModelsBytes(t, "gpt-5.4", "last good")
 	tags := []string{"rust-v0.145.0", "rust-v0.146.0"}
-	bodies := [][]byte{good, codexModelsBytesWithoutNestedField(t, "model_messages", "instructions_variables")}
+	bodies := [][]byte{good, codexModelsBytesWithInstructionsVariables(t, []string{})}
 	var latestCalls atomic.Int32
 	var modelsCalls atomic.Int32
 	github := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

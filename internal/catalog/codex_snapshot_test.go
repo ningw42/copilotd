@@ -77,7 +77,6 @@ func TestDecodeCodexModelsRejectsIncompleteNestedRequiredFields(t *testing.T) {
 		{name: "truncation mode", parent: "truncation_policy", field: "mode"},
 		{name: "truncation limit", parent: "truncation_policy", field: "limit"},
 		{name: "model messages instructions template", parent: "model_messages", field: "instructions_template"},
-		{name: "model messages instructions variables", parent: "model_messages", field: "instructions_variables"},
 	}
 
 	for _, tc := range tests {
@@ -86,6 +85,78 @@ func TestDecodeCodexModelsRejectsIncompleteNestedRequiredFields(t *testing.T) {
 
 			if _, err := decodeCodexModels(incomplete); err == nil {
 				t.Fatalf("decodeCodexModels accepted %s without required %s", tc.parent, tc.field)
+			}
+		})
+	}
+}
+
+func TestDecodeCodexModelsAcceptsAndPreservesOptionalInstructionsVariables(t *testing.T) {
+	tests := []struct {
+		name        string
+		modelsBytes []byte
+		wantPresent bool
+		wantJSON    string
+	}{
+		{
+			name:        "absent",
+			modelsBytes: codexModelsBytesWithoutNestedField(t, "model_messages", "instructions_variables"),
+		},
+		{
+			name:        "null",
+			modelsBytes: codexModelsBytesWithInstructionsVariables(t, nil),
+			wantPresent: true,
+			wantJSON:    "null",
+		},
+		{
+			name:        "empty object",
+			modelsBytes: codexModelsBytesWithInstructionsVariables(t, map[string]string{}),
+			wantPresent: true,
+			wantJSON:    `{}`,
+		},
+		{
+			name:        "populated object",
+			modelsBytes: validCodexModelsBytes(t, "gpt-test", "prompt"),
+			wantPresent: true,
+			wantJSON:    `{"personality_default":""}`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			models, err := decodeCodexModels(tc.modelsBytes)
+			if err != nil {
+				t.Fatalf("decodeCodexModels rejected optional instructions_variables: %v", err)
+			}
+			var messages map[string]json.RawMessage
+			if err := json.Unmarshal(models["gpt-test"]["model_messages"], &messages); err != nil {
+				t.Fatalf("decode preserved model_messages: %v", err)
+			}
+			got, present := messages["instructions_variables"]
+			if present != tc.wantPresent {
+				t.Fatalf("instructions_variables presence = %t, want %t", present, tc.wantPresent)
+			}
+			if present && string(got) != tc.wantJSON {
+				t.Errorf("instructions_variables = %s, want %s", got, tc.wantJSON)
+			}
+		})
+	}
+}
+
+func TestDecodeCodexModelsRejectsMalformedInstructionsVariables(t *testing.T) {
+	tests := []struct {
+		name      string
+		variables any
+	}{
+		{name: "string", variables: "not an object"},
+		{name: "array", variables: []string{}},
+		{name: "non-string object value", variables: map[string]any{"personality_default": 1}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			modelsBytes := codexModelsBytesWithInstructionsVariables(t, tc.variables)
+			if _, err := decodeCodexModels(modelsBytes); err == nil {
+				t.Fatal("decodeCodexModels accepted malformed instructions_variables")
 			}
 		})
 	}
@@ -162,6 +233,26 @@ func codexModelsBytesWithoutNestedField(t *testing.T, parentField, nestedField s
 		t.Fatalf("encode incomplete fixture: %v", err)
 	}
 	return incomplete
+}
+
+func codexModelsBytesWithInstructionsVariables(t *testing.T, variables any) []byte {
+	t.Helper()
+	var envelope struct {
+		Models []map[string]any `json:"models"`
+	}
+	if err := json.Unmarshal(validCodexModelsBytes(t, "gpt-test", "prompt"), &envelope); err != nil {
+		t.Fatalf("decode complete fixture: %v", err)
+	}
+	messages, ok := envelope.Models[0]["model_messages"].(map[string]any)
+	if !ok {
+		t.Fatalf("fixture model_messages = %#v, want object", envelope.Models[0]["model_messages"])
+	}
+	messages["instructions_variables"] = variables
+	current, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatalf("encode instructions_variables fixture: %v", err)
+	}
+	return current
 }
 
 func validCodexModelsBytes(t *testing.T, slug, prompt string) []byte {
