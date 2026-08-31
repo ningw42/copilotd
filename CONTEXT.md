@@ -80,7 +80,7 @@ not assumed globally unique (a later Surface may reuse a path).
 Modeled as the single `endpoint.Route` type, shared by HTTP forwarding, catalog
 required-route membership, and shim dispatch; the earlier separate `shim.Route`
 and `catalog.Route` types are removed.
-_Avoid_: endpoint (unqualified), path (unqualified)
+_Avoid_: endpoint (unqualified), path (as a Route synonym)
 
 **Endpoint**:
 How copilotd serves one operation — an inbound binding paired with an upstream

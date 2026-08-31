@@ -658,7 +658,7 @@ for facts produced elsewhere.
 |---|---|---|
 | logger | `service`, `version`, `component` | always |
 | context | `request_id` | always |
-| context | `inbound` | a registered handler ran |
+| context | `inbound` | a registered binding's scope wrapper ran |
 | context | `surface` | matched an Endpoint (absent for probes and unmatched) |
 | context | `ws=true` | matched the `endpoint.WSForward` registration |
 | context | `upstream_request_id` | Copilot returned a differing id |
