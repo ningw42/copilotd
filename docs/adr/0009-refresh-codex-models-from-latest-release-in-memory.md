@@ -9,9 +9,11 @@ unchanged; the accept-gate rejects any fetched entry that cannot satisfy that
 required `ModelInfo` contract. It also amends ADR-0008 by generalizing
 `versionFact` into the cache registry and moving per-fact freshness into the
 uniform `/readyz` `caches` block while retaining effective impersonation headers.
+The embedded floor may advance independently when a newer stable snapshot passes
+that contract; it was advanced to `rust-v0.151.0` on 2026-08-31.
 
 The Codex catalog serves `models.json` from a memory-only **cached value**. Its
-embedded `rust-v0.144.5` vendored snapshot is the guaranteed-parseable
+embedded `rust-v0.151.0` vendored snapshot is the guaranteed-parseable
 **fallback**. When the Codex catalog is enabled, copilotd checks
 `openai/codex`'s latest GitHub release tag at startup and on a 24-hour-by-default
 cadence, resolves that stable tag to its commit, then fetches

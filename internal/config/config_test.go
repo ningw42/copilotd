@@ -63,8 +63,8 @@ func defaultConfig() ServeConfig {
 		MaxBufferedResponseBytes:     33554432,
 		CodexCatalogRefreshInterval:  24 * time.Hour,
 		StartupMintRetries:           3,
-		VSCodeVersionFallback:        "1.104.1",
-		PluginVersionFallback:        "0.26.7",
+		VSCodeVersionFallback:        "1.135.0",
+		PluginVersionFallback:        "0.48.1",
 		CopilotIntegrationID:         "vscode-chat",
 		GithubAPIVersion:             "2025-04-01",
 		ImpersonationRefreshInterval: 24 * time.Hour,
@@ -1090,8 +1090,8 @@ func TestLoadPrecedence(t *testing.T) {
 		c.MaxBufferedResponseBytes = 33554432
 		c.CodexCatalogRefreshInterval = 24 * time.Hour
 		c.StartupMintRetries = 3
-		c.VSCodeVersionFallback = "1.104.1"
-		c.PluginVersionFallback = "0.26.7"
+		c.VSCodeVersionFallback = "1.135.0"
+		c.PluginVersionFallback = "0.48.1"
 		c.CopilotIntegrationID = "vscode-chat"
 		c.GithubAPIVersion = "2025-04-01"
 		c.ImpersonationRefreshInterval = 24 * time.Hour
@@ -1302,8 +1302,8 @@ func TestConfigLogValueEmitsOnlyNonSecretFields(t *testing.T) {
 		CodexOverrideLimits:          true,
 		CodexCatalogRefreshInterval:  6 * time.Hour,
 		StartupMintRetries:           3,
-		VSCodeVersionFallback:        "1.104.1",
-		PluginVersionFallback:        "0.26.7",
+		VSCodeVersionFallback:        "1.135.0",
+		PluginVersionFallback:        "0.48.1",
 		CopilotIntegrationID:         "vscode-chat",
 		GithubAPIVersion:             "2025-04-01",
 		ImpersonationRefreshInterval: 24 * time.Hour,
@@ -1333,8 +1333,8 @@ func TestConfigLogValueEmitsOnlyNonSecretFields(t *testing.T) {
 		"config.shim-nop-enabled=true",
 		"config.shim-responses-item-id-stabilizer-enabled=true",
 		"config.startup-mint-retries=3",
-		"config.vscode-version=1.104.1",
-		"config.plugin-version=0.26.7",
+		"config.vscode-version=1.135.0",
+		"config.plugin-version=0.48.1",
 		"config.copilot-integration-id=vscode-chat",
 		"config.github-api-version=2025-04-01",
 		"config.impersonation-refresh-interval=24h0m0s",
@@ -1418,8 +1418,8 @@ func TestLoadServeIdentityFields(t *testing.T) {
 			t.Errorf("StartupMintRetries = %d, want 3", got.StartupMintRetries)
 		}
 		want := map[string]string{
-			"VSCodeVersionFallback": "1.104.1",
-			"PluginVersionFallback": "0.26.7",
+			"VSCodeVersionFallback": "1.135.0",
+			"PluginVersionFallback": "0.48.1",
 			"CopilotIntegrationID":  "vscode-chat",
 			"GithubAPIVersion":      "2025-04-01",
 		}
@@ -1484,11 +1484,11 @@ func TestLoadServeImpersonationConfig(t *testing.T) {
 		if err != nil {
 			t.Fatalf("loadServe() error = %v", err)
 		}
-		if got.VSCodeVersionFallback != "1.104.1" {
-			t.Errorf("VSCodeVersionFallback = %q, want 1.104.1", got.VSCodeVersionFallback)
+		if got.VSCodeVersionFallback != "1.135.0" {
+			t.Errorf("VSCodeVersionFallback = %q, want 1.135.0", got.VSCodeVersionFallback)
 		}
-		if got.PluginVersionFallback != "0.26.7" {
-			t.Errorf("PluginVersionFallback = %q, want 0.26.7", got.PluginVersionFallback)
+		if got.PluginVersionFallback != "0.48.1" {
+			t.Errorf("PluginVersionFallback = %q, want 0.48.1", got.PluginVersionFallback)
 		}
 		if got.ImpersonationRefreshInterval != 24*time.Hour {
 			t.Errorf("ImpersonationRefreshInterval = %v, want 24h", got.ImpersonationRefreshInterval)

@@ -5,7 +5,8 @@
 **Amendment:** ADR-0009 changes the fixed `rust-v0.144.5` vendored snapshot
 from the sole served source into the embedded fallback of a memory-only cached
 value that follows the latest stable Codex release and fetches content at its
-resolved commit. This ADR's fidelity
+resolved commit. The embedded floor was advanced to `rust-v0.151.0` on
+2026-08-31 after its current contract was audited. This ADR's fidelity
 contract remains in force: every accepted entry must be a complete Codex
 `ModelInfo`, re-emitted field-for-field except for the enumerated reviewer and
 limit overlays.
@@ -20,7 +21,7 @@ command-auth clients can avoid `codex-auto-review`.
 The Codex client-shaped catalog (Phase 6b), served on
 `GET /openai/v1/models?client_version=…`, re-emits an accepted release of Codex's
 own `models.json` (latest stable release, commit-addressed, with the vendored
-`rust-v0.144.5` floor) **field-for-field per slug**,
+`rust-v0.151.0` floor) **field-for-field per slug**,
 overwriting only an enumerated set of keys — `auto_review_model_override` (injected
 from a per-main-model `codex-auto-review-model-overrides` entry or the global
 `codex-auto-review-model` fallback) and, under the opt-in
@@ -55,7 +56,7 @@ unstable and copilotd must never silently change a user's model behavior.
 
 The deliberate divergences (design §13, amended by ADR-0009): each served value
 is release-tag-pinned; a future required-field addition fails the accept-gate and
-holds the last-good release or `rust-v0.144.5` floor, so Codex retains complete
+holds the last-good release or `rust-v0.151.0` floor, so Codex retains complete
 entries. Prompt/behavior values come from that accepted release; limits are
 Codex's numbers unless the operator opts into the overlay; coverage is the
 intersection of Copilot-forwardable and accepted Codex slugs; and auto-review

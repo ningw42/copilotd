@@ -18,6 +18,8 @@ func TestEmbeddedCodexModelsLoadAtStartup(t *testing.T) {
 		"gpt-5.6-luna",
 		"gpt-5.6-sol",
 		"gpt-5.6-terra",
+		"gpt-daybreak-blue-latest",
+		"gpt-daybreak-red-latest",
 	}
 
 	gotSlugs := make([]string, 0, len(testCodexModels))

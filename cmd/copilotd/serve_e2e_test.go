@@ -45,8 +45,8 @@ func e2eConfig(oauthToken string) config.ServeConfig {
 		MaxRequestBytes:              1 << 20,
 		MaxBufferedResponseBytes:     1 << 20,
 		StartupMintRetries:           0, // deterministic against stubs; no retries needed
-		VSCodeVersionFallback:        "1.104.1",
-		PluginVersionFallback:        "0.26.7",
+		VSCodeVersionFallback:        "1.135.0",
+		PluginVersionFallback:        "0.48.1",
 		CopilotIntegrationID:         "vscode-chat",
 		GithubAPIVersion:             "2025-04-01",
 		ImpersonationRefreshInterval: 24 * time.Hour,
@@ -225,8 +225,8 @@ func TestServeFirstRealCallEndToEnd(t *testing.T) {
 			t.Errorf("inbound API key leaked upstream (auth=%q)", copilot.auth)
 		}
 		if copilot.hdr.Get("Copilot-Integration-Id") != "vscode-chat" ||
-			copilot.hdr.Get("Editor-Version") != "vscode/1.104.1" ||
-			copilot.hdr.Get("User-Agent") != "GitHubCopilotChat/0.26.7" ||
+			copilot.hdr.Get("Editor-Version") != "vscode/1.135.0" ||
+			copilot.hdr.Get("User-Agent") != "GitHubCopilotChat/0.48.1" ||
 			copilot.hdr.Get("X-Github-Api-Version") != "2025-04-01" {
 			t.Errorf("impersonation headers missing upstream: %v", copilot.hdr)
 		}

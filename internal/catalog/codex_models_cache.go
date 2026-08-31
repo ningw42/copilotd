@@ -19,7 +19,7 @@ import (
 )
 
 const (
-	embeddedCodexModelsVersion = "rust-v0.144.5"
+	embeddedCodexModelsVersion = "rust-v0.151.0"
 	modelsRequestTimeout       = 5 * time.Second
 	modelsEdgeResponseLimit    = 8 << 20
 	latestCodexReleasePath     = "/repos/openai/codex/releases/latest"

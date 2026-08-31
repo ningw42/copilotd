@@ -41,6 +41,12 @@ func TestLatestStableCodexCatalogRoundTripFidelity(t *testing.T) {
 	if _, err := validateCodexModels(latestBytes); err != nil {
 		t.Fatalf("decode %s catalog at %s: %v", latestStableCodexTag, latestStableCodexCommit, err)
 	}
+	if embeddedCodexModelsVersion != latestStableCodexTag {
+		t.Fatalf("embedded catalog version = %s, want audited %s", embeddedCodexModelsVersion, latestStableCodexTag)
+	}
+	if !bytes.Equal(embeddedCodexModels, latestBytes) {
+		t.Fatalf("embedded catalog differs from audited %s bytes", latestStableCodexTag)
+	}
 	latestModels := rawCodexModelsBySlug(t, latestBytes)
 
 	github := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -86,8 +92,8 @@ func TestLatestStableCodexCatalogRoundTripFidelity(t *testing.T) {
 	if !bytes.Equal(currentBytes, latestBytes) {
 		t.Fatalf("cache retained %d bytes, want exact %d-byte %s catalog", len(currentBytes), len(latestBytes), latestStableCodexTag)
 	}
-	if status.Source != "fetched" || status.Version != latestStableCodexTag || status.LastSuccess == nil {
-		t.Fatalf("cache status = %#v, want fetched %s with last success", status, latestStableCodexTag)
+	if status.Source != "fallback" || status.Version != latestStableCodexTag || status.LastSuccess != nil {
+		t.Fatalf("cache status = %#v, want unchanged vendored fallback %s", status, latestStableCodexTag)
 	}
 
 	copilotBytes, err := os.ReadFile("testdata/copilot-models-2026-07-18.json")

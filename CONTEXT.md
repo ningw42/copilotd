@@ -229,7 +229,7 @@ which Codex fetches a self-hosted proxy's model catalog.
 _Avoid_: auth provider (unqualified).
 
 **Vendored snapshot**:
-The pinned copy of Codex's bundled `models.json` (`rust-v0.144.5`) embedded in
+The pinned copy of Codex's bundled `models.json` (`rust-v0.151.0`) embedded in
 copilotd, carried with Apache-2.0 `LICENSE`/`NOTICE` and a `PROVENANCE` record.
 It is the cached value's guaranteed-parseable embedded floor and defines the
 complete-entry accept contract for newer Codex release bytes; it is not
