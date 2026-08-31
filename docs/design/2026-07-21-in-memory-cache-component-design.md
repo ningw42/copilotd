@@ -307,9 +307,10 @@ not burden impersonation. Validation relocates: `discoverVSCode`/`discoverCopilo
 keep their *selection* logic (skip prereleases, take the first stable candidate /
 `releases[0]`) but no longer call `validateVersion` themselves; the cache's
 `Validate` cell is now the single accept-gate, unifying with Codex's
-`decodeCodexModels`. Behavior is equivalent at the boundary to ADR-0008 — a value
-that fails the gate is held back as last-good/fallback exactly as before; only
-`source` renders as `"fetched"` rather than `"discovered"` (see §Observability).
+`validateCodexModels`. Behavior is equivalent at the boundary to ADR-0008 — a
+value that fails the gate is held back as last-good/fallback exactly as before;
+only `source` renders as `"fetched"` rather than `"discovered"` (see
+§Observability).
 
 ### The Codex `models.json` consumer (#53)
 
@@ -321,26 +322,34 @@ A single `*cache.Value[[]byte]`, wired in `internal/catalog`:
 | `FallbackVersion` | the vendored tag, `rust-v0.144.5` |
 | `TTL` | `--codex-catalog-refresh-interval` (default 24h; `0` disables) |
 | `Version` | `GET /repos/openai/codex/releases/latest` → the release **tag** (cheap; no blob) |
-| `Fetch` | GET `models.json` at that tag → `([]byte, tag, err)` |
+| `Fetch` | Resolve tag to SHA; fetch `models.json` at the SHA |
 | `Hash` | content hash of the bytes |
-| `Validate` | `decodeCodexModels` parses cleanly — **the required-field-drift gate** |
+| `Validate` | `validateCodexModels` required-field-drift gate |
 | `Name` | `codex_models` |
 
 **Latest release tag as the version identity.** The tracked ref is
 `openai/codex`'s newest release tag (the `rust-vX.Y.Z` lineage the vendored
-snapshot is already pinned to). A tag is immutable and pins a commit, which
-satisfies #53's "commit-based" intent while giving the peek a cheap, human-readable
+snapshot is already pinned to). Resolving the stable tag to a commit satisfies
+#53's "commit-based" intent while giving the peek a cheap, human-readable
 compare. The ladder for Codex:
+
+> **Compatibility note (2026-08-31):** the release tag remains the cheap version
+> identity and `/readyz` label, but a changed tag is resolved through GitHub's
+> commit endpoint and the content request uses that peeled 40-hex commit SHA.
+> This closes the tag-movement window between resolution and retrieval; an
+> unchanged tag continues to hold the already accepted content without another
+> download. Every response on this credential-free edge is capped at 8 MiB.
 
 1. **Peek** `releases/latest` → tag. Tag unchanged → touch, done (no 291 KB
    download). Most ticks stop here.
-2. **Fetch** `models.json` at the tag. Compute its content hash.
+2. **Fetch** Resolve the tag to its commit through the SHA media type and read
+   `models.json` at that commit. Compute its content hash.
 3. **Hash unchanged** vs the served value (a release that didn't touch
    `models.json`) → re-key the version label to the new tag, no validate/swap.
 4. **Hash matches the embedded floor** (a release whose `models.json` equals the
    vendored snapshot) → serve the floor and release any fetched copy, so we never
    hold 291 KB byte-identical to the embed we already have for free.
-5. **Validate** with `decodeCodexModels`; a blob that does not parse into the
+5. **Validate** with `validateCodexModels`; a blob that does not parse into the
    expected `ModelInfo` shape is **rejected** — we hold last-good (or the floor)
    and log. This is the drift protection #53 calls out: a newer `models.json` that
    our renderer can't honor never displaces a good value.
@@ -348,17 +357,18 @@ compare. The ladder for Codex:
 
 **Parse on the read path; validate on accept.** The package-level
 `var codexModels = mustDecodeCodexModels(...)` is removed. The catalog render path
-calls `decodeCodexModels(value)` on `Current()` at request time. The Codex catalog
-`/models` path is cold — clients fetch the list rarely, and Codex caches it 300s
-client-side — so re-parsing 8 models per read is negligible. The **only** retained
+calls `parseCodexModels(value)` on `Current()` at request time. The Codex
+catalog `/models` path is cold — clients fetch the list rarely, and Codex
+caches it 300s client-side — so re-parsing 8 models per read is negligible. The
+**only** retained
 copy is the raw bytes, and only while a fetched release is ahead of the floor; when
 `Current()` returns the embed (the common case), no extra bytes are held. Parsing
-still happens once at **accept** time (step 4) to validate, but that parse is
+still happens once at **accept** time (step 5) to validate, but that parse is
 discarded, not retained.
 
-The embedded snapshot, its `LICENSE`/`NOTICE`/`PROVENANCE`, and the `decodeCodexModels`
-validator are unchanged; the snapshot's role shifts from "the served value" to
-"the floor and the accept-time contract."
+The embedded snapshot, its `LICENSE`/`NOTICE`/`PROVENANCE`, and the
+`validateCodexModels` validator are unchanged; the snapshot's role shifts from
+"the served value" to "the floor and the accept-time contract."
 
 > **Note (2026-07-22, post-#88).** Issue #88 (per-model reviewer routing) has since
 > merged, reworking the render path this consumer feeds: `RenderCodex` now resolves
@@ -367,7 +377,7 @@ validator are unchanged; the snapshot's role shifts from "the served value" to
 > `SkippedReviewers []SkippedReviewer`. `RenderCodex` still reads the package-level
 > `codexModels` global directly (`internal/catalog/codex_render.go`), so the
 > parse-on-read change is unchanged in intent — remove the global and thread the
-> decoded model map from `decodeCodexModels(Current())` through `RenderCodex`'s
+> decoded model map from `parseCodexModels(Current())` through `RenderCodex`'s
 > signature, the `Rendering` struct, and the `handler.go` call site into that now
 > per-model, override-aware loop.
 
@@ -504,8 +514,8 @@ sub-issue, not a silent side effect.
   overwrite a good value — cold failures hold the fallback, warm failures hold the
   last-good.
 - A malformed / unparseable fetch (impersonation shape-check, Codex
-  `decodeCodexModels`) is a failure, not a poison-write — the accept-gate rejects
-  it before the swap.
+  `validateCodexModels`) is a failure, not a poison-write — the accept-gate
+  rejects it before the swap.
 - Every `Run` stops on context cancellation at shutdown; `Prime` returns early on
   cancellation and skips entries whose `TTL <= 0` (no outbound).
 - Logging: the engine logs each refresh success at debug and each refresh failure at
@@ -554,9 +564,9 @@ Test-first, matching the package layout:
   unchanged tag → no blob fetched; a new tag with identical content → re-key, no
   re-validate; a new tag whose content equals the embedded floor → serve the
   floor, hold no fetched copy; a new tag with a good blob → swap; a new tag with a
-  blob that fails `decodeCodexModels` → rejected, floor/last-good retained; the
-  render path parses `Current()` and never a package-level global; disabled TTL
-  never calls the edge; a disabled catalog (`--codex-catalog-enabled=false`)
+  blob that fails `validateCodexModels` → rejected, floor/last-good retained;
+  the render path parses `Current()` and never a package-level global; disabled
+  TTL never calls the edge; a disabled catalog (`--codex-catalog-enabled=false`)
   registers nothing and never calls the edge.
 - **`identity.Manager`** — unchanged; still reads impersonation through the
   `Impersonation` interface.
@@ -644,8 +654,9 @@ a port ticket so each fits a single implementation context. The native chain is
 2. **#95 — Codex `models.json` freshness as a `cache` consumer.** Add the
    `*cache.Value[[]byte]` (registered only when `--codex-catalog-enabled`),
    latest-release-tag tracking, the version/hash ladder with floor-revert, the
-   `decodeCodexModels` accept-gate, parse-on-read (remove the package-level parsed
-   global), the unauthenticated `openai/codex` fetch (5s per-call bound),
+   `validateCodexModels` accept-gate, `parseCodexModels` on read (remove the
+   package-level parsed global), the unauthenticated `openai/codex` fetch
+   (5s per-call bound),
    `--codex-catalog-refresh-interval`, and the `codex_models` `/readyz` entry;
    author **ADR-0009** and update `CONFIGURATION.md` and the ROADMAP. *Blocked by #94.*
 

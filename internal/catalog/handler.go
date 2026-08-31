@@ -78,7 +78,7 @@ func Handler(logger *slog.Logger, ep endpoint.Catalog, rendering Rendering, sour
 				currentBytes, _ = rendering.Codex.Models.Current()
 			}
 			var codexModels CodexModels
-			codexModels, err = decodeCodexModels(currentBytes)
+			codexModels, err = parseCodexModels(currentBytes)
 			if err == nil {
 				representation, outcome, err = RenderCodex(codexModels, filtered, rendering.Codex.RenderConfig)
 			}

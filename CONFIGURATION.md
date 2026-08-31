@@ -169,7 +169,11 @@ auto-review model or live-limit override is configured.
 ### `--codex-auto-review-model`
 
 Injects the model slug as Codex's auto-review model when it is present in both
-the vendored Codex catalog and the live Copilot catalog.
+the current accepted Codex catalog and the live Copilot-forwardable set. The
+injected value takes precedence over Codex's provider default. As of Codex
+0.151.0, command-auth providers default to `gpt-5.6-luna`; an explicit value
+remains useful for stable routing across Codex versions and changing Copilot
+lineups.
 
 ### `--codex-auto-review-model-overrides`
 
@@ -207,8 +211,9 @@ the vendored Codex limits.
 
 ### `--codex-catalog-refresh-interval`
 
-Sets the best-effort cadence for checking the latest immutable `openai/codex`
-release and refreshing Codex's `models.json` cached value. The default is `24h`;
+Sets the best-effort cadence for checking the latest stable `openai/codex`
+release, resolving its tag to a commit, and refreshing Codex's `models.json`
+cached value from that commit. The default is `24h`;
 `0` disables outbound refresh and pins the enabled catalog to its embedded
 fallback. Negative values are rejected. When `--codex-catalog-enabled=false`,
 the cached value is not registered and no Codex release request is made.

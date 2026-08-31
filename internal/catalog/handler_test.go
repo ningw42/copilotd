@@ -203,7 +203,7 @@ func discardHandlerLogger() *slog.Logger {
 }
 
 func TestHandlerRendersCodexFromCurrentCachedBytes(t *testing.T) {
-	fresh := validCodexModelsBytes(t, "fresh-model", "release prompt")
+	fresh := codexModelsBytesWithoutField(t, "base_instructions")
 	registry := cache.NewRegistry()
 	modelsValue := cache.New(discardHandlerLogger(), cache.Cacheable[[]byte]{
 		Fallback:        embeddedCodexModels,
@@ -214,14 +214,14 @@ func TestHandlerRendersCodexFromCurrentCachedBytes(t *testing.T) {
 		},
 		Hash: hashModels,
 		Validate: func(currentBytes []byte) error {
-			_, err := decodeCodexModels(currentBytes)
+			_, err := validateCodexModels(currentBytes)
 			return err
 		},
 	})
 	registry.Register(modelsValue)
 	registry.Prime(context.Background())
 
-	upstreamBody := []byte(`{"data":[{"id":"fresh-model","model_picker_enabled":true,"supported_endpoints":["/responses"]}]}`)
+	upstreamBody := []byte(`{"data":[{"id":"gpt-test","model_picker_enabled":true,"supported_endpoints":["/responses"]}]}`)
 	handler := Handler(discardHandlerLogger(), endpoint.OpenAICatalog(), Rendering{
 		Render: RenderOpenAI,
 		Codex: CodexDescriptor{
@@ -240,7 +240,7 @@ func TestHandlerRendersCodexFromCurrentCachedBytes(t *testing.T) {
 		t.Fatalf("status = %d, want 200: %s", recorder.Code, recorder.Body.String())
 	}
 	entries := decodeRenderedCodex(t, recorder.Body.Bytes())
-	if got := renderedSlugs(t, entries); len(got) != 1 || got[0] != "fresh-model" {
+	if got := renderedSlugs(t, entries); len(got) != 1 || got[0] != "gpt-test" {
 		t.Fatalf("rendered slugs = %q, want current Catalog model", got)
 	}
 }

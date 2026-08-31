@@ -14,12 +14,15 @@ The Codex catalog serves `models.json` from a memory-only **cached value**. Its
 embedded `rust-v0.144.5` vendored snapshot is the guaranteed-parseable
 **fallback**. When the Codex catalog is enabled, copilotd checks
 `openai/codex`'s latest GitHub release tag at startup and on a 24-hour-by-default
-cadence, then fetches `codex-rs/models-manager/models.json` at that immutable
-tag. The **refresh ladder** rejects malformed content through
-`decodeCodexModels`, holds last-good on failure, and returns to the embedded
+cadence, resolves that stable tag to its commit, then fetches
+`codex-rs/models-manager/models.json` at the immutable commit SHA. The tag stays
+the human-readable cached-value version; an unchanged tag holds the already
+accepted commit's content. The **refresh ladder** rejects malformed content through
+`validateCodexModels`, holds last-good on failure, and returns to the embedded
 allocation when fetched bytes equal the floor. The read path decodes the
-currently served bytes and threads that decoded model map into the Codex
-renderer; it does not retain a second parsed copy.
+currently served bytes with `parseCodexModels` and threads that model map into
+the Codex renderer without repeating accept-time contract validation; it does
+not retain a second parsed copy.
 
 This outbound dependency is public and credential-isolated. A dedicated plain
 HTTP client talks to GitHub without the API key, GitHub OAuth token, Copilot
@@ -35,8 +38,9 @@ the embedded fallback while retaining its non-secret `/readyz` observation.
   `ModelInfo` evolves independently and the shipped catalog silently becomes
   stale until copilotd is rebuilt.
 - **Track the default-branch head** — rejected because an unreleased prompt or
-  schema edit could become live immediately. A release tag is reviewed,
-  human-readable, and immutable.
+  schema edit could become live immediately. A stable release tag is reviewed
+  and human-readable; resolving it before content retrieval gives the fetched
+  artifact an immutable commit identity.
 - **Persist fetched bytes** — rejected. The embedded fallback makes disk state
   unnecessary, and persistence would violate the ROADMAP's single-file
   state-at-rest boundary.
@@ -48,10 +52,10 @@ the embedded fallback while retaining its non-secret `/readyz` observation.
 ## Consequences
 
 The Codex catalog can advance between copilotd releases without becoming less
-reliable than the vendored floor. A schema drift that `decodeCodexModels` cannot
-honor never replaces a good value. Startup and periodic failures do not affect
-readiness. `/readyz` reports `codex_models` through the cache registry only when
-the catalog is enabled.
+reliable than the vendored floor. A schema drift that
+`validateCodexModels` cannot honor never replaces a good value. Startup and
+periodic failures do not affect readiness. `/readyz` reports `codex_models`
+through the cache registry only when the catalog is enabled.
 
 The process now holds externally fetched content in memory. This is consistent
 with ROADMAP principle 4: memory-only cached values are not state at rest;

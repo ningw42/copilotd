@@ -4,14 +4,22 @@
 
 **Amendment:** ADR-0009 changes the fixed `rust-v0.144.5` vendored snapshot
 from the sole served source into the embedded fallback of a memory-only cached
-value that follows the latest immutable Codex release tag. This ADR's fidelity
+value that follows the latest stable Codex release and fetches content at its
+resolved commit. This ADR's fidelity
 contract remains in force: every accepted entry must be a complete Codex
 `ModelInfo`, re-emitted field-for-field except for the enumerated reviewer and
 limit overlays.
 
+**Compatibility note (2026-08-31):** Codex `rust-v0.151.0` treats command auth
+as API-key auth and defaults that provider mode's Guardian reviewer to
+`gpt-5.6-luna`; `codex-auto-review` remains the ChatGPT-auth default. Configured
+`auto_review_model_override` values still take precedence, so this ADR's
+explicit routing mechanism remains valid but is no longer the only way current
+command-auth clients can avoid `codex-auto-review`.
+
 The Codex client-shaped catalog (Phase 6b), served on
 `GET /openai/v1/models?client_version=…`, re-emits an accepted release of Codex's
-own `models.json` (latest immutable release tag, with the vendored
+own `models.json` (latest stable release, commit-addressed, with the vendored
 `rust-v0.144.5` floor) **field-for-field per slug**,
 overwriting only an enumerated set of keys — `auto_review_model_override` (injected
 from a per-main-model `codex-auto-review-model-overrides` entry or the global

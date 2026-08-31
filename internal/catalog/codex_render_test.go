@@ -45,7 +45,7 @@ func TestRenderCodexIntersectsInLiveOrderAndEmitsCompleteEntries(t *testing.T) {
 			t.Errorf("models[%d] does not match Codex required-field types: %v", i, err)
 		}
 		assertCodexRequiredFieldValues(t, i, mirror)
-		if mirror.Slug == "" || mirror.BaseInstructions == "" {
+		if mirror.Slug == "" || decodeStringField(t, entry, "base_instructions") == "" {
 			t.Errorf("models[%d] has empty slug or base_instructions", i)
 		}
 		if raw := bytes.TrimSpace(entry["model_messages"]); len(raw) == 0 || bytes.Equal(raw, []byte("null")) || bytes.Equal(raw, []byte("{}")) {

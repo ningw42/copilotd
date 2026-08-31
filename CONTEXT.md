@@ -203,9 +203,12 @@ _Avoid_: model list (unqualified).
 
 **Reviewer model**:
 The real, forwardable model copilotd routes Codex's guardian auto-review to via
-`auto_review_model_override`, replacing Codex's unforwardable default
-`codex-auto-review`. Chosen per **Main model** — a per-main-model override map over
-a global default — so different main models can route to different reviewers.
+`auto_review_model_override`, taking precedence over Codex's provider default.
+Current Codex defaults command/API-key providers to `gpt-5.6-luna` and ChatGPT
+auth to `codex-auto-review`; the explicit override keeps routing controllable
+across client versions and Copilot lineups. Chosen per **Main model** — a
+per-main-model override map over a global default — so different main models can
+route to different reviewers.
 A configured reviewer is injected only when it is emitted from the intersection
 of Copilot-forwardable models and the current decoded model map, ensuring Codex
 can resolve the reviewer's complete `ModelInfo`.

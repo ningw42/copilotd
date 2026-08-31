@@ -371,8 +371,9 @@ func TestServeDiscoveredVersionsEndToEnd(t *testing.T) {
 
 func TestServeFreshCodexCatalogAndReadinessEndToEnd(t *testing.T) {
 	const (
-		tag   = "rust-v0.145.0"
-		oauth = "gho-codex-freshness"
+		tag    = "rust-v0.145.0"
+		commit = "1234567890abcdef1234567890abcdef12345678"
+		oauth  = "gho-codex-freshness"
 	)
 	fresh := completeCodexModelsBytes(t, "fresh-model", "fresh release prompt")
 	upstream := newCopilotStub(t, `{"data":[{"id":"fresh-model","vendor":"OpenAI","model_picker_enabled":true,"supported_endpoints":["/responses"]}]}`)
@@ -394,12 +395,20 @@ func TestServeFreshCodexCatalogAndReadinessEndToEnd(t *testing.T) {
 				t.Errorf("Codex release peek carried Authorization %q", got)
 			}
 			_, _ = io.WriteString(w, `{"tag_name":"`+tag+`"}`)
+		case "/repos/openai/codex/commits/" + tag:
+			if got := r.Header.Get("Authorization"); got != "" {
+				t.Errorf("Codex commit resolution carried Authorization %q", got)
+			}
+			if got := r.Header.Get("Accept"); got != "application/vnd.github.sha" {
+				t.Errorf("Codex commit Accept = %q, want GitHub SHA media type", got)
+			}
+			_, _ = io.WriteString(w, commit)
 		case "/repos/openai/codex/contents/codex-rs/models-manager/models.json":
 			if got := r.Header.Get("Authorization"); got != "" {
 				t.Errorf("Codex models fetch carried Authorization %q", got)
 			}
-			if got := r.URL.Query().Get("ref"); got != tag {
-				t.Errorf("Codex models ref = %q, want %q", got, tag)
+			if got := r.URL.Query().Get("ref"); got != commit {
+				t.Errorf("Codex models ref = %q, want peeled commit %q", got, commit)
 			}
 			_, _ = w.Write(fresh)
 		default:
