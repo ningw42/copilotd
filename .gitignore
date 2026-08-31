@@ -9,3 +9,5 @@
 /.superpowers/
 # pi agent state
 /.pi/
+# agent scratch work (reviews, drafts, working notes)
+/.scratch/
