@@ -16,8 +16,14 @@ import (
 	"github.com/ningw42/copilotd/internal/endpoint"
 	"github.com/ningw42/copilotd/internal/identity"
 	"github.com/ningw42/copilotd/internal/logging"
+	"github.com/ningw42/copilotd/internal/requestsummary"
 	"github.com/ningw42/copilotd/internal/shim"
+	"github.com/ningw42/copilotd/internal/sse"
 )
+
+type telemetryStreamObserver struct{}
+
+func (telemetryStreamObserver) ObserveStreamOutcome(string, sse.Outcome) {}
 
 type recordingWsMetrics struct {
 	mu        sync.Mutex
@@ -197,7 +203,7 @@ func TestProxyPublishesClientClosedSessionWithDirectionalCounts(t *testing.T) {
 	observed := &recordingWsMetrics{}
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logs, nil))
-	client, handlerDone, resultContexts, cleanup := startTelemetrySession(t, logger, observed, 1<<20, func(conn *websocket.Conn) {
+	client, handlerDone, resultSummaries, cleanup := startTelemetrySession(t, logger, observed, 1<<20, func(conn *websocket.Conn) {
 		for {
 			messageType, payload, err := conn.Read(context.Background())
 			if err != nil {
@@ -244,9 +250,9 @@ func TestProxyPublishesClientClosedSessionWithDirectionalCounts(t *testing.T) {
 	}
 
 	totalBytes := int64(len(messages[0]) + len(messages[1]))
-	result := publishedSessionResult(t, resultContexts)
-	wantResult := SessionResult{
-		Terminal:  SessionClientClosed,
+	result := publishedSessionResult(t, resultSummaries)
+	wantResult := requestsummary.WebSocketResult{
+		Terminal:  requestsummary.WebSocketClientClosed,
 		CloseCode: int(websocket.StatusNormalClosure),
 		MsgsC2U:   2,
 		MsgsU2C:   2,
@@ -285,7 +291,7 @@ func TestProxyDroppedClientMessageIsNotForwardedOrCounted(t *testing.T) {
 		},
 	}}
 	received := make(chan string, 1)
-	client, handlerDone, resultContexts, cleanup := startTelemetrySessionWithRegistry(
+	client, handlerDone, resultSummaries, cleanup := startTelemetrySessionWithRegistry(
 		t,
 		slog.New(slog.NewTextHandler(&logs, nil)),
 		observed,
@@ -326,7 +332,7 @@ func TestProxyDroppedClientMessageIsNotForwardedOrCounted(t *testing.T) {
 	}
 	waitForHandler(t, handlerDone)
 
-	result := publishedSessionResult(t, resultContexts)
+	result := publishedSessionResult(t, resultSummaries)
 	if result.MsgsC2U != 1 || result.BytesC2U != 4 {
 		t.Errorf("client-to-upstream session result = %#v, want one four-byte message", result)
 	}
@@ -344,7 +350,7 @@ func TestProxyDroppedServerMessageIsNotForwardedOrCounted(t *testing.T) {
 			})
 		},
 	}}
-	client, handlerDone, resultContexts, cleanup := startTelemetrySessionWithRegistry(
+	client, handlerDone, resultSummaries, cleanup := startTelemetrySessionWithRegistry(
 		t,
 		slog.New(slog.NewTextHandler(&logs, nil)),
 		observed,
@@ -372,7 +378,7 @@ func TestProxyDroppedServerMessageIsNotForwardedOrCounted(t *testing.T) {
 	}
 	waitForHandler(t, handlerDone)
 
-	result := publishedSessionResult(t, resultContexts)
+	result := publishedSessionResult(t, resultSummaries)
 	if result.MsgsU2C != 1 || result.BytesU2C != 4 {
 		t.Errorf("upstream-to-client session result = %#v, want one four-byte message", result)
 	}
@@ -395,7 +401,7 @@ func TestProxyClientMessageShimPanicIsWarnedAndRedacted(t *testing.T) {
 		},
 	}}
 	upstreamClosed := make(chan websocket.StatusCode, 1)
-	client, handlerDone, resultContexts, cleanup := startTelemetrySessionWithRegistry(
+	client, handlerDone, resultSummaries, cleanup := startTelemetrySessionWithRegistry(
 		t,
 		slog.New(slog.NewTextHandler(&logs, nil)),
 		observed,
@@ -431,8 +437,8 @@ func TestProxyClientMessageShimPanicIsWarnedAndRedacted(t *testing.T) {
 	if len(terminals) != 1 || terminals[0] != SessionError {
 		t.Errorf("terminal observations = %v, want [error]", terminals)
 	}
-	result := publishedSessionResult(t, resultContexts)
-	if result.Terminal != SessionError || result.CloseCode != int(websocket.StatusInternalError) {
+	result := publishedSessionResult(t, resultSummaries)
+	if result.Terminal != requestsummary.WebSocketError || result.CloseCode != int(websocket.StatusInternalError) {
 		t.Errorf("panic session result = %#v, want error/1011", result)
 	}
 	logText := logs.String()
@@ -448,7 +454,7 @@ func TestProxyTreatsAbruptClientDisconnectAsCleanClientClosure(t *testing.T) {
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logs, nil))
 	upstreamClosed := make(chan websocket.StatusCode, 1)
-	client, handlerDone, resultContexts, cleanup := startTelemetrySession(t, logger, observed, 1<<20, func(conn *websocket.Conn) {
+	client, handlerDone, resultSummaries, cleanup := startTelemetrySession(t, logger, observed, 1<<20, func(conn *websocket.Conn) {
 		_, _, err := conn.Read(context.Background())
 		upstreamClosed <- websocket.CloseStatus(err)
 	})
@@ -471,8 +477,8 @@ func TestProxyTreatsAbruptClientDisconnectAsCleanClientClosure(t *testing.T) {
 	if len(terminals) != 1 || terminals[0] != SessionClientClosed {
 		t.Errorf("terminal observations = %v, want [client_closed]", terminals)
 	}
-	result := publishedSessionResult(t, resultContexts)
-	if result.Terminal != SessionClientClosed || result.CloseCode != int(websocket.StatusGoingAway) {
+	result := publishedSessionResult(t, resultSummaries)
+	if result.Terminal != requestsummary.WebSocketClientClosed || result.CloseCode != int(websocket.StatusGoingAway) {
 		t.Errorf("abrupt-close session result = %#v, want client_closed/1001", result)
 	}
 }
@@ -480,7 +486,7 @@ func TestProxyTreatsAbruptClientDisconnectAsCleanClientClosure(t *testing.T) {
 func TestProxyPublishesUpstreamCloseAsCleanTerminal(t *testing.T) {
 	observed := &recordingWsMetrics{}
 	var logs bytes.Buffer
-	client, handlerDone, resultContexts, cleanup := startTelemetrySession(
+	client, handlerDone, resultSummaries, cleanup := startTelemetrySession(
 		t,
 		slog.New(slog.NewTextHandler(&logs, nil)),
 		observed,
@@ -501,8 +507,8 @@ func TestProxyPublishesUpstreamCloseAsCleanTerminal(t *testing.T) {
 	if len(terminals) != 1 || terminals[0] != SessionUpstreamClosed {
 		t.Errorf("terminal observations = %v, want [upstream_closed]", terminals)
 	}
-	result := publishedSessionResult(t, resultContexts)
-	if result.Terminal != SessionUpstreamClosed || result.CloseCode != 4002 {
+	result := publishedSessionResult(t, resultSummaries)
+	if result.Terminal != requestsummary.WebSocketUpstreamClosed || result.CloseCode != 4002 {
 		t.Errorf("upstream-close session result = %#v, want upstream_closed/4002", result)
 	}
 }
@@ -510,7 +516,7 @@ func TestProxyPublishesUpstreamCloseAsCleanTerminal(t *testing.T) {
 func TestProxyPublishesOversizeAsAbnormalTerminal(t *testing.T) {
 	observed := &recordingWsMetrics{}
 	var logs bytes.Buffer
-	client, handlerDone, resultContexts, cleanup := startTelemetrySession(
+	client, handlerDone, resultSummaries, cleanup := startTelemetrySession(
 		t,
 		slog.New(slog.NewTextHandler(&logs, nil)),
 		observed,
@@ -534,18 +540,18 @@ func TestProxyPublishesOversizeAsAbnormalTerminal(t *testing.T) {
 	if len(terminals) != 1 || terminals[0] != SessionError {
 		t.Errorf("terminal observations = %v, want [error]", terminals)
 	}
-	result := publishedSessionResult(t, resultContexts)
-	if result.Terminal != SessionError || result.CloseCode != int(websocket.StatusMessageTooBig) {
+	result := publishedSessionResult(t, resultSummaries)
+	if result.Terminal != requestsummary.WebSocketError || result.CloseCode != int(websocket.StatusMessageTooBig) {
 		t.Errorf("oversize session result = %#v, want error/1009", result)
 	}
 }
 
-func startTelemetrySession(t *testing.T, logger *slog.Logger, observed *recordingWsMetrics, maxMessageBytes int64, serveUpstream func(*websocket.Conn)) (*websocket.Conn, <-chan struct{}, <-chan context.Context, func()) {
+func startTelemetrySession(t *testing.T, logger *slog.Logger, observed *recordingWsMetrics, maxMessageBytes int64, serveUpstream func(*websocket.Conn)) (*websocket.Conn, <-chan struct{}, <-chan *requestsummary.Summary, func()) {
 	t.Helper()
 	return startTelemetrySessionWithRegistry(t, logger, observed, maxMessageBytes, nil, serveUpstream)
 }
 
-func startTelemetrySessionWithRegistry(t *testing.T, logger *slog.Logger, observed *recordingWsMetrics, maxMessageBytes int64, registry shim.Registry, serveUpstream func(*websocket.Conn)) (*websocket.Conn, <-chan struct{}, <-chan context.Context, func()) {
+func startTelemetrySessionWithRegistry(t *testing.T, logger *slog.Logger, observed *recordingWsMetrics, maxMessageBytes int64, registry shim.Registry, serveUpstream func(*websocket.Conn)) (*websocket.Conn, <-chan struct{}, <-chan *requestsummary.Summary, func()) {
 	t.Helper()
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -572,10 +578,10 @@ func startTelemetrySessionWithRegistry(t *testing.T, logger *slog.Logger, observ
 		WsMetrics{Accept: observed, SessionTerminal: observed},
 	)
 	handlerDone := make(chan struct{})
-	resultContexts := make(chan context.Context, 1)
+	resultSummaries := make(chan *requestsummary.Summary, 1)
 	downstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ctx := WithSessionResultHolder(logging.WithRequestID(r.Context(), "request-telemetry"))
-		resultContexts <- ctx
+		ctx, summary := requestsummary.Begin(logging.WithRequestID(r.Context(), "request-telemetry"), telemetryStreamObserver{})
+		resultSummaries <- summary
 		proxy.Handler(endpoint.OpenAIResponsesWS()).ServeHTTP(w, r.WithContext(ctx))
 		close(handlerDone)
 	}))
@@ -600,14 +606,32 @@ func startTelemetrySessionWithRegistry(t *testing.T, logger *slog.Logger, observ
 		downstream.Close()
 		upstream.Close()
 	}
-	return client, handlerDone, resultContexts, cleanup
+	return client, handlerDone, resultSummaries, cleanup
 }
 
-func publishedSessionResult(t *testing.T, contexts <-chan context.Context) SessionResult {
+func publishedSessionResult(t *testing.T, summaries <-chan *requestsummary.Summary) requestsummary.WebSocketResult {
 	t.Helper()
-	ctx := <-contexts
-	result, ok := SessionResultFromContext(ctx)
-	if !ok {
+	publication := (<-summaries).Finish(requestsummary.ResponseResult{})
+	var result requestsummary.WebSocketResult
+	found := false
+	for _, attr := range publication.Attrs {
+		switch attr.Key {
+		case logging.TerminalReasonKey:
+			result.Terminal = requestsummary.WebSocketTerminal(attr.Value.String())
+			found = true
+		case logging.CloseCodeKey:
+			result.CloseCode = int(attr.Value.Int64())
+		case logging.MsgsC2UKey:
+			result.MsgsC2U = attr.Value.Int64()
+		case logging.MsgsU2CKey:
+			result.MsgsU2C = attr.Value.Int64()
+		case logging.BytesC2UKey:
+			result.BytesC2U = attr.Value.Int64()
+		case logging.BytesU2CKey:
+			result.BytesU2C = attr.Value.Int64()
+		}
+	}
+	if !found {
 		t.Fatal("WebSocket handler published no session result")
 	}
 	return result

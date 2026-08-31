@@ -32,6 +32,7 @@ type catalogFailureScenario struct {
 	wantStatus    int
 	wantCalls     int32
 	wantErrorType func(endpoint.Surface) string
+	wantMessage   string
 }
 
 func TestCatalogLocalFailuresHaveGETEquivalentHEADFramingOverRealListener(t *testing.T) {
@@ -69,7 +70,10 @@ func TestCatalogLocalFailuresHaveGETEquivalentHEADFramingOverRealListener(t *tes
 		}), wantStatus: 502, wantCalls: 2, wantErrorType: apiError},
 		{name: "malformed catalog", ready: true, authorize: true, roundTrip: freshResponse(200, func() io.ReadCloser {
 			return io.NopCloser(strings.NewReader(`<body-secret>`))
-		}), wantStatus: 502, wantCalls: 2, wantErrorType: apiError},
+		}), wantStatus: 502, wantCalls: 2, wantErrorType: apiError, wantMessage: "upstream models response was invalid"},
+		{name: "rendering failure", ready: true, authorize: true, roundTrip: freshResponse(200, func() io.ReadCloser {
+			return io.NopCloser(strings.NewReader(`{"data":[{"id":"unrenderable-model-secret","model_picker_enabled":true,"supported_endpoints":["/v1/messages","/responses"]}]}`))
+		}), wantStatus: 502, wantCalls: 2, wantErrorType: apiError, wantMessage: "could not render the models catalog"},
 	}
 	surfaces := []struct {
 		name    string
@@ -104,8 +108,9 @@ func TestCatalogLocalFailuresHaveGETEquivalentHEADFramingOverRealListener(t *tes
 				if responseLimit == 0 {
 					responseLimit = 1 << 20
 				}
+				logger, logs := bufferLogger(t, "info")
 				forwarder := newTestForwarder(provider, client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, responseLimit, nil)
-				base := startServer(t, newTestServerFromBase(testConfig(), discardLogger(t), provider, newTestReadyObservers(), forwarder, newTestCatalogSourceWith(provider, client, time.Second, responseLimit, discardLogger(t)), newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.RenderDescriptors{}))
+				base := startServer(t, newTestServerFromBase(testConfig(), logger, provider, newTestReadyObservers(), forwarder, newTestCatalogSourceWith(provider, client, time.Second, responseLimit, logger), newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.RenderDescriptors{}))
 
 				do := func(method string) (*http.Response, []byte) {
 					t.Helper()
@@ -116,6 +121,7 @@ func TestCatalogLocalFailuresHaveGETEquivalentHEADFramingOverRealListener(t *tes
 					if scenario.authorize {
 						req.Header.Set("Authorization", "Bearer "+testAPIKey)
 					}
+					req.Header.Set("X-Request-Id", "catalog-omission-"+strings.ToLower(method))
 					resp, err := http.DefaultClient.Do(req)
 					if err != nil {
 						t.Fatalf("%s: %v", method, err)
@@ -136,6 +142,9 @@ func TestCatalogLocalFailuresHaveGETEquivalentHEADFramingOverRealListener(t *tes
 				if got := catalogErrorType(t, surface.surface, getBody); got != scenario.wantErrorType(surface.surface) {
 					t.Errorf("error type = %q, want %q", got, scenario.wantErrorType(surface.surface))
 				}
+				if scenario.wantMessage != "" && !strings.Contains(string(getBody), scenario.wantMessage) {
+					t.Errorf("error body = %s, want %q", getBody, scenario.wantMessage)
+				}
 				if getResponse.Header.Get("Content-Type") != "application/json" || headResponse.Header.Get("Content-Type") != "application/json" {
 					t.Errorf("GET/HEAD content types = %q/%q, want application/json", getResponse.Header.Get("Content-Type"), headResponse.Header.Get("Content-Type"))
 				}
@@ -150,6 +159,48 @@ func TestCatalogLocalFailuresHaveGETEquivalentHEADFramingOverRealListener(t *tes
 				}
 				if got := calls.Load(); got != scenario.wantCalls {
 					t.Errorf("upstream calls = %d, want %d for GET+HEAD", got, scenario.wantCalls)
+				}
+
+				output := logs.String()
+				accessLines := serverLogLinesContaining(output, "msg=access")
+				if len(accessLines) != 2 {
+					t.Fatalf("access records = %d, want one for GET and one for HEAD:\n%s", len(accessLines), output)
+				}
+				wantLevel := "level=INFO"
+				if scenario.wantStatus >= http.StatusInternalServerError {
+					wantLevel = "level=WARN"
+				}
+				for _, request := range []struct {
+					method string
+					bytes  int
+				}{
+					{method: http.MethodGet, bytes: len(getBody)},
+					{method: http.MethodHead, bytes: 0},
+				} {
+					requestID := "catalog-omission-" + strings.ToLower(request.method)
+					lines := serverLogLinesContaining(output, "msg=access", "request_id="+requestID)
+					if len(lines) != 1 {
+						t.Fatalf("access records for %s = %d, want one:\n%s", request.method, len(lines), output)
+					}
+					for _, want := range []string{
+						"component=internal/server",
+						wantLevel,
+						"method=" + request.method,
+						`inbound="` + request.method + ` ` + surface.path + `"`,
+						"surface=" + surface.surface.String(),
+						"status=" + strconv.Itoa(scenario.wantStatus),
+						"bytes=" + strconv.Itoa(request.bytes),
+						"duration=",
+					} {
+						if !strings.Contains(lines[0], want) {
+							t.Errorf("%s access record missing %q: %s", request.method, want, lines[0])
+						}
+					}
+					for _, omitted := range []string{"outcome=", "frames=", "fallbacks=", "catalog_shape=", "secret"} {
+						if strings.Contains(lines[0], omitted) {
+							t.Errorf("%s access record unexpectedly contains %q: %s", request.method, omitted, lines[0])
+						}
+					}
 				}
 			})
 		}

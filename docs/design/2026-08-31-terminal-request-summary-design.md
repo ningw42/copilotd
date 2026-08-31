@@ -229,11 +229,19 @@ Catalog handler ───────────┤
 WebSocket forwarder ───────┘
 ```
 
-`requestsummary` must not import `internal/server`, `internal/forward`,
+ADR-0013 narrowly authorizes the direct
+`internal/upstream → internal/requestsummary` edge so `Caller.Correlate` remains
+the owner of differing upstream request-id publication. The direction is
+one-way: `requestsummary` must not import `internal/server`, `internal/forward`,
 `internal/catalog`, `internal/upstream`, or `internal/wsforward`. That rule keeps
-producer implementations behind the seam and prevents import cycles. It may use
-stable leaf vocabulary such as `sse.Outcome`, standard-library types, and the
-central logging key registry.
+producer implementations behind the seam and prevents import cycles.
+
+`requestsummary` may use stable leaf vocabulary such as `sse.Outcome`,
+standard-library types, and the central logging key registry. In particular,
+`requestsummary.StreamResult.Outcome` remains typed as `sse.Outcome`; therefore
+the authorized direct edge gives `internal/upstream` the accepted transitive
+`internal/requestsummary → internal/sse` dependency. Layering remains sound and
+no cycle results because neither `requestsummary` nor `sse` imports `upstream`.
 
 Each producer explicitly projects its package-owned result into a
 summary-owned fact. The projection is intentional: producer result types may
@@ -436,13 +444,17 @@ for a non-probe request; a matched probe remains Debug under level rule 1.
 
 `upstream.Caller.Correlate` continues to derive and return a later immutable
 logging context only when Copilot's request id exists and differs from
-copilotd's resolved request id. It records that context through
-`RecordCorrelation` before returning it.
+copilotd's resolved request id. Under the narrowly amended ADR-0013 boundary,
+`Caller.Correlate` remains the owner of publication and records that context
+through `RecordCorrelation` before returning it.
 
-The standalone upstream correlation record remains Debug. Response-path records
-continue using the returned child context directly. Final access publication
-prefers the recorded correlated context because it descends from matched scope
-and therefore already includes `inbound`, Surface, and WebSocket attributes.
+The method's signature, unchanged-context and derived-context returns, all four
+existing consumer call sites, and standalone Debug correlation record remain
+unchanged.
+Response-path records continue using the returned child context directly. Final
+access publication prefers the recorded correlated context because it descends
+from matched scope and therefore already includes `inbound`, Surface, and
+WebSocket attributes.
 
 Correlation is accepted once. Later attempts do not replace the first differing
 upstream id, preserving the existing holder's first-publication behavior.
@@ -568,8 +580,8 @@ Final access uses, in order:
 
 A correlated context is derived on the response path from a descendant of the
 matched context, so preferring it retains request id, `inbound`, Surface, and
-WebSocket scope. A cancelled correlated context remains valid for slog value
-lookup, exactly as under the current implementation.
+WebSocket scope. A cancelled correlated context remains selected, exactly as
+under the current implementation.
 
 ### Level precedence
 
@@ -651,8 +663,10 @@ finalization policy, publication plan, and focused tests.
 ### `internal/server`
 
 `accessLog` replaces five holder installations and reads with `Begin`, one
-`Finish`, and one unchanged server-owned `LogAttrs` emission. Its direct imports
-of producer modules and `sse` disappear from middleware.
+`Finish`, and one unchanged server-owned `LogAttrs` emission. The Catalog,
+forward, SSE, and WebSocket result/finalization imports leave middleware.
+`internal/upstream` remains imported there because request-ID handling continues
+to use `upstream.RequestIDHeader`.
 
 `scoped` records registration-owned scope through `RecordBinding`.
 `recoverMW` resolves matched scope through `MatchedContext`. The server-owned
@@ -668,9 +682,11 @@ says otherwise.
 
 ### `internal/upstream`
 
-`Caller.Correlate` records its derived correlated context through the shared
-contract. Its response-path return value, Debug record, and callers remain
-unchanged. The correlation holder is deleted.
+Under ADR-0013's narrow direct-import amendment, `Caller.Correlate` remains the
+owner of `RecordCorrelation` and records its derived correlated context through
+the shared contract. Its signature, unchanged- and derived-context return
+behavior, Debug record, and callers remain unchanged. The correlation holder is
+deleted.
 
 ### `internal/forward`
 
@@ -901,7 +917,10 @@ complete plan prepared for the one access publication without implying that the
 module emits it. `requestsummary` prepares the `Publication`; `internal/server`
 emits it.
 
-No interface or ownership decision remains open.
+SC1 is resolved as Option 1: `Caller.Correlate` remains the owner of
+`RecordCorrelation` under the narrow ADR-0013 direct-import amendment;
+`requestsummary.StreamResult.Outcome` remains typed as `sse.Outcome`, and the
+resulting transitive SSE dependency is accepted.
 
 ## CONTEXT.md changes
 
@@ -927,8 +946,11 @@ change; this design does not require one.
   — access remains the sole server-owned terminal request summary emitted with
   ordinary slog; its scope, level, key, and Component rules are unchanged.
 - [ADR-0013](../adr/0013-govern-authenticated-upstream-calls-in-internal-upstream.md)
-  — `internal/upstream` retains ownership of `Caller.Correlate`; this design
-  changes only how its later response-path context reaches access finalization.
+  — narrowly amended to authorize the direct
+  `internal/upstream → internal/requestsummary` edge while
+  `Caller.Correlate` retains publication ownership. The amendment also records
+  the accepted transitive `internal/requestsummary → internal/sse` consequence;
+  the rest of the upstream-call boundary is unchanged.
 - [ADR-0007](../adr/0007-served-endpoints-as-typed-contracts.md) — the typed
   Endpoint owns Surface, and its approved `Surface.String()` projection supplies
   the stream metric label without re-derivation.

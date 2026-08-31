@@ -6,12 +6,9 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/ningw42/copilotd/internal/catalog"
-	"github.com/ningw42/copilotd/internal/forward"
 	"github.com/ningw42/copilotd/internal/logging"
-	"github.com/ningw42/copilotd/internal/sse"
+	"github.com/ningw42/copilotd/internal/requestsummary"
 	"github.com/ningw42/copilotd/internal/upstream"
-	"github.com/ningw42/copilotd/internal/wsforward"
 )
 
 // requestID resolves the correlation id — honoring a well-formed inbound value,
@@ -32,14 +29,13 @@ func requestID(next http.Handler) http.Handler {
 func scoped(attrs []slog.Attr, probe bool, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := logging.With(r.Context(), attrs...)
-		publishMatchedScope(r.Context(), matchedScope{ctx: ctx, probe: probe})
+		requestsummary.RecordBinding(r.Context(), requestsummary.Binding{Context: ctx, Probe: probe})
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
 // accessLog emits the sole terminal request summary after the registered
-// handler returns. Registration scope is absent when no registered handler ran;
-// streamed response facts are added from their package-owned result holder.
+// handler returns. Registration scope is absent when no registered handler ran.
 func accessLog(logger *slog.Logger, streamOutcomes StreamOutcomeObserver, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
@@ -49,68 +45,16 @@ func accessLog(logger *slog.Logger, streamOutcomes StreamOutcomeObserver, next h
 			suppressBodyBytes: r.Method == http.MethodHead,
 		}
 
-		ctx := forward.WithStreamResultHolder(r.Context())
-		ctx = catalog.WithShapeResultHolder(ctx)
-		ctx = withMatchedScopeHolder(ctx)
-		ctx = wsforward.WithSessionResultHolder(ctx)
-		ctx = upstream.WithCorrelationHolder(ctx)
+		ctx, summary := requestsummary.Begin(r.Context(), streamOutcomes)
 		next.ServeHTTP(sw, r.WithContext(ctx))
 
-		logCtx := r.Context()
-		probe := false
-		matched, matchedOK := matchedScopeFromContext(ctx)
-		if matchedOK {
-			probe = matched.probe
-		}
-		if correlated, ok := upstream.CorrelatedContextFromContext(ctx); ok {
-			logCtx = correlated
-		} else if matchedOK {
-			logCtx = matched.ctx
-		}
-		level := slog.LevelInfo
-		if probe {
-			level = slog.LevelDebug
-		}
-		attrs := []slog.Attr{
-			slog.String(logging.MethodKey, r.Method),
-			slog.Int(logging.StatusKey, sw.status),
-			slog.Int64(logging.BytesKey, sw.bytes),
-			slog.Duration(logging.DurationKey, time.Since(start)),
-		}
-		if result, ok := forward.StreamResultFromContext(ctx); ok {
-			streamOutcomes.ObserveStreamOutcome(result.Surface, result.Outcome)
-			if !probe {
-				switch result.Outcome {
-				case sse.OutcomeSynthesized, sse.OutcomeStall, sse.OutcomeUpstreamError, sse.OutcomeShimError:
-					level = slog.LevelWarn
-				}
-			}
-			attrs = append(attrs,
-				slog.String(logging.OutcomeKey, string(result.Outcome)),
-				slog.Int(logging.FramesKey, result.Frames),
-				slog.Int(logging.FallbacksKey, result.Fallbacks),
-			)
-		}
-		if shape, ok := catalog.ShapeResultFromContext(ctx); ok {
-			attrs = append(attrs, slog.String(logging.CatalogShapeKey, string(shape)))
-		}
-		if result, ok := wsforward.SessionResultFromContext(ctx); ok {
-			if !probe && result.Terminal == wsforward.SessionError {
-				level = slog.LevelWarn
-			}
-			attrs = append(attrs,
-				slog.String(logging.TerminalReasonKey, string(result.Terminal)),
-				slog.Int(logging.CloseCodeKey, result.CloseCode),
-				slog.Int64(logging.MsgsC2UKey, result.MsgsC2U),
-				slog.Int64(logging.MsgsU2CKey, result.MsgsU2C),
-				slog.Int64(logging.BytesC2UKey, result.BytesC2U),
-				slog.Int64(logging.BytesU2CKey, result.BytesU2C),
-			)
-		}
-		if !probe && sw.status >= http.StatusInternalServerError {
-			level = slog.LevelWarn
-		}
-		logger.LogAttrs(logCtx, level, "access", attrs...)
+		publication := summary.Finish(requestsummary.ResponseResult{
+			Method:   r.Method,
+			Status:   sw.status,
+			Bytes:    sw.bytes,
+			Duration: time.Since(start),
+		})
+		logger.LogAttrs(publication.Context, publication.Level, "access", publication.Attrs...)
 	})
 }
 
@@ -122,8 +66,8 @@ func recoverMW(logger *slog.Logger, next http.Handler) http.Handler {
 		defer func() {
 			if rec := recover(); rec != nil {
 				logCtx := r.Context()
-				if matched, ok := matchedScopeFromContext(r.Context()); ok {
-					logCtx = matched.ctx
+				if matched, ok := requestsummary.MatchedContext(r.Context()); ok {
+					logCtx = matched
 				}
 				logger.LogAttrs(logCtx, slog.LevelError, "panic recovered",
 					slog.Any(logging.PanicKey, rec),

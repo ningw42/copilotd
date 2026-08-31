@@ -18,6 +18,8 @@ import (
 	"github.com/ningw42/copilotd/internal/config"
 	"github.com/ningw42/copilotd/internal/endpoint"
 	"github.com/ningw42/copilotd/internal/logging"
+	"github.com/ningw42/copilotd/internal/requestsummary"
+	"github.com/ningw42/copilotd/internal/sse"
 	"github.com/ningw42/copilotd/internal/upstream"
 )
 
@@ -55,6 +57,52 @@ func TestHandlerCallsTheCatalogContractsUpstreamRoute(t *testing.T) {
 	}
 	if !source.call.AcceptIdentityEncoding {
 		t.Error("upstream call did not request identity encoding")
+	}
+}
+
+type noOpStreamObserver struct{}
+
+func (noOpStreamObserver) ObserveStreamOutcome(string, sse.Outcome) {}
+
+func TestHandlerPublishesShapeOnlyAfterSuccessfulOpenAIRender(t *testing.T) {
+	rendered := false
+	handler := Handler(discardHandlerLogger(), endpoint.OpenAICatalog(), Rendering{
+		Render: func(models []Model) ([]byte, error) {
+			rendered = true
+			return RenderOpenAI(models)
+		},
+	}, stubSource{status: http.StatusOK, body: []byte(`{"data":[]}`)})
+	request := httptest.NewRequest(http.MethodGet, "/openai/v1/models", nil)
+	ctx, summary := requestsummary.Begin(request.Context(), noOpStreamObserver{})
+	request = request.WithContext(ctx)
+	recorder := httptest.NewRecorder()
+
+	handler(recorder, request)
+
+	if !rendered || recorder.Code != http.StatusOK {
+		t.Fatalf("rendered/status = %t/%d, want successful render before publication", rendered, recorder.Code)
+	}
+	publication := summary.Finish(requestsummary.ResponseResult{})
+	var got string
+	for _, attr := range publication.Attrs {
+		if attr.Key == logging.CatalogShapeKey {
+			got = attr.Value.String()
+		}
+	}
+	if got != "openai" {
+		t.Errorf("published catalog shape = %q, want openai", got)
+	}
+
+	failedHandler := Handler(discardHandlerLogger(), endpoint.OpenAICatalog(), Rendering{
+		Render: func([]Model) ([]byte, error) { return nil, errors.New("render failed") },
+	}, stubSource{status: http.StatusOK, body: []byte(`{"data":[]}`)})
+	failedRequest := httptest.NewRequest(http.MethodGet, "/openai/v1/models", nil)
+	failedCtx, failedSummary := requestsummary.Begin(failedRequest.Context(), noOpStreamObserver{})
+	failedHandler(httptest.NewRecorder(), failedRequest.WithContext(failedCtx))
+	for _, attr := range failedSummary.Finish(requestsummary.ResponseResult{}).Attrs {
+		if attr.Key == logging.CatalogShapeKey {
+			t.Errorf("render failure published catalog shape %q", attr.Value.String())
+		}
 	}
 }
 

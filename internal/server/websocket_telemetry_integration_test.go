@@ -282,8 +282,14 @@ func TestWebSocketPreUpgradeFailureEmitsOnlyAccessRecord(t *testing.T) {
 		}
 	}
 	out := logs.String()
-	if got := strings.Count(out, "msg=access"); got != 1 {
-		t.Fatalf("access lines = %d, want 1:\n%s", got, out)
+	accessLines := serverLogLinesContaining(out, "msg=access")
+	if len(accessLines) != 1 {
+		t.Fatalf("access lines = %d, want 1:\n%s", len(accessLines), out)
+	}
+	for _, sessionOnly := range []string{"terminal_reason=", "close_code=", "msgs_c2u=", "msgs_u2c=", "bytes_c2u=", "bytes_u2c="} {
+		if strings.Contains(accessLines[0], sessionOnly) {
+			t.Errorf("pre-upgrade access record unexpectedly contains %q: %s", sessionOnly, accessLines[0])
+		}
 	}
 	for _, establishedOnlyRecord := range []string{`msg="websocket established"`, `msg="websocket session"`} {
 		if strings.Contains(out, establishedOnlyRecord) {

@@ -351,7 +351,7 @@ func TestSingleModelsPassthroughForwardsEachInboundMethodWithoutSSEProcessing(t 
 	for _, tc := range tests {
 		t.Run(tc.method+" is preserved upstream", func(t *testing.T) {
 			req := httptest.NewRequest(tc.method, "/models", nil)
-			ctx := WithStreamResultHolder(req.Context())
+			ctx, stream := beginStreamPublication(req.Context())
 			req = req.WithContext(ctx)
 			rec := newDeadlineRecorder()
 
@@ -363,8 +363,8 @@ func TestSingleModelsPassthroughForwardsEachInboundMethodWithoutSSEProcessing(t 
 			if got := rec.Body.String(); got != tc.wantBody {
 				t.Errorf("body = %q, want raw passthrough body %q", got, tc.wantBody)
 			}
-			if result, ok := StreamResultFromContext(ctx); ok {
-				t.Errorf("raw Models response recorded SSE result %#v", result)
+			if result, ok := stream.finish(); ok {
+				t.Errorf("raw Models response published SSE result %#v", result)
 			}
 		})
 	}

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +17,8 @@ import (
 	"github.com/ningw42/copilotd/internal/config"
 	"github.com/ningw42/copilotd/internal/endpoint"
 	"github.com/ningw42/copilotd/internal/logging"
+	"github.com/ningw42/copilotd/internal/requestsummary"
+	"github.com/ningw42/copilotd/internal/sse"
 )
 
 func TestCallerClassifyMapsExecutionFailures(t *testing.T) {
@@ -127,6 +130,10 @@ func TestCallerClassifyMapsExecutionFailures(t *testing.T) {
 	}
 }
 
+type noOpStreamObserver struct{}
+
+func (noOpStreamObserver) ObserveStreamOutcome(string, sse.Outcome) {}
+
 func TestCallerCorrelateLogsOnlyDifferentResolvedRequestIDs(t *testing.T) {
 	tests := []struct {
 		name              string
@@ -167,21 +174,22 @@ func TestCallerCorrelateLogsOnlyDifferentResolvedRequestIDs(t *testing.T) {
 				t.Fatalf("new logger: %v", err)
 			}
 			caller := &Caller{logger: logger}
-			input := WithCorrelationHolder(tc.ctx)
+			input, summary := requestsummary.Begin(tc.ctx, noOpStreamObserver{})
 			header := make(http.Header)
 			if tc.upstreamRequestID != "" {
 				header.Set("X-Request-Id", tc.upstreamRequestID)
 			}
 
 			got := caller.Correlate(input, header)
+			publication := summary.Finish(requestsummary.ResponseResult{})
 
 			logOutput := logs.String()
 			if !tc.wantLog {
 				if got != input {
 					t.Error("absent or equal upstream id derived a new context")
 				}
-				if _, ok := CorrelatedContextFromContext(input); ok {
-					t.Error("absent or equal upstream id published a correlated context")
+				if publication.Context != tc.ctx {
+					t.Error("absent or equal upstream id changed the summary publication context")
 				}
 				if logOutput != "" {
 					t.Errorf("correlation log = %q, want none", logOutput)
@@ -191,8 +199,7 @@ func TestCallerCorrelateLogsOnlyDifferentResolvedRequestIDs(t *testing.T) {
 			if got == input {
 				t.Error("differing upstream id returned the input context")
 			}
-			published, ok := CorrelatedContextFromContext(input)
-			if !ok || published != got {
+			if publication.Context != got {
 				t.Error("differing upstream id did not publish the returned context")
 			}
 			for _, want := range []string{
@@ -213,6 +220,25 @@ func TestCallerCorrelateLogsOnlyDifferentResolvedRequestIDs(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestCallerCorrelatePublishesTheFirstDifferingContext(t *testing.T) {
+	base := logging.WithRequestID(context.Background(), "copilotd-123")
+	ctx, summary := requestsummary.Begin(base, noOpStreamObserver{})
+	caller := &Caller{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	firstHeader := http.Header{RequestIDHeader: {"upstream-first"}}
+	secondHeader := http.Header{RequestIDHeader: {"upstream-second"}}
+
+	first := caller.Correlate(ctx, firstHeader)
+	second := caller.Correlate(ctx, secondHeader)
+	publication := summary.Finish(requestsummary.ResponseResult{})
+
+	if first == ctx || second == ctx || first == second {
+		t.Fatal("differing upstream ids did not derive distinct response contexts")
+	}
+	if publication.Context != first {
+		t.Error("later differing upstream id replaced the first published context")
 	}
 }
 

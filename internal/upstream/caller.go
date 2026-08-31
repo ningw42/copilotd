@@ -10,6 +10,7 @@ import (
 	"github.com/ningw42/copilotd/internal/apierror"
 	"github.com/ningw42/copilotd/internal/identity"
 	"github.com/ningw42/copilotd/internal/logging"
+	"github.com/ningw42/copilotd/internal/requestsummary"
 )
 
 // RequestIDHeader carries copilotd's resolved correlation id in both directions.
@@ -111,7 +112,7 @@ func (c *Caller) Correlate(ctx context.Context, header http.Header) context.Cont
 		return ctx
 	}
 	correlated := logging.With(ctx, slog.String(logging.UpstreamRequestIDKey, upstreamRequestID))
-	publishCorrelatedContext(ctx, correlated)
+	requestsummary.RecordCorrelation(ctx, correlated)
 	c.logger.DebugContext(correlated, "upstream response correlation")
 	return correlated
 }

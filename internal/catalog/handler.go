@@ -10,6 +10,7 @@ import (
 	"github.com/ningw42/copilotd/internal/cache"
 	"github.com/ningw42/copilotd/internal/endpoint"
 	"github.com/ningw42/copilotd/internal/logging"
+	"github.com/ningw42/copilotd/internal/requestsummary"
 	"github.com/ningw42/copilotd/internal/upstream"
 )
 
@@ -68,10 +69,10 @@ func Handler(logger *slog.Logger, ep endpoint.Catalog, rendering Rendering, sour
 			return
 		}
 		filtered := Filter(models, ep.RequiredRoute())
-		shape := CatalogShapeOpenAI
+		shape := requestsummary.CatalogShapeOpenAI
 		var representation []byte
 		if servesCodexShape(ep, rendering, r) {
-			shape = CatalogShapeCodex
+			shape = requestsummary.CatalogShapeCodex
 			var outcome CodexRenderOutcome
 			currentBytes := embeddedCodexModels
 			if rendering.Codex.Models != nil {
@@ -97,7 +98,7 @@ func Handler(logger *slog.Logger, ep endpoint.Catalog, rendering Rendering, sour
 			return
 		}
 		if ep.Surface() == endpoint.OpenAI {
-			StoreCatalogShape(r.Context(), shape)
+			requestsummary.RecordCatalogShape(r.Context(), shape)
 		}
 
 		w.Header().Set("Content-Type", "application/json")

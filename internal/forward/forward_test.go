@@ -22,6 +22,7 @@ import (
 	"github.com/ningw42/copilotd/internal/endpoint"
 	"github.com/ningw42/copilotd/internal/identity"
 	"github.com/ningw42/copilotd/internal/logging"
+	"github.com/ningw42/copilotd/internal/requestsummary"
 	"github.com/ningw42/copilotd/internal/shim"
 	"github.com/ningw42/copilotd/internal/sse"
 	upstreampolicy "github.com/ningw42/copilotd/internal/upstream"
@@ -849,21 +850,21 @@ func TestForwardResponsesItemIDStabilizerSSEGateScopeAndFailSafe(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	run := func(t *testing.T, ep endpoint.HTTPForward, enabled bool) (*deadlineRecorder, StreamResult) {
+	run := func(t *testing.T, ep endpoint.HTTPForward, enabled bool) (*deadlineRecorder, requestsummary.StreamResult) {
 		t.Helper()
 		registry := shim.CanonicalRegistry()
 		registry[1].Enabled = enabled
 		f := newTestForwarder(readyStub(upstream.URL), NewClient(5*time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, registry)
 		req := httptest.NewRequest(http.MethodPost, "/provider/route", strings.NewReader(`{"stream":true}`))
-		ctx := WithStreamResultHolder(req.Context())
+		ctx, stream := beginStreamPublication(req.Context())
 		req = req.WithContext(ctx)
 		rec := newDeadlineRecorder()
 
 		f.Handler(ep)(rec, req)
 
-		result, ok := StreamResultFromContext(ctx)
+		result, ok := stream.finish()
 		if !ok {
-			t.Fatal("forwarder did not record an SSE stream result")
+			t.Fatal("forwarder did not publish an SSE stream result")
 		}
 		return rec, result
 	}
@@ -1154,7 +1155,7 @@ func TestForwardStreamShimPanicRendersNativeTerminalAndReleasesUpstream(t *testi
 	}}
 	f := newTestForwarder(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, registry)
 	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{"stream":true}`))
-	ctx := WithStreamResultHolder(req.Context())
+	ctx, stream := beginStreamPublication(req.Context())
 	req = req.WithContext(ctx)
 	rec := newDeadlineRecorder()
 
@@ -1164,7 +1165,7 @@ func TestForwardStreamShimPanicRendersNativeTerminalAndReleasesUpstream(t *testi
 	if got := rec.Body.String(); got != want {
 		t.Errorf("body = %q, want one native shim terminal %q", got, want)
 	}
-	result, ok := StreamResultFromContext(ctx)
+	result, ok := stream.finish()
 	if !ok || result.Outcome != sse.OutcomeShimError || result.Frames != 0 {
 		t.Errorf("stream result = %#v, %t, want shim_error with zero transformed frames", result, ok)
 	}
@@ -1204,7 +1205,7 @@ func TestForwardSuppressesPostTerminalShimPanicAndRecordsIt(t *testing.T) {
 	}
 	f := newTestForwarderWithLogger(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, logger, registry)
 	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{"stream":true}`))
-	ctx := WithStreamResultHolder(logging.WithRequestID(req.Context(), requestID))
+	ctx, stream := beginStreamPublication(logging.WithRequestID(req.Context(), requestID))
 	req = req.WithContext(ctx)
 	rec := newDeadlineRecorder()
 
@@ -1213,7 +1214,7 @@ func TestForwardSuppressesPostTerminalShimPanicAndRecordsIt(t *testing.T) {
 	if got := rec.Body.String(); got != terminal {
 		t.Errorf("body = %q, want only upstream terminal %q", got, terminal)
 	}
-	result, ok := StreamResultFromContext(ctx)
+	result, ok := stream.finish()
 	if !ok || result.Outcome != sse.OutcomeClean || result.Frames != 1 {
 		t.Errorf("stream result = %#v, %t, want clean with one terminal frame", result, ok)
 	}
@@ -1251,7 +1252,7 @@ func TestForwardComposesHeldFinalizeOutputThroughOuterShim(t *testing.T) {
 	}
 	f := newTestForwarder(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, registry)
 	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{"stream":true}`))
-	ctx := WithStreamResultHolder(req.Context())
+	ctx, stream := beginStreamPublication(req.Context())
 	req = req.WithContext(ctx)
 	rec := newDeadlineRecorder()
 
@@ -1261,7 +1262,7 @@ func TestForwardComposesHeldFinalizeOutputThroughOuterShim(t *testing.T) {
 	if got := rec.Body.String(); got != want {
 		t.Errorf("body = %q, want fully composed held terminal %q", got, want)
 	}
-	result, ok := StreamResultFromContext(ctx)
+	result, ok := stream.finish()
 	if !ok || result.Outcome != sse.OutcomeClean || result.Frames != 1 {
 		t.Errorf("stream result = %#v, %t, want clean with one finalized frame", result, ok)
 	}
@@ -1290,7 +1291,7 @@ func TestForwardFinalizePanicRendersNativeTerminalAndReleasesUpstream(t *testing
 	}}
 	f := newTestForwarder(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, registry)
 	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{"stream":true}`))
-	ctx := WithStreamResultHolder(req.Context())
+	ctx, stream := beginStreamPublication(req.Context())
 	req = req.WithContext(ctx)
 	rec := newDeadlineRecorder()
 
@@ -1300,7 +1301,7 @@ func TestForwardFinalizePanicRendersNativeTerminalAndReleasesUpstream(t *testing
 	if got := rec.Body.String(); got != want {
 		t.Errorf("body = %q, want one native shim terminal %q", got, want)
 	}
-	result, ok := StreamResultFromContext(ctx)
+	result, ok := stream.finish()
 	if !ok || result.Outcome != sse.OutcomeShimError || result.Frames != 0 {
 		t.Errorf("stream result = %#v, %t, want shim_error with no partial frames", result, ok)
 	}
@@ -1355,7 +1356,7 @@ func TestForwardEndpointContractControlsEventStreamProcessing(t *testing.T) {
 			})}
 			f := newTestForwarder(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 			req := httptest.NewRequest(http.MethodPost, "/provider/route", strings.NewReader(`{}`))
-			ctx := WithStreamResultHolder(req.Context())
+			ctx, stream := beginStreamPublication(req.Context())
 			req = req.WithContext(ctx)
 			rec := newDeadlineRecorder()
 
@@ -1364,7 +1365,7 @@ func TestForwardEndpointContractControlsEventStreamProcessing(t *testing.T) {
 			if got := rec.Body.String(); got != tc.body {
 				t.Errorf("body = %q, want upstream bytes verbatim %q", got, tc.body)
 			}
-			result, pumped := StreamResultFromContext(ctx)
+			result, pumped := stream.finish()
 			if pumped != tc.wantPumped {
 				t.Errorf("SSE pump recorded result = %t, want %t (result %#v)", pumped, tc.wantPumped, result)
 			}
@@ -1644,7 +1645,44 @@ func TestForwardKeepsCompressedBufferedResponseOpaque(t *testing.T) {
 	}
 }
 
-func TestForwardStoresStreamResultOnRequestHolder(t *testing.T) {
+type recordingStreamOutcomeObserver struct {
+	surface string
+	outcome sse.Outcome
+	count   int
+}
+
+func (o *recordingStreamOutcomeObserver) ObserveStreamOutcome(surface string, outcome sse.Outcome) {
+	o.surface = surface
+	o.outcome = outcome
+	o.count++
+}
+
+type streamPublication struct {
+	summary  *requestsummary.Summary
+	observer *recordingStreamOutcomeObserver
+}
+
+func beginStreamPublication(ctx context.Context) (context.Context, streamPublication) {
+	observer := &recordingStreamOutcomeObserver{}
+	ctx, summary := requestsummary.Begin(ctx, observer)
+	return ctx, streamPublication{summary: summary, observer: observer}
+}
+
+func (p streamPublication) finish() (requestsummary.StreamResult, bool) {
+	publication := p.summary.Finish(requestsummary.ResponseResult{})
+	result := requestsummary.StreamResult{Surface: p.observer.surface, Outcome: p.observer.outcome}
+	for _, attr := range publication.Attrs {
+		switch attr.Key {
+		case logging.FramesKey:
+			result.Frames = int(attr.Value.Int64())
+		case logging.FallbacksKey:
+			result.Fallbacks = int(attr.Value.Int64())
+		}
+	}
+	return result, p.observer.count == 1
+}
+
+func TestForwardPublishesActualPumpResult(t *testing.T) {
 	const first = "event: content_block_delta\ndata: {\"type\":\"content_block_delta\"}\n\n"
 	const terminal = "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
@@ -1657,18 +1695,27 @@ func TestForwardStoresStreamResultOnRequestHolder(t *testing.T) {
 	})}
 	f := newTestForwarder(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{"stream":true}`))
-	ctx := WithStreamResultHolder(req.Context())
+	observer := &recordingStreamOutcomeObserver{}
+	ctx, summary := requestsummary.Begin(req.Context(), observer)
 	req = req.WithContext(ctx)
 
 	f.Handler(endpoint.AnthropicMessages())(newDeadlineRecorder(), req)
 
-	got, ok := StreamResultFromContext(ctx)
-	if !ok {
-		t.Fatal("stream result holder is unset, want pump result")
+	publication := summary.Finish(requestsummary.ResponseResult{})
+	wantAttrs := []slog.Attr{
+		slog.String(logging.MethodKey, ""),
+		slog.Int(logging.StatusKey, 0),
+		slog.Int64(logging.BytesKey, 0),
+		slog.Duration(logging.DurationKey, 0),
+		slog.String(logging.OutcomeKey, "clean"),
+		slog.Int(logging.FramesKey, 2),
+		slog.Int(logging.FallbacksKey, 0),
 	}
-	want := StreamResult{Surface: "anthropic", Outcome: sse.OutcomeClean, Frames: 2}
-	if got != want {
-		t.Errorf("stream result = %#v, want %#v", got, want)
+	if !reflect.DeepEqual(publication.Attrs, wantAttrs) {
+		t.Errorf("summary attrs = %#v, want pump projection %#v", publication.Attrs, wantAttrs)
+	}
+	if observer.count != 1 || observer.surface != "anthropic" || observer.outcome != sse.OutcomeClean {
+		t.Errorf("stream observation = count %d surface %q outcome %q, want 1 anthropic clean", observer.count, observer.surface, observer.outcome)
 	}
 }
 
@@ -1684,7 +1731,7 @@ func TestForwardReportsDataTypeFallbacks(t *testing.T) {
 	})}
 	f := newTestForwarder(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{"stream":true}`))
-	ctx := WithStreamResultHolder(req.Context())
+	ctx, stream := beginStreamPublication(req.Context())
 	req = req.WithContext(ctx)
 
 	f.Handler(endpoint.AnthropicMessages())(newDeadlineRecorder(), req)
@@ -1692,9 +1739,9 @@ func TestForwardReportsDataTypeFallbacks(t *testing.T) {
 	if got := f.fallbacks.Count(); got != 1 {
 		t.Errorf("fallback count = %d, want 1 for data-only frame", got)
 	}
-	result, ok := StreamResultFromContext(ctx)
+	result, ok := stream.finish()
 	if !ok {
-		t.Fatal("stream result holder is unset")
+		t.Fatal("stream summary is empty")
 	}
 	if result.Fallbacks != 1 {
 		t.Errorf("stream fallback count = %d, want 1 for data-only frame", result.Fallbacks)
@@ -1715,7 +1762,7 @@ func TestForwardOpenAITerminalsAreVerbatimAndNeverDoubled(t *testing.T) {
 			})}
 			f := newTestForwarder(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 			req := httptest.NewRequest(http.MethodPost, "/openai/v1/responses", strings.NewReader(`{"stream":true}`))
-			ctx := WithStreamResultHolder(req.Context())
+			ctx, stream := beginStreamPublication(req.Context())
 			req = req.WithContext(ctx)
 			rec := newDeadlineRecorder()
 
@@ -1724,9 +1771,9 @@ func TestForwardOpenAITerminalsAreVerbatimAndNeverDoubled(t *testing.T) {
 			if got := rec.Body.String(); got != raw {
 				t.Errorf("body = %q, want exact terminal %q with no synthesized duplicate", got, raw)
 			}
-			got, ok := StreamResultFromContext(ctx)
+			got, ok := stream.finish()
 			if !ok {
-				t.Fatal("stream result holder is unset")
+				t.Fatal("stream summary is empty")
 			}
 			if got.Outcome != sse.OutcomeClean || got.Frames != 1 {
 				t.Errorf("stream result = %#v, want clean one-frame terminal", got)
@@ -1735,7 +1782,7 @@ func TestForwardOpenAITerminalsAreVerbatimAndNeverDoubled(t *testing.T) {
 	}
 }
 
-func TestForwardLeavesStreamResultUnsetForBufferedResponse(t *testing.T) {
+func TestForwardLeavesStreamSummaryEmptyForBufferedResponse(t *testing.T) {
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		return &http.Response{
 			StatusCode: http.StatusOK,
@@ -1746,17 +1793,17 @@ func TestForwardLeavesStreamResultUnsetForBufferedResponse(t *testing.T) {
 	})}
 	f := newTestForwarder(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{"stream":false}`))
-	ctx := WithStreamResultHolder(req.Context())
+	ctx, stream := beginStreamPublication(req.Context())
 	req = req.WithContext(ctx)
 
 	f.Handler(endpoint.AnthropicMessages())(newDeadlineRecorder(), req)
 
-	if got, ok := StreamResultFromContext(ctx); ok {
-		t.Errorf("buffered response stored stream result %#v, want holder unset", got)
+	if got, ok := stream.finish(); ok {
+		t.Errorf("buffered response published stream result %#v, want no result", got)
 	}
 }
 
-func TestForwardStoresCanonicalOpenAIStreamSurface(t *testing.T) {
+func TestForwardPublishesCanonicalOpenAIStreamSurface(t *testing.T) {
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		return &http.Response{
 			StatusCode: http.StatusOK,
@@ -1767,14 +1814,14 @@ func TestForwardStoresCanonicalOpenAIStreamSurface(t *testing.T) {
 	})}
 	f := newTestForwarder(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 	req := httptest.NewRequest(http.MethodPost, "/openai/v1/responses", strings.NewReader(`{"stream":true}`))
-	ctx := WithStreamResultHolder(req.Context())
+	ctx, stream := beginStreamPublication(req.Context())
 	req = req.WithContext(ctx)
 
 	f.Handler(endpoint.OpenAIResponsesHTTP())(newDeadlineRecorder(), req)
 
-	got, ok := StreamResultFromContext(ctx)
+	got, ok := stream.finish()
 	if !ok {
-		t.Fatal("OpenAI stream result holder is unset")
+		t.Fatal("OpenAI stream summary is empty")
 	}
 	if got.Surface != "openai" {
 		t.Errorf("OpenAI stream surface = %q, want canonical openai", got.Surface)

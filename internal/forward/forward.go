@@ -23,6 +23,7 @@ import (
 
 	"github.com/ningw42/copilotd/internal/apierror"
 	"github.com/ningw42/copilotd/internal/endpoint"
+	"github.com/ningw42/copilotd/internal/requestsummary"
 	"github.com/ningw42/copilotd/internal/shim"
 	"github.com/ningw42/copilotd/internal/sse"
 	"github.com/ningw42/copilotd/internal/upstream"
@@ -275,7 +276,7 @@ func (f *Forwarder) forward(w http.ResponseWriter, r *http.Request, header http.
 		policy := streamPolicy(ep.Surface(), f.writeTimeout, f.streamIdleTimeout, f.streamKeepaliveInterval, f.clock, f.fallbacks.Increment)
 		policy.SuppressedShimErrors = f.suppressedShimErrors
 		result := sse.Pump(responseCtx, cancel, resp.Body, w, f.sseLogger, policy, chain.StreamAdapter())
-		StoreStreamResult(r.Context(), StreamResult{
+		requestsummary.RecordStream(r.Context(), requestsummary.StreamResult{
 			Surface:   ep.Surface().String(),
 			Outcome:   result.Outcome,
 			Frames:    result.Frames,

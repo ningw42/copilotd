@@ -3,15 +3,14 @@ package server
 import (
 	"sync"
 
+	"github.com/ningw42/copilotd/internal/requestsummary"
 	"github.com/ningw42/copilotd/internal/sse"
 	"github.com/ningw42/copilotd/internal/wsforward"
 )
 
 // StreamOutcomeObserver is the backend seam for the per-surface terminal
 // outcome metric.
-type StreamOutcomeObserver interface {
-	ObserveStreamOutcome(surface string, outcome sse.Outcome)
-}
+type StreamOutcomeObserver = requestsummary.StreamOutcomeObserver
 
 const (
 	streamSurfaceAnthropicIndex = iota

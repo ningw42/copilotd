@@ -22,11 +22,22 @@ messages were duplicated. The Catalog also introduced a second error vocabulary
 that round-tripped back to `internal/apierror` while losing detail.
 
 The shared policy needs one owner below every consumer. `internal/upstream` is a
-leaf that may import only `internal/apierror`, `internal/endpoint`,
-`internal/identity`, `internal/logging`, and the standard library. It does not
-own WebSocket dialing or post-commit response interpretation, so the package
-concentrates the common trunk without imposing one transport abstraction on
-different response tails.
+dependency-light package whose direct imports are limited to
+`internal/apierror`, `internal/endpoint`, `internal/identity`,
+`internal/logging`, `internal/requestsummary`, and the standard library. The
+structural allowlist governs direct imports only. The `internal/requestsummary`
+edge exists so `Caller.Correlate` remains the owner of differing upstream
+request-id publication. Because `requestsummary.StreamResult.Outcome` retains
+its `sse.Outcome` type, that edge has the accepted transitive consequence
+`internal/requestsummary → internal/sse`.
+
+The direction remains one-way: `internal/requestsummary` is not a consumer of
+`internal/upstream` and does not import it, and neither it nor `internal/sse`
+points back to `internal/upstream`. The shared policy therefore remains below
+its consumers and the accepted transitive dependency introduces no import
+cycle. `internal/upstream` still does not own WebSocket dialing or post-commit
+response interpretation, so the package concentrates the common trunk without
+imposing one transport abstraction on different response tails.
 
 ## Considered options
 
@@ -65,9 +76,12 @@ different response tails.
   `internal/upstream` does not pump streams, upgrade WebSockets, decode catalogs,
   or own the raw WebSocket connection; ADR-0003's post-commit stream policy is
   unchanged.
-- The leaf import allowlist and the prohibition on `internal/forward` importing
-  `internal/catalog` are structural test invariants. This keeps the shared module
-  below its consumers and preserves ADR-0007's facts-only Endpoint boundary.
+- The direct-import allowlist and the prohibition on `internal/forward`
+  importing `internal/catalog` are structural test invariants. The allowlist
+  admits only the named direct dependencies above; it does not prohibit the
+  accepted transitive `internal/requestsummary → internal/sse` dependency. This
+  keeps the shared module below its consumers and preserves ADR-0007's
+  facts-only Endpoint boundary.
 - The consolidation introduces no new wire-output divergence. It continues to
   render the existing `internal/apierror.Kind` Fabrications, while request-side
   hop-by-hop stripping is ordinary proxy behavior, so the divergence ledger is

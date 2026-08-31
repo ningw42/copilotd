@@ -1469,31 +1469,58 @@ func TestAnthropicStreamingEndToEnd(t *testing.T) {
 	const first = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\"}}\n\n"
 	const terminal = "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
 	const synthesized = "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"copilotd: upstream stream ended before a terminal event\"}}\n\n"
+	const promptCanary = "private-prompt-secret-71"
 
-	serveAgainst := func(t *testing.T, upstreamURL string) string {
+	serveAgainst := func(t *testing.T, upstreamURL string) (string, func() string) {
 		t.Helper()
 		prov := identity.NewStatic(identity.Credential{
 			BaseURL: upstreamURL,
 			Token:   "copilot-token",
 			Headers: http.Header{"Copilot-Integration-Id": {"vscode-chat"}},
 		}, true)
+		logger, logs := bufferLogger(t, "info")
 		fwd := newTestForwarder(prov, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
-		return startServer(t, newTestServerFromBase(testConfig(), discardLogger(t), prov, newTestReadyObservers(), fwd, newTestCatalogSource(prov), newTestWSProxy(prov), NewStreamOutcomeCounter(), catalog.RenderDescriptors{}))
+		base := startServer(t, newTestServerFromBase(testConfig(), logger, prov, newTestReadyObservers(), fwd, newTestCatalogSource(prov), newTestWSProxy(prov), NewStreamOutcomeCounter(), catalog.RenderDescriptors{}))
+		return base, logs.String
 	}
 
-	request := func(t *testing.T, base string) *http.Response {
+	request := func(t *testing.T, base, requestID string) *http.Response {
 		t.Helper()
-		req, err := http.NewRequest(http.MethodPost, base+"/anthropic/v1/messages", strings.NewReader(`{"stream":true}`))
+		body := `{"stream":true,"messages":[{"role":"user","content":"` + promptCanary + `"}]}`
+		req, err := http.NewRequest(http.MethodPost, base+"/anthropic/v1/messages", strings.NewReader(body))
 		if err != nil {
 			t.Fatalf("build request: %v", err)
 		}
 		req.Header.Set("Authorization", "Bearer "+testAPIKey)
 		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Request-Id", requestID)
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			t.Fatalf("stream request: %v", err)
 		}
 		return resp
+	}
+
+	assertAccess := func(t *testing.T, output, requestID, level, outcome string, frames int) {
+		t.Helper()
+		lines := serverLogLinesContaining(output, "msg=access", "request_id="+requestID)
+		if len(lines) != 1 {
+			t.Fatalf("access records = %d, want one:\n%s", len(lines), output)
+		}
+		for _, want := range []string{
+			"component=internal/server",
+			"level=" + level,
+			"outcome=" + outcome,
+			"frames=" + strconv.Itoa(frames),
+			"fallbacks=0",
+		} {
+			if !strings.Contains(lines[0], want) {
+				t.Errorf("access record missing %q: %s", want, lines[0])
+			}
+		}
+		if strings.Contains(output, promptCanary) {
+			t.Errorf("captured logs leaked prompt canary:\n%s", output)
+		}
 	}
 
 	t.Run("frames arrive incrementally and clean terminal is not doubled", func(t *testing.T) {
@@ -1511,7 +1538,8 @@ func TestAnthropicStreamingEndToEnd(t *testing.T) {
 		}))
 		defer upstream.Close()
 
-		resp := request(t, serveAgainst(t, upstream.URL))
+		base, logs := serveAgainst(t, upstream.URL)
+		resp := request(t, base, "anthropic-stream-clean")
 		defer func() { _ = resp.Body.Close() }()
 		select {
 		case <-firstFlushed:
@@ -1549,6 +1577,7 @@ func TestAnthropicStreamingEndToEnd(t *testing.T) {
 		if got := string(rest); got != terminal {
 			t.Errorf("remaining bytes = %q, want one upstream terminal only %q", got, terminal)
 		}
+		assertAccess(t, logs(), "anthropic-stream-clean", "INFO", "clean", 2)
 	})
 
 	t.Run("truncated stream gets native terminal and request id", func(t *testing.T) {
@@ -1560,7 +1589,8 @@ func TestAnthropicStreamingEndToEnd(t *testing.T) {
 		}))
 		defer upstream.Close()
 
-		resp := request(t, serveAgainst(t, upstream.URL))
+		base, logs := serveAgainst(t, upstream.URL)
+		resp := request(t, base, "anthropic-stream-synthesized")
 		defer func() { _ = resp.Body.Close() }()
 		body, err := readAllWithin(resp.Body, time.Second)
 		if err != nil {
@@ -1569,9 +1599,10 @@ func TestAnthropicStreamingEndToEnd(t *testing.T) {
 		if got := string(body); got != first+synthesized {
 			t.Errorf("body = %q, want upstream frame plus native terminal %q", got, first+synthesized)
 		}
-		if requestID := resp.Header.Get("X-Request-Id"); requestID == "" {
-			t.Error("synthesized streaming response is missing X-Request-Id")
+		if requestID := resp.Header.Get("X-Request-Id"); requestID != "anthropic-stream-synthesized" {
+			t.Errorf("synthesized streaming response request id = %q, want pinned id", requestID)
 		}
+		assertAccess(t, logs(), "anthropic-stream-synthesized", "WARN", "synthesized", 1)
 	})
 }
 

@@ -20,6 +20,7 @@ import (
 	"github.com/ningw42/copilotd/internal/forward"
 	"github.com/ningw42/copilotd/internal/identity"
 	"github.com/ningw42/copilotd/internal/logging"
+	"github.com/ningw42/copilotd/internal/requestsummary"
 	"github.com/ningw42/copilotd/internal/sse"
 )
 
@@ -235,9 +236,9 @@ func TestAccessLogUnmatchedRequestCarriesNoBinding(t *testing.T) {
 	if !strings.Contains(out, "status=404") {
 		t.Errorf("access line missing status=404:\n%s", out)
 	}
-	for _, streamOnly := range []string{"outcome=", "frames="} {
+	for _, streamOnly := range []string{"outcome=", "frames=", "fallbacks="} {
 		if strings.Contains(out, streamOnly) {
-			t.Errorf("non-stream Phase 1 access line unexpectedly contains %q:\n%s", streamOnly, out)
+			t.Errorf("non-stream access line unexpectedly contains %q:\n%s", streamOnly, out)
 		}
 	}
 }
@@ -317,6 +318,11 @@ func TestAccessLogScopeComesFromMatchedRegistration(t *testing.T) {
 					t.Errorf("access record contains forbidden scope %q:\n%s", forbidden, out)
 				}
 			}
+			for _, streamOnly := range []string{"outcome=", "frames=", "fallbacks="} {
+				if strings.Contains(accessLine, streamOnly) {
+					t.Errorf("non-stream access record unexpectedly contains %q: %s", streamOnly, accessLine)
+				}
+			}
 		})
 	}
 }
@@ -342,7 +348,7 @@ func TestAccessLogEnrichesStreamSummary(t *testing.T) {
 	logger, buf := bufferLogger(t, "info")
 	metrics := NewStreamOutcomeCounter()
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		forward.StoreStreamResult(r.Context(), forward.StreamResult{
+		requestsummary.RecordStream(r.Context(), requestsummary.StreamResult{
 			Surface:   "anthropic",
 			Outcome:   sse.OutcomeClean,
 			Frames:    2,
@@ -387,7 +393,7 @@ func TestAccessLogObservesEveryStreamOutcomeBySurface(t *testing.T) {
 	for _, surface := range []string{"anthropic", "openai"} {
 		for _, outcome := range outcomes {
 			inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				forward.StoreStreamResult(r.Context(), forward.StreamResult{
+				requestsummary.RecordStream(r.Context(), requestsummary.StreamResult{
 					Surface: surface,
 					Outcome: outcome,
 				})
@@ -450,7 +456,7 @@ func TestAccessLogUsesOutcomeSeverity(t *testing.T) {
 		t.Run(string(tt.outcome), func(t *testing.T) {
 			logger, buf := bufferLogger(t, "info")
 			inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				forward.StoreStreamResult(r.Context(), forward.StreamResult{
+				requestsummary.RecordStream(r.Context(), requestsummary.StreamResult{
 					Surface: "anthropic",
 					Outcome: tt.outcome,
 				})
@@ -487,7 +493,7 @@ func TestAccessLogUsesWarnForServerFailure(t *testing.T) {
 func TestAccessLogDoesNotLogStreamBodiesOrSecrets(t *testing.T) {
 	logger, buf := bufferLogger(t, "info")
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		forward.StoreStreamResult(r.Context(), forward.StreamResult{
+		requestsummary.RecordStream(r.Context(), requestsummary.StreamResult{
 			Surface: "anthropic",
 			Outcome: sse.OutcomeShimError,
 			Frames:  1,
@@ -510,7 +516,7 @@ func TestAccessLogDoesNotLogStreamBodiesOrSecrets(t *testing.T) {
 func TestAccessLogRecordsOnlyTheBoundedCatalogShape(t *testing.T) {
 	logger, buf := bufferLogger(t, "info")
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		catalog.StoreCatalogShape(r.Context(), catalog.CatalogShapeCodex)
+		requestsummary.RecordCatalogShape(r.Context(), requestsummary.CatalogShapeCodex)
 		_, _ = io.WriteString(w, "private-catalog-body")
 	})
 	h := accessLog(logger, NewStreamOutcomeCounter(), inner)
@@ -536,6 +542,94 @@ func TestAccessLogRecordsOnlyTheBoundedCatalogShape(t *testing.T) {
 		if strings.Contains(strings.ToLower(header), "catalog") {
 			t.Errorf("internal catalog metadata leaked in response header %q", header)
 		}
+	}
+}
+
+type panickingProvider struct {
+	panicOnReady bool
+}
+
+func (p panickingProvider) Current(context.Context) (identity.Credential, error) {
+	panic("injected Current panic")
+}
+
+func (p panickingProvider) Ready() bool {
+	if p.panicOnReady {
+		panic("injected Ready panic")
+	}
+	return true
+}
+
+func TestPanicRecoveryRetainsMatchedScopeAndAccessLevel(t *testing.T) {
+	tests := []struct {
+		name         string
+		provider     panickingProvider
+		method       string
+		target       string
+		body         string
+		wantLevel    string
+		wantScope    []string
+		forbidScopes []string
+	}{
+		{
+			name:      "non-probe endpoint",
+			method:    http.MethodPost,
+			target:    "/openai/v1/responses",
+			body:      `{}`,
+			wantLevel: "WARN",
+			wantScope: []string{`inbound="POST /openai/v1/responses"`, "surface=openai"},
+		},
+		{
+			name:         "ready probe",
+			provider:     panickingProvider{panicOnReady: true},
+			method:       http.MethodGet,
+			target:       "/readyz",
+			wantLevel:    "DEBUG",
+			wantScope:    []string{`inbound="GET /readyz"`},
+			forbidScopes: []string{"surface=", "ws="},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			logger, logs := bufferLogger(t, "debug")
+			forwarder := newTestForwarder(tt.provider, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
+			handler := newTestHandler(testAPIKey, tt.provider, newTestReadyObservers(), forwarder, newTestCatalogSource(tt.provider), logger, NewStreamOutcomeCounter(), catalog.RenderDescriptors{}, newTestWSProxy(tt.provider))
+			request := httptest.NewRequest(tt.method, tt.target, strings.NewReader(tt.body))
+			request.Header.Set("X-Request-Id", "matched-panic")
+			request.Header.Set("Authorization", "Bearer "+testAPIKey)
+			recorder := httptest.NewRecorder()
+
+			handler.ServeHTTP(recorder, request)
+
+			if recorder.Code != http.StatusInternalServerError {
+				t.Fatalf("status = %d, want 500", recorder.Code)
+			}
+			output := logs.String()
+			panicLines := serverLogLinesContaining(output, `msg="panic recovered"`)
+			if len(panicLines) != 1 {
+				t.Fatalf("panic records = %d, want one:\n%s", len(panicLines), output)
+			}
+			accessLines := serverLogLinesContaining(output, "msg=access")
+			if len(accessLines) != 1 {
+				t.Fatalf("access records = %d, want one:\n%s", len(accessLines), output)
+			}
+			for _, want := range append([]string{"level=ERROR", "component=internal/server", "request_id=matched-panic"}, tt.wantScope...) {
+				if !strings.Contains(panicLines[0], want) {
+					t.Errorf("panic record missing %q: %s", want, panicLines[0])
+				}
+			}
+			for _, want := range append([]string{"level=" + tt.wantLevel, "component=internal/server", "request_id=matched-panic", "status=500"}, tt.wantScope...) {
+				if !strings.Contains(accessLines[0], want) {
+					t.Errorf("access record missing %q: %s", want, accessLines[0])
+				}
+			}
+			for _, forbidden := range tt.forbidScopes {
+				if strings.Contains(panicLines[0], forbidden) || strings.Contains(accessLines[0], forbidden) {
+					t.Errorf("panic/access records contain forbidden scope %q:\n%s", forbidden, output)
+				}
+			}
+		})
 	}
 }
 

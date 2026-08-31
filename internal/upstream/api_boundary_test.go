@@ -12,10 +12,11 @@ func TestProductionImportsStayWithinLeafAllowlist(t *testing.T) {
 	}
 
 	allowed := map[string]bool{
-		"github.com/ningw42/copilotd/internal/apierror": true,
-		"github.com/ningw42/copilotd/internal/endpoint": true,
-		"github.com/ningw42/copilotd/internal/identity": true,
-		"github.com/ningw42/copilotd/internal/logging":  true,
+		"github.com/ningw42/copilotd/internal/apierror":       true,
+		"github.com/ningw42/copilotd/internal/endpoint":       true,
+		"github.com/ningw42/copilotd/internal/identity":       true,
+		"github.com/ningw42/copilotd/internal/logging":        true,
+		"github.com/ningw42/copilotd/internal/requestsummary": true,
 	}
 	for _, importPath := range pkg.Imports {
 		if allowed[importPath] {
@@ -25,7 +26,7 @@ func TestProductionImportsStayWithinLeafAllowlist(t *testing.T) {
 		if err == nil && dependency.Goroot {
 			continue
 		}
-		t.Errorf("production import %q is outside the internal/upstream leaf allowlist", importPath)
+		t.Errorf("production import %q is outside the internal/upstream direct-import allowlist", importPath)
 	}
 }
 

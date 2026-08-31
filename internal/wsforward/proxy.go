@@ -17,6 +17,7 @@ import (
 	"github.com/ningw42/copilotd/internal/apierror"
 	"github.com/ningw42/copilotd/internal/endpoint"
 	"github.com/ningw42/copilotd/internal/logging"
+	"github.com/ningw42/copilotd/internal/requestsummary"
 	"github.com/ningw42/copilotd/internal/shim"
 	"github.com/ningw42/copilotd/internal/upstream"
 )
@@ -215,8 +216,8 @@ func (p *Proxy) Handler(ep endpoint.WSForward) http.HandlerFunc {
 		defer p.untrackSession(session)
 
 		result := runSession(p.drainCtx, p.baseCtx, client, upstreamConn, p.writeTimeout, p.maxMessageBytes, chain.WSClientAdapter(), chain.WSServerAdapter())
-		StoreSessionResult(r.Context(), SessionResult{
-			Terminal:  result.terminal,
+		requestsummary.RecordWebSocket(r.Context(), requestsummary.WebSocketResult{
+			Terminal:  requestsummary.WebSocketTerminal(result.terminal),
 			CloseCode: int(result.closeCode),
 			MsgsC2U:   result.messagesClientToUpstream,
 			MsgsU2C:   result.messagesUpstreamToClient,

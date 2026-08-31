@@ -388,6 +388,11 @@ func TestCodexCatalogConfigWiringWarningAndAccessLogConfidentiality(t *testing.T
 		if !strings.Contains(line, "component=internal/server") {
 			t.Errorf("access record has wrong Component: %s", line)
 		}
+		for _, forbidden := range []string{"model=", "reviewer="} {
+			if strings.Contains(line, forbidden) {
+				t.Errorf("access record leaked reviewer configuration field %q: %s", forbidden, line)
+			}
+		}
 	}
 	for _, forbidden := range []string{querySecret, modelBodySecret, vendorSecret, copilotToken, testAPIKey, string(codexBody), string(openAIBody)} {
 		if strings.Contains(output, forbidden) {

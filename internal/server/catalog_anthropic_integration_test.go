@@ -8,6 +8,7 @@ import (
 	"os"
 	"slices"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -38,10 +39,11 @@ func TestAnthropicModelCatalogOverRealListener(t *testing.T) {
 		Token:   "copilot-token",
 		Headers: http.Header{"Copilot-Integration-Id": {"vscode-chat"}},
 	}, true)
+	logger, logs := bufferLogger(t, "info")
 	forwarder := newTestForwarder(provider, forward.NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
-	base := startServer(t, newTestServerFromBase(testConfig(), discardLogger(t), provider, newTestReadyObservers(), forwarder, newTestCatalogSource(provider), newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.RenderDescriptors{}))
+	base := startServer(t, newTestServerFromBase(testConfig(), logger, provider, newTestReadyObservers(), forwarder, newTestCatalogSourceWith(provider, forward.NewClient(time.Second), time.Second, 1<<20, logger), newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.RenderDescriptors{}))
 
-	do := func(method, target, keyHeader, key string) (*http.Response, []byte) {
+	do := func(method, target, keyHeader, key, requestID string) (*http.Response, []byte) {
 		t.Helper()
 		req, err := http.NewRequest(method, base+target, nil)
 		if err != nil {
@@ -49,6 +51,9 @@ func TestAnthropicModelCatalogOverRealListener(t *testing.T) {
 		}
 		if keyHeader != "" {
 			req.Header.Set(keyHeader, key)
+		}
+		if requestID != "" {
+			req.Header.Set("X-Request-Id", requestID)
 		}
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
@@ -62,7 +67,7 @@ func TestAnthropicModelCatalogOverRealListener(t *testing.T) {
 		return resp, body
 	}
 
-	getResp, getBody := do(http.MethodGet, "/anthropic/v1/models?limit=1&after_id=ignored", "Authorization", "Bearer "+testAPIKey)
+	getResp, getBody := do(http.MethodGet, "/anthropic/v1/models?limit=1&after_id=ignored", "Authorization", "Bearer "+testAPIKey, "anthropic-catalog-get")
 	if getResp.StatusCode != http.StatusOK {
 		t.Fatalf("GET status = %d, want 200: %s", getResp.StatusCode, getBody)
 	}
@@ -96,12 +101,46 @@ func TestAnthropicModelCatalogOverRealListener(t *testing.T) {
 		t.Errorf("evidence-backed capabilities are not visible through the served Catalog: %+v", catalog.Data[0].Capabilities)
 	}
 
-	headResp, headBody := do(http.MethodHead, "/anthropic/v1/models", "X-Api-Key", testAPIKey)
+	headResp, headBody := do(http.MethodHead, "/anthropic/v1/models", "X-Api-Key", testAPIKey, "anthropic-catalog-head")
 	if headResp.StatusCode != http.StatusOK || len(headBody) != 0 || headResp.Header.Get("Content-Length") != strconv.Itoa(len(getBody)) {
 		t.Errorf("HEAD = status %d length %q body %q, want GET-equivalent headers and no body", headResp.StatusCode, headResp.Header.Get("Content-Length"), headBody)
 	}
 	if got := hits.Load(); got != 2 {
 		t.Errorf("GET+HEAD upstream hits = %d, want 2", got)
+	}
+
+	output := logs.String()
+	for _, request := range []struct {
+		method    string
+		requestID string
+		bytes     int
+	}{
+		{method: http.MethodGet, requestID: "anthropic-catalog-get", bytes: len(getBody)},
+		{method: http.MethodHead, requestID: "anthropic-catalog-head", bytes: 0},
+	} {
+		lines := serverLogLinesContaining(output, "msg=access", "request_id="+request.requestID)
+		if len(lines) != 1 {
+			t.Fatalf("%s access records = %d, want one:\n%s", request.method, len(lines), output)
+		}
+		for _, want := range []string{
+			"level=INFO",
+			"component=internal/server",
+			"method=" + request.method,
+			`inbound="` + request.method + ` /anthropic/v1/models"`,
+			"surface=anthropic",
+			"status=200",
+			"bytes=" + strconv.Itoa(request.bytes),
+			"duration=",
+		} {
+			if !strings.Contains(lines[0], want) {
+				t.Errorf("%s access record missing %q: %s", request.method, want, lines[0])
+			}
+		}
+		for _, omitted := range []string{"outcome=", "frames=", "fallbacks=", "catalog_shape=", "claude-opus-4.6"} {
+			if strings.Contains(lines[0], omitted) {
+				t.Errorf("%s access record unexpectedly contains %q: %s", request.method, omitted, lines[0])
+			}
+		}
 	}
 
 	for _, request := range []struct {
@@ -112,7 +151,7 @@ func TestAnthropicModelCatalogOverRealListener(t *testing.T) {
 		{http.MethodPost, "/anthropic/v1/models", http.StatusMethodNotAllowed},
 		{http.MethodGet, "/anthropic/models", http.StatusNotFound},
 	} {
-		resp, _ := do(request.method, request.target, "Authorization", "Bearer "+testAPIKey)
+		resp, _ := do(request.method, request.target, "Authorization", "Bearer "+testAPIKey, "")
 		if resp.StatusCode != request.status {
 			t.Errorf("%s %s status = %d, want %d", request.method, request.target, resp.StatusCode, request.status)
 		}
