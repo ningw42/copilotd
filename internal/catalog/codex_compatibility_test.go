@@ -21,33 +21,27 @@ import (
 )
 
 const (
-	latestStableCodexTag    = "rust-v0.151.0"
-	latestStableCodexCommit = "78c290807ce710180111df227df3b7a4fe845452"
-	latestStableCodexBlob   = "0c4137ad9560e1ac7b9baf1adc95dbc7051e2b6c"
-	latestStableCodexSHA256 = "eb0d7b9a5dcaf103895c5f8a14c16b269df46e039b375a55ba97f6238542d2ed"
+	vendoredCodexTag    = "rust-v0.151.0"
+	vendoredCodexCommit = "78c290807ce710180111df227df3b7a4fe845452"
+	vendoredCodexBlob   = "0c4137ad9560e1ac7b9baf1adc95dbc7051e2b6c"
+	vendoredCodexSHA256 = "eb0d7b9a5dcaf103895c5f8a14c16b269df46e039b375a55ba97f6238542d2ed"
 )
 
-func TestLatestStableCodexCatalogRoundTripFidelity(t *testing.T) {
-	latestBytes, err := os.ReadFile("testdata/codex-latest/models.json")
-	if err != nil {
-		t.Fatalf("read %s catalog fixture at %s: %v", latestStableCodexTag, latestStableCodexCommit, err)
+func TestVendoredCodexCatalogRoundTripFidelity(t *testing.T) {
+	wantFallbackBytes := bytes.Clone(embeddedCodexModels)
+	if got := hashModels(embeddedCodexModels); got != vendoredCodexSHA256 {
+		t.Fatalf("%s vendored snapshot hash = %s, want pinned %s", vendoredCodexTag, got, vendoredCodexSHA256)
 	}
-	if got := hashModels(latestBytes); got != latestStableCodexSHA256 {
-		t.Fatalf("%s fixture hash = %s, want pinned %s", latestStableCodexTag, got, latestStableCodexSHA256)
+	if got := gitBlobObjectID(embeddedCodexModels); got != vendoredCodexBlob {
+		t.Fatalf("%s vendored snapshot Git blob = %s, want upstream %s", vendoredCodexTag, got, vendoredCodexBlob)
 	}
-	if got := gitBlobObjectID(latestBytes); got != latestStableCodexBlob {
-		t.Fatalf("%s fixture Git blob = %s, want upstream %s", latestStableCodexTag, got, latestStableCodexBlob)
+	if _, err := validateCodexModels(embeddedCodexModels); err != nil {
+		t.Fatalf("decode %s vendored snapshot at %s: %v", vendoredCodexTag, vendoredCodexCommit, err)
 	}
-	if _, err := validateCodexModels(latestBytes); err != nil {
-		t.Fatalf("decode %s catalog at %s: %v", latestStableCodexTag, latestStableCodexCommit, err)
+	if embeddedCodexModelsVersion != vendoredCodexTag {
+		t.Fatalf("embedded catalog version = %s, want audited %s", embeddedCodexModelsVersion, vendoredCodexTag)
 	}
-	if embeddedCodexModelsVersion != latestStableCodexTag {
-		t.Fatalf("embedded catalog version = %s, want audited %s", embeddedCodexModelsVersion, latestStableCodexTag)
-	}
-	if !bytes.Equal(embeddedCodexModels, latestBytes) {
-		t.Fatalf("embedded catalog differs from audited %s bytes", latestStableCodexTag)
-	}
-	latestModels := rawCodexModelsBySlug(t, latestBytes)
+	vendoredModels := rawCodexModelsBySlug(t, embeddedCodexModels)
 
 	github := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -61,20 +55,20 @@ func TestLatestStableCodexCatalogRoundTripFidelity(t *testing.T) {
 			if r.URL.RawQuery != "" {
 				t.Errorf("latest-release query = %q, want empty", r.URL.RawQuery)
 			}
-			_, _ = io.WriteString(w, `{"tag_name":"`+latestStableCodexTag+`","target_commitish":"main","prerelease":false,"draft":false}`)
-		case codexReleaseCommitPath + latestStableCodexTag:
+			_, _ = io.WriteString(w, `{"tag_name":"`+vendoredCodexTag+`","target_commitish":"main","prerelease":false,"draft":false}`)
+		case codexReleaseCommitPath + vendoredCodexTag:
 			if got := r.Header.Get("Accept"); got != githubSHA1MediaType {
 				t.Errorf("commit Accept = %q, want %q", got, githubSHA1MediaType)
 			}
-			_, _ = io.WriteString(w, latestStableCodexCommit)
+			_, _ = io.WriteString(w, vendoredCodexCommit)
 		case codexModelsContentPath:
-			if got := r.URL.Query().Get("ref"); got != latestStableCodexCommit {
-				t.Errorf("models ref = %q, want peeled commit %q", got, latestStableCodexCommit)
+			if got := r.URL.Query().Get("ref"); got != vendoredCodexCommit {
+				t.Errorf("models ref = %q, want peeled commit %q", got, vendoredCodexCommit)
 			}
 			if got := r.Header.Get("Accept"); got != githubRawMediaType {
 				t.Errorf("models Accept = %q, want %q", got, githubRawMediaType)
 			}
-			_, _ = w.Write(latestBytes)
+			_, _ = w.Write(embeddedCodexModels)
 		default:
 			http.NotFound(w, r)
 		}
@@ -89,11 +83,11 @@ func TestLatestStableCodexCatalogRoundTripFidelity(t *testing.T) {
 	registry.Prime(context.Background())
 
 	currentBytes, status := modelsValue.Current()
-	if !bytes.Equal(currentBytes, latestBytes) {
-		t.Fatalf("cache retained %d bytes, want exact %d-byte %s catalog", len(currentBytes), len(latestBytes), latestStableCodexTag)
+	if !bytes.Equal(currentBytes, wantFallbackBytes) {
+		t.Fatalf("cache retained %d bytes, want exact %d-byte %s catalog", len(currentBytes), len(wantFallbackBytes), vendoredCodexTag)
 	}
-	if status.Source != "fallback" || status.Version != latestStableCodexTag || status.LastSuccess != nil {
-		t.Fatalf("cache status = %#v, want unchanged vendored fallback %s", status, latestStableCodexTag)
+	if status.Source != "fallback" || status.Version != vendoredCodexTag || status.LastSuccess != nil {
+		t.Fatalf("cache status = %#v, want unchanged vendored fallback %s", status, vendoredCodexTag)
 	}
 
 	copilotBytes, err := os.ReadFile("testdata/copilot-models-2026-07-18.json")
@@ -130,7 +124,7 @@ func TestLatestStableCodexCatalogRoundTripFidelity(t *testing.T) {
 		"gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra",
 	}
 	if got := renderedSlugs(t, entries); !reflect.DeepEqual(got, wantSlugs) {
-		t.Fatalf("rendered slugs = %q, want latest-stable/Copilot intersection %q", got, wantSlugs)
+		t.Fatalf("rendered slugs = %q, want vendored/Copilot intersection %q", got, wantSlugs)
 	}
 
 	copilotModels, err := Decode(copilotBytes)
@@ -150,7 +144,7 @@ func TestLatestStableCodexCatalogRoundTripFidelity(t *testing.T) {
 	seenLimitOverlay := false
 	for _, entry := range entries {
 		slug := decodeStringField(t, entry, "slug")
-		source := latestModels[slug]
+		source := vendoredModels[slug]
 		for field, want := range source {
 			if _, mutated := mutatedFields[field]; mutated {
 				continue
@@ -194,27 +188,19 @@ func TestLatestStableCodexCatalogRoundTripFidelity(t *testing.T) {
 	}
 }
 
-func BenchmarkValidateCodexModelsLatest(b *testing.B) {
-	latestBytes, err := os.ReadFile("testdata/codex-latest/models.json")
-	if err != nil {
-		b.Fatal(err)
-	}
+func BenchmarkValidateVendoredCodexModels(b *testing.B) {
 	b.ReportAllocs()
 	for b.Loop() {
-		if _, err := validateCodexModels(latestBytes); err != nil {
+		if _, err := validateCodexModels(embeddedCodexModels); err != nil {
 			b.Fatal(err)
 		}
 	}
 }
 
-func BenchmarkParseCodexModelsLatest(b *testing.B) {
-	latestBytes, err := os.ReadFile("testdata/codex-latest/models.json")
-	if err != nil {
-		b.Fatal(err)
-	}
+func BenchmarkParseVendoredCodexModels(b *testing.B) {
 	b.ReportAllocs()
 	for b.Loop() {
-		if _, err := parseCodexModels(latestBytes); err != nil {
+		if _, err := parseCodexModels(embeddedCodexModels); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -259,7 +245,7 @@ func rawCodexModelsBySlug(t *testing.T, body []byte) map[string]map[string]json.
 		Models []map[string]json.RawMessage `json:"models"`
 	}
 	if err := json.Unmarshal(body, &envelope); err != nil {
-		t.Fatalf("decode raw Codex fixture: %v", err)
+		t.Fatalf("decode raw vendored Codex snapshot: %v", err)
 	}
 	models := make(map[string]map[string]json.RawMessage, len(envelope.Models))
 	for i, entry := range envelope.Models {
