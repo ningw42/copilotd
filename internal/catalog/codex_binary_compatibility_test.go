@@ -324,7 +324,7 @@ func requireLatestCodexBinary(t *testing.T, binary string) {
 
 func replacedBundledDefaultModel(t *testing.T) []byte {
 	t.Helper()
-	model := latestCodexModel(t, "gpt-5.4")
+	model := vendoredCodexModel(t, "gpt-5.4")
 	model["priority"] = json.RawMessage("0")
 	model["visibility"] = json.RawMessage(`"list"`)
 	return marshalRemoteModels(t, model)
@@ -332,7 +332,7 @@ func replacedBundledDefaultModel(t *testing.T) []byte {
 
 func matchingRemoteAliasAndSource(t *testing.T) []byte {
 	t.Helper()
-	source := latestCodexModel(t, "gpt-5.6-sol")
+	source := vendoredCodexModel(t, "gpt-5.6-sol")
 	alias := make(map[string]json.RawMessage, len(source))
 	for key, value := range source {
 		alias[key] = value
@@ -343,35 +343,31 @@ func matchingRemoteAliasAndSource(t *testing.T) []byte {
 
 func singleRemoteDefaultModel(t *testing.T) []byte {
 	t.Helper()
-	model := latestCodexModel(t, "gpt-5.4")
+	model := vendoredCodexModel(t, "gpt-5.4")
 	model["slug"] = json.RawMessage(`"gpt-5.4-audit-alias"`)
 	model["priority"] = json.RawMessage("0")
 	model["visibility"] = json.RawMessage(`"list"`)
 	return marshalRemoteModels(t, model)
 }
 
-func latestCodexModel(t *testing.T, wantSlug string) map[string]json.RawMessage {
+func vendoredCodexModel(t *testing.T, wantSlug string) map[string]json.RawMessage {
 	t.Helper()
-	latestBytes, err := os.ReadFile("testdata/codex-latest/models.json")
-	if err != nil {
-		t.Fatalf("read latest Codex fixture: %v", err)
-	}
 	var envelope struct {
 		Models []map[string]json.RawMessage `json:"models"`
 	}
-	if err := json.Unmarshal(latestBytes, &envelope); err != nil {
-		t.Fatalf("decode latest Codex fixture: %v", err)
+	if err := json.Unmarshal(embeddedCodexModels, &envelope); err != nil {
+		t.Fatalf("decode vendored Codex snapshot: %v", err)
 	}
 	for _, model := range envelope.Models {
 		var slug string
 		if err := json.Unmarshal(model["slug"], &slug); err != nil {
-			t.Fatalf("decode fixture slug: %v", err)
+			t.Fatalf("decode vendored snapshot slug: %v", err)
 		}
 		if slug == wantSlug {
 			return model
 		}
 	}
-	t.Fatalf("latest Codex fixture has no %s entry", wantSlug)
+	t.Fatalf("vendored Codex snapshot has no %s entry", wantSlug)
 	return nil
 }
 

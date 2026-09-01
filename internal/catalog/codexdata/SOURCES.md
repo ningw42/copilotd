@@ -2,7 +2,7 @@
 
 ## Stable release pin
 
-This fixture was audited on 2026-08-31. GitHub's first-party
+The vendored snapshot was audited on 2026-08-31. GitHub's first-party
 `/repos/openai/codex/releases/latest` endpoint returned release ID `378941035`,
 tag `rust-v0.151.0`, published `2026-08-29T09:55:39Z`, with `draft: false` and
 `prerelease: false`. The annotated tag object
@@ -23,7 +23,7 @@ between resolution and content retrieval, and an unchanged tag cannot silently
 replace last-good bytes. Commit resolution requests the 40-byte GitHub SHA media
 type, and every response on this credential-free edge is capped at 8 MiB.
 
-## Fixture identity
+## Vendored snapshot identity
 
 - Repository/path: `openai/codex`,
   `codex-rs/models-manager/models.json` at the pinned commit. [Source][catalog]
@@ -40,16 +40,17 @@ The release also publishes `codex-package_SHA256SUMS`; GitHub records the
 manifest asset itself as
 `sha256:197e852956ef6fcd48d9959c6ab3df8eb81ce0dbe7f5cc472215554bfbd2b1d5`.
 GitHub's generated [commit tarball][source-tar] and [commit ZIP][source-zip]
-have no API-provided digest, so they are not used as the fixture identity.
+have no API-provided digest, so they are not used as the vendored snapshot
+identity.
 [Manifest metadata][checksums]
 
 ## Deserialization contract and test grounding
 
-`TestLatestStableCodexCatalogRoundTripFidelity` proves that the exact pinned
-catalog passes validation, cache acceptance, handler rendering, reviewer
+`TestVendoredCodexCatalogRoundTripFidelity` proves that the exact vendored
+snapshot passes validation, cache acceptance, handler rendering, reviewer
 resolution, a derived limits overlay, and field-for-field preservation. It is
 not the regression witness for the relaxed acceptance rules: parent commit
-`931b566` also accepts this exact 0.151 fixture because every entry still
+`931b566` also accepts this exact 0.151 snapshot because every entry still
 carries both instruction forms, the two removed legacy booleans, and non-empty
 reasoning levels. The synthetic contract tests exercise those Serde-valid
 alternatives and fail against the parent implementation.
@@ -127,8 +128,9 @@ an object. Newer sibling sections (`auto_review`, `collaboration_modes`,
 objects or explicit `null` and must survive copilotd rendering unchanged unless
 an ADR-governed overlay names the field. [Catalog][catalog]
 
-The fixture does not positively exercise every mirrored optional/default field:
-`effective_context_window_percent` and `multi_agent_reasoning_effort` are absent
+The vendored snapshot does not positively exercise every mirrored
+optional/default field: `effective_context_window_percent` and
+`multi_agent_reasoning_effort` are absent
 from all ten entries; `availability_nux` is null throughout; and
 `persistent_instructions` and `confirmation_policies` are absent. Synthetic
 positive and malformed-shape tests cover the corresponding validator paths.

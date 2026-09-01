@@ -9,4 +9,5 @@
 - SHA-256: `eb0d7b9a5dcaf103895c5f8a14c16b269df46e039b375a55ba97f6238542d2ed`
 
 `models.json` is vendored without modification from the source above. `LICENSE`
-and `NOTICE` are copied from the repository root at the same commit.
+and `NOTICE` are copied from the repository root at the same commit. See
+[`SOURCES.md`](SOURCES.md) for the audited Codex compatibility contract.

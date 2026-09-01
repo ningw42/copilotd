@@ -295,7 +295,7 @@ func TestValidateCodexModelsAcceptsEmptyReasoningLevels(t *testing.T) {
 	}
 }
 
-func TestValidateCodexModelsAcceptsKnownOptionalFieldsAbsentFromPinnedFixture(t *testing.T) {
+func TestValidateCodexModelsAcceptsKnownOptionalFieldsAbsentFromVendoredSnapshot(t *testing.T) {
 	modelsBytes := mutateCodexModelsBytes(t, func(entry map[string]any) {
 		entry["effective_context_window_percent"] = 95
 		entry["multi_agent_reasoning_effort"] = "future_effort"
