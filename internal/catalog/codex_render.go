@@ -42,9 +42,9 @@ const (
 // UnappliedCatalogAlias identifies one configured alias mapping that had no
 // effect on alias resolution.
 type UnappliedCatalogAlias struct {
-	Alias  string
-	Source string
-	Reason CatalogAliasSkipReason
+	Alias          string
+	MetadataSource string
+	Reason         CatalogAliasSkipReason
 }
 
 // CodexRenderOutcome reports configured mappings and reviewers that could not
@@ -72,19 +72,19 @@ func RenderCodex(codexModels CodexModels, forwardable []Model, cfg CodexRenderCo
 	for _, alias := range aliases {
 		if _, ok := forwardableByID[alias]; !ok {
 			outcome.UnappliedAliases = append(outcome.UnappliedAliases, UnappliedCatalogAlias{
-				Alias: alias, Source: cfg.ModelAliases[alias], Reason: CatalogAliasNotForwardable,
+				Alias: alias, MetadataSource: cfg.ModelAliases[alias], Reason: CatalogAliasNotForwardable,
 			})
 			continue
 		}
 		if _, ok := codexModels[alias]; ok {
 			outcome.UnappliedAliases = append(outcome.UnappliedAliases, UnappliedCatalogAlias{
-				Alias: alias, Source: cfg.ModelAliases[alias], Reason: CatalogAliasShadowedByOfficial,
+				Alias: alias, MetadataSource: cfg.ModelAliases[alias], Reason: CatalogAliasShadowedByOfficial,
 			})
 			continue
 		}
 		if _, ok := codexModels[cfg.ModelAliases[alias]]; !ok {
 			outcome.UnappliedAliases = append(outcome.UnappliedAliases, UnappliedCatalogAlias{
-				Alias: alias, Source: cfg.ModelAliases[alias], Reason: CatalogAliasMetadataSourceMissing,
+				Alias: alias, MetadataSource: cfg.ModelAliases[alias], Reason: CatalogAliasMetadataSourceMissing,
 			})
 		}
 	}

@@ -234,9 +234,10 @@ Codex bytes are edited or persisted.
 
 ### `--codex-auto-review-model`
 
-Injects the model slug as Codex's auto-review model when it is present in both
-the current accepted Codex catalog and the live Copilot-forwardable set. The
-injected value takes precedence over Codex's provider default. As of Codex
+Injects the model slug as Codex's auto-review model when its served slug belongs
+to the complete emitted Codex membership, including resolved exact official
+entries and Codex catalog aliases. The injected value takes precedence over
+Codex's provider default. As of Codex
 0.151.0, command-auth providers default to `gpt-5.6-luna`; an explicit value
 remains useful for stable routing across Codex versions and changing Copilot
 lineups.

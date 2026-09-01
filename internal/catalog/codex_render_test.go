@@ -96,7 +96,7 @@ func TestRenderCodexReportsAliasThatIsNotForwardable(t *testing.T) {
 		t.Errorf("rendered slugs = %q, want unaffected exact entry", got)
 	}
 	want := []UnappliedCatalogAlias{{
-		Alias: alias, Source: "gpt-5.4-mini", Reason: CatalogAliasNotForwardable,
+		Alias: alias, MetadataSource: "gpt-5.4-mini", Reason: CatalogAliasNotForwardable,
 	}}
 	if !reflect.DeepEqual(outcome.UnappliedAliases, want) {
 		t.Errorf("unapplied aliases = %#v, want %#v", outcome.UnappliedAliases, want)
@@ -122,7 +122,7 @@ func TestRenderCodexOfficialEntryShadowsConfiguredAlias(t *testing.T) {
 		assertRawFieldEqual(t, alias, field, entries[0][field], want)
 	}
 	want := []UnappliedCatalogAlias{{
-		Alias: alias, Source: "gpt-5.5", Reason: CatalogAliasShadowedByOfficial,
+		Alias: alias, MetadataSource: "gpt-5.5", Reason: CatalogAliasShadowedByOfficial,
 	}}
 	if !reflect.DeepEqual(outcome.UnappliedAliases, want) {
 		t.Errorf("unapplied aliases = %#v, want %#v", outcome.UnappliedAliases, want)
@@ -149,7 +149,7 @@ func TestRenderCodexReportsMissingMetadataSourceAndContinues(t *testing.T) {
 		t.Errorf("rendered slugs = %q, want unaffected models %q", got, wantSlugs)
 	}
 	want := []UnappliedCatalogAlias{{
-		Alias: missingAlias, Source: "gpt-no-such-source", Reason: CatalogAliasMetadataSourceMissing,
+		Alias: missingAlias, MetadataSource: "gpt-no-such-source", Reason: CatalogAliasMetadataSourceMissing,
 	}}
 	if !reflect.DeepEqual(outcome.UnappliedAliases, want) {
 		t.Errorf("unapplied aliases = %#v, want %#v", outcome.UnappliedAliases, want)
@@ -165,7 +165,7 @@ func TestRenderCodexReportsEachConfiguredAliasAtMostOnce(t *testing.T) {
 		t.Fatalf("RenderCodex: %v", err)
 	}
 	want := []UnappliedCatalogAlias{{
-		Alias: alias, Source: "gpt-no-such-source", Reason: CatalogAliasMetadataSourceMissing,
+		Alias: alias, MetadataSource: "gpt-no-such-source", Reason: CatalogAliasMetadataSourceMissing,
 	}}
 	if !reflect.DeepEqual(outcome.UnappliedAliases, want) {
 		t.Errorf("unapplied aliases = %#v, want one outcome %#v", outcome.UnappliedAliases, want)
@@ -190,7 +190,7 @@ func TestRenderCodexAliasResolutionIsSingleHop(t *testing.T) {
 		t.Errorf("rendered slugs = %q, want only directly resolvable alias", got)
 	}
 	want := []UnappliedCatalogAlias{{
-		Alias: firstAlias, Source: secondAlias, Reason: CatalogAliasMetadataSourceMissing,
+		Alias: firstAlias, MetadataSource: secondAlias, Reason: CatalogAliasMetadataSourceMissing,
 	}}
 	if !reflect.DeepEqual(outcome.UnappliedAliases, want) {
 		t.Errorf("unapplied aliases = %#v, want %#v", outcome.UnappliedAliases, want)
@@ -217,9 +217,9 @@ func TestRenderCodexUnappliedAliasReasonsAreExclusiveAndAliasSorted(t *testing.T
 		t.Errorf("rendered slugs = %q, want shadowed official entry only", got)
 	}
 	want := []UnappliedCatalogAlias{
-		{Alias: missingSource, Source: "gpt-no-such-source", Reason: CatalogAliasMetadataSourceMissing},
-		{Alias: notForwarded, Source: "gpt-5.6-sol", Reason: CatalogAliasNotForwardable},
-		{Alias: shadowed, Source: "gpt-5.4-mini", Reason: CatalogAliasShadowedByOfficial},
+		{Alias: missingSource, MetadataSource: "gpt-no-such-source", Reason: CatalogAliasMetadataSourceMissing},
+		{Alias: notForwarded, MetadataSource: "gpt-5.6-sol", Reason: CatalogAliasNotForwardable},
+		{Alias: shadowed, MetadataSource: "gpt-5.4-mini", Reason: CatalogAliasShadowedByOfficial},
 	}
 	if !reflect.DeepEqual(outcome.UnappliedAliases, want) {
 		t.Errorf("unapplied aliases = %#v, want alias-sorted exclusive outcomes %#v", outcome.UnappliedAliases, want)

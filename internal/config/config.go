@@ -376,11 +376,18 @@ func (f *ServeFlags) Resolve(lookupEnv func(string) (string, bool)) (ServeConfig
 	return cfg, nil
 }
 
-func parseCodexCatalogModelAliases(raw string) (map[string]string, error) {
+type stringMapSyntax struct {
+	setting string
+	pair    string
+	key     string
+	value   string
+}
+
+func parseStringMap(raw string, syntax stringMapSyntax, validatePair func(string, string) error) (map[string]string, error) {
 	if raw == "" {
 		return nil, nil
 	}
-	aliases := make(map[string]string)
+	values := make(map[string]string)
 	for _, segment := range strings.Split(raw, ",") {
 		segment = strings.TrimSpace(segment)
 		if segment == "" {
@@ -388,61 +395,54 @@ func parseCodexCatalogModelAliases(raw string) (map[string]string, error) {
 		}
 		pair := strings.SplitN(segment, "=", 2)
 		if len(pair) != 2 {
-			return nil, fmt.Errorf("invalid codex-catalog-model-aliases segment %q: expected alias=source", segment)
+			return nil, fmt.Errorf("invalid %s segment %q: expected %s", syntax.setting, segment, syntax.pair)
 		}
-		alias := strings.TrimSpace(pair[0])
-		source := strings.TrimSpace(pair[1])
-		if alias == "" {
-			return nil, fmt.Errorf("invalid codex-catalog-model-aliases segment %q: alias is empty", segment)
+		key := strings.TrimSpace(pair[0])
+		value := strings.TrimSpace(pair[1])
+		if key == "" {
+			return nil, fmt.Errorf("invalid %s segment %q: %s is empty", syntax.setting, segment, syntax.key)
 		}
-		if source == "" {
-			return nil, fmt.Errorf("invalid codex-catalog-model-aliases segment %q: metadata source is empty", segment)
+		if value == "" {
+			return nil, fmt.Errorf("invalid %s segment %q: %s is empty", syntax.setting, segment, syntax.value)
 		}
-		if alias == source {
-			return nil, fmt.Errorf("invalid codex-catalog-model-aliases: alias %q maps to itself", alias)
+		if _, exists := values[key]; exists {
+			return nil, fmt.Errorf("invalid %s: duplicate %s %q", syntax.setting, syntax.key, key)
 		}
-		if _, exists := aliases[alias]; exists {
-			return nil, fmt.Errorf("invalid codex-catalog-model-aliases: duplicate alias %q", alias)
+		if validatePair != nil {
+			if err := validatePair(key, value); err != nil {
+				return nil, err
+			}
 		}
-		aliases[alias] = source
+		values[key] = value
 	}
-	if len(aliases) == 0 {
+	if len(values) == 0 {
 		return nil, nil
 	}
-	return aliases, nil
+	return values, nil
+}
+
+func parseCodexCatalogModelAliases(raw string) (map[string]string, error) {
+	const setting = "codex-catalog-model-aliases"
+	return parseStringMap(raw, stringMapSyntax{
+		setting: setting,
+		pair:    "alias=source",
+		key:     "alias",
+		value:   "metadata source",
+	}, func(alias, source string) error {
+		if alias == source {
+			return fmt.Errorf("invalid %s: alias %q maps to itself", setting, alias)
+		}
+		return nil
+	})
 }
 
 func parseAutoReviewModelOverrides(raw string) (map[string]string, error) {
-	if raw == "" {
-		return nil, nil
-	}
-	overrides := make(map[string]string)
-	for _, segment := range strings.Split(raw, ",") {
-		segment = strings.TrimSpace(segment)
-		if segment == "" {
-			continue
-		}
-		pair := strings.SplitN(segment, "=", 2)
-		if len(pair) != 2 {
-			return nil, fmt.Errorf("invalid codex-auto-review-model-overrides segment %q: expected main=reviewer", segment)
-		}
-		mainModel := strings.TrimSpace(pair[0])
-		reviewerModel := strings.TrimSpace(pair[1])
-		if mainModel == "" {
-			return nil, fmt.Errorf("invalid codex-auto-review-model-overrides segment %q: main model is empty", segment)
-		}
-		if reviewerModel == "" {
-			return nil, fmt.Errorf("invalid codex-auto-review-model-overrides segment %q: reviewer model is empty", segment)
-		}
-		if _, exists := overrides[mainModel]; exists {
-			return nil, fmt.Errorf("invalid codex-auto-review-model-overrides: duplicate main model %q", mainModel)
-		}
-		overrides[mainModel] = reviewerModel
-	}
-	if len(overrides) == 0 {
-		return nil, nil
-	}
-	return overrides, nil
+	return parseStringMap(raw, stringMapSyntax{
+		setting: "codex-auto-review-model-overrides",
+		pair:    "main=reviewer",
+		key:     "main model",
+		value:   "reviewer model",
+	}, nil)
 }
 
 // defaultOAuthTokenFile is the default path to the GitHub OAuth token file:

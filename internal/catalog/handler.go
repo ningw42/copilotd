@@ -87,7 +87,7 @@ func Handler(logger *slog.Logger, ep endpoint.Catalog, rendering Rendering, sour
 				for _, unapplied := range outcome.UnappliedAliases {
 					logger.WarnContext(responseCtx, "Codex catalog alias mapping was not applied",
 						slog.String(logging.ModelKey, unapplied.Alias),
-						slog.String(logging.MetadataSourceKey, unapplied.Source),
+						slog.String(logging.MetadataSourceKey, unapplied.MetadataSource),
 						slog.String(logging.SkipReasonKey, string(unapplied.Reason)))
 				}
 				for _, skipped := range outcome.SkippedReviewers {
