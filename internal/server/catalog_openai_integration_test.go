@@ -35,8 +35,24 @@ func testCodexDescriptor(cfg config.ServeConfig) catalog.CodexDescriptor {
 
 func TestCodexCatalogAliasOverRealListener(t *testing.T) {
 	const alias = "gpt-example-alias"
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = io.WriteString(w, `{"data":[{"id":"`+alias+`","vendor":"OpenAI","model_picker_enabled":true,"supported_endpoints":["/responses"]}]}`)
+	inferenceModels := make(chan string, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/models":
+			_, _ = io.WriteString(w, `{"data":[{"id":"`+alias+`","vendor":"OpenAI","model_picker_enabled":true,"supported_endpoints":["/responses"]}]}`)
+		case "/responses":
+			var request struct {
+				Model string `json:"model"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Errorf("decode inference request: %v", err)
+			}
+			inferenceModels <- request.Model
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"id":"resp_alias","object":"response"}`)
+		default:
+			http.NotFound(w, r)
+		}
 	}))
 	defer upstream.Close()
 
@@ -78,6 +94,25 @@ func TestCodexCatalogAliasOverRealListener(t *testing.T) {
 	}
 	if envelope.Models[0].DisplayName != "GPT-5.4" || envelope.Models[0].BaseInstructions == "" {
 		t.Errorf("alias metadata = %+v, want complete gpt-5.4 source metadata", envelope.Models[0])
+	}
+
+	inferenceRequest, err := http.NewRequest(http.MethodPost, base+"/openai/v1/responses", strings.NewReader(`{"model":"`+alias+`","input":"hello"}`))
+	if err != nil {
+		t.Fatalf("build inference request: %v", err)
+	}
+	inferenceRequest.Header.Set("Authorization", "Bearer "+testAPIKey)
+	inferenceRequest.Header.Set("Content-Type", "application/json")
+	inferenceResponse, err := http.DefaultClient.Do(inferenceRequest)
+	if err != nil {
+		t.Fatalf("POST inference: %v", err)
+	}
+	defer func() { _ = inferenceResponse.Body.Close() }()
+	if inferenceResponse.StatusCode != http.StatusOK {
+		inferenceBody, _ := io.ReadAll(inferenceResponse.Body)
+		t.Fatalf("inference status = %d, want 200: %s", inferenceResponse.StatusCode, inferenceBody)
+	}
+	if inferenceModel := <-inferenceModels; inferenceModel != alias {
+		t.Errorf("upstream inference model = %q, want served alias %q unchanged", inferenceModel, alias)
 	}
 }
 

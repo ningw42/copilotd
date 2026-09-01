@@ -281,6 +281,103 @@ func TestRenderCodexEmptyAliasMapPreservesExistingOutput(t *testing.T) {
 	}
 }
 
+func TestRenderCodexAliasesParticipateInCompleteReviewerMembership(t *testing.T) {
+	const (
+		firstAlias  = "gpt-first-review-alias"
+		secondAlias = "gpt-second-review-alias"
+	)
+	models := []Model{{ID: firstAlias}, {ID: secondAlias}, {ID: "gpt-5.5"}}
+	body, outcome, err := RenderCodex(testCodexModels, models, CodexRenderConfig{
+		ModelAliases: map[string]string{
+			firstAlias:  "gpt-5.4",
+			secondAlias: "gpt-5.4-mini",
+		},
+		AutoReviewModelOverrides: map[string]string{
+			firstAlias:  firstAlias,
+			secondAlias: firstAlias,
+			"gpt-5.5":   secondAlias,
+		},
+	})
+	if err != nil {
+		t.Fatalf("RenderCodex: %v", err)
+	}
+	if len(outcome.UnappliedAliases) != 0 || len(outcome.SkippedReviewers) != 0 {
+		t.Errorf("outcome = %#v, want every alias and reviewer applied", outcome)
+	}
+	entries := decodeRenderedCodex(t, body)
+	wantReviewers := []string{firstAlias, firstAlias, secondAlias}
+	for i, want := range wantReviewers {
+		if got := decodeStringField(t, entries[i], "auto_review_model_override"); got != want {
+			t.Errorf("%s reviewer = %q, want %q", decodeStringField(t, entries[i], "slug"), got, want)
+		}
+	}
+}
+
+func TestRenderCodexDoesNotAdvertiseUnappliedAliasAsReviewer(t *testing.T) {
+	const alias = "gpt-unapplied-review-alias"
+	body, outcome, err := RenderCodex(testCodexModels, []Model{{ID: "gpt-5.4"}}, CodexRenderConfig{
+		ModelAliases: map[string]string{alias: "gpt-5.5"},
+		AutoReviewModelOverrides: map[string]string{
+			"gpt-5.4": alias,
+		},
+	})
+	if err != nil {
+		t.Fatalf("RenderCodex: %v", err)
+	}
+	wantSkipped := []SkippedReviewer{{Model: "gpt-5.4", Reviewer: alias}}
+	if !reflect.DeepEqual(outcome.SkippedReviewers, wantSkipped) {
+		t.Errorf("skipped reviewers = %#v, want %#v", outcome.SkippedReviewers, wantSkipped)
+	}
+	entries := decodeRenderedCodex(t, body)
+	if _, ok := entries[0]["auto_review_model_override"]; ok {
+		t.Error("main model advertised an unapplied alias as its reviewer")
+	}
+}
+
+func TestRenderCodexAliasRemovesSourceReviewerAndUsesAliasLiveLimits(t *testing.T) {
+	const (
+		alias  = "gpt-limit-alias"
+		source = "gpt-5.4"
+	)
+	codexModels := make(CodexModels, len(testCodexModels))
+	for slug, entry := range testCodexModels {
+		codexModels[slug] = entry
+	}
+	sourceEntry := copyCodexEntry(testCodexModels[source])
+	sourceEntry["auto_review_model_override"] = json.RawMessage(`"source-reviewer"`)
+	codexModels[source] = sourceEntry
+
+	aliasPromptLimit := 111
+	sourcePromptLimit, sourceContextLimit := 777, 888
+	models := []Model{
+		{ID: source, Capabilities: Capabilities{Limits: Limits{MaxPromptTokens: &sourcePromptLimit, MaxContextWindowTokens: &sourceContextLimit}}},
+		{ID: alias, Capabilities: Capabilities{Limits: Limits{MaxPromptTokens: &aliasPromptLimit}}},
+	}
+	offBody, _, err := RenderCodex(codexModels, models, CodexRenderConfig{
+		ModelAliases: map[string]string{alias: source},
+	})
+	if err != nil {
+		t.Fatalf("RenderCodex overlay off: %v", err)
+	}
+	offAlias := decodeRenderedCodex(t, offBody)[1]
+	assertRawFieldEqual(t, alias, "context_window", offAlias["context_window"], sourceEntry["context_window"])
+	assertRawFieldEqual(t, alias, "max_context_window", offAlias["max_context_window"], sourceEntry["max_context_window"])
+
+	onBody, _, err := RenderCodex(codexModels, models, CodexRenderConfig{
+		ModelAliases:   map[string]string{alias: source},
+		OverrideLimits: true,
+	})
+	if err != nil {
+		t.Fatalf("RenderCodex overlay on: %v", err)
+	}
+	onAlias := decodeRenderedCodex(t, onBody)[1]
+	if _, ok := onAlias["auto_review_model_override"]; ok {
+		t.Error("alias retained its metadata source reviewer")
+	}
+	assertJSONInt(t, onAlias, "context_window", aliasPromptLimit)
+	assertRawFieldEqual(t, alias, "max_context_window", onAlias["max_context_window"], sourceEntry["max_context_window"])
+}
+
 func TestRenderCodexCopiesCurrentFieldsVerbatimAndDoesNotAliasThem(t *testing.T) {
 	models := Filter(capturedModels(t), endpoint.RouteOpenAIResponses)
 	body, _, err := RenderCodex(testCodexModels, models, CodexRenderConfig{
