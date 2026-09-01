@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -96,6 +97,24 @@ func TestCodexCatalogAliasOverRealListener(t *testing.T) {
 		t.Errorf("alias metadata = %+v, want complete gpt-5.4 source metadata", envelope.Models[0])
 	}
 
+	headRequest, err := http.NewRequest(http.MethodHead, base+"/openai/v1/models?client_version=0.151.0", nil)
+	if err != nil {
+		t.Fatalf("build HEAD request: %v", err)
+	}
+	headRequest.Header.Set("Authorization", "Bearer "+testAPIKey)
+	headResponse, err := http.DefaultClient.Do(headRequest)
+	if err != nil {
+		t.Fatalf("HEAD catalog: %v", err)
+	}
+	headBody, readErr := io.ReadAll(headResponse.Body)
+	_ = headResponse.Body.Close()
+	if readErr != nil {
+		t.Fatalf("read HEAD catalog: %v", readErr)
+	}
+	if headResponse.StatusCode != http.StatusOK || len(headBody) != 0 || headResponse.Header.Get("Content-Length") != strconv.Itoa(len(body)) {
+		t.Errorf("HEAD = status %d length %q body %q, want alias-inclusive GET length %d and no body", headResponse.StatusCode, headResponse.Header.Get("Content-Length"), headBody, len(body))
+	}
+
 	inferenceRequest, err := http.NewRequest(http.MethodPost, base+"/openai/v1/responses", strings.NewReader(`{"model":"`+alias+`","input":"hello"}`))
 	if err != nil {
 		t.Fatalf("build inference request: %v", err)
@@ -113,6 +132,62 @@ func TestCodexCatalogAliasOverRealListener(t *testing.T) {
 	}
 	if inferenceModel := <-inferenceModels; inferenceModel != alias {
 		t.Errorf("upstream inference model = %q, want served alias %q unchanged", inferenceModel, alias)
+	}
+}
+
+func TestCodexCatalogAliasConfigIsScopedToNegotiatedOpenAICatalog(t *testing.T) {
+	const alias = "gpt-scoped-alias"
+	upstreamBody := []byte(`{"data":[{"id":"` + alias + `","vendor":"OpenAI","model_picker_enabled":true,"supported_endpoints":["/responses"]}]}`)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(upstreamBody)
+	}))
+	defer upstream.Close()
+
+	provider := identity.NewStatic(identity.Credential{BaseURL: upstream.URL, Token: "copilot-token"}, true)
+	newStack := func(enabled bool) string {
+		t.Helper()
+		cfg := testConfig()
+		cfg.CodexCatalogEnabled = enabled
+		cfg.CodexCatalogModelAliases = map[string]string{alias: "gpt-5.4"}
+		forwarder := newTestForwarder(provider, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
+		return startServer(t, newTestServerFromBase(cfg, discardLogger(t), provider, newTestReadyObservers(), forwarder, newTestCatalogSource(provider), newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.RenderDescriptors{Codex: testCodexDescriptor(cfg)}))
+	}
+	request := func(base, target string) []byte {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodGet, base+target, nil)
+		if err != nil {
+			t.Fatalf("build request: %v", err)
+		}
+		req.Header.Set("Authorization", "Bearer "+testAPIKey)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("GET %s: %v", target, err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatalf("read %s: %v", target, err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("GET %s = %d, want 200: %s", target, resp.StatusCode, body)
+		}
+		return body
+	}
+
+	enabledBase := newStack(true)
+	if body := request(enabledBase, "/openai/v1/models"); !strings.HasPrefix(string(body), `{"object":"list","data":[`) {
+		t.Errorf("OpenAI request without client_version changed shape: %s", body)
+	}
+	if body := request(enabledBase, "/anthropic/v1/models?client_version=0.151.0"); !strings.HasPrefix(string(body), `{"data":[`) || strings.Contains(string(body), `"models"`) {
+		t.Errorf("Anthropic catalog acquired Codex shape: %s", body)
+	}
+	if body := request(enabledBase, "/models"); !bytes.Equal(body, upstreamBody) {
+		t.Errorf("raw /models changed:\n got %s\nwant %s", body, upstreamBody)
+	}
+
+	disabledBase := newStack(false)
+	if body := request(disabledBase, "/openai/v1/models?client_version=0.151.0"); !strings.HasPrefix(string(body), `{"object":"list","data":[`) {
+		t.Errorf("disabled Codex catalog changed OpenAI shape: %s", body)
 	}
 }
 

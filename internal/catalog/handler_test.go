@@ -177,13 +177,14 @@ func TestHandlerNegotiatesCodexShapeOnlyWhenEveryGateIsOpen(t *testing.T) {
 }
 
 func TestHandlerCodexHEADMatchesGETHeadersAndSuppressesBody(t *testing.T) {
-	upstreamBody := []byte(`{"data":[{"id":"gpt-5.4","vendor":"OpenAI","model_picker_enabled":true,"supported_endpoints":["/responses"]}]}`)
+	const alias = "gpt-example-alias"
+	upstreamBody := []byte(`{"data":[{"id":"` + alias + `","vendor":"OpenAI","model_picker_enabled":true,"supported_endpoints":["/responses"]}]}`)
 	rendering := Rendering{
 		Render: RenderOpenAI,
 		Codex: CodexDescriptor{
 			Enabled: true,
 			RenderConfig: CodexRenderConfig{
-				AutoReviewModel: "gpt-5.4",
+				ModelAliases: map[string]string{alias: "gpt-5.4"},
 			},
 		},
 	}

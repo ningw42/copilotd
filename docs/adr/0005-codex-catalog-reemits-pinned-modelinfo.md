@@ -8,8 +8,8 @@ value that follows the latest stable Codex release and fetches content at its
 resolved commit. The embedded floor was advanced to `rust-v0.151.0` on
 2026-08-31 after its current contract was audited. This ADR's fidelity
 contract remains in force: every accepted entry must be a complete Codex
-`ModelInfo`, re-emitted field-for-field except for the enumerated reviewer and
-limit overlays.
+`ModelInfo`, re-emitted field-for-field except for the enumerated explicit-alias
+slug substitution, reviewer routing, and live-limit overlay.
 
 **Compatibility note (2026-08-31):** Codex `rust-v0.151.0` treats command auth
 as API-key auth and defaults that provider mode's Guardian reviewer to
@@ -21,12 +21,16 @@ command-auth clients can avoid `codex-auto-review`.
 The Codex client-shaped catalog (Phase 6b), served on
 `GET /openai/v1/models?client_version=…`, re-emits an accepted release of Codex's
 own `models.json` (latest stable release, commit-addressed, with the vendored
-`rust-v0.151.0` floor) **field-for-field per slug**,
-overwriting only an enumerated set of keys — `auto_review_model_override` (injected
-from a per-main-model `codex-auto-review-model-overrides` entry or the global
-`codex-auto-review-model` fallback) and, under the opt-in
-`codex-catalog-override-limits`, `context_window` / `max_context_window`. We do
-this because Codex, under command auth, merges a fetched catalog **wholesale per
+`rust-v0.151.0` floor) **field-for-field per source entry**, applying only this
+enumerated sequence of mutations: an explicitly configured Codex catalog alias
+replaces `slug` with its real live Copilot model ID;
+`auto_review_model_override` is removed and then optionally injected from a
+per-main-model `codex-auto-review-model-overrides` entry or the global
+`codex-auto-review-model` fallback; and, under the opt-in
+`codex-catalog-override-limits`, `context_window` / `max_context_window` may be
+overlaid from that served model's live Copilot facts. Exact official metadata
+wins over a configured alias source for the same slug. We do this because Codex,
+under command auth, merges a fetched catalog **wholesale per
 slug** (`apply_remote_models`:
 `existing_models[i] = model`) with no field-merge, and required `ModelInfo` fields
 have no fallback — an empty `base_instructions` reaches the wire as
@@ -47,10 +51,10 @@ unstable and copilotd must never silently change a user's model behavior.
   `auto_review_model_override` survives both HTTP and WSS. This is the same lever
   OpenAI's own Amazon Bedrock provider uses (routing auto-review to `gpt-5.4`).
 - **Emit only the entries we inject into** (minimal blast radius) — rejected for
-  simplicity: the whole intersection is emitted, but *only* when there is something
-  to inject (a reviewer or the limits overlay), so prompt-pinning is never
-  gratuitous — a bare `codex-catalog-enabled=true` emits nothing and Codex falls
-  back to its own bundle.
+  simplicity: the whole resolved membership is emitted, but *only* when there is
+  something to inject (an explicit alias, a reviewer, or the limits overlay), so
+  prompt-pinning is never gratuitous — a bare `codex-catalog-enabled=true` emits
+  nothing and Codex falls back to its own bundle.
 
 ## Consequences
 
@@ -58,10 +62,13 @@ The deliberate divergences (design §13, amended by ADR-0009): each served value
 is release-tag-pinned; a future required-field addition fails the accept-gate and
 holds the last-good release or `rust-v0.151.0` floor, so Codex retains complete
 entries. Prompt/behavior values come from that accepted release; limits are
-Codex's numbers unless the operator opts into the overlay; coverage is the
-intersection of Copilot-forwardable and accepted Codex slugs; and auto-review
-requires operator config. Recorded in
-`docs/design/2026-07-19-phase-6b-codex-model-catalog-auto-review-design.md` §13.
+Codex's numbers unless the operator opts into the overlay; coverage is exact
+Copilot-forwardable/accepted Codex intersections plus explicitly configured live
+aliases with accepted metadata sources; and auto-review requires operator
+config. Alias slugs are real Copilot inference IDs and are not rewritten on the
+inference path. Recorded in
+`docs/design/2026-07-19-phase-6b-codex-model-catalog-auto-review-design.md` §13
+and `docs/design/2026-09-01-codex-catalog-model-aliases-design.md` §9.
 
 The per-model routing extension deliberately changes the existing opt-in log
 behavior: an unforwardable global reviewer now logs once per affected advertised
