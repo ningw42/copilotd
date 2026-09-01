@@ -1,6 +1,6 @@
 module github.com/ningw42/copilotd
 
-go 1.26
+go 1.27
 
 require (
 	github.com/coder/websocket v1.8.15

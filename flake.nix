@@ -53,7 +53,7 @@
       commit = self.shortRev or "dirty";
       date = self.lastModifiedDate or "unknown";
 
-      # The Go toolchain is pinned explicitly to 1.26 in BOTH the package build
+      # The Go toolchain is pinned explicitly to 1.27 in BOTH the package build
       # and the devShell, so `nix flake update` cannot silently change the Go
       # minor. Bump this pin deliberately, once per Go release.
       copilotdFor = forSupportedSystems (
@@ -61,7 +61,7 @@
         let
           pkgs = pkgsFor.${system};
         in
-        (pkgs.buildGoModule.override { go = pkgs.go_1_26; }) {
+        (pkgs.buildGoModule.override { go = pkgs.go_1_27; }) {
           pname = "copilotd";
           version = commit;
           src = ./.;
@@ -134,7 +134,7 @@
             inherit (gitHooksCheck.${system}) shellHook;
             buildInputs = gitHooksCheck.${system}.enabledPackages;
             packages = [
-              pkgs.go_1_26
+              pkgs.go_1_27
               pkgs.gopls
               treefmtEval.${system}.config.build.wrapper
             ]
