@@ -84,6 +84,161 @@ func TestRenderCodexClonesOfficialMetadataForLiveAlias(t *testing.T) {
 	}
 }
 
+func TestRenderCodexReportsAliasThatIsNotForwardable(t *testing.T) {
+	const alias = "gpt-missing-alias"
+	body, outcome, err := RenderCodex(testCodexModels, []Model{{ID: "gpt-5.4"}}, CodexRenderConfig{
+		ModelAliases: map[string]string{alias: "gpt-5.4-mini"},
+	})
+	if err != nil {
+		t.Fatalf("RenderCodex: %v", err)
+	}
+	if got := renderedSlugs(t, decodeRenderedCodex(t, body)); !reflect.DeepEqual(got, []string{"gpt-5.4"}) {
+		t.Errorf("rendered slugs = %q, want unaffected exact entry", got)
+	}
+	want := []UnappliedCatalogAlias{{
+		Alias: alias, Source: "gpt-5.4-mini", Reason: CatalogAliasNotForwardable,
+	}}
+	if !reflect.DeepEqual(outcome.UnappliedAliases, want) {
+		t.Errorf("unapplied aliases = %#v, want %#v", outcome.UnappliedAliases, want)
+	}
+}
+
+func TestRenderCodexOfficialEntryShadowsConfiguredAlias(t *testing.T) {
+	const alias = "gpt-5.4"
+	body, outcome, err := RenderCodex(testCodexModels, []Model{{ID: alias}}, CodexRenderConfig{
+		ModelAliases: map[string]string{alias: "gpt-5.5"},
+	})
+	if err != nil {
+		t.Fatalf("RenderCodex: %v", err)
+	}
+	entries := decodeRenderedCodex(t, body)
+	if len(entries) != 1 {
+		t.Fatalf("rendered entries = %d, want official entry", len(entries))
+	}
+	for field, want := range testCodexModels[alias] {
+		if field == "auto_review_model_override" {
+			continue
+		}
+		assertRawFieldEqual(t, alias, field, entries[0][field], want)
+	}
+	want := []UnappliedCatalogAlias{{
+		Alias: alias, Source: "gpt-5.5", Reason: CatalogAliasShadowedByOfficial,
+	}}
+	if !reflect.DeepEqual(outcome.UnappliedAliases, want) {
+		t.Errorf("unapplied aliases = %#v, want %#v", outcome.UnappliedAliases, want)
+	}
+}
+
+func TestRenderCodexReportsMissingMetadataSourceAndContinues(t *testing.T) {
+	const (
+		missingAlias = "gpt-missing-source-alias"
+		validAlias   = "gpt-valid-alias"
+	)
+	models := []Model{{ID: missingAlias}, {ID: validAlias}, {ID: "gpt-5.5"}}
+	body, outcome, err := RenderCodex(testCodexModels, models, CodexRenderConfig{
+		ModelAliases: map[string]string{
+			missingAlias: "gpt-no-such-source",
+			validAlias:   "gpt-5.4",
+		},
+	})
+	if err != nil {
+		t.Fatalf("RenderCodex: %v", err)
+	}
+	wantSlugs := []string{validAlias, "gpt-5.5"}
+	if got := renderedSlugs(t, decodeRenderedCodex(t, body)); !reflect.DeepEqual(got, wantSlugs) {
+		t.Errorf("rendered slugs = %q, want unaffected models %q", got, wantSlugs)
+	}
+	want := []UnappliedCatalogAlias{{
+		Alias: missingAlias, Source: "gpt-no-such-source", Reason: CatalogAliasMetadataSourceMissing,
+	}}
+	if !reflect.DeepEqual(outcome.UnappliedAliases, want) {
+		t.Errorf("unapplied aliases = %#v, want %#v", outcome.UnappliedAliases, want)
+	}
+}
+
+func TestRenderCodexReportsEachConfiguredAliasAtMostOnce(t *testing.T) {
+	const alias = "gpt-duplicate-live-alias"
+	_, outcome, err := RenderCodex(testCodexModels, []Model{{ID: alias}, {ID: alias}}, CodexRenderConfig{
+		ModelAliases: map[string]string{alias: "gpt-no-such-source"},
+	})
+	if err != nil {
+		t.Fatalf("RenderCodex: %v", err)
+	}
+	want := []UnappliedCatalogAlias{{
+		Alias: alias, Source: "gpt-no-such-source", Reason: CatalogAliasMetadataSourceMissing,
+	}}
+	if !reflect.DeepEqual(outcome.UnappliedAliases, want) {
+		t.Errorf("unapplied aliases = %#v, want one outcome %#v", outcome.UnappliedAliases, want)
+	}
+}
+
+func TestRenderCodexAliasResolutionIsSingleHop(t *testing.T) {
+	const (
+		firstAlias  = "gpt-first-alias"
+		secondAlias = "gpt-second-alias"
+	)
+	body, outcome, err := RenderCodex(testCodexModels, []Model{{ID: firstAlias}, {ID: secondAlias}}, CodexRenderConfig{
+		ModelAliases: map[string]string{
+			firstAlias:  secondAlias,
+			secondAlias: "gpt-5.4",
+		},
+	})
+	if err != nil {
+		t.Fatalf("RenderCodex: %v", err)
+	}
+	if got := renderedSlugs(t, decodeRenderedCodex(t, body)); !reflect.DeepEqual(got, []string{secondAlias}) {
+		t.Errorf("rendered slugs = %q, want only directly resolvable alias", got)
+	}
+	want := []UnappliedCatalogAlias{{
+		Alias: firstAlias, Source: secondAlias, Reason: CatalogAliasMetadataSourceMissing,
+	}}
+	if !reflect.DeepEqual(outcome.UnappliedAliases, want) {
+		t.Errorf("unapplied aliases = %#v, want %#v", outcome.UnappliedAliases, want)
+	}
+}
+
+func TestRenderCodexUnappliedAliasReasonsAreExclusiveAndAliasSorted(t *testing.T) {
+	const (
+		missingSource = "a-missing-source"
+		shadowed      = "gpt-5.5"
+		notForwarded  = "gpt-5.4"
+	)
+	body, outcome, err := RenderCodex(testCodexModels, []Model{{ID: shadowed}, {ID: missingSource}}, CodexRenderConfig{
+		ModelAliases: map[string]string{
+			notForwarded:  "gpt-5.6-sol",
+			shadowed:      "gpt-5.4-mini",
+			missingSource: "gpt-no-such-source",
+		},
+	})
+	if err != nil {
+		t.Fatalf("RenderCodex: %v", err)
+	}
+	if got := renderedSlugs(t, decodeRenderedCodex(t, body)); !reflect.DeepEqual(got, []string{shadowed}) {
+		t.Errorf("rendered slugs = %q, want shadowed official entry only", got)
+	}
+	want := []UnappliedCatalogAlias{
+		{Alias: missingSource, Source: "gpt-no-such-source", Reason: CatalogAliasMetadataSourceMissing},
+		{Alias: notForwarded, Source: "gpt-5.6-sol", Reason: CatalogAliasNotForwardable},
+		{Alias: shadowed, Source: "gpt-5.4-mini", Reason: CatalogAliasShadowedByOfficial},
+	}
+	if !reflect.DeepEqual(outcome.UnappliedAliases, want) {
+		t.Errorf("unapplied aliases = %#v, want alias-sorted exclusive outcomes %#v", outcome.UnappliedAliases, want)
+	}
+}
+
+func TestRenderCodexUnconfiguredCopilotOnlyModelRemainsSilent(t *testing.T) {
+	body, outcome, err := RenderCodex(testCodexModels, []Model{{ID: "gpt-copilot-only"}}, CodexRenderConfig{})
+	if err != nil {
+		t.Fatalf("RenderCodex: %v", err)
+	}
+	if got := renderedSlugs(t, decodeRenderedCodex(t, body)); len(got) != 0 {
+		t.Errorf("rendered slugs = %q, want none", got)
+	}
+	if len(outcome.UnappliedAliases) != 0 {
+		t.Errorf("unapplied aliases = %#v, want none for unconfigured model", outcome.UnappliedAliases)
+	}
+}
+
 func TestRenderCodexAliasOrderFollowsLiveModelsAndIsMapOrderIndependent(t *testing.T) {
 	models := []Model{{ID: "gpt-z-alias"}, {ID: "gpt-5.5"}, {ID: "gpt-a-alias"}}
 	firstAliases := map[string]string{

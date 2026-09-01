@@ -81,6 +81,89 @@ func TestCodexCatalogAliasOverRealListener(t *testing.T) {
 	}
 }
 
+func TestCodexCatalogAliasWarningsOverRealListener(t *testing.T) {
+	const (
+		notForwarded  = "gpt-5.4-mini"
+		missingSource = "gpt-missing-source"
+		shadowed      = "gpt-5.4"
+		querySecret   = "alias-query-secret"
+		bodySecret    = "alias-model-body-secret"
+		tokenSecret   = "alias-copilot-token-secret"
+	)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"data":[`+
+			`{"id":"`+shadowed+`","vendor":"OpenAI","secret":"`+bodySecret+`","model_picker_enabled":true,"supported_endpoints":["/responses"]},`+
+			`{"id":"`+missingSource+`","vendor":"OpenAI","model_picker_enabled":true,"supported_endpoints":["/responses"]}`+
+			`]}`)
+	}))
+	defer upstream.Close()
+
+	logger, logs := bufferLogger(t, "info")
+	cfg := testConfig()
+	cfg.CodexCatalogEnabled = true
+	cfg.CodexCatalogModelAliases = map[string]string{
+		notForwarded:  "gpt-5.6-sol",
+		missingSource: "gpt-no-such-source",
+		shadowed:      "gpt-5.5",
+	}
+	provider := identity.NewStatic(identity.Credential{BaseURL: upstream.URL, Token: tokenSecret}, true)
+	forwarder := newTestForwarder(provider, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
+	base := startServer(t, newTestServerFromBase(cfg, logger, provider, newTestReadyObservers(), forwarder, newTestCatalogSourceWith(provider, forward.NewClient(time.Second), time.Second, 1<<20, logger), newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.RenderDescriptors{Codex: testCodexDescriptor(cfg)}))
+
+	for requestNumber := 0; requestNumber < 2; requestNumber++ {
+		req, err := http.NewRequest(http.MethodGet, base+"/openai/v1/models?client_version="+querySecret, nil)
+		if err != nil {
+			t.Fatalf("build request: %v", err)
+		}
+		req.Header.Set("Authorization", "Bearer "+testAPIKey)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("GET catalog: %v", err)
+		}
+		body, readErr := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if readErr != nil {
+			t.Fatalf("read catalog: %v", readErr)
+		}
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("request %d status = %d, want 200: %s", requestNumber+1, resp.StatusCode, body)
+		}
+		var envelope struct {
+			Models []struct {
+				Slug string `json:"slug"`
+			} `json:"models"`
+		}
+		if err := json.Unmarshal(body, &envelope); err != nil || len(envelope.Models) != 1 || envelope.Models[0].Slug != shadowed {
+			t.Errorf("request %d body = %s, want sole shadowed official entry: %v", requestNumber+1, body, err)
+		}
+	}
+
+	output := logs.String()
+	warningLines := serverLogLinesContaining(output, `msg="Codex catalog alias mapping was not applied"`)
+	if len(warningLines) != 6 {
+		t.Fatalf("alias warning count = %d, want three per request:\n%s", len(warningLines), output)
+	}
+	for _, line := range warningLines {
+		if !strings.Contains(line, "level=WARN") || !strings.Contains(line, "component=internal/catalog") {
+			t.Errorf("alias warning has wrong level or Component: %s", line)
+		}
+	}
+	for _, want := range []string{
+		"model=" + notForwarded, "metadata_source=gpt-5.6-sol", "skip_reason=alias_not_forwardable",
+		"model=" + missingSource, "metadata_source=gpt-no-such-source", "skip_reason=metadata_source_missing",
+		"model=" + shadowed, "metadata_source=gpt-5.5", "skip_reason=shadowed_by_official",
+	} {
+		if !strings.Contains(output, want) {
+			t.Errorf("alias warnings missing %q:\n%s", want, output)
+		}
+	}
+	for _, secret := range []string{querySecret, bodySecret, tokenSecret} {
+		if strings.Contains(output, secret) {
+			t.Errorf("catalog logs leaked %q:\n%s", secret, output)
+		}
+	}
+}
+
 func TestCodexCatalogPerModelReviewerOverRealListener(t *testing.T) {
 	const (
 		mainModel = "gpt-5.6-sol"

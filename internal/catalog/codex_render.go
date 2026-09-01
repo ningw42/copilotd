@@ -29,9 +29,28 @@ type SkippedReviewer struct {
 	Reviewer string
 }
 
-// CodexRenderOutcome reports configured reviewers that could not safely be
-// injected. Callers can turn each pure outcome event into one warning.
+// CatalogAliasSkipReason identifies why a configured catalog alias mapping was
+// not applied.
+type CatalogAliasSkipReason string
+
+const (
+	CatalogAliasNotForwardable        CatalogAliasSkipReason = "alias_not_forwardable"
+	CatalogAliasShadowedByOfficial    CatalogAliasSkipReason = "shadowed_by_official"
+	CatalogAliasMetadataSourceMissing CatalogAliasSkipReason = "metadata_source_missing"
+)
+
+// UnappliedCatalogAlias identifies one configured alias mapping that had no
+// effect on alias resolution.
+type UnappliedCatalogAlias struct {
+	Alias  string
+	Source string
+	Reason CatalogAliasSkipReason
+}
+
+// CodexRenderOutcome reports configured mappings and reviewers that could not
+// safely be applied. Callers can turn each pure outcome event into one warning.
 type CodexRenderOutcome struct {
+	UnappliedAliases []UnappliedCatalogAlias
 	SkippedReviewers []SkippedReviewer
 }
 
@@ -40,6 +59,36 @@ type CodexRenderOutcome struct {
 // verbatim except for the served alias slug and the explicitly configured
 // reviewer and limits mutations.
 func RenderCodex(codexModels CodexModels, forwardable []Model, cfg CodexRenderConfig) ([]byte, CodexRenderOutcome, error) {
+	var outcome CodexRenderOutcome
+	forwardableByID := make(map[string]struct{}, len(forwardable))
+	for _, model := range forwardable {
+		forwardableByID[model.ID] = struct{}{}
+	}
+	aliases := make([]string, 0, len(cfg.ModelAliases))
+	for alias := range cfg.ModelAliases {
+		aliases = append(aliases, alias)
+	}
+	sort.Strings(aliases)
+	for _, alias := range aliases {
+		if _, ok := forwardableByID[alias]; !ok {
+			outcome.UnappliedAliases = append(outcome.UnappliedAliases, UnappliedCatalogAlias{
+				Alias: alias, Source: cfg.ModelAliases[alias], Reason: CatalogAliasNotForwardable,
+			})
+			continue
+		}
+		if _, ok := codexModels[alias]; ok {
+			outcome.UnappliedAliases = append(outcome.UnappliedAliases, UnappliedCatalogAlias{
+				Alias: alias, Source: cfg.ModelAliases[alias], Reason: CatalogAliasShadowedByOfficial,
+			})
+			continue
+		}
+		if _, ok := codexModels[cfg.ModelAliases[alias]]; !ok {
+			outcome.UnappliedAliases = append(outcome.UnappliedAliases, UnappliedCatalogAlias{
+				Alias: alias, Source: cfg.ModelAliases[alias], Reason: CatalogAliasMetadataSourceMissing,
+			})
+		}
+	}
+
 	type resolvedEntry struct {
 		fields  map[string]json.RawMessage
 		aliased bool
@@ -60,8 +109,9 @@ func RenderCodex(codexModels CodexModels, forwardable []Model, cfg CodexRenderCo
 			emitted[model.ID] = struct{}{}
 		}
 	}
-
-	var outcome CodexRenderOutcome
+	sort.Slice(outcome.UnappliedAliases, func(i, j int) bool {
+		return outcome.UnappliedAliases[i].Alias < outcome.UnappliedAliases[j].Alias
+	})
 
 	entries := make([]map[string]json.RawMessage, 0, len(emitted))
 	for _, model := range forwardable {

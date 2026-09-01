@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -246,6 +247,78 @@ func TestHandlerLogsEverySkippedCodexReviewer(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("warning missing %q: %s", want, out)
 		}
+	}
+	if strings.Contains(out, "skip_reason=") {
+		t.Errorf("reviewer warning gained an alias skip reason: %s", out)
+	}
+}
+
+func TestHandlerLogsEveryUnappliedCodexAliasOnEveryRequest(t *testing.T) {
+	const (
+		notForwarded  = "a-not-forwarded"
+		missingSource = "b-missing-source"
+		shadowed      = "gpt-5.4"
+	)
+	var logs bytes.Buffer
+	logger, err := logging.NewWithWriter(&logs, config.ServeConfig{LogLevel: "info", LogFormat: "text"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	upstreamBody := []byte(`{"data":[` +
+		`{"id":"` + shadowed + `","vendor":"OpenAI","model_picker_enabled":true,"supported_endpoints":["/responses"]},` +
+		`{"id":"` + missingSource + `","vendor":"OpenAI","model_picker_enabled":true,"supported_endpoints":["/responses"]}` +
+		`]}`)
+	handler := Handler(logger, endpoint.OpenAICatalog(), Rendering{
+		Render: RenderOpenAI,
+		Codex: CodexDescriptor{
+			Enabled: true,
+			RenderConfig: CodexRenderConfig{ModelAliases: map[string]string{
+				notForwarded:  "gpt-5.6-sol",
+				missingSource: "gpt-no-such-source",
+				shadowed:      "gpt-5.5",
+			}},
+		},
+	}, stubSource{status: http.StatusOK, body: upstreamBody})
+
+	for requestNumber := 0; requestNumber < 2; requestNumber++ {
+		recorder := httptest.NewRecorder()
+		handler(recorder, httptest.NewRequest(http.MethodGet, "/openai/v1/models?client_version=0.151.0", nil))
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("request %d status = %d, want 200: %s", requestNumber+1, recorder.Code, recorder.Body.String())
+		}
+		if got := renderedSlugs(t, decodeRenderedCodex(t, recorder.Body.Bytes())); !reflect.DeepEqual(got, []string{shadowed}) {
+			t.Errorf("request %d rendered slugs = %q, want shadowed official entry", requestNumber+1, got)
+		}
+	}
+
+	output := logs.String()
+	var warningLines []string
+	for _, line := range strings.Split(output, "\n") {
+		if strings.Contains(line, `msg="Codex catalog alias mapping was not applied"`) {
+			warningLines = append(warningLines, line)
+		}
+	}
+	if len(warningLines) != 6 {
+		t.Fatalf("unapplied alias warnings = %d, want 6 (three per request):\n%s", len(warningLines), output)
+	}
+	wantOrder := []string{notForwarded, missingSource, shadowed, notForwarded, missingSource, shadowed}
+	for i, wantAlias := range wantOrder {
+		if !strings.Contains(warningLines[i], "model="+wantAlias) {
+			t.Errorf("warning[%d] = %s, want alias-sorted model %s", i, warningLines[i], wantAlias)
+		}
+	}
+	for _, want := range []string{
+		"level=WARN",
+		"model=" + notForwarded, "metadata_source=gpt-5.6-sol", "skip_reason=alias_not_forwardable",
+		"model=" + missingSource, "metadata_source=gpt-no-such-source", "skip_reason=metadata_source_missing",
+		"model=" + shadowed, "metadata_source=gpt-5.5", "skip_reason=shadowed_by_official",
+	} {
+		if !strings.Contains(output, want) {
+			t.Errorf("warning output missing %q:\n%s", want, output)
+		}
+	}
+	if strings.Contains(output, "failure_class=") {
+		t.Errorf("unapplied alias warning used failure_class:\n%s", output)
 	}
 }
 
