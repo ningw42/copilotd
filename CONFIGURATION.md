@@ -165,7 +165,8 @@ byte-for-byte verbatim.
 ### `--codex-catalog-enabled`
 
 Allows a Codex-shaped model catalog when the request has `client_version` and a
-catalog alias, auto-review model, or live-limit override is configured.
+catalog alias, global auto-review model, per-main-model reviewer override, or
+live-limit override is configured.
 
 ### `--codex-catalog-model-aliases`
 
@@ -223,7 +224,10 @@ authoritative, including `minimal_client_version`, visibility, priority,
 reasoning presets, service tiers, prompts, tool policy, and model messages.
 The operator owns the compatibility assertion between those values and the
 real alias model; copilotd validates source existence and completeness, not
-behavioral suitability.
+behavioral suitability. Because those gates come from the source, they can
+leave an alias hidden or unsuitable for a particular Codex client even though
+the mapping applied successfully; that condition produces no `skip_reason`
+warning.
 
 Complete-source fidelity can give the source and alias duplicate picker labels
 and ranking. Under client/catalog version skew, an alias can therefore change

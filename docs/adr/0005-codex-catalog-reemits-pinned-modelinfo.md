@@ -30,9 +30,10 @@ per-main-model `codex-auto-review-model-overrides` entry or the global
 `codex-catalog-override-limits`, `context_window` / `max_context_window` may be
 overlaid from that served model's live Copilot facts. Exact official metadata
 wins over a configured alias source for the same slug. We do this because Codex,
-under command auth, merges a fetched catalog **wholesale per
-slug** (`apply_remote_models`:
-`existing_models[i] = model`) with no field-merge, and required `ModelInfo` fields
+under command auth, merges a fetched catalog **wholesale per slug**
+(`apply_remote_models`: `existing_models[i] = model` for a known slug and
+`existing_models.push(model)` for an unknown one) with no field-merge, and
+required `ModelInfo` fields
 have no fallback — an empty `base_instructions` reaches the wire as
 `instructions: ""` and degrades the active model. Re-emitting Codex's own complete
 entry is therefore the only faithful way to add a single field. The feature is

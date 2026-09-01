@@ -312,10 +312,11 @@ divergence ledger and exposed through a config flag. Transport-owned Alterations
 are additionally enumerated by the shim registry.
 
 **Omission** (anticipated):
-The latent third divergence kind — dropping or coalescing upstream content. The shim
-seam permits it (`emit=false`, coalesce-via-state), but no shipped divergence drops
-anything yet, so the kind is named here and gains a ledger section only when it earns
-a first entry.
+The latent third divergence kind — dropping or coalescing Copilot-forwarded
+content. The shim seam permits it (`emit=false`, coalesce-via-state), but no
+shipped divergence drops or coalesces forwarded content. The Codex catalog's
+governed reviewer-field removal is classified as an **Alteration** under
+ADR-0005 rather than an Omission.
 
 ### Caching
 

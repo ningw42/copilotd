@@ -56,8 +56,9 @@ type CodexRenderOutcome struct {
 
 // RenderCodex resolves complete official metadata for Responses-forwardable
 // Copilot models, preserving Copilot's order. Codex entry fields are copied
-// verbatim except for the served alias slug and the explicitly configured
-// reviewer and limits mutations.
+// verbatim except for the served alias slug; auto_review_model_override is
+// always removed and then optionally reinjected from deployment policy; and
+// live limits are optionally overlaid.
 func RenderCodex(codexModels CodexModels, forwardable []Model, cfg CodexRenderConfig) ([]byte, CodexRenderOutcome, error) {
 	var outcome CodexRenderOutcome
 	forwardableByID := make(map[string]struct{}, len(forwardable))
