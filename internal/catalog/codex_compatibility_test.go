@@ -28,20 +28,20 @@ const (
 )
 
 func TestVendoredCodexCatalogRoundTripFidelity(t *testing.T) {
-	vendoredBytes := embeddedCodexModels
-	if got := hashModels(vendoredBytes); got != vendoredCodexSHA256 {
+	wantFallbackBytes := bytes.Clone(embeddedCodexModels)
+	if got := hashModels(embeddedCodexModels); got != vendoredCodexSHA256 {
 		t.Fatalf("%s vendored snapshot hash = %s, want pinned %s", vendoredCodexTag, got, vendoredCodexSHA256)
 	}
-	if got := gitBlobObjectID(vendoredBytes); got != vendoredCodexBlob {
+	if got := gitBlobObjectID(embeddedCodexModels); got != vendoredCodexBlob {
 		t.Fatalf("%s vendored snapshot Git blob = %s, want upstream %s", vendoredCodexTag, got, vendoredCodexBlob)
 	}
-	if _, err := validateCodexModels(vendoredBytes); err != nil {
+	if _, err := validateCodexModels(embeddedCodexModels); err != nil {
 		t.Fatalf("decode %s vendored snapshot at %s: %v", vendoredCodexTag, vendoredCodexCommit, err)
 	}
 	if embeddedCodexModelsVersion != vendoredCodexTag {
 		t.Fatalf("embedded catalog version = %s, want audited %s", embeddedCodexModelsVersion, vendoredCodexTag)
 	}
-	vendoredModels := rawCodexModelsBySlug(t, vendoredBytes)
+	vendoredModels := rawCodexModelsBySlug(t, embeddedCodexModels)
 
 	github := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -68,7 +68,7 @@ func TestVendoredCodexCatalogRoundTripFidelity(t *testing.T) {
 			if got := r.Header.Get("Accept"); got != githubRawMediaType {
 				t.Errorf("models Accept = %q, want %q", got, githubRawMediaType)
 			}
-			_, _ = w.Write(vendoredBytes)
+			_, _ = w.Write(embeddedCodexModels)
 		default:
 			http.NotFound(w, r)
 		}
@@ -83,8 +83,8 @@ func TestVendoredCodexCatalogRoundTripFidelity(t *testing.T) {
 	registry.Prime(context.Background())
 
 	currentBytes, status := modelsValue.Current()
-	if !bytes.Equal(currentBytes, vendoredBytes) {
-		t.Fatalf("cache retained %d bytes, want exact %d-byte %s catalog", len(currentBytes), len(vendoredBytes), vendoredCodexTag)
+	if !bytes.Equal(currentBytes, wantFallbackBytes) {
+		t.Fatalf("cache retained %d bytes, want exact %d-byte %s catalog", len(currentBytes), len(wantFallbackBytes), vendoredCodexTag)
 	}
 	if status.Source != "fallback" || status.Version != vendoredCodexTag || status.LastSuccess != nil {
 		t.Fatalf("cache status = %#v, want unchanged vendored fallback %s", status, vendoredCodexTag)

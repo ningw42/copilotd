@@ -655,7 +655,7 @@ step 1 promotes them into the repository's release-audit test rather than
 treating either as a permanent public contract.
 
 The audit stays on the existing pinned Codex 0.151.0 binary and does not advance
-the embedded floor, `codex-latest` fixture, or accept-gate hashes. It proves two
+the vendored snapshot or its accept-gate hashes. It proves two
 cases: an unknown alias can win the picker and reach `/responses` unchanged; and
 an alias with the same picker metadata as its bundled source does not displace
 that source as the default. Source inspection at 0.152.0 remains corroboration,
