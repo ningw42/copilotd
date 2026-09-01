@@ -348,6 +348,7 @@ func runBoundServe(ctx context.Context, cfg config.ServeConfig, base *slog.Logge
 			Enabled: cfg.CodexCatalogEnabled,
 			Models:  codexModels,
 			RenderConfig: catalog.CodexRenderConfig{
+				ModelAliases:             cfg.CodexCatalogModelAliases,
 				AutoReviewModel:          cfg.CodexAutoReviewModel,
 				AutoReviewModelOverrides: cfg.CodexAutoReviewModelOverrides,
 				OverrideLimits:           cfg.CodexOverrideLimits,

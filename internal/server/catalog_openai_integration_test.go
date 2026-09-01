@@ -25,10 +25,59 @@ func testCodexDescriptor(cfg config.ServeConfig) catalog.CodexDescriptor {
 	return catalog.CodexDescriptor{
 		Enabled: cfg.CodexCatalogEnabled,
 		RenderConfig: catalog.CodexRenderConfig{
+			ModelAliases:             cfg.CodexCatalogModelAliases,
 			AutoReviewModel:          cfg.CodexAutoReviewModel,
 			AutoReviewModelOverrides: cfg.CodexAutoReviewModelOverrides,
 			OverrideLimits:           cfg.CodexOverrideLimits,
 		},
+	}
+}
+
+func TestCodexCatalogAliasOverRealListener(t *testing.T) {
+	const alias = "gpt-example-alias"
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"data":[{"id":"`+alias+`","vendor":"OpenAI","model_picker_enabled":true,"supported_endpoints":["/responses"]}]}`)
+	}))
+	defer upstream.Close()
+
+	cfg := testConfig()
+	cfg.CodexCatalogEnabled = true
+	cfg.CodexCatalogModelAliases = map[string]string{alias: "gpt-5.4"}
+	provider := identity.NewStatic(identity.Credential{BaseURL: upstream.URL, Token: "copilot-token"}, true)
+	forwarder := newTestForwarder(provider, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
+	base := startServer(t, newTestServerFromBase(cfg, discardLogger(t), provider, newTestReadyObservers(), forwarder, newTestCatalogSource(provider), newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.RenderDescriptors{Codex: testCodexDescriptor(cfg)}))
+	req, err := http.NewRequest(http.MethodGet, base+"/openai/v1/models?client_version=0.151.0", nil)
+	if err != nil {
+		t.Fatalf("build catalog request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+testAPIKey)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET catalog: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read catalog: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("catalog status = %d %s, want 200", resp.StatusCode, body)
+	}
+	var envelope struct {
+		Models []struct {
+			Slug             string `json:"slug"`
+			DisplayName      string `json:"display_name"`
+			BaseInstructions string `json:"base_instructions"`
+		} `json:"models"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		t.Fatalf("decode Codex catalog: %v\n%s", err, body)
+	}
+	if len(envelope.Models) != 1 || envelope.Models[0].Slug != alias {
+		t.Fatalf("catalog models = %+v, want sole alias %q", envelope.Models, alias)
+	}
+	if envelope.Models[0].DisplayName != "GPT-5.4" || envelope.Models[0].BaseInstructions == "" {
+		t.Errorf("alias metadata = %+v, want complete gpt-5.4 source metadata", envelope.Models[0])
 	}
 }
 

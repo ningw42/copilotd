@@ -7,10 +7,13 @@ import (
 	"sort"
 )
 
-// CodexRenderConfig contains the reviewer and limits mutations the pure Codex
-// renderer may apply. Whether to emit the Codex catalog at all is a handler
-// concern.
+// CodexRenderConfig contains the aliases, reviewer routing, and limits policy
+// the pure Codex renderer may apply. Whether to emit the Codex catalog at all
+// is a handler concern.
 type CodexRenderConfig struct {
+	// ModelAliases maps a live Copilot model ID to the exact official Codex
+	// entry that supplies its complete metadata.
+	ModelAliases    map[string]string
 	AutoReviewModel string
 	// AutoReviewModelOverrides must contain non-empty reviewer slugs from
 	// validated configuration. A present main-model key is authoritative, so
@@ -32,13 +35,28 @@ type CodexRenderOutcome struct {
 	SkippedReviewers []SkippedReviewer
 }
 
-// RenderCodex intersects Responses-forwardable Copilot models with the current
-// decoded model map, preserving Copilot's order. Codex entry fields are copied
-// verbatim except for the explicitly configured reviewer and limits mutations.
+// RenderCodex resolves complete official metadata for Responses-forwardable
+// Copilot models, preserving Copilot's order. Codex entry fields are copied
+// verbatim except for the served alias slug and the explicitly configured
+// reviewer and limits mutations.
 func RenderCodex(codexModels CodexModels, forwardable []Model, cfg CodexRenderConfig) ([]byte, CodexRenderOutcome, error) {
+	type resolvedEntry struct {
+		fields  map[string]json.RawMessage
+		aliased bool
+	}
+	resolved := make(map[string]resolvedEntry, len(forwardable))
 	emitted := make(map[string]struct{}, len(forwardable))
 	for _, model := range forwardable {
-		if _, ok := codexModels[model.ID]; ok {
+		entry, ok := codexModels[model.ID]
+		aliased := false
+		if !ok {
+			if source, configured := cfg.ModelAliases[model.ID]; configured {
+				entry, ok = codexModels[source]
+				aliased = ok
+			}
+		}
+		if ok {
+			resolved[model.ID] = resolvedEntry{fields: entry, aliased: aliased}
 			emitted[model.ID] = struct{}{}
 		}
 	}
@@ -47,12 +65,19 @@ func RenderCodex(codexModels CodexModels, forwardable []Model, cfg CodexRenderCo
 
 	entries := make([]map[string]json.RawMessage, 0, len(emitted))
 	for _, model := range forwardable {
-		codexEntry, ok := codexModels[model.ID]
+		resolvedEntry, ok := resolved[model.ID]
 		if !ok {
 			continue
 		}
 
-		fields := copyCodexEntry(codexEntry)
+		fields := copyCodexEntry(resolvedEntry.fields)
+		if resolvedEntry.aliased {
+			rawAlias, err := json.Marshal(model.ID)
+			if err != nil {
+				return nil, outcome, fmt.Errorf("encode Codex catalog alias: %w", err)
+			}
+			fields["slug"] = rawAlias
+		}
 		// The Codex entry's value is not authoritative for this deployment. Omit
 		// it unless the configured reviewer is itself safe to advertise.
 		delete(fields, "auto_review_model_override")

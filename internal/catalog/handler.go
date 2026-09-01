@@ -114,7 +114,8 @@ func servesCodexShape(ep endpoint.Catalog, rendering Rendering, r *http.Request)
 	return ep.Surface() == endpoint.OpenAI &&
 		r.URL.Query().Has("client_version") &&
 		rendering.Codex.Enabled &&
-		(rendering.Codex.RenderConfig.AutoReviewModel != "" ||
+		(len(rendering.Codex.RenderConfig.ModelAliases) > 0 ||
+			rendering.Codex.RenderConfig.AutoReviewModel != "" ||
 			len(rendering.Codex.RenderConfig.AutoReviewModelOverrides) > 0 ||
 			rendering.Codex.RenderConfig.OverrideLimits)
 }

@@ -54,6 +54,78 @@ func TestRenderCodexIntersectsInLiveOrderAndEmitsCompleteEntries(t *testing.T) {
 	}
 }
 
+func TestRenderCodexClonesOfficialMetadataForLiveAlias(t *testing.T) {
+	const alias = "gpt-example-alias"
+	models := []Model{{ID: "gpt-5.5"}, {ID: alias}, {ID: "gpt-5.4-mini"}}
+	body, outcome, err := RenderCodex(testCodexModels, models, CodexRenderConfig{
+		ModelAliases: map[string]string{alias: "gpt-5.4"},
+	})
+	if err != nil {
+		t.Fatalf("RenderCodex: %v", err)
+	}
+	if len(outcome.SkippedReviewers) != 0 {
+		t.Errorf("skipped reviewers = %v, want none", outcome.SkippedReviewers)
+	}
+
+	entries := decodeRenderedCodex(t, body)
+	wantSlugs := []string{"gpt-5.5", alias, "gpt-5.4-mini"}
+	if got := renderedSlugs(t, entries); !reflect.DeepEqual(got, wantSlugs) {
+		t.Fatalf("rendered slugs = %q, want live order %q", got, wantSlugs)
+	}
+	aliased := entries[1]
+	for field, want := range testCodexModels["gpt-5.4"] {
+		if field == "slug" || field == "auto_review_model_override" {
+			continue
+		}
+		assertRawFieldEqual(t, alias, field, aliased[field], want)
+	}
+	if _, ok := aliased["auto_review_model_override"]; ok {
+		t.Error("alias retained the metadata source reviewer")
+	}
+}
+
+func TestRenderCodexAliasOrderFollowsLiveModelsAndIsMapOrderIndependent(t *testing.T) {
+	models := []Model{{ID: "gpt-z-alias"}, {ID: "gpt-5.5"}, {ID: "gpt-a-alias"}}
+	firstAliases := map[string]string{
+		"gpt-z-alias": "gpt-5.4",
+		"gpt-a-alias": "gpt-5.4-mini",
+	}
+	secondAliases := map[string]string{
+		"gpt-a-alias": "gpt-5.4-mini",
+		"gpt-z-alias": "gpt-5.4",
+	}
+	firstBody, firstOutcome, err := RenderCodex(testCodexModels, models, CodexRenderConfig{ModelAliases: firstAliases})
+	if err != nil {
+		t.Fatalf("RenderCodex first map: %v", err)
+	}
+	secondBody, secondOutcome, err := RenderCodex(testCodexModels, models, CodexRenderConfig{ModelAliases: secondAliases})
+	if err != nil {
+		t.Fatalf("RenderCodex second map: %v", err)
+	}
+	if !bytes.Equal(firstBody, secondBody) || !reflect.DeepEqual(firstOutcome, secondOutcome) {
+		t.Errorf("map insertion order changed rendering:\nfirst %s %#v\nsecond %s %#v", firstBody, firstOutcome, secondBody, secondOutcome)
+	}
+	want := []string{"gpt-z-alias", "gpt-5.5", "gpt-a-alias"}
+	if got := renderedSlugs(t, decodeRenderedCodex(t, firstBody)); !reflect.DeepEqual(got, want) {
+		t.Errorf("rendered slugs = %q, want live order %q", got, want)
+	}
+}
+
+func TestRenderCodexEmptyAliasMapPreservesExistingOutput(t *testing.T) {
+	models := []Model{{ID: "gpt-5.4-mini"}, {ID: "gpt-5.4"}}
+	baselineBody, baselineOutcome, err := RenderCodex(testCodexModels, models, CodexRenderConfig{})
+	if err != nil {
+		t.Fatalf("RenderCodex baseline: %v", err)
+	}
+	emptyBody, emptyOutcome, err := RenderCodex(testCodexModels, models, CodexRenderConfig{ModelAliases: map[string]string{}})
+	if err != nil {
+		t.Fatalf("RenderCodex empty aliases: %v", err)
+	}
+	if !bytes.Equal(emptyBody, baselineBody) || !reflect.DeepEqual(emptyOutcome, baselineOutcome) {
+		t.Errorf("empty aliases changed rendering:\nbaseline %s %#v\nempty %s %#v", baselineBody, baselineOutcome, emptyBody, emptyOutcome)
+	}
+}
+
 func TestRenderCodexCopiesCurrentFieldsVerbatimAndDoesNotAliasThem(t *testing.T) {
 	models := Filter(capturedModels(t), endpoint.RouteOpenAIResponses)
 	body, _, err := RenderCodex(testCodexModels, models, CodexRenderConfig{

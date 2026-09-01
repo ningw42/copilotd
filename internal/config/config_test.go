@@ -150,6 +150,203 @@ func TestCodexAutoReviewModelOverridesResolvesFlag(t *testing.T) {
 	}
 }
 
+func TestCodexCatalogModelAliasesResolvesFlag(t *testing.T) {
+	got, err := loadServe([]string{
+		"--apikey", testAPIKey,
+		"--codex-catalog-model-aliases", "gpt-example-alias=gpt-example",
+	}, noEnv())
+	if err != nil {
+		t.Fatalf("loadServe() error = %v", err)
+	}
+	want := map[string]string{"gpt-example-alias": "gpt-example"}
+	if !reflect.DeepEqual(got.CodexCatalogModelAliases, want) {
+		t.Errorf("CodexCatalogModelAliases = %v, want %v", got.CodexCatalogModelAliases, want)
+	}
+}
+
+func TestCodexCatalogModelAliasesNormalizesInputs(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want map[string]string
+	}{
+		{name: "default"},
+		{name: "empty segments", args: []string{"--codex-catalog-model-aliases", " , , "}},
+		{
+			name: "pairs remain case-sensitive",
+			args: []string{"--codex-catalog-model-aliases", " Alias = Source=Variant ,, alias = source , "},
+			want: map[string]string{"Alias": "Source=Variant", "alias": "source"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			args := append([]string{"--apikey", testAPIKey}, tc.args...)
+			got, err := loadServe(args, noEnv())
+			if err != nil {
+				t.Fatalf("loadServe() error = %v", err)
+			}
+			if !reflect.DeepEqual(got.CodexCatalogModelAliases, tc.want) {
+				t.Errorf("CodexCatalogModelAliases = %#v, want %#v", got.CodexCatalogModelAliases, tc.want)
+			}
+		})
+	}
+}
+
+func TestCodexCatalogModelAliasesRejectsMalformedPairs(t *testing.T) {
+	tests := map[string]string{
+		"missing equals": "gpt-example-alias-gpt-example",
+		"empty alias":    "=gpt-example",
+		"empty source":   "gpt-example-alias=",
+		"duplicate alias": "gpt-example-alias=gpt-example," +
+			"gpt-example-alias=gpt-other",
+		"self mapping": "gpt-example=gpt-example",
+	}
+	for name, value := range tests {
+		t.Run(name, func(t *testing.T) {
+			_, err := loadServe([]string{
+				"--apikey", testAPIKey,
+				"--codex-catalog-model-aliases", value,
+			}, noEnv())
+			if err == nil {
+				t.Fatalf("loadServe() error = nil, want %q rejected", value)
+			}
+			if !strings.Contains(err.Error(), "codex-catalog-model-aliases") {
+				t.Errorf("error = %q, want key context", err)
+			}
+		})
+	}
+}
+
+func TestCodexCatalogModelAliasesRejectsMalformedLowerPrecedenceLayer(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "copilotd.toml")
+	if err := os.WriteFile(path, []byte(`codex-catalog-model-aliases = "file-malformed"`+"\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	tests := []struct {
+		name       string
+		args       []string
+		env        map[string]string
+		wantSource string
+		wantRaw    string
+	}{
+		{
+			name: "TOML before valid environment",
+			args: []string{"--config", path},
+			env: map[string]string{
+				"COPILOTD_CODEX_CATALOG_MODEL_ALIASES": "env-alias=env-source",
+			},
+			wantSource: "config file",
+			wantRaw:    "file-malformed",
+		},
+		{
+			name: "environment before valid flag",
+			args: []string{"--codex-catalog-model-aliases", "flag-alias=flag-source"},
+			env: map[string]string{
+				"COPILOTD_CODEX_CATALOG_MODEL_ALIASES": "env-malformed",
+			},
+			wantSource: "env",
+			wantRaw:    "env-malformed",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			env := map[string]string{"COPILOTD_APIKEY": testAPIKey}
+			for key, value := range tc.env {
+				env[key] = value
+			}
+			_, err := loadServe(tc.args, envFunc(env))
+			if err == nil {
+				t.Fatal("loadServe() error = nil, want malformed lower-precedence layer rejected")
+			}
+			want := fmt.Sprintf(`invalid codex-catalog-model-aliases %q from %s:`, tc.wantRaw, tc.wantSource)
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error = %q, want source-attributed prefix %q", err, want)
+			}
+		})
+	}
+}
+
+func TestCodexCatalogModelAliasesUsesWholesalePrecedence(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "copilotd.toml")
+	if err := os.WriteFile(path, []byte(`codex-catalog-model-aliases = "file-alias=file-source"`+"\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	tests := []struct {
+		name string
+		args []string
+		env  map[string]string
+		want map[string]string
+	}{
+		{
+			name: "TOML replaces default",
+			args: []string{"--config", path},
+			want: map[string]string{"file-alias": "file-source"},
+		},
+		{
+			name: "environment replaces TOML",
+			args: []string{"--config", path},
+			env: map[string]string{
+				"COPILOTD_CODEX_CATALOG_MODEL_ALIASES": "env-alias=env-source",
+			},
+			want: map[string]string{"env-alias": "env-source"},
+		},
+		{
+			name: "flag replaces environment",
+			args: []string{
+				"--config", path,
+				"--codex-catalog-model-aliases", "flag-alias=flag-source",
+			},
+			env: map[string]string{
+				"COPILOTD_CODEX_CATALOG_MODEL_ALIASES": "env-alias=env-source",
+			},
+			want: map[string]string{"flag-alias": "flag-source"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			env := map[string]string{"COPILOTD_APIKEY": testAPIKey}
+			for key, value := range tc.env {
+				env[key] = value
+			}
+			got, err := loadServe(tc.args, envFunc(env))
+			if err != nil {
+				t.Fatalf("loadServe() error = %v", err)
+			}
+			if !reflect.DeepEqual(got.CodexCatalogModelAliases, tc.want) {
+				t.Errorf("CodexCatalogModelAliases = %#v, want %#v", got.CodexCatalogModelAliases, tc.want)
+			}
+		})
+	}
+}
+
+func TestCodexCatalogModelAliasesIsLoggedNormalizedWhenCatalogDisabled(t *testing.T) {
+	got, err := loadServe([]string{
+		"--apikey", testAPIKey,
+		"--codex-catalog-enabled=false",
+		"--codex-catalog-model-aliases", " z-alias = z-source , a-alias=a-source ",
+	}, noEnv())
+	if err != nil {
+		t.Fatalf("loadServe() error = %v, want staged disabled config accepted", err)
+	}
+	if got.CodexCatalogEnabled {
+		t.Fatal("CodexCatalogEnabled = true, want catalog disabled")
+	}
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	logger.Info("effective config", "config", got)
+	out := buf.String()
+	want := `config.codex-catalog-model-aliases="a-alias=a-source,z-alias=z-source"`
+	if !strings.Contains(out, want) {
+		t.Errorf("log output missing %q\nfull: %s", want, out)
+	}
+	if strings.Contains(out, " z-alias = z-source ") {
+		t.Errorf("log output contains unparsed staging value\nfull: %s", out)
+	}
+}
+
 func TestCodexAutoReviewModelOverridesNormalizesPairs(t *testing.T) {
 	got, err := loadServe([]string{
 		"--apikey", testAPIKey,
@@ -1294,7 +1491,10 @@ func TestConfigLogValueEmitsOnlyNonSecretFields(t *testing.T) {
 		ShimResponsesItemIDStabilizerEnabled: true,
 		GithubOAuthToken:                     "gho-super-secret-oauth-value",
 		CodexCatalogEnabled:                  true,
-		CodexAutoReviewModel:                 "gpt-5.6-luna",
+		CodexCatalogModelAliases: map[string]string{
+			"gpt-example-alias": "gpt-example",
+		},
+		CodexAutoReviewModel: "gpt-5.6-luna",
 		CodexAutoReviewModelOverrides: map[string]string{
 			"gpt-5.6-sol": "gpt-5.4",
 			"gpt-5.4":     "gpt-5.4-mini",
@@ -1339,6 +1539,7 @@ func TestConfigLogValueEmitsOnlyNonSecretFields(t *testing.T) {
 		"config.github-api-version=2025-04-01",
 		"config.impersonation-refresh-interval=24h0m0s",
 		"config.codex-catalog-enabled=true",
+		`config.codex-catalog-model-aliases="gpt-example-alias=gpt-example"`,
 		"config.codex-auto-review-model=gpt-5.6-luna",
 		`config.codex-auto-review-model-overrides="gpt-5.4=gpt-5.4-mini,gpt-5.6-sol=gpt-5.4"`,
 		"config.codex-catalog-override-limits=true",
@@ -1389,6 +1590,7 @@ func TestConfigLogValueEmitsOnlyNonSecretFields(t *testing.T) {
 		"shim-nop-enabled",
 		"shim-responses-item-id-stabilizer-enabled",
 		"codex-catalog-enabled",
+		"codex-catalog-model-aliases",
 		"codex-auto-review-model",
 		"codex-auto-review-model-overrides",
 		"codex-catalog-override-limits",

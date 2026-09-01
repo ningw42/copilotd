@@ -122,12 +122,14 @@ func TestHandlerNegotiatesCodexShapeOnlyWhenEveryGateIsOpen(t *testing.T) {
 		rawQuery      string
 		enabled       bool
 		reviewer      string
+		aliases       map[string]string
 		overrideLimit bool
 		wantCodex     bool
 	}{
 		{name: "client key absent", enabled: true, reviewer: "gpt-5.4"},
 		{name: "catalog disabled", rawQuery: "client_version=0.144.5", reviewer: "gpt-5.4"},
 		{name: "nothing to inject", rawQuery: "client_version=0.144.5", enabled: true},
+		{name: "aliases are enough to inject", rawQuery: "client_version=0.144.5", enabled: true, aliases: map[string]string{"gpt-example-alias": "gpt-5.4"}, wantCodex: true},
 		{name: "empty client value is present with reviewer", rawQuery: "client_version=", enabled: true, reviewer: "gpt-5.4", wantCodex: true},
 		{name: "valueless client key is present with limits", rawQuery: "client_version", enabled: true, overrideLimit: true, wantCodex: true},
 	}
@@ -139,6 +141,7 @@ func TestHandlerNegotiatesCodexShapeOnlyWhenEveryGateIsOpen(t *testing.T) {
 				Codex: CodexDescriptor{
 					Enabled: tc.enabled,
 					RenderConfig: CodexRenderConfig{
+						ModelAliases:    tc.aliases,
 						AutoReviewModel: tc.reviewer,
 						OverrideLimits:  tc.overrideLimit,
 					},
@@ -291,6 +294,79 @@ func TestHandlerRendersCodexFromCurrentCachedBytes(t *testing.T) {
 	if got := renderedSlugs(t, entries); len(got) != 1 || got[0] != "gpt-test" {
 		t.Fatalf("rendered slugs = %q, want current Catalog model", got)
 	}
+}
+
+func TestHandlerRendersAliasFromCurrentAndFallbackCodexModels(t *testing.T) {
+	const alias = "gpt-alias"
+	upstreamBody := []byte(`{"data":[{"id":"` + alias + `","vendor":"OpenAI","model_picker_enabled":true,"supported_endpoints":["/responses"]}]}`)
+
+	tests := []struct {
+		name        string
+		models      *cache.Value[[]byte]
+		source      string
+		displayName string
+	}{
+		{
+			name:        "accepted current bytes",
+			models:      testCodexModelsValue(t, validCodexModelsBytes(t, "gpt-source", "fresh prompt"), nil),
+			source:      "gpt-source",
+			displayName: "Fresh model",
+		},
+		{
+			name:        "embedded fallback after refresh failure",
+			models:      testCodexModelsValue(t, nil, errors.New("refresh failed")),
+			source:      "gpt-5.4",
+			displayName: "GPT-5.4",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			handler := Handler(discardHandlerLogger(), endpoint.OpenAICatalog(), Rendering{
+				Render: RenderOpenAI,
+				Codex: CodexDescriptor{
+					Enabled: true,
+					Models:  tc.models,
+					RenderConfig: CodexRenderConfig{
+						ModelAliases: map[string]string{alias: tc.source},
+					},
+				},
+			}, stubSource{status: http.StatusOK, body: upstreamBody})
+			recorder := httptest.NewRecorder()
+			handler(recorder, httptest.NewRequest(http.MethodGet, "/openai/v1/models?client_version=0.151.0", nil))
+
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200: %s", recorder.Code, recorder.Body.String())
+			}
+			entries := decodeRenderedCodex(t, recorder.Body.Bytes())
+			if len(entries) != 1 || decodeStringField(t, entries[0], "slug") != alias {
+				t.Fatalf("rendered entries = %s, want sole alias", recorder.Body.Bytes())
+			}
+			if got := decodeStringField(t, entries[0], "display_name"); got != tc.displayName {
+				t.Errorf("alias display_name = %q, want source value %q", got, tc.displayName)
+			}
+		})
+	}
+}
+
+func testCodexModelsValue(t *testing.T, current []byte, fetchErr error) *cache.Value[[]byte] {
+	t.Helper()
+	modelsValue := cache.New(discardHandlerLogger(), cache.Cacheable[[]byte]{
+		Fallback:        embeddedCodexModels,
+		FallbackVersion: embeddedCodexModelsVersion,
+		TTL:             time.Hour,
+		Fetch: func(context.Context) ([]byte, string, error) {
+			return current, "rust-v0.152.0", fetchErr
+		},
+		Hash: hashModels,
+		Validate: func(currentBytes []byte) error {
+			_, err := validateCodexModels(currentBytes)
+			return err
+		},
+	})
+	registry := cache.NewRegistry()
+	registry.Register(modelsValue)
+	registry.Prime(context.Background())
+	return modelsValue
 }
 
 func (s stubSource) Buffered(ctx context.Context, call upstream.Call) (int, []byte, context.Context, *upstream.Failure) {
