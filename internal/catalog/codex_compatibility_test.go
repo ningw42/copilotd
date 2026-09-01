@@ -21,8 +21,8 @@ import (
 )
 
 const (
-	vendoredCodexTag    = "rust-v0.151.0"
-	vendoredCodexCommit = "78c290807ce710180111df227df3b7a4fe845452"
+	vendoredCodexTag    = "rust-v0.152.1"
+	vendoredCodexCommit = "5adb68a49933ae446bf11935662c83dba55a0804"
 	vendoredCodexBlob   = "0c4137ad9560e1ac7b9baf1adc95dbc7051e2b6c"
 	vendoredCodexSHA256 = "eb0d7b9a5dcaf103895c5f8a14c16b269df46e039b375a55ba97f6238542d2ed"
 )
@@ -113,7 +113,7 @@ func TestVendoredCodexCatalogRoundTripFidelity(t *testing.T) {
 		},
 	}, stubSource{status: http.StatusOK, body: copilotBytes})
 	recorder := httptest.NewRecorder()
-	handler(recorder, httptest.NewRequest(http.MethodGet, "/openai/v1/models?client_version=0.151.0", nil))
+	handler(recorder, httptest.NewRequest(http.MethodGet, "/openai/v1/models?client_version=0.152.1", nil))
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("handler status = %d, want 200: %s", recorder.Code, recorder.Body.String())

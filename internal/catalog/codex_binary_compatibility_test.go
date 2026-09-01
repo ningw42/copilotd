@@ -32,8 +32,8 @@ func TestLatestCodexBinaryAcceptsUnknownRemoteCatalogModel(t *testing.T) {
 	if observed.modelsMethod != http.MethodGet {
 		t.Errorf("models method = %q, want GET", observed.modelsMethod)
 	}
-	if observed.clientVersion != "0.151.0" {
-		t.Errorf("client_version = %q, want 0.151.0", observed.clientVersion)
+	if observed.clientVersion != "0.152.1" {
+		t.Errorf("client_version = %q, want 0.152.1", observed.clientVersion)
 	}
 	if observed.authorization != "Bearer catalog-audit-token" {
 		t.Errorf("Authorization = %q, want command-auth bearer", observed.authorization)
@@ -308,7 +308,7 @@ func requireLatestCodexBinary(t *testing.T, binary string) {
 	if _, err := io.Copy(hasher, file); err != nil {
 		t.Fatalf("hash Codex binary: %v", err)
 	}
-	const wantSHA256 = "9739cbc928b9c573be83256acd46668f5dd4f119d2d09e05246895ca2aaf0c9a"
+	const wantSHA256 = "b82018241214a4a7c6b97b198585192d1dbc3aab1ddcdc640f04d8dee8c606f9"
 	if got := hex.EncodeToString(hasher.Sum(nil)); got != wantSHA256 {
 		t.Fatalf("Codex binary SHA-256 = %s, want pinned %s", got, wantSHA256)
 	}
@@ -317,8 +317,8 @@ func requireLatestCodexBinary(t *testing.T, binary string) {
 	if err != nil {
 		t.Fatalf("Codex version: %v: %s", err, output)
 	}
-	if got := strings.TrimSpace(string(output)); got != "codex-cli 0.151.0" {
-		t.Fatalf("Codex version = %q, want codex-cli 0.151.0", got)
+	if got := strings.TrimSpace(string(output)); got != "codex-cli 0.152.1" {
+		t.Fatalf("Codex version = %q, want codex-cli 0.152.1", got)
 	}
 }
 
