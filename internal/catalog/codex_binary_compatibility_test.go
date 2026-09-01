@@ -13,16 +13,115 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 )
 
-// TestLatestCodexBinaryRemoteCatalogContract is an opt-in black-box check for
-// release audits. CODEX_CATALOG_AUDIT_BINARY must name the exact pinned Codex
-// executable; ordinary repository tests remain network- and tool-independent.
-func TestLatestCodexBinaryRemoteCatalogContract(t *testing.T) {
+// These tests are opt-in black-box checks for release audits.
+// CODEX_CATALOG_AUDIT_BINARY must name the exact pinned Codex executable;
+// ordinary repository tests remain network- and tool-independent.
+func TestLatestCodexBinaryAcceptsUnknownRemoteCatalogModel(t *testing.T) {
+	observed := observeLatestCodexBinaryCatalog(t, singleRemoteDefaultModel(t))
+
+	if observed.modelsCalls == 0 {
+		t.Fatalf("Codex did not fetch the command-auth model catalog:\n%s", observed.output)
+	}
+	if observed.modelsMethod != http.MethodGet {
+		t.Errorf("models method = %q, want GET", observed.modelsMethod)
+	}
+	if observed.clientVersion != "0.151.0" {
+		t.Errorf("client_version = %q, want 0.151.0", observed.clientVersion)
+	}
+	if observed.authorization != "Bearer catalog-audit-token" {
+		t.Errorf("Authorization = %q, want command-auth bearer", observed.authorization)
+	}
+	if observed.originator == "" || observed.userAgent == "" {
+		t.Errorf("default request headers: originator=%q User-Agent=%q", observed.originator, observed.userAgent)
+	}
+	if observed.responsesCalls == 0 {
+		t.Fatalf("Codex did not make a Responses request after catalog merge:\n%s", observed.output)
+	}
+	if observed.responsesMethod != http.MethodPost {
+		t.Errorf("Responses method = %q, want POST", observed.responsesMethod)
+	}
+	if observed.selectedModel != "gpt-5.4-audit-alias" {
+		t.Errorf("selected model = %q, want unknown remote priority/visibility winner gpt-5.4-audit-alias", observed.selectedModel)
+	}
+}
+
+func TestLatestCodexBinaryReplacesBundledRemoteCatalogModel(t *testing.T) {
+	observed := observeLatestCodexBinaryCatalog(t, replacedBundledDefaultModel(t))
+
+	if observed.modelsCalls == 0 {
+		t.Fatalf("Codex did not fetch the command-auth model catalog:\n%s", observed.output)
+	}
+	if observed.responsesCalls == 0 {
+		t.Fatalf("Codex did not make a Responses request after catalog merge:\n%s", observed.output)
+	}
+	if observed.selectedModel != "gpt-5.4" {
+		t.Errorf("selected model = %q, want remotely replaced bundled model gpt-5.4", observed.selectedModel)
+	}
+}
+
+func TestLatestCodexBinaryKeepsBundledSourceAheadOfMatchingAlias(t *testing.T) {
+	modelsBody := matchingRemoteAliasAndSource(t)
+	observed := observeLatestCodexBinaryCatalog(t, modelsBody)
+
+	if observed.modelsCalls == 0 {
+		t.Fatalf("Codex did not fetch the command-auth model catalog:\n%s", observed.output)
+	}
+	if observed.responsesCalls == 0 {
+		t.Fatalf("Codex did not make a Responses request after catalog merge:\n%s", observed.output)
+	}
+	if observed.selectedModel != "gpt-5.6-sol" {
+		t.Errorf("selected model = %q, want untouched bundled source gpt-5.6-sol ahead of metadata-matching alias", observed.selectedModel)
+	}
+
+	const alias = "gpt-5.6-sol-audit-alias"
+	withoutAlias := observeLatestCodexBinaryCatalogWithModel(t, []byte(`{"models":[]}`), alias)
+	if withoutAlias.responsesCalls == 0 || withoutAlias.selectedModel != alias {
+		t.Fatalf("negative control changed: Codex no longer forwards arbitrary explicit model %q without a catalog entry:\n%s", alias, withoutAlias.output)
+	}
+	if slices.Contains(withoutAlias.listedModels, alias) {
+		t.Fatalf("empty remote catalog unexpectedly listed alias %q", alias)
+	}
+
+	aliasObserved := observeLatestCodexBinaryCatalogWithModel(t, modelsBody, alias)
+	if aliasObserved.responsesCalls == 0 {
+		t.Fatalf("Codex did not make a Responses request with the accepted alias:\n%s", aliasObserved.output)
+	}
+	if aliasObserved.selectedModel != alias {
+		t.Errorf("explicitly selected model = %q, want accepted remote alias %q", aliasObserved.selectedModel, alias)
+	}
+	if !slices.Contains(aliasObserved.listedModels, alias) {
+		t.Errorf("merged model list %q does not contain accepted alias %q", aliasObserved.listedModels, alias)
+	}
+}
+
+type codexCatalogObservation struct {
+	modelsCalls     int
+	responsesCalls  int
+	modelsMethod    string
+	responsesMethod string
+	clientVersion   string
+	authorization   string
+	originator      string
+	userAgent       string
+	selectedModel   string
+	listedModels    []string
+	output          string
+}
+
+func observeLatestCodexBinaryCatalog(t *testing.T, modelsBody []byte) codexCatalogObservation {
+	t.Helper()
+	return observeLatestCodexBinaryCatalogWithModel(t, modelsBody, "")
+}
+
+func observeLatestCodexBinaryCatalogWithModel(t *testing.T, modelsBody []byte, model string) codexCatalogObservation {
+	t.Helper()
 	binary := os.Getenv("CODEX_CATALOG_AUDIT_BINARY")
 	if binary == "" {
 		t.Skip("set CODEX_CATALOG_AUDIT_BINARY to the pinned Codex executable")
@@ -33,20 +132,8 @@ func TestLatestCodexBinaryRemoteCatalogContract(t *testing.T) {
 		t.Skipf("command-auth contract needs printf on PATH: %v", err)
 	}
 
-	modelsBody := singleRemoteDefaultModel(t)
-	type observation struct {
-		modelsCalls     int
-		responsesCalls  int
-		modelsMethod    string
-		responsesMethod string
-		clientVersion   string
-		authorization   string
-		originator      string
-		userAgent       string
-		selectedModel   string
-	}
 	var mu sync.Mutex
-	var got observation
+	var got codexCatalogObservation
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/models":
@@ -98,7 +185,12 @@ args = ["catalog-audit-token"]
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, binary, "exec", "--skip-git-repo-check", "--json", "return one short word")
+	args := []string{"exec", "--skip-git-repo-check", "--json"}
+	if model != "" {
+		args = append(args, "--model", model)
+	}
+	args = append(args, "return one short word")
+	cmd := exec.CommandContext(ctx, binary, args...)
 	cmd.Dir = t.TempDir()
 	cmd.Env = append(os.Environ(), "CODEX_HOME="+codexHome)
 	var output bytes.Buffer
@@ -109,32 +201,99 @@ args = ["catalog-audit-token"]
 		t.Fatalf("Codex audit timed out: %v\n%s", ctx.Err(), output.String())
 	}
 
+	var listedModels []string
+	if model != "" {
+		listedModels = listLatestCodexBinaryModels(t, binary, codexHome)
+	}
 	mu.Lock()
+	got.listedModels = listedModels
+	got.output = output.String()
 	observed := got
 	mu.Unlock()
-	if observed.modelsCalls == 0 {
-		t.Fatalf("Codex did not fetch the command-auth model catalog:\n%s", output.String())
+	return observed
+}
+
+func listLatestCodexBinaryModels(t *testing.T, binary, codexHome string) []string {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, binary, "app-server", "--listen", "stdio://")
+	cmd.Dir = t.TempDir()
+	cmd.Env = append(os.Environ(), "CODEX_HOME="+codexHome)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatalf("open Codex app-server stdin: %v", err)
 	}
-	if observed.modelsMethod != http.MethodGet {
-		t.Errorf("models method = %q, want GET", observed.modelsMethod)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatalf("open Codex app-server stdout: %v", err)
 	}
-	if observed.clientVersion != "0.151.0" {
-		t.Errorf("client_version = %q, want 0.151.0", observed.clientVersion)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start Codex app-server: %v", err)
 	}
-	if observed.authorization != "Bearer catalog-audit-token" {
-		t.Errorf("Authorization = %q, want command-auth bearer", observed.authorization)
+	defer func() {
+		_ = stdin.Close()
+		cancel()
+		_ = cmd.Wait()
+	}()
+
+	encoder := json.NewEncoder(stdin)
+	decoder := json.NewDecoder(stdout)
+	if err := encoder.Encode(map[string]any{
+		"id": 1, "method": "initialize",
+		"params": map[string]any{
+			"clientInfo": map[string]string{"name": "catalog-audit", "version": "1"},
+		},
+	}); err != nil {
+		t.Fatalf("initialize Codex app-server: %v", err)
 	}
-	if observed.originator == "" || observed.userAgent == "" {
-		t.Errorf("default request headers: originator=%q User-Agent=%q", observed.originator, observed.userAgent)
+	readCodexAppServerResult(t, decoder, 1, &stderr)
+	if err := encoder.Encode(map[string]any{"method": "initialized"}); err != nil {
+		t.Fatalf("notify initialized Codex app-server: %v", err)
 	}
-	if observed.responsesCalls == 0 {
-		t.Fatalf("Codex did not make a Responses request after catalog merge:\n%s", output.String())
+	if err := encoder.Encode(map[string]any{
+		"id": 2, "method": "model/list",
+		"params": map[string]any{"includeHidden": true, "limit": 100},
+	}); err != nil {
+		t.Fatalf("list Codex app-server models: %v", err)
 	}
-	if observed.responsesMethod != http.MethodPost {
-		t.Errorf("Responses method = %q, want POST", observed.responsesMethod)
+	result := readCodexAppServerResult(t, decoder, 2, &stderr)
+	var response struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
 	}
-	if observed.selectedModel != "gpt-5.4" {
-		t.Errorf("selected model = %q, want remote priority/visibility winner gpt-5.4", observed.selectedModel)
+	if err := json.Unmarshal(result, &response); err != nil {
+		t.Fatalf("decode Codex app-server model list: %v: %s", err, result)
+	}
+	models := make([]string, len(response.Data))
+	for i, model := range response.Data {
+		models[i] = model.ID
+	}
+	return models
+}
+
+func readCodexAppServerResult(t *testing.T, decoder *json.Decoder, wantID int, stderr *bytes.Buffer) json.RawMessage {
+	t.Helper()
+	for {
+		var message struct {
+			ID     json.RawMessage `json:"id"`
+			Result json.RawMessage `json:"result"`
+			Error  json.RawMessage `json:"error"`
+		}
+		if err := decoder.Decode(&message); err != nil {
+			t.Fatalf("read Codex app-server response %d: %v: %s", wantID, err, stderr.String())
+		}
+		var id int
+		if json.Unmarshal(message.ID, &id) != nil || id != wantID {
+			continue
+		}
+		if len(message.Error) > 0 && !bytes.Equal(message.Error, []byte("null")) {
+			t.Fatalf("Codex app-server response %d error: %s", wantID, message.Error)
+		}
+		return message.Result
 	}
 }
 
@@ -163,7 +322,35 @@ func requireLatestCodexBinary(t *testing.T, binary string) {
 	}
 }
 
+func replacedBundledDefaultModel(t *testing.T) []byte {
+	t.Helper()
+	model := latestCodexModel(t, "gpt-5.4")
+	model["priority"] = json.RawMessage("0")
+	model["visibility"] = json.RawMessage(`"list"`)
+	return marshalRemoteModels(t, model)
+}
+
+func matchingRemoteAliasAndSource(t *testing.T) []byte {
+	t.Helper()
+	source := latestCodexModel(t, "gpt-5.6-sol")
+	alias := make(map[string]json.RawMessage, len(source))
+	for key, value := range source {
+		alias[key] = value
+	}
+	alias["slug"] = json.RawMessage(`"gpt-5.6-sol-audit-alias"`)
+	return marshalRemoteModels(t, alias)
+}
+
 func singleRemoteDefaultModel(t *testing.T) []byte {
+	t.Helper()
+	model := latestCodexModel(t, "gpt-5.4")
+	model["slug"] = json.RawMessage(`"gpt-5.4-audit-alias"`)
+	model["priority"] = json.RawMessage("0")
+	model["visibility"] = json.RawMessage(`"list"`)
+	return marshalRemoteModels(t, model)
+}
+
+func latestCodexModel(t *testing.T, wantSlug string) map[string]json.RawMessage {
 	t.Helper()
 	latestBytes, err := os.ReadFile("testdata/codex-latest/models.json")
 	if err != nil {
@@ -180,19 +367,21 @@ func singleRemoteDefaultModel(t *testing.T) []byte {
 		if err := json.Unmarshal(model["slug"], &slug); err != nil {
 			t.Fatalf("decode fixture slug: %v", err)
 		}
-		if slug != "gpt-5.4" {
-			continue
+		if slug == wantSlug {
+			return model
 		}
-		model["priority"] = json.RawMessage("0")
-		model["visibility"] = json.RawMessage(`"list"`)
-		body, err := json.Marshal(struct {
-			Models []map[string]json.RawMessage `json:"models"`
-		}{Models: []map[string]json.RawMessage{model}})
-		if err != nil {
-			t.Fatalf("encode remote model fixture: %v", err)
-		}
-		return body
 	}
-	t.Fatal("latest Codex fixture has no gpt-5.4 entry")
+	t.Fatalf("latest Codex fixture has no %s entry", wantSlug)
 	return nil
+}
+
+func marshalRemoteModels(t *testing.T, models ...map[string]json.RawMessage) []byte {
+	t.Helper()
+	body, err := json.Marshal(struct {
+		Models []map[string]json.RawMessage `json:"models"`
+	}{Models: models})
+	if err != nil {
+		t.Fatalf("encode remote model fixture: %v", err)
+	}
+	return body
 }

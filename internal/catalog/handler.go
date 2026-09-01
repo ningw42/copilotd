@@ -84,6 +84,12 @@ func Handler(logger *slog.Logger, ep endpoint.Catalog, rendering Rendering, sour
 				representation, outcome, err = RenderCodex(codexModels, filtered, rendering.Codex.RenderConfig)
 			}
 			if err == nil {
+				for _, unapplied := range outcome.UnappliedAliases {
+					logger.WarnContext(responseCtx, "Codex catalog alias mapping was not applied",
+						slog.String(logging.ModelKey, unapplied.Alias),
+						slog.String(logging.MetadataSourceKey, unapplied.MetadataSource),
+						slog.String(logging.SkipReasonKey, string(unapplied.Reason)))
+				}
 				for _, skipped := range outcome.SkippedReviewers {
 					logger.WarnContext(responseCtx, "Codex catalog reviewer was skipped",
 						slog.String(logging.ModelKey, skipped.Model),
@@ -114,7 +120,5 @@ func servesCodexShape(ep endpoint.Catalog, rendering Rendering, r *http.Request)
 	return ep.Surface() == endpoint.OpenAI &&
 		r.URL.Query().Has("client_version") &&
 		rendering.Codex.Enabled &&
-		(rendering.Codex.RenderConfig.AutoReviewModel != "" ||
-			len(rendering.Codex.RenderConfig.AutoReviewModelOverrides) > 0 ||
-			rendering.Codex.RenderConfig.OverrideLimits)
+		rendering.Codex.RenderConfig.mutates()
 }

@@ -7,16 +7,26 @@ import (
 	"sort"
 )
 
-// CodexRenderConfig contains the reviewer and limits mutations the pure Codex
-// renderer may apply. Whether to emit the Codex catalog at all is a handler
-// concern.
+// CodexRenderConfig contains the aliases, reviewer routing, and limits policy
+// the pure Codex renderer may apply. Whether to emit the Codex catalog at all
+// is a handler concern.
 type CodexRenderConfig struct {
+	// ModelAliases maps a live Copilot model ID to the exact official Codex
+	// entry that supplies its complete metadata.
+	ModelAliases    map[string]string
 	AutoReviewModel string
 	// AutoReviewModelOverrides must contain non-empty reviewer slugs from
 	// validated configuration. A present main-model key is authoritative, so
 	// RenderCodex does not fall back to AutoReviewModel for that model.
 	AutoReviewModelOverrides map[string]string
 	OverrideLimits           bool
+}
+
+func (c CodexRenderConfig) mutates() bool {
+	return len(c.ModelAliases) > 0 ||
+		c.AutoReviewModel != "" ||
+		len(c.AutoReviewModelOverrides) > 0 ||
+		c.OverrideLimits
 }
 
 // SkippedReviewer identifies one emitted main model whose resolved reviewer
@@ -26,33 +36,105 @@ type SkippedReviewer struct {
 	Reviewer string
 }
 
-// CodexRenderOutcome reports configured reviewers that could not safely be
-// injected. Callers can turn each pure outcome event into one warning.
+// CodexAliasSkipReason identifies why a configured Codex catalog alias mapping
+// was not applied.
+type CodexAliasSkipReason string
+
+const (
+	CodexAliasNotForwardable        CodexAliasSkipReason = "alias_not_forwardable"
+	CodexAliasShadowedByOfficial    CodexAliasSkipReason = "shadowed_by_official"
+	CodexAliasMetadataSourceMissing CodexAliasSkipReason = "metadata_source_missing"
+)
+
+// UnappliedCodexAlias identifies one configured Codex catalog alias mapping
+// that had no effect on alias resolution.
+type UnappliedCodexAlias struct {
+	Alias          string
+	MetadataSource string
+	Reason         CodexAliasSkipReason
+}
+
+// CodexRenderOutcome reports configured mappings and reviewers that could not
+// safely be applied. Callers can turn each pure outcome event into one warning.
 type CodexRenderOutcome struct {
+	UnappliedAliases []UnappliedCodexAlias
 	SkippedReviewers []SkippedReviewer
 }
 
-// RenderCodex intersects Responses-forwardable Copilot models with the current
-// decoded model map, preserving Copilot's order. Codex entry fields are copied
-// verbatim except for the explicitly configured reviewer and limits mutations.
+func codexAliasSkipReason(alias, source string, forwardableByID map[string]struct{}, codexModels CodexModels) (CodexAliasSkipReason, bool) {
+	if _, ok := forwardableByID[alias]; !ok {
+		return CodexAliasNotForwardable, true
+	}
+	if _, ok := codexModels[alias]; ok {
+		return CodexAliasShadowedByOfficial, true
+	}
+	if _, ok := codexModels[source]; !ok {
+		return CodexAliasMetadataSourceMissing, true
+	}
+	return "", false
+}
+
+// RenderCodex resolves complete official metadata for Responses-forwardable
+// Copilot models, preserving Copilot's order. Codex entry fields are copied
+// verbatim except for the served alias slug; auto_review_model_override is
+// always removed and then optionally reinjected from deployment policy; and
+// live limits are optionally overlaid.
 func RenderCodex(codexModels CodexModels, forwardable []Model, cfg CodexRenderConfig) ([]byte, CodexRenderOutcome, error) {
-	emitted := make(map[string]struct{}, len(forwardable))
+	var outcome CodexRenderOutcome
+	forwardableByID := make(map[string]struct{}, len(forwardable))
 	for _, model := range forwardable {
-		if _, ok := codexModels[model.ID]; ok {
-			emitted[model.ID] = struct{}{}
+		forwardableByID[model.ID] = struct{}{}
+	}
+	aliases := make([]string, 0, len(cfg.ModelAliases))
+	for alias := range cfg.ModelAliases {
+		aliases = append(aliases, alias)
+	}
+	// Outcomes are alias-sorted by construction because each configured mapping
+	// yields at most one event during this walk.
+	sort.Strings(aliases)
+	for _, alias := range aliases {
+		source := cfg.ModelAliases[alias]
+		if reason, unapplied := codexAliasSkipReason(alias, source, forwardableByID, codexModels); unapplied {
+			outcome.UnappliedAliases = append(outcome.UnappliedAliases, UnappliedCodexAlias{
+				Alias: alias, MetadataSource: source, Reason: reason,
+			})
 		}
 	}
 
-	var outcome CodexRenderOutcome
-
-	entries := make([]map[string]json.RawMessage, 0, len(emitted))
+	type resolvedEntry struct {
+		fields  map[string]json.RawMessage
+		aliased bool
+	}
+	resolved := make(map[string]resolvedEntry, len(forwardable))
 	for _, model := range forwardable {
-		codexEntry, ok := codexModels[model.ID]
+		entry, ok := codexModels[model.ID]
+		aliased := false
+		if !ok {
+			if source, configured := cfg.ModelAliases[model.ID]; configured {
+				entry, ok = codexModels[source]
+				aliased = ok
+			}
+		}
+		if ok {
+			resolved[model.ID] = resolvedEntry{fields: entry, aliased: aliased}
+		}
+	}
+
+	entries := make([]map[string]json.RawMessage, 0, len(resolved))
+	for _, model := range forwardable {
+		entry, ok := resolved[model.ID]
 		if !ok {
 			continue
 		}
 
-		fields := copyCodexEntry(codexEntry)
+		fields := copyCodexEntry(entry.fields)
+		if entry.aliased {
+			rawAlias, err := json.Marshal(model.ID)
+			if err != nil {
+				return nil, outcome, fmt.Errorf("encode Codex catalog alias: %w", err)
+			}
+			fields["slug"] = rawAlias
+		}
 		// The Codex entry's value is not authoritative for this deployment. Omit
 		// it unless the configured reviewer is itself safe to advertise.
 		delete(fields, "auto_review_model_override")
@@ -60,7 +142,7 @@ func RenderCodex(codexModels CodexModels, forwardable []Model, cfg CodexRenderCo
 		if !overridden {
 			reviewer = cfg.AutoReviewModel
 		}
-		_, injectReviewer := emitted[reviewer]
+		_, injectReviewer := resolved[reviewer]
 		if reviewer != "" && injectReviewer {
 			rawReviewer, err := json.Marshal(reviewer)
 			if err != nil {

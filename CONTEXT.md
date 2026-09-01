@@ -195,11 +195,25 @@ _Avoid_: "server" as a general term for the upstream; "frame" for a message.
 The client-shaped model list served on the OpenAI Surface's `/models` when a
 request carries Codex's `?client_version=` and the feature is enabled — Codex's own
 `ModelInfo` entries decoded from the Codex `models.json` cached value's current
-bytes and re-emitted field-for-field with a reviewer override injected. The
-vendored snapshot is the embedded floor and accept contract; a newer accepted
-release may supply the current bytes. Carries *Codex's* schema and values, not
-Copilot's. Contrast the provider-shaped **Catalog**.
+bytes and re-emitted field-for-field with only the governed alias-slug,
+reviewer, and live-limit mutations applied. The vendored snapshot is the
+embedded floor and accept contract; a newer accepted release may supply the
+current bytes. Carries *Codex's* schema and values, not Copilot's. Contrast the
+provider-shaped **Catalog**.
 _Avoid_: model list (unqualified).
+
+**Codex catalog alias**:
+A real, live Copilot Responses model ID that is absent from the accepted
+official Codex catalog and is emitted with a complete cloned official
+`ModelInfo`. It is the slug Codex selects and sends unchanged to inference;
+it is not an inference name rewrite.
+_Avoid_: inference alias, model rewrite.
+
+**Metadata source**:
+The exact slug of an entry in the current accepted official Codex catalog whose
+complete `ModelInfo` supplies a Codex catalog alias's behavioral metadata. It is
+not an inference target and need not itself be live Copilot-forwardable.
+_Avoid_: target model, alias destination.
 
 **Reviewer model**:
 The real, forwardable model copilotd routes Codex's guardian auto-review to via
@@ -209,9 +223,9 @@ auth to `codex-auto-review`; the explicit override keeps routing controllable
 across client versions and Copilot lineups. Chosen per **Main model** — a
 per-main-model override map over a global default — so different main models can
 route to different reviewers.
-A configured reviewer is injected only when it is emitted from the intersection
-of Copilot-forwardable models and the current decoded model map, ensuring Codex
-can resolve the reviewer's complete `ModelInfo`.
+A configured reviewer is injected only when its served slug is emitted from the
+resolved exact-and-aliased membership, ensuring Codex can resolve the reviewer's
+complete `ModelInfo`.
 _Avoid_: auto-reviewer, guardian model.
 
 **Main model**:
@@ -298,10 +312,11 @@ divergence ledger and exposed through a config flag. Transport-owned Alterations
 are additionally enumerated by the shim registry.
 
 **Omission** (anticipated):
-The latent third divergence kind — dropping or coalescing upstream content. The shim
-seam permits it (`emit=false`, coalesce-via-state), but no shipped divergence drops
-anything yet, so the kind is named here and gains a ledger section only when it earns
-a first entry.
+The latent third divergence kind — dropping or coalescing Copilot-forwarded
+content. The shim seam permits it (`emit=false`, coalesce-via-state), but no
+shipped divergence drops or coalesces forwarded content. The Codex catalog's
+governed reviewer-field removal is classified as an **Alteration** under
+ADR-0005 rather than an Omission.
 
 ### Caching
 

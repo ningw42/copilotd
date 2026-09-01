@@ -83,6 +83,8 @@ var expectedLogKeys = map[string]string{
 	"LoginKey":              "login",
 	"PathKey":               "path",
 	"ModelKey":              "model",
+	"MetadataSourceKey":     "metadata_source",
+	"SkipReasonKey":         "skip_reason",
 	"ReviewerKey":           "reviewer",
 	"BuildKey":              "build",
 	"ConfigKey":             "config",

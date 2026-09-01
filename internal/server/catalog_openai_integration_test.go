@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -19,16 +20,272 @@ import (
 	"github.com/ningw42/copilotd/internal/config"
 	"github.com/ningw42/copilotd/internal/forward"
 	"github.com/ningw42/copilotd/internal/identity"
+	"github.com/ningw42/copilotd/internal/logging"
 )
 
 func testCodexDescriptor(cfg config.ServeConfig) catalog.CodexDescriptor {
 	return catalog.CodexDescriptor{
 		Enabled: cfg.CodexCatalogEnabled,
 		RenderConfig: catalog.CodexRenderConfig{
+			ModelAliases:             cfg.CodexCatalogModelAliases,
 			AutoReviewModel:          cfg.CodexAutoReviewModel,
 			AutoReviewModelOverrides: cfg.CodexAutoReviewModelOverrides,
 			OverrideLimits:           cfg.CodexOverrideLimits,
 		},
+	}
+}
+
+func TestCodexCatalogAliasOverRealListener(t *testing.T) {
+	const alias = "gpt-example-alias"
+	inferenceModels := make(chan string, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/models":
+			_, _ = io.WriteString(w, `{"data":[{"id":"`+alias+`","vendor":"OpenAI","model_picker_enabled":true,"supported_endpoints":["/responses"]}]}`)
+		case "/responses":
+			var request struct {
+				Model string `json:"model"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Errorf("decode inference request: %v", err)
+			}
+			inferenceModels <- request.Model
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"id":"resp_alias","object":"response"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer upstream.Close()
+
+	cfg := testConfig()
+	cfg.CodexCatalogEnabled = true
+	cfg.CodexCatalogModelAliases = map[string]string{alias: "gpt-5.4"}
+	cfg.CodexAutoReviewModelOverrides = map[string]string{alias: alias}
+	provider := identity.NewStatic(identity.Credential{BaseURL: upstream.URL, Token: "copilot-token"}, true)
+	forwarder := newTestForwarder(provider, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
+	base := startServer(t, newTestServerFromBase(cfg, discardLogger(t), provider, newTestReadyObservers(), forwarder, newTestCatalogSource(provider), newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.RenderDescriptors{Codex: testCodexDescriptor(cfg)}))
+	req, err := http.NewRequest(http.MethodGet, base+"/openai/v1/models?client_version=0.151.0", nil)
+	if err != nil {
+		t.Fatalf("build catalog request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+testAPIKey)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET catalog: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read catalog: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("catalog status = %d %s, want 200", resp.StatusCode, body)
+	}
+	var envelope struct {
+		Models []struct {
+			Slug             string `json:"slug"`
+			DisplayName      string `json:"display_name"`
+			BaseInstructions string `json:"base_instructions"`
+			Reviewer         string `json:"auto_review_model_override"`
+		} `json:"models"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		t.Fatalf("decode Codex catalog: %v\n%s", err, body)
+	}
+	if len(envelope.Models) != 1 || envelope.Models[0].Slug != alias {
+		t.Fatalf("catalog models = %+v, want sole alias %q", envelope.Models, alias)
+	}
+	if envelope.Models[0].DisplayName != "GPT-5.4" || envelope.Models[0].BaseInstructions == "" {
+		t.Errorf("alias metadata = %+v, want complete gpt-5.4 source metadata", envelope.Models[0])
+	}
+	if envelope.Models[0].Reviewer != alias {
+		t.Errorf("alias reviewer = %q, want self-review %q over real listener", envelope.Models[0].Reviewer, alias)
+	}
+
+	headRequest, err := http.NewRequest(http.MethodHead, base+"/openai/v1/models?client_version=0.151.0", nil)
+	if err != nil {
+		t.Fatalf("build HEAD request: %v", err)
+	}
+	headRequest.Header.Set("Authorization", "Bearer "+testAPIKey)
+	headResponse, err := http.DefaultClient.Do(headRequest)
+	if err != nil {
+		t.Fatalf("HEAD catalog: %v", err)
+	}
+	headBody, readErr := io.ReadAll(headResponse.Body)
+	_ = headResponse.Body.Close()
+	if readErr != nil {
+		t.Fatalf("read HEAD catalog: %v", readErr)
+	}
+	if headResponse.StatusCode != http.StatusOK || len(headBody) != 0 || headResponse.Header.Get("Content-Length") != strconv.Itoa(len(body)) {
+		t.Errorf("HEAD = status %d length %q body %q, want alias-inclusive GET length %d and no body", headResponse.StatusCode, headResponse.Header.Get("Content-Length"), headBody, len(body))
+	}
+
+	inferenceRequest, err := http.NewRequest(http.MethodPost, base+"/openai/v1/responses", strings.NewReader(`{"model":"`+alias+`","input":"hello"}`))
+	if err != nil {
+		t.Fatalf("build inference request: %v", err)
+	}
+	inferenceRequest.Header.Set("Authorization", "Bearer "+testAPIKey)
+	inferenceRequest.Header.Set("Content-Type", "application/json")
+	inferenceResponse, err := http.DefaultClient.Do(inferenceRequest)
+	if err != nil {
+		t.Fatalf("POST inference: %v", err)
+	}
+	defer func() { _ = inferenceResponse.Body.Close() }()
+	if inferenceResponse.StatusCode != http.StatusOK {
+		inferenceBody, _ := io.ReadAll(inferenceResponse.Body)
+		t.Fatalf("inference status = %d, want 200: %s", inferenceResponse.StatusCode, inferenceBody)
+	}
+	if inferenceModel := <-inferenceModels; inferenceModel != alias {
+		t.Errorf("upstream inference model = %q, want served alias %q unchanged", inferenceModel, alias)
+	}
+}
+
+func TestCodexCatalogAliasConfigIsScopedToNegotiatedOpenAICatalog(t *testing.T) {
+	const alias = "gpt-scoped-alias"
+	upstreamBody := []byte(`{"data":[{"id":"` + alias + `","vendor":"OpenAI","model_picker_enabled":true,"supported_endpoints":["/responses"]}]}`)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(upstreamBody)
+	}))
+	defer upstream.Close()
+
+	provider := identity.NewStatic(identity.Credential{BaseURL: upstream.URL, Token: "copilot-token"}, true)
+	newStack := func(enabled bool) string {
+		t.Helper()
+		cfg := testConfig()
+		cfg.CodexCatalogEnabled = enabled
+		cfg.CodexCatalogModelAliases = map[string]string{alias: "gpt-5.4"}
+		forwarder := newTestForwarder(provider, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
+		return startServer(t, newTestServerFromBase(cfg, discardLogger(t), provider, newTestReadyObservers(), forwarder, newTestCatalogSource(provider), newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.RenderDescriptors{Codex: testCodexDescriptor(cfg)}))
+	}
+	request := func(base, target string) []byte {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodGet, base+target, nil)
+		if err != nil {
+			t.Fatalf("build request: %v", err)
+		}
+		req.Header.Set("Authorization", "Bearer "+testAPIKey)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("GET %s: %v", target, err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatalf("read %s: %v", target, err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("GET %s = %d, want 200: %s", target, resp.StatusCode, body)
+		}
+		return body
+	}
+
+	enabledBase := newStack(true)
+	if body := request(enabledBase, "/openai/v1/models"); !strings.HasPrefix(string(body), `{"object":"list","data":[`) {
+		t.Errorf("OpenAI request without client_version changed shape: %s", body)
+	}
+	if body := request(enabledBase, "/anthropic/v1/models?client_version=0.151.0"); !strings.HasPrefix(string(body), `{"data":[`) || strings.Contains(string(body), `"models"`) {
+		t.Errorf("Anthropic catalog acquired Codex shape: %s", body)
+	}
+	if body := request(enabledBase, "/models"); !bytes.Equal(body, upstreamBody) {
+		t.Errorf("raw /models changed:\n got %s\nwant %s", body, upstreamBody)
+	}
+
+	disabledBase := newStack(false)
+	if body := request(disabledBase, "/openai/v1/models?client_version=0.151.0"); !strings.HasPrefix(string(body), `{"object":"list","data":[`) {
+		t.Errorf("disabled Codex catalog changed OpenAI shape: %s", body)
+	}
+}
+
+func TestCodexCatalogAliasWarningsOverRealListener(t *testing.T) {
+	const (
+		notForwarded  = "gpt-5.4-mini"
+		missingSource = "gpt-missing-source"
+		unconfigured  = "gpt-unconfigured-copilot-only"
+		shadowed      = "gpt-5.4"
+		querySecret   = "alias-query-secret"
+		bodySecret    = "alias-model-body-secret"
+		tokenSecret   = "alias-copilot-token-secret"
+	)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"data":[`+
+			`{"id":"`+shadowed+`","vendor":"OpenAI","secret":"`+bodySecret+`","model_picker_enabled":true,"supported_endpoints":["/responses"]},`+
+			`{"id":"`+missingSource+`","vendor":"OpenAI","model_picker_enabled":true,"supported_endpoints":["/responses"]},`+
+			`{"id":"`+unconfigured+`","vendor":"OpenAI","model_picker_enabled":true,"supported_endpoints":["/responses"]}`+
+			`]}`)
+	}))
+	defer upstream.Close()
+
+	logs := &synchronizedLogBuffer{}
+	logger, err := logging.NewWithWriter(logs, config.ServeConfig{LogLevel: "info", LogFormat: "text"})
+	if err != nil {
+		t.Fatalf("build logger: %v", err)
+	}
+	cfg := testConfig()
+	cfg.CodexCatalogEnabled = true
+	cfg.CodexCatalogModelAliases = map[string]string{
+		notForwarded:  "gpt-5.6-sol",
+		missingSource: "gpt-no-such-source",
+		shadowed:      "gpt-5.5",
+	}
+	provider := identity.NewStatic(identity.Credential{BaseURL: upstream.URL, Token: tokenSecret}, true)
+	forwarder := newTestForwarder(provider, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
+	base := startServer(t, newTestServerFromBase(cfg, logger, provider, newTestReadyObservers(), forwarder, newTestCatalogSourceWith(provider, forward.NewClient(time.Second), time.Second, 1<<20, logger), newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.RenderDescriptors{Codex: testCodexDescriptor(cfg)}))
+
+	for requestNumber := 0; requestNumber < 2; requestNumber++ {
+		req, err := http.NewRequest(http.MethodGet, base+"/openai/v1/models?client_version="+querySecret, nil)
+		if err != nil {
+			t.Fatalf("build request: %v", err)
+		}
+		req.Header.Set("Authorization", "Bearer "+testAPIKey)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("GET catalog: %v", err)
+		}
+		body, readErr := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if readErr != nil {
+			t.Fatalf("read catalog: %v", readErr)
+		}
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("request %d status = %d, want 200: %s", requestNumber+1, resp.StatusCode, body)
+		}
+		var envelope struct {
+			Models []struct {
+				Slug string `json:"slug"`
+			} `json:"models"`
+		}
+		if err := json.Unmarshal(body, &envelope); err != nil || len(envelope.Models) != 1 || envelope.Models[0].Slug != shadowed {
+			t.Errorf("request %d body = %s, want sole shadowed official entry: %v", requestNumber+1, body, err)
+		}
+	}
+
+	output := logs.String()
+	warningLines := serverLogLinesContaining(output, `msg="Codex catalog alias mapping was not applied"`)
+	if len(warningLines) != 6 {
+		t.Fatalf("alias warning count = %d, want three per request:\n%s", len(warningLines), output)
+	}
+	for _, line := range warningLines {
+		if !strings.Contains(line, "level=WARN") || !strings.Contains(line, "component=internal/catalog") {
+			t.Errorf("alias warning has wrong level or Component: %s", line)
+		}
+	}
+	for _, want := range []string{
+		"model=" + notForwarded, "metadata_source=gpt-5.6-sol", "skip_reason=alias_not_forwardable",
+		"model=" + missingSource, "metadata_source=gpt-no-such-source", "skip_reason=metadata_source_missing",
+		"model=" + shadowed, "metadata_source=gpt-5.5", "skip_reason=shadowed_by_official",
+	} {
+		if !strings.Contains(output, want) {
+			t.Errorf("alias warnings missing %q:\n%s", want, output)
+		}
+	}
+	if strings.Contains(output, "model="+unconfigured) {
+		t.Errorf("unconfigured Copilot-only model produced a warning:\n%s", output)
+	}
+	for _, secret := range []string{querySecret, bodySecret, tokenSecret} {
+		if strings.Contains(output, secret) {
+			t.Errorf("catalog logs leaked %q:\n%s", secret, output)
+		}
 	}
 }
 

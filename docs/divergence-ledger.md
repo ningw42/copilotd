@@ -25,9 +25,15 @@ single place the divergence is defined, and this row is a pointer to it.
 |---|---|---|---|
 | Responses item-id stabilizer | [ADR-0011](adr/0011-responses-item-id-stabilization-policy.md) + [design](design/2026-07-23-responses-item-id-stabilization-design.md); shim `responses-item-id-stabilizer` | Rewrites Copilot's churning per-event item `id` to one genuine upstream id per `output_index`, on both OpenAI `/responses` transports (SSE + WebSocket), so `id`-keyed clients stop corrupting. No id is minted — every value on the wire retains an upstream basis. | `--shim-responses-item-id-stabilizer-enabled` / `ShimResponsesItemIDStabilizerEnabled` — **off by default** |
 | Anthropic catalog model-ID normalization | [ADR-0004](adr/0004-provider-shaped-catalogs-report-copilot-values.md) + `internal/catalog` | Rewrites dots to hyphens only for `vendor:"Anthropic"` / `claude-` IDs on `/anthropic/v1/models`, including `first_id` and `last_id`. Other IDs and inference forwarding remain verbatim. | `--anthropic-catalog-model-id-normalization-enabled` / `AnthropicCatalogModelIDNormalizationEnabled` — **off by default** |
+| Codex catalog reviewer override | [ADR-0005](adr/0005-codex-catalog-reemits-pinned-modelinfo.md) | Whenever the Codex shape is served, unconditionally removes the accepted official entry's `auto_review_model_override`, then optionally injects deployment reviewer routing selected by the served Main-model slug. | Removal occurs with `--codex-catalog-enabled` plus any Codex-shape mutation trigger; `--codex-auto-review-model` / `--codex-auto-review-model-overrides` gate reinjection. All are **off by default**. |
+| Codex catalog live-limit overlay | [ADR-0005](adr/0005-codex-catalog-reemits-pinned-modelinfo.md) | Replaces accepted official `context_window` and `max_context_window` values, when available, with the served model's live Copilot limits. | `--codex-catalog-enabled` plus `--codex-catalog-override-limits` — **off by default** |
+| Explicit Codex catalog alias | [ADR-0005](adr/0005-codex-catalog-reemits-pinned-modelinfo.md) + [design](design/2026-09-01-codex-catalog-model-aliases-design.md) | Clones one complete accepted official Codex entry and replaces its `slug` with a configured real, live Copilot Responses model ID; inference forwards that alias unchanged. | `--codex-catalog-enabled` plus `--codex-catalog-model-aliases` — **off by default** |
 
-## Omission — dropping or coalescing upstream content
+## Omission — dropping or coalescing Copilot-forwarded content
 
-None yet. The shim seam permits it (`emit=false`, coalesce-via-state), but no shipped
-divergence drops or coalesces content, so this kind has no entries. This section gains
-rows only when an Omission divergence first ships.
+None for Copilot-forwarded content. The shim seam permits it (`emit=false`,
+coalesce-via-state), but no shipped divergence drops or coalesces forwarded
+content. The Codex catalog's governed removal of an accepted official reviewer
+field is classified and accounted for above as an Alteration under ADR-0005.
+This section gains rows when an Omission of Copilot-forwarded content first
+ships.

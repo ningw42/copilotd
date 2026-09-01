@@ -36,6 +36,7 @@ form is accepted as input, so `--stream-idle-timeout 5m` and
 | [`--shim-nop-enabled=<BOOL>`](#--shim-nop-enabled) | `COPILOTD_SHIM_NOP_ENABLED` | `shim-nop-enabled` | `false` |
 | [`--anthropic-catalog-model-id-normalization-enabled=<BOOL>`](#--anthropic-catalog-model-id-normalization-enabled) | `COPILOTD_ANTHROPIC_CATALOG_MODEL_ID_NORMALIZATION_ENABLED` | `anthropic-catalog-model-id-normalization-enabled` | `false` |
 | [`--codex-catalog-enabled=<BOOL>`](#--codex-catalog-enabled) | `COPILOTD_CODEX_CATALOG_ENABLED` | `codex-catalog-enabled` | `false` |
+| [`--codex-catalog-model-aliases <MAP>`](#--codex-catalog-model-aliases) | `COPILOTD_CODEX_CATALOG_MODEL_ALIASES` | `codex-catalog-model-aliases` | Empty |
 | [`--codex-auto-review-model <SLUG>`](#--codex-auto-review-model) | `COPILOTD_CODEX_AUTO_REVIEW_MODEL` | `codex-auto-review-model` | Empty |
 | [`--codex-auto-review-model-overrides <MAP>`](#--codex-auto-review-model-overrides) | `COPILOTD_CODEX_AUTO_REVIEW_MODEL_OVERRIDES` | `codex-auto-review-model-overrides` | Empty |
 | [`--codex-catalog-override-limits=<BOOL>`](#--codex-catalog-override-limits) | `COPILOTD_CODEX_CATALOG_OVERRIDE_LIMITS` | `codex-catalog-override-limits` | `false` |
@@ -163,14 +164,84 @@ byte-for-byte verbatim.
 
 ### `--codex-catalog-enabled`
 
-Allows a Codex-shaped model catalog when the request has `client_version` and an
-auto-review model or live-limit override is configured.
+Allows a Codex-shaped model catalog when the request has `client_version` and a
+catalog alias, global auto-review model, per-main-model reviewer override, or
+live-limit override is configured.
+
+### `--codex-catalog-model-aliases`
+
+Sets explicit Codex catalog aliases as a comma-separated string of
+`LIVE_COPILOT_MODEL_ID=OFFICIAL_CODEX_METADATA_SOURCE` pairs. The default is an
+empty map. For example:
+
+```sh
+copilotd serve \
+  --codex-catalog-enabled \
+  --codex-catalog-model-aliases 'gpt-example-alias=gpt-example' \
+  --codex-auto-review-model-overrides \
+    'gpt-example-alias=gpt-example-alias'
+```
+
+The left side is a real Copilot model ID that Codex selects and sends unchanged
+to `/responses`; this setting never rewrites an inference request. The right
+side is used only as a metadata source. It must name a complete entry in the
+current accepted official Codex catalog, but it need not be live in Copilot.
+The example's per-main-model override also demonstrates valid self-review by
+the served alias.
+
+The same map can be supplied through
+`COPILOTD_CODEX_CATALOG_MODEL_ALIASES` or the flat TOML string key:
+
+```toml
+codex-catalog-model-aliases = "gpt-example-alias=gpt-example"
+```
+
+Matching is exact and case-sensitive. Surrounding whitespace and empty comma
+segments are ignored, and each non-empty segment splits on its first `=`. A
+missing `=`, empty alias, empty source, duplicate alias, or alias-to-itself map
+fails configuration resolution before the server binds. Every supplied TOML,
+environment, and flag layer is parsed eagerly, so a malformed lower-precedence
+value remains an error even when a higher layer is valid. Among valid layers,
+flag > environment > TOML > default precedence replaces the complete map;
+layers are never merged. A non-empty map is valid but inert while
+`--codex-catalog-enabled=false`, allowing staged rollout.
+
+An alias is emitted only while Copilot reports it as picker-visible and
+Responses-forwardable and its metadata source exists in the accepted Codex
+catalog. Exact official metadata wins if Codex later publishes the alias slug.
+Every configured mapping that is not applied produces one `Warn` record per
+Codex catalog request with `model`, `metadata_source`, and `skip_reason`:
+
+- `alias_not_forwardable`: the live Copilot-forwardable set lacks the alias;
+- `metadata_source_missing`: the accepted Codex catalog lacks its source; or
+- `shadowed_by_official`: Codex now has an exact entry for the alias, so that
+  official entry is still served with ordinary reviewer/live-limit mutations.
+
+A `shadowed_by_official` warning repeats on every Codex catalog request until
+the superseded mapping is removed. The other two conditions omit only the
+affected alias. An accepted source's own client gates and behavior remain
+authoritative, including `minimal_client_version`, visibility, priority,
+reasoning presets, service tiers, prompts, tool policy, and model messages.
+The operator owns the compatibility assertion between those values and the
+real alias model; copilotd validates source existence and completeness, not
+behavioral suitability. Because those gates come from the source, they can
+leave an alias hidden or unsuitable for a particular Codex client even though
+the mapping applied successfully; that condition produces no `skip_reason`
+warning.
+
+Complete-source fidelity can give the source and alias duplicate picker labels
+and ranking. Under client/catalog version skew, an alias can therefore change
+the default selected model. Operators should choose compatible sources and
+account for both effects during rollout. The alias also disappears safely if
+live eligibility or source availability is later lost; no official cached
+Codex bytes are edited or persisted.
 
 ### `--codex-auto-review-model`
 
-Injects the model slug as Codex's auto-review model when it is present in both
-the current accepted Codex catalog and the live Copilot-forwardable set. The
-injected value takes precedence over Codex's provider default. As of Codex
+Injects the model slug as Codex's auto-review model when its served slug belongs
+to the complete emitted Codex membership, including resolved exact official
+entries and Codex catalog aliases. The injected value takes precedence over
+Codex's provider default. As of Codex
 0.151.0, command-auth providers default to `gpt-5.6-luna`; an explicit value
 remains useful for stable routing across Codex versions and changing Copilot
 lineups.

@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -122,12 +123,14 @@ func TestHandlerNegotiatesCodexShapeOnlyWhenEveryGateIsOpen(t *testing.T) {
 		rawQuery      string
 		enabled       bool
 		reviewer      string
+		aliases       map[string]string
 		overrideLimit bool
 		wantCodex     bool
 	}{
 		{name: "client key absent", enabled: true, reviewer: "gpt-5.4"},
 		{name: "catalog disabled", rawQuery: "client_version=0.144.5", reviewer: "gpt-5.4"},
 		{name: "nothing to inject", rawQuery: "client_version=0.144.5", enabled: true},
+		{name: "aliases are enough to inject", rawQuery: "client_version=0.144.5", enabled: true, aliases: map[string]string{"gpt-example-alias": "gpt-5.4"}, wantCodex: true},
 		{name: "empty client value is present with reviewer", rawQuery: "client_version=", enabled: true, reviewer: "gpt-5.4", wantCodex: true},
 		{name: "valueless client key is present with limits", rawQuery: "client_version", enabled: true, overrideLimit: true, wantCodex: true},
 	}
@@ -139,6 +142,7 @@ func TestHandlerNegotiatesCodexShapeOnlyWhenEveryGateIsOpen(t *testing.T) {
 				Codex: CodexDescriptor{
 					Enabled: tc.enabled,
 					RenderConfig: CodexRenderConfig{
+						ModelAliases:    tc.aliases,
 						AutoReviewModel: tc.reviewer,
 						OverrideLimits:  tc.overrideLimit,
 					},
@@ -173,13 +177,14 @@ func TestHandlerNegotiatesCodexShapeOnlyWhenEveryGateIsOpen(t *testing.T) {
 }
 
 func TestHandlerCodexHEADMatchesGETHeadersAndSuppressesBody(t *testing.T) {
-	upstreamBody := []byte(`{"data":[{"id":"gpt-5.4","vendor":"OpenAI","model_picker_enabled":true,"supported_endpoints":["/responses"]}]}`)
+	const alias = "gpt-example-alias"
+	upstreamBody := []byte(`{"data":[{"id":"` + alias + `","vendor":"OpenAI","model_picker_enabled":true,"supported_endpoints":["/responses"]}]}`)
 	rendering := Rendering{
 		Render: RenderOpenAI,
 		Codex: CodexDescriptor{
 			Enabled: true,
 			RenderConfig: CodexRenderConfig{
-				AutoReviewModel: "gpt-5.4",
+				ModelAliases: map[string]string{alias: "gpt-5.4"},
 			},
 		},
 	}
@@ -244,6 +249,83 @@ func TestHandlerLogsEverySkippedCodexReviewer(t *testing.T) {
 			t.Errorf("warning missing %q: %s", want, out)
 		}
 	}
+	if strings.Contains(out, "skip_reason=") {
+		t.Errorf("reviewer warning gained an alias skip reason: %s", out)
+	}
+}
+
+func TestHandlerLogsEveryUnappliedCodexAliasOnEveryRequest(t *testing.T) {
+	const (
+		notForwarded  = "a-not-forwarded"
+		missingSource = "b-missing-source"
+		unconfigured  = "c-unconfigured-copilot-only"
+		shadowed      = "gpt-5.4"
+	)
+	var logs bytes.Buffer
+	logger, err := logging.NewWithWriter(&logs, config.ServeConfig{LogLevel: "info", LogFormat: "text"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	upstreamBody := []byte(`{"data":[` +
+		`{"id":"` + shadowed + `","vendor":"OpenAI","model_picker_enabled":true,"supported_endpoints":["/responses"]},` +
+		`{"id":"` + missingSource + `","vendor":"OpenAI","model_picker_enabled":true,"supported_endpoints":["/responses"]},` +
+		`{"id":"` + unconfigured + `","vendor":"OpenAI","model_picker_enabled":true,"supported_endpoints":["/responses"]}` +
+		`]}`)
+	handler := Handler(logger, endpoint.OpenAICatalog(), Rendering{
+		Render: RenderOpenAI,
+		Codex: CodexDescriptor{
+			Enabled: true,
+			RenderConfig: CodexRenderConfig{ModelAliases: map[string]string{
+				notForwarded:  "gpt-5.6-sol",
+				missingSource: "gpt-no-such-source",
+				shadowed:      "gpt-5.5",
+			}},
+		},
+	}, stubSource{status: http.StatusOK, body: upstreamBody})
+
+	for requestNumber := 0; requestNumber < 2; requestNumber++ {
+		recorder := httptest.NewRecorder()
+		handler(recorder, httptest.NewRequest(http.MethodGet, "/openai/v1/models?client_version=0.151.0", nil))
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("request %d status = %d, want 200: %s", requestNumber+1, recorder.Code, recorder.Body.String())
+		}
+		if got := renderedSlugs(t, decodeRenderedCodex(t, recorder.Body.Bytes())); !reflect.DeepEqual(got, []string{shadowed}) {
+			t.Errorf("request %d rendered slugs = %q, want shadowed official entry", requestNumber+1, got)
+		}
+	}
+
+	output := logs.String()
+	var warningLines []string
+	for _, line := range strings.Split(output, "\n") {
+		if strings.Contains(line, `msg="Codex catalog alias mapping was not applied"`) {
+			warningLines = append(warningLines, line)
+		}
+	}
+	if len(warningLines) != 6 {
+		t.Fatalf("unapplied alias warnings = %d, want 6 (three per request):\n%s", len(warningLines), output)
+	}
+	wantOrder := []string{notForwarded, missingSource, shadowed, notForwarded, missingSource, shadowed}
+	for i, wantAlias := range wantOrder {
+		if !strings.Contains(warningLines[i], "model="+wantAlias) {
+			t.Errorf("warning[%d] = %s, want alias-sorted model %s", i, warningLines[i], wantAlias)
+		}
+	}
+	for _, want := range []string{
+		"level=WARN",
+		"model=" + notForwarded, "metadata_source=gpt-5.6-sol", "skip_reason=alias_not_forwardable",
+		"model=" + missingSource, "metadata_source=gpt-no-such-source", "skip_reason=metadata_source_missing",
+		"model=" + shadowed, "metadata_source=gpt-5.5", "skip_reason=shadowed_by_official",
+	} {
+		if !strings.Contains(output, want) {
+			t.Errorf("warning output missing %q:\n%s", want, output)
+		}
+	}
+	if strings.Contains(output, "model="+unconfigured) {
+		t.Errorf("unconfigured Copilot-only model produced a warning:\n%s", output)
+	}
+	if strings.Contains(output, "failure_class=") {
+		t.Errorf("unapplied alias warning used failure_class:\n%s", output)
+	}
 }
 
 func discardHandlerLogger() *slog.Logger {
@@ -291,6 +373,131 @@ func TestHandlerRendersCodexFromCurrentCachedBytes(t *testing.T) {
 	if got := renderedSlugs(t, entries); len(got) != 1 || got[0] != "gpt-test" {
 		t.Fatalf("rendered slugs = %q, want current Catalog model", got)
 	}
+}
+
+func TestHandlerRendersAliasFromCurrentAndFallbackCodexModels(t *testing.T) {
+	const alias = "gpt-alias"
+	upstreamBody := []byte(`{"data":[{"id":"` + alias + `","vendor":"OpenAI","model_picker_enabled":true,"supported_endpoints":["/responses"]}]}`)
+
+	tests := []struct {
+		name        string
+		models      *cache.Value[[]byte]
+		source      string
+		displayName string
+	}{
+		{
+			name:        "accepted current bytes",
+			models:      testCodexModelsValue(t, validCodexModelsBytes(t, "gpt-source", "fresh prompt"), nil),
+			source:      "gpt-source",
+			displayName: "Fresh model",
+		},
+		{
+			name:        "embedded fallback after refresh failure",
+			models:      testCodexModelsValue(t, nil, errors.New("refresh failed")),
+			source:      "gpt-5.4",
+			displayName: "GPT-5.4",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			handler := Handler(discardHandlerLogger(), endpoint.OpenAICatalog(), Rendering{
+				Render: RenderOpenAI,
+				Codex: CodexDescriptor{
+					Enabled: true,
+					Models:  tc.models,
+					RenderConfig: CodexRenderConfig{
+						ModelAliases: map[string]string{alias: tc.source},
+					},
+				},
+			}, stubSource{status: http.StatusOK, body: upstreamBody})
+			recorder := httptest.NewRecorder()
+			handler(recorder, httptest.NewRequest(http.MethodGet, "/openai/v1/models?client_version=0.151.0", nil))
+
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200: %s", recorder.Code, recorder.Body.String())
+			}
+			entries := decodeRenderedCodex(t, recorder.Body.Bytes())
+			if len(entries) != 1 || decodeStringField(t, entries[0], "slug") != alias {
+				t.Fatalf("rendered entries = %s, want sole alias", recorder.Body.Bytes())
+			}
+			if got := decodeStringField(t, entries[0], "display_name"); got != tc.displayName {
+				t.Errorf("alias display_name = %q, want source value %q", got, tc.displayName)
+			}
+		})
+	}
+}
+
+func TestHandlerAliasFailuresRemainOpenAIBadGateway(t *testing.T) {
+	const alias = "gpt-error-alias"
+	validUpstream := []byte(`{"data":[{"id":"` + alias + `","vendor":"OpenAI","model_picker_enabled":true,"supported_endpoints":["/responses"]}]}`)
+	invalidCurrent := cache.New(discardHandlerLogger(), cache.Cacheable[[]byte]{
+		Fallback:        []byte(`{"models":[`),
+		FallbackVersion: "invalid",
+		TTL:             0,
+		Fetch: func(context.Context) ([]byte, string, error) {
+			return nil, "", errors.New("unused")
+		},
+		Hash: hashModels,
+	})
+
+	// These are the two alias-configured 502 causes reachable through Handler.
+	// parseCodexModels rejects invalid cached JSON before RawMessages reach the
+	// renderer, while the renderer's json.Marshal inputs are strings and cannot
+	// fail. TestRenderCodexRejectsInvalidRawMetadataSourceField covers the pure
+	// renderer's defensive invalid-RawMessage branch.
+	tests := []struct {
+		name         string
+		upstreamBody []byte
+		models       *cache.Value[[]byte]
+		wantMessage  string
+	}{
+		{name: "invalid live Copilot JSON", upstreamBody: []byte(`{"data":[`), wantMessage: "upstream models response was invalid"},
+		{name: "invalid current Codex bytes", upstreamBody: validUpstream, models: invalidCurrent, wantMessage: "could not render the models catalog"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			handler := Handler(discardHandlerLogger(), endpoint.OpenAICatalog(), Rendering{
+				Render: RenderOpenAI,
+				Codex: CodexDescriptor{
+					Enabled: true,
+					Models:  tc.models,
+					RenderConfig: CodexRenderConfig{
+						ModelAliases: map[string]string{alias: "gpt-5.4"},
+					},
+				},
+			}, stubSource{status: http.StatusOK, body: tc.upstreamBody})
+			recorder := httptest.NewRecorder()
+			handler(recorder, httptest.NewRequest(http.MethodGet, "/openai/v1/models?client_version=0.151.0", nil))
+
+			if recorder.Code != http.StatusBadGateway {
+				t.Fatalf("status = %d, want 502: %s", recorder.Code, recorder.Body.String())
+			}
+			if !strings.Contains(recorder.Body.String(), `"type":"api_error"`) || !strings.Contains(recorder.Body.String(), tc.wantMessage) {
+				t.Errorf("body = %s, want OpenAI api_error containing %q", recorder.Body.String(), tc.wantMessage)
+			}
+		})
+	}
+}
+
+func testCodexModelsValue(t *testing.T, current []byte, fetchErr error) *cache.Value[[]byte] {
+	t.Helper()
+	modelsValue := cache.New(discardHandlerLogger(), cache.Cacheable[[]byte]{
+		Fallback:        embeddedCodexModels,
+		FallbackVersion: embeddedCodexModelsVersion,
+		TTL:             time.Hour,
+		Fetch: func(context.Context) ([]byte, string, error) {
+			return current, "rust-v0.152.0", fetchErr
+		},
+		Hash: hashModels,
+		Validate: func(currentBytes []byte) error {
+			_, err := validateCodexModels(currentBytes)
+			return err
+		},
+	})
+	registry := cache.NewRegistry()
+	registry.Register(modelsValue)
+	registry.Prime(context.Background())
+	return modelsValue
 }
 
 func (s stubSource) Buffered(ctx context.Context, call upstream.Call) (int, []byte, context.Context, *upstream.Failure) {

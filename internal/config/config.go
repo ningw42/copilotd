@@ -144,6 +144,7 @@ type ServeConfig struct {
 	// overlays. They are non-secret and remain valid but inert while the catalog
 	// is disabled.
 	CodexCatalogEnabled           bool
+	CodexCatalogModelAliases      map[string]string
 	CodexAutoReviewModel          string
 	CodexAutoReviewModelOverrides map[string]string
 	CodexOverrideLimits           bool
@@ -190,16 +191,16 @@ func appendSpecLogAttrs[C any](attrs []slog.Attr, specs []spec[C], target *C) []
 	return attrs
 }
 
-func formatAutoReviewModelOverrides(overrides map[string]string) string {
-	keys := make([]string, 0, len(overrides))
-	for key := range overrides {
+func formatStringMap(values map[string]string) string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
 		keys = append(keys, key)
 	}
 	slices.Sort(keys)
 
 	pairs := make([]string, 0, len(keys))
 	for _, key := range keys {
-		pairs = append(pairs, key+"="+overrides[key])
+		pairs = append(pairs, key+"="+values[key])
 	}
 	return strings.Join(pairs, ",")
 }
@@ -224,19 +225,20 @@ func commonFields[C any](targets commonTargets[C]) ([]spec[C], *configPathField[
 	}, configPath
 }
 
-type codexAutoReviewModelOverridesFlagValue struct {
+type stringMapFlagValue struct {
 	stored *map[string]string
+	parse  func(string) (map[string]string, error)
 }
 
-func (v *codexAutoReviewModelOverridesFlagValue) String() string {
+func (v *stringMapFlagValue) String() string {
 	if v == nil || v.stored == nil {
 		return ""
 	}
-	return formatAutoReviewModelOverrides(*v.stored)
+	return formatStringMap(*v.stored)
 }
 
-func (v *codexAutoReviewModelOverridesFlagValue) Set(raw string) error {
-	parsed, err := parseAutoReviewModelOverrides(raw)
+func (v *stringMapFlagValue) Set(raw string) error {
+	parsed, err := v.parse(raw)
 	if err != nil {
 		return err
 	}
@@ -244,28 +246,26 @@ func (v *codexAutoReviewModelOverridesFlagValue) Set(raw string) error {
 	return nil
 }
 
-func registerCodexAutoReviewModelOverrides(fs *ff.FlagSet, name string, def map[string]string, usage string) *map[string]string {
-	stored := def
-	if _, err := fs.AddFlag(ff.FlagConfig{
-		LongName:    name,
-		Usage:       usage,
-		Value:       &codexAutoReviewModelOverridesFlagValue{stored: &stored},
-		Placeholder: "STRING",
-	}); err != nil {
-		panic(err)
-	}
-	return &stored
-}
-
-func codexAutoReviewModelOverridesField() spec[ServeConfig] {
+func stringMapField(name string, get func(*ServeConfig) *map[string]string, parse func(string) (map[string]string, error), usage string) spec[ServeConfig] {
 	return &field[ServeConfig, map[string]string]{
-		name:  "codex-auto-review-model-overrides",
-		usage: "per-main-model reviewer overrides (main=reviewer,...)",
-		get:   func(c *ServeConfig) *map[string]string { return &c.CodexAutoReviewModelOverrides },
-		parse: parseAutoReviewModelOverrides,
-		reg:   registerCodexAutoReviewModelOverrides,
+		name:  name,
+		usage: usage,
+		get:   get,
+		parse: parse,
+		reg: func(fs *ff.FlagSet, name string, def map[string]string, usage string) *map[string]string {
+			stored := def
+			if _, err := fs.AddFlag(ff.FlagConfig{
+				LongName:    name,
+				Usage:       usage,
+				Value:       &stringMapFlagValue{stored: &stored, parse: parse},
+				Placeholder: "STRING",
+			}); err != nil {
+				panic(err)
+			}
+			return &stored
+		},
 		logf: func(key string, value map[string]string) slog.Attr {
-			return slog.String(key, formatAutoReviewModelOverrides(value))
+			return slog.String(key, formatStringMap(value))
 		},
 	}
 }
@@ -297,8 +297,9 @@ func serveSpecs() ([]spec[ServeConfig], *configPathField[ServeConfig]) {
 		boolField("shim-nop-enabled", defaultShimNopEnabled, func(c *ServeConfig) *bool { return &c.ShimNopEnabled }, "enable the canonical no-op shim"),
 		boolField("shim-responses-item-id-stabilizer-enabled", defaultShimResponsesItemIDStabilizerEnabled, func(c *ServeConfig) *bool { return &c.ShimResponsesItemIDStabilizerEnabled }, "stabilize churning OpenAI Responses item ids (opt-in)"),
 		boolField("codex-catalog-enabled", defaultCodexCatalogEnabled, func(c *ServeConfig) *bool { return &c.CodexCatalogEnabled }, "enable the Codex client-shaped catalog"),
+		stringMapField("codex-catalog-model-aliases", func(c *ServeConfig) *map[string]string { return &c.CodexCatalogModelAliases }, parseCodexCatalogModelAliases, "Codex catalog aliases (live-alias=metadata-source,...)"),
 		stringField("codex-auto-review-model", defaultCodexAutoReviewModel, func(c *ServeConfig) *string { return &c.CodexAutoReviewModel }, nil, "reviewer model injected into the Codex catalog"),
-		codexAutoReviewModelOverridesField(),
+		stringMapField("codex-auto-review-model-overrides", func(c *ServeConfig) *map[string]string { return &c.CodexAutoReviewModelOverrides }, parseAutoReviewModelOverrides, "per-main-model reviewer overrides (main=reviewer,...)"),
 		boolField("codex-catalog-override-limits", defaultCodexOverrideLimits, func(c *ServeConfig) *bool { return &c.CodexOverrideLimits }, "override Codex catalog limits with live Copilot limits"),
 		durationField("codex-catalog-refresh-interval", defaultCodexCatalogRefreshInterval, inHours, func(c *ServeConfig) *time.Duration { return &c.CodexCatalogRefreshInterval }, nonNegative, "Codex models.json refresh cadence (0 pins the embedded floor)"),
 		secretStringField("github-oauth-token", func(c *ServeConfig) *string { return &c.GithubOAuthToken }, nil, "inline GitHub OAuth token (secret; precedence over the GitHub OAuth token file)"),
@@ -357,11 +358,18 @@ func (f *ServeFlags) Resolve(lookupEnv func(string) (string, bool)) (ServeConfig
 	return cfg, nil
 }
 
-func parseAutoReviewModelOverrides(raw string) (map[string]string, error) {
+type stringMapSyntax struct {
+	settingName string
+	pairForm    string
+	keyLabel    string
+	valueLabel  string
+}
+
+func parseStringMap(raw string, syntax stringMapSyntax, validatePair func(string, string) error) (map[string]string, error) {
 	if raw == "" {
 		return nil, nil
 	}
-	overrides := make(map[string]string)
+	values := make(map[string]string)
 	for _, segment := range strings.Split(raw, ",") {
 		segment = strings.TrimSpace(segment)
 		if segment == "" {
@@ -369,25 +377,54 @@ func parseAutoReviewModelOverrides(raw string) (map[string]string, error) {
 		}
 		pair := strings.SplitN(segment, "=", 2)
 		if len(pair) != 2 {
-			return nil, fmt.Errorf("invalid codex-auto-review-model-overrides segment %q: expected main=reviewer", segment)
+			return nil, fmt.Errorf("invalid %s segment %q: expected %s", syntax.settingName, segment, syntax.pairForm)
 		}
-		mainModel := strings.TrimSpace(pair[0])
-		reviewerModel := strings.TrimSpace(pair[1])
-		if mainModel == "" {
-			return nil, fmt.Errorf("invalid codex-auto-review-model-overrides segment %q: main model is empty", segment)
+		key := strings.TrimSpace(pair[0])
+		value := strings.TrimSpace(pair[1])
+		if key == "" {
+			return nil, fmt.Errorf("invalid %s segment %q: %s is empty", syntax.settingName, segment, syntax.keyLabel)
 		}
-		if reviewerModel == "" {
-			return nil, fmt.Errorf("invalid codex-auto-review-model-overrides segment %q: reviewer model is empty", segment)
+		if value == "" {
+			return nil, fmt.Errorf("invalid %s segment %q: %s is empty", syntax.settingName, segment, syntax.valueLabel)
 		}
-		if _, exists := overrides[mainModel]; exists {
-			return nil, fmt.Errorf("invalid codex-auto-review-model-overrides: duplicate main model %q", mainModel)
+		if _, exists := values[key]; exists {
+			return nil, fmt.Errorf("invalid %s: duplicate %s %q", syntax.settingName, syntax.keyLabel, key)
 		}
-		overrides[mainModel] = reviewerModel
+		if validatePair != nil {
+			if err := validatePair(key, value); err != nil {
+				return nil, err
+			}
+		}
+		values[key] = value
 	}
-	if len(overrides) == 0 {
+	if len(values) == 0 {
 		return nil, nil
 	}
-	return overrides, nil
+	return values, nil
+}
+
+func parseCodexCatalogModelAliases(raw string) (map[string]string, error) {
+	const setting = "codex-catalog-model-aliases"
+	return parseStringMap(raw, stringMapSyntax{
+		settingName: setting,
+		pairForm:    "alias=source",
+		keyLabel:    "alias",
+		valueLabel:  "metadata source",
+	}, func(alias, source string) error {
+		if alias == source {
+			return fmt.Errorf("invalid %s: alias %q maps to itself", setting, alias)
+		}
+		return nil
+	})
+}
+
+func parseAutoReviewModelOverrides(raw string) (map[string]string, error) {
+	return parseStringMap(raw, stringMapSyntax{
+		settingName: "codex-auto-review-model-overrides",
+		pairForm:    "main=reviewer",
+		keyLabel:    "main model",
+		valueLabel:  "reviewer model",
+	}, nil)
 }
 
 // defaultOAuthTokenFile is the default path to the GitHub OAuth token file:

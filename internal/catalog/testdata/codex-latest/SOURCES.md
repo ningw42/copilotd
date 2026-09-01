@@ -183,12 +183,23 @@ catalog contains both reviewer slugs, each with complete metadata; both are
 
 ## Executable client check
 
-`TestLatestCodexBinaryRemoteCatalogContract` is an opt-in black-box check. With
-`CODEX_CATALOG_AUDIT_BINARY` pointing at the pinned executable, it runs Codex
-against an isolated local command-auth provider and asserts the real request's
-`client_version`, bearer/default headers, `ModelsResponse` acceptance, remote
-merge, priority/visibility selection, and selected Responses model. The audit
-ran it against the official
+`TestLatestCodexBinaryAcceptsUnknownRemoteCatalogModel`,
+`TestLatestCodexBinaryReplacesBundledRemoteCatalogModel`, and
+`TestLatestCodexBinaryKeepsBundledSourceAheadOfMatchingAlias` are opt-in
+black-box checks. With `CODEX_CATALOG_AUDIT_BINARY` pointing at the pinned
+executable, they run Codex against isolated local command-auth providers. The
+first asserts the real request's `client_version`, bearer/default headers,
+unknown-slug `ModelsResponse` acceptance, picker selection, and unchanged
+Responses model. The second retains the original audit of wholesale in-place
+replacement for a known bundled slug. The third returns only an unknown alias
+cloned from the untouched bundled default source and asserts that equal display,
+priority, and visibility leave the bundled source selected. A negative control
+establishes that explicit `--model` forwards an arbitrary unknown slug even with
+an empty remote catalog, so explicit selection is not treated as merge evidence.
+The audit instead queries the pinned app-server's `model/list`: the empty-catalog
+control omits the alias while the alias-catalog run includes it, independently
+witnessing the merge before `/responses` forwarding is checked. The audit ran
+them against the official
 [`codex-x86_64-unknown-linux-musl.zst`][codex-binary] asset after verifying
 SHA-256
 `4041e6a1b600a20420505984ecc534d56d9c10fddcdeaf03736b22a0b3308c1a`;

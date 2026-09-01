@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/ningw42/copilotd/internal/endpoint"
@@ -52,6 +53,402 @@ func TestRenderCodexIntersectsInLiveOrderAndEmitsCompleteEntries(t *testing.T) {
 			t.Errorf("models[%d] has empty model_messages", i)
 		}
 	}
+}
+
+func TestRenderCodexClonesOfficialMetadataForLiveAlias(t *testing.T) {
+	const alias = "gpt-example-alias"
+	models := []Model{{ID: "gpt-5.5"}, {ID: alias}, {ID: "gpt-5.4-mini"}}
+	body, outcome, err := RenderCodex(testCodexModels, models, CodexRenderConfig{
+		ModelAliases: map[string]string{alias: "gpt-5.4"},
+	})
+	if err != nil {
+		t.Fatalf("RenderCodex: %v", err)
+	}
+	if len(outcome.SkippedReviewers) != 0 {
+		t.Errorf("skipped reviewers = %v, want none", outcome.SkippedReviewers)
+	}
+
+	entries := decodeRenderedCodex(t, body)
+	wantSlugs := []string{"gpt-5.5", alias, "gpt-5.4-mini"}
+	if got := renderedSlugs(t, entries); !reflect.DeepEqual(got, wantSlugs) {
+		t.Fatalf("rendered slugs = %q, want live order %q", got, wantSlugs)
+	}
+	baselineBody, _, err := RenderCodex(testCodexModels, models, CodexRenderConfig{})
+	if err != nil {
+		t.Fatalf("RenderCodex baseline: %v", err)
+	}
+	baselineEntries := decodeRenderedCodex(t, baselineBody)
+	if len(baselineEntries) != 2 || !reflect.DeepEqual(entries[0], baselineEntries[0]) || !reflect.DeepEqual(entries[2], baselineEntries[1]) {
+		t.Errorf("alias configuration changed unrelated exact entries:\nwith alias: %#v\nbaseline: %#v", entries, baselineEntries)
+	}
+	aliased := entries[1]
+	for field, want := range testCodexModels["gpt-5.4"] {
+		if field == "slug" || field == "auto_review_model_override" {
+			continue
+		}
+		assertRawFieldEqual(t, alias, field, aliased[field], want)
+	}
+	if _, ok := aliased["auto_review_model_override"]; ok {
+		t.Error("alias retained the metadata source reviewer")
+	}
+}
+
+func TestRenderCodexRejectsInvalidRawMetadataSourceField(t *testing.T) {
+	const alias = "gpt-invalid-raw-alias"
+	codexModels := CodexModels{
+		"gpt-source": {
+			"slug":   json.RawMessage(`"gpt-source"`),
+			"future": json.RawMessage(`{`),
+		},
+	}
+	_, _, err := RenderCodex(codexModels, []Model{{ID: alias}}, CodexRenderConfig{
+		ModelAliases: map[string]string{alias: "gpt-source"},
+	})
+	if err == nil || !strings.Contains(err.Error(), `Codex field "future" contains invalid JSON`) {
+		t.Fatalf("RenderCodex error = %v, want invalid raw source field rejected", err)
+	}
+}
+
+func TestRenderCodexReportsAliasThatIsNotForwardable(t *testing.T) {
+	const alias = "gpt-missing-alias"
+	body, outcome, err := RenderCodex(testCodexModels, []Model{{ID: "gpt-5.4"}}, CodexRenderConfig{
+		ModelAliases: map[string]string{alias: "gpt-5.4-mini"},
+	})
+	if err != nil {
+		t.Fatalf("RenderCodex: %v", err)
+	}
+	if got := renderedSlugs(t, decodeRenderedCodex(t, body)); !reflect.DeepEqual(got, []string{"gpt-5.4"}) {
+		t.Errorf("rendered slugs = %q, want unaffected exact entry", got)
+	}
+	want := []UnappliedCodexAlias{{
+		Alias: alias, MetadataSource: "gpt-5.4-mini", Reason: CodexAliasNotForwardable,
+	}}
+	if !reflect.DeepEqual(outcome.UnappliedAliases, want) {
+		t.Errorf("unapplied aliases = %#v, want %#v", outcome.UnappliedAliases, want)
+	}
+}
+
+func TestRenderCodexOfficialEntryShadowsConfiguredAlias(t *testing.T) {
+	const alias = "gpt-5.4"
+	promptLimit, contextLimit := 111, 222
+	models := []Model{{
+		ID: alias,
+		Capabilities: Capabilities{Limits: Limits{
+			MaxPromptTokens:        &promptLimit,
+			MaxContextWindowTokens: &contextLimit,
+		}},
+	}}
+	body, outcome, err := RenderCodex(testCodexModels, models, CodexRenderConfig{
+		ModelAliases:    map[string]string{alias: "gpt-5.5"},
+		AutoReviewModel: alias,
+		OverrideLimits:  true,
+	})
+	if err != nil {
+		t.Fatalf("RenderCodex: %v", err)
+	}
+	entries := decodeRenderedCodex(t, body)
+	if len(entries) != 1 {
+		t.Fatalf("rendered entries = %d, want official entry", len(entries))
+	}
+	for field, want := range testCodexModels[alias] {
+		switch field {
+		case "auto_review_model_override", "context_window", "max_context_window":
+			continue
+		}
+		assertRawFieldEqual(t, alias, field, entries[0][field], want)
+	}
+	if got := decodeStringField(t, entries[0], "auto_review_model_override"); got != alias {
+		t.Errorf("shadowed official reviewer = %q, want ordinary reviewer mutation %q", got, alias)
+	}
+	assertJSONInt(t, entries[0], "context_window", promptLimit)
+	assertJSONInt(t, entries[0], "max_context_window", contextLimit)
+	want := []UnappliedCodexAlias{{
+		Alias: alias, MetadataSource: "gpt-5.5", Reason: CodexAliasShadowedByOfficial,
+	}}
+	if !reflect.DeepEqual(outcome.UnappliedAliases, want) {
+		t.Errorf("unapplied aliases = %#v, want %#v", outcome.UnappliedAliases, want)
+	}
+}
+
+func TestRenderCodexReportsMissingMetadataSourceAndContinues(t *testing.T) {
+	const (
+		missingAlias = "gpt-missing-source-alias"
+		validAlias   = "gpt-valid-alias"
+	)
+	models := []Model{{ID: missingAlias}, {ID: validAlias}, {ID: "gpt-5.5"}}
+	body, outcome, err := RenderCodex(testCodexModels, models, CodexRenderConfig{
+		ModelAliases: map[string]string{
+			missingAlias: "gpt-no-such-source",
+			validAlias:   "gpt-5.4",
+		},
+	})
+	if err != nil {
+		t.Fatalf("RenderCodex: %v", err)
+	}
+	wantSlugs := []string{validAlias, "gpt-5.5"}
+	if got := renderedSlugs(t, decodeRenderedCodex(t, body)); !reflect.DeepEqual(got, wantSlugs) {
+		t.Errorf("rendered slugs = %q, want unaffected models %q", got, wantSlugs)
+	}
+	want := []UnappliedCodexAlias{{
+		Alias: missingAlias, MetadataSource: "gpt-no-such-source", Reason: CodexAliasMetadataSourceMissing,
+	}}
+	if !reflect.DeepEqual(outcome.UnappliedAliases, want) {
+		t.Errorf("unapplied aliases = %#v, want %#v", outcome.UnappliedAliases, want)
+	}
+}
+
+func TestRenderCodexReportsEachConfiguredAliasAtMostOnce(t *testing.T) {
+	const alias = "gpt-duplicate-live-alias"
+	_, outcome, err := RenderCodex(testCodexModels, []Model{{ID: alias}, {ID: alias}}, CodexRenderConfig{
+		ModelAliases: map[string]string{alias: "gpt-no-such-source"},
+	})
+	if err != nil {
+		t.Fatalf("RenderCodex: %v", err)
+	}
+	want := []UnappliedCodexAlias{{
+		Alias: alias, MetadataSource: "gpt-no-such-source", Reason: CodexAliasMetadataSourceMissing,
+	}}
+	if !reflect.DeepEqual(outcome.UnappliedAliases, want) {
+		t.Errorf("unapplied aliases = %#v, want one outcome %#v", outcome.UnappliedAliases, want)
+	}
+}
+
+func TestRenderCodexAliasResolutionIsSingleHop(t *testing.T) {
+	const (
+		firstAlias  = "gpt-first-alias"
+		secondAlias = "gpt-second-alias"
+	)
+	body, outcome, err := RenderCodex(testCodexModels, []Model{{ID: firstAlias}, {ID: secondAlias}}, CodexRenderConfig{
+		ModelAliases: map[string]string{
+			firstAlias:  secondAlias,
+			secondAlias: "gpt-5.4",
+		},
+	})
+	if err != nil {
+		t.Fatalf("RenderCodex: %v", err)
+	}
+	if got := renderedSlugs(t, decodeRenderedCodex(t, body)); !reflect.DeepEqual(got, []string{secondAlias}) {
+		t.Errorf("rendered slugs = %q, want only directly resolvable alias", got)
+	}
+	want := []UnappliedCodexAlias{{
+		Alias: firstAlias, MetadataSource: secondAlias, Reason: CodexAliasMetadataSourceMissing,
+	}}
+	if !reflect.DeepEqual(outcome.UnappliedAliases, want) {
+		t.Errorf("unapplied aliases = %#v, want %#v", outcome.UnappliedAliases, want)
+	}
+}
+
+func TestRenderCodexUnappliedAliasReasonsAreExclusiveAndAliasSorted(t *testing.T) {
+	const (
+		missingSource = "a-missing-source"
+		shadowed      = "gpt-5.5"
+		notForwarded  = "gpt-5.4"
+	)
+	body, outcome, err := RenderCodex(testCodexModels, []Model{{ID: shadowed}, {ID: missingSource}}, CodexRenderConfig{
+		ModelAliases: map[string]string{
+			notForwarded:  "gpt-5.6-sol",
+			shadowed:      "gpt-5.4-mini",
+			missingSource: "gpt-no-such-source",
+		},
+	})
+	if err != nil {
+		t.Fatalf("RenderCodex: %v", err)
+	}
+	if got := renderedSlugs(t, decodeRenderedCodex(t, body)); !reflect.DeepEqual(got, []string{shadowed}) {
+		t.Errorf("rendered slugs = %q, want shadowed official entry only", got)
+	}
+	want := []UnappliedCodexAlias{
+		{Alias: missingSource, MetadataSource: "gpt-no-such-source", Reason: CodexAliasMetadataSourceMissing},
+		{Alias: notForwarded, MetadataSource: "gpt-5.6-sol", Reason: CodexAliasNotForwardable},
+		{Alias: shadowed, MetadataSource: "gpt-5.4-mini", Reason: CodexAliasShadowedByOfficial},
+	}
+	if !reflect.DeepEqual(outcome.UnappliedAliases, want) {
+		t.Errorf("unapplied aliases = %#v, want alias-sorted exclusive outcomes %#v", outcome.UnappliedAliases, want)
+	}
+}
+
+func TestRenderCodexUnconfiguredCopilotOnlyModelRemainsSilent(t *testing.T) {
+	body, outcome, err := RenderCodex(testCodexModels, []Model{{ID: "gpt-copilot-only"}}, CodexRenderConfig{})
+	if err != nil {
+		t.Fatalf("RenderCodex: %v", err)
+	}
+	if got := renderedSlugs(t, decodeRenderedCodex(t, body)); len(got) != 0 {
+		t.Errorf("rendered slugs = %q, want none", got)
+	}
+	if len(outcome.UnappliedAliases) != 0 {
+		t.Errorf("unapplied aliases = %#v, want none for unconfigured model", outcome.UnappliedAliases)
+	}
+}
+
+func TestRenderCodexAliasOrderFollowsLiveModelsAndIsMapOrderIndependent(t *testing.T) {
+	models := []Model{{ID: "gpt-z-alias"}, {ID: "gpt-5.5"}, {ID: "gpt-a-alias"}}
+	firstAliases := map[string]string{
+		"gpt-z-alias": "gpt-5.4",
+		"gpt-a-alias": "gpt-5.4-mini",
+	}
+	secondAliases := map[string]string{
+		"gpt-a-alias": "gpt-5.4-mini",
+		"gpt-z-alias": "gpt-5.4",
+	}
+	firstBody, firstOutcome, err := RenderCodex(testCodexModels, models, CodexRenderConfig{ModelAliases: firstAliases})
+	if err != nil {
+		t.Fatalf("RenderCodex first map: %v", err)
+	}
+	secondBody, secondOutcome, err := RenderCodex(testCodexModels, models, CodexRenderConfig{ModelAliases: secondAliases})
+	if err != nil {
+		t.Fatalf("RenderCodex second map: %v", err)
+	}
+	if !bytes.Equal(firstBody, secondBody) || !reflect.DeepEqual(firstOutcome, secondOutcome) {
+		t.Errorf("map insertion order changed rendering:\nfirst %s %#v\nsecond %s %#v", firstBody, firstOutcome, secondBody, secondOutcome)
+	}
+	want := []string{"gpt-z-alias", "gpt-5.5", "gpt-a-alias"}
+	if got := renderedSlugs(t, decodeRenderedCodex(t, firstBody)); !reflect.DeepEqual(got, want) {
+		t.Errorf("rendered slugs = %q, want live order %q", got, want)
+	}
+}
+
+func TestRenderCodexEmptyAliasMapPreservesExistingOutput(t *testing.T) {
+	models := []Model{{ID: "gpt-5.4-mini"}, {ID: "gpt-5.4"}}
+	baselineBody, baselineOutcome, err := RenderCodex(testCodexModels, models, CodexRenderConfig{})
+	if err != nil {
+		t.Fatalf("RenderCodex baseline: %v", err)
+	}
+	emptyBody, emptyOutcome, err := RenderCodex(testCodexModels, models, CodexRenderConfig{ModelAliases: map[string]string{}})
+	if err != nil {
+		t.Fatalf("RenderCodex empty aliases: %v", err)
+	}
+	if !bytes.Equal(emptyBody, baselineBody) || !reflect.DeepEqual(emptyOutcome, baselineOutcome) {
+		t.Errorf("empty aliases changed rendering:\nbaseline %s %#v\nempty %s %#v", baselineBody, baselineOutcome, emptyBody, emptyOutcome)
+	}
+}
+
+func TestRenderCodexAliasOverrideBeatsGlobalAndOthersUseGlobal(t *testing.T) {
+	const (
+		alias    = "gpt-example-alias"
+		source   = "gpt-5.4"
+		reviewer = "gpt-5.5"
+	)
+	models := []Model{{ID: alias}, {ID: source}, {ID: reviewer}}
+	body, outcome, err := RenderCodex(testCodexModels, models, CodexRenderConfig{
+		ModelAliases:    map[string]string{alias: source},
+		AutoReviewModel: reviewer,
+		AutoReviewModelOverrides: map[string]string{
+			alias: alias,
+		},
+	})
+	if err != nil {
+		t.Fatalf("RenderCodex: %v", err)
+	}
+	if len(outcome.UnappliedAliases) != 0 || len(outcome.SkippedReviewers) != 0 {
+		t.Errorf("outcome = %#v, want all aliases and reviewers applied", outcome)
+	}
+	entries := decodeRenderedCodex(t, body)
+	wantReviewers := []string{alias, reviewer, reviewer}
+	for i, want := range wantReviewers {
+		if got := decodeStringField(t, entries[i], "auto_review_model_override"); got != want {
+			t.Errorf("%s reviewer = %q, want %q", decodeStringField(t, entries[i], "slug"), got, want)
+		}
+	}
+}
+
+func TestRenderCodexAliasesParticipateInCompleteReviewerMembership(t *testing.T) {
+	const (
+		firstAlias  = "gpt-first-review-alias"
+		secondAlias = "gpt-second-review-alias"
+	)
+	models := []Model{{ID: firstAlias}, {ID: secondAlias}, {ID: "gpt-5.5"}}
+	body, outcome, err := RenderCodex(testCodexModels, models, CodexRenderConfig{
+		ModelAliases: map[string]string{
+			firstAlias:  "gpt-5.4",
+			secondAlias: "gpt-5.4-mini",
+		},
+		AutoReviewModelOverrides: map[string]string{
+			firstAlias:  firstAlias,
+			secondAlias: firstAlias,
+			"gpt-5.5":   secondAlias,
+		},
+	})
+	if err != nil {
+		t.Fatalf("RenderCodex: %v", err)
+	}
+	if len(outcome.UnappliedAliases) != 0 || len(outcome.SkippedReviewers) != 0 {
+		t.Errorf("outcome = %#v, want every alias and reviewer applied", outcome)
+	}
+	entries := decodeRenderedCodex(t, body)
+	wantReviewers := []string{firstAlias, firstAlias, secondAlias}
+	for i, want := range wantReviewers {
+		if got := decodeStringField(t, entries[i], "auto_review_model_override"); got != want {
+			t.Errorf("%s reviewer = %q, want %q", decodeStringField(t, entries[i], "slug"), got, want)
+		}
+	}
+}
+
+func TestRenderCodexDoesNotAdvertiseUnappliedAliasAsReviewer(t *testing.T) {
+	const alias = "gpt-unapplied-review-alias"
+	body, outcome, err := RenderCodex(testCodexModels, []Model{{ID: "gpt-5.4"}}, CodexRenderConfig{
+		ModelAliases: map[string]string{alias: "gpt-5.5"},
+		AutoReviewModelOverrides: map[string]string{
+			"gpt-5.4": alias,
+		},
+	})
+	if err != nil {
+		t.Fatalf("RenderCodex: %v", err)
+	}
+	wantSkipped := []SkippedReviewer{{Model: "gpt-5.4", Reviewer: alias}}
+	if !reflect.DeepEqual(outcome.SkippedReviewers, wantSkipped) {
+		t.Errorf("skipped reviewers = %#v, want %#v", outcome.SkippedReviewers, wantSkipped)
+	}
+	entries := decodeRenderedCodex(t, body)
+	if _, ok := entries[0]["auto_review_model_override"]; ok {
+		t.Error("main model advertised an unapplied alias as its reviewer")
+	}
+}
+
+func TestRenderCodexAliasRemovesSourceReviewerAndUsesAliasLiveLimits(t *testing.T) {
+	const (
+		alias  = "gpt-limit-alias"
+		source = "gpt-5.4"
+	)
+	codexModels := make(CodexModels, len(testCodexModels))
+	for slug, entry := range testCodexModels {
+		codexModels[slug] = entry
+	}
+	sourceEntry := make(map[string]json.RawMessage, len(testCodexModels[source]))
+	for field, raw := range testCodexModels[source] {
+		sourceEntry[field] = bytes.Clone(raw)
+	}
+	sourceEntry["auto_review_model_override"] = json.RawMessage(`"source-reviewer"`)
+	codexModels[source] = sourceEntry
+
+	aliasPromptLimit := 111
+	sourcePromptLimit, sourceContextLimit := 777, 888
+	models := []Model{
+		{ID: source, Capabilities: Capabilities{Limits: Limits{MaxPromptTokens: &sourcePromptLimit, MaxContextWindowTokens: &sourceContextLimit}}},
+		{ID: alias, Capabilities: Capabilities{Limits: Limits{MaxPromptTokens: &aliasPromptLimit}}},
+	}
+	offBody, _, err := RenderCodex(codexModels, models, CodexRenderConfig{
+		ModelAliases: map[string]string{alias: source},
+	})
+	if err != nil {
+		t.Fatalf("RenderCodex overlay off: %v", err)
+	}
+	offAlias := decodeRenderedCodex(t, offBody)[1]
+	assertRawFieldEqual(t, alias, "context_window", offAlias["context_window"], sourceEntry["context_window"])
+	assertRawFieldEqual(t, alias, "max_context_window", offAlias["max_context_window"], sourceEntry["max_context_window"])
+
+	onBody, _, err := RenderCodex(codexModels, models, CodexRenderConfig{
+		ModelAliases:   map[string]string{alias: source},
+		OverrideLimits: true,
+	})
+	if err != nil {
+		t.Fatalf("RenderCodex overlay on: %v", err)
+	}
+	onAlias := decodeRenderedCodex(t, onBody)[1]
+	if _, ok := onAlias["auto_review_model_override"]; ok {
+		t.Error("alias retained its metadata source reviewer")
+	}
+	assertJSONInt(t, onAlias, "context_window", aliasPromptLimit)
+	assertRawFieldEqual(t, alias, "max_context_window", onAlias["max_context_window"], sourceEntry["max_context_window"])
 }
 
 func TestRenderCodexCopiesCurrentFieldsVerbatimAndDoesNotAliasThem(t *testing.T) {
