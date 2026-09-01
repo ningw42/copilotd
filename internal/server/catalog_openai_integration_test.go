@@ -20,6 +20,7 @@ import (
 	"github.com/ningw42/copilotd/internal/config"
 	"github.com/ningw42/copilotd/internal/forward"
 	"github.com/ningw42/copilotd/internal/identity"
+	"github.com/ningw42/copilotd/internal/logging"
 )
 
 func testCodexDescriptor(cfg config.ServeConfig) catalog.CodexDescriptor {
@@ -208,7 +209,11 @@ func TestCodexCatalogAliasWarningsOverRealListener(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	logger, logs := bufferLogger(t, "info")
+	logs := &synchronizedLogBuffer{}
+	logger, err := logging.NewWithWriter(logs, config.ServeConfig{LogLevel: "info", LogFormat: "text"})
+	if err != nil {
+		t.Fatalf("build logger: %v", err)
+	}
 	cfg := testConfig()
 	cfg.CodexCatalogEnabled = true
 	cfg.CodexCatalogModelAliases = map[string]string{
