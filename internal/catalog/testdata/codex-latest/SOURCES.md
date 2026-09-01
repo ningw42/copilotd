@@ -183,16 +183,19 @@ catalog contains both reviewer slugs, each with complete metadata; both are
 
 ## Executable client check
 
-`TestLatestCodexBinaryAcceptsUnknownRemoteCatalogModel` and
+`TestLatestCodexBinaryAcceptsUnknownRemoteCatalogModel`,
+`TestLatestCodexBinaryReplacesBundledRemoteCatalogModel`, and
 `TestLatestCodexBinaryKeepsBundledSourceAheadOfMatchingAlias` are opt-in
 black-box checks. With `CODEX_CATALOG_AUDIT_BINARY` pointing at the pinned
 executable, they run Codex against isolated local command-auth providers. The
 first asserts the real request's `client_version`, bearer/default headers,
 unknown-slug `ModelsResponse` acceptance, picker selection, and unchanged
-Responses model. The second returns only an unknown alias cloned from the
-untouched bundled default source and asserts that equal display, priority, and
-visibility leave the bundled source selected. The audit ran them against the
-official
+Responses model. The second retains the original audit of wholesale in-place
+replacement for a known bundled slug. The third returns only an unknown alias
+cloned from the untouched bundled default source; it asserts that equal display,
+priority, and visibility leave the bundled source selected, then explicitly
+selects the alias and observes it on `/responses` as an independent merge
+witness. The audit ran them against the official
 [`codex-x86_64-unknown-linux-musl.zst`][codex-binary] asset after verifying
 SHA-256
 `4041e6a1b600a20420505984ecc534d56d9c10fddcdeaf03736b22a0b3308c1a`;

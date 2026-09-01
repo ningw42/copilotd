@@ -51,8 +51,23 @@ func TestLatestCodexBinaryAcceptsUnknownRemoteCatalogModel(t *testing.T) {
 	}
 }
 
+func TestLatestCodexBinaryReplacesBundledRemoteCatalogModel(t *testing.T) {
+	observed := observeLatestCodexBinaryCatalog(t, replacedBundledDefaultModel(t))
+
+	if observed.modelsCalls == 0 {
+		t.Fatalf("Codex did not fetch the command-auth model catalog:\n%s", observed.output)
+	}
+	if observed.responsesCalls == 0 {
+		t.Fatalf("Codex did not make a Responses request after catalog merge:\n%s", observed.output)
+	}
+	if observed.selectedModel != "gpt-5.4" {
+		t.Errorf("selected model = %q, want remotely replaced bundled model gpt-5.4", observed.selectedModel)
+	}
+}
+
 func TestLatestCodexBinaryKeepsBundledSourceAheadOfMatchingAlias(t *testing.T) {
-	observed := observeLatestCodexBinaryCatalog(t, matchingRemoteAliasAndSource(t))
+	modelsBody := matchingRemoteAliasAndSource(t)
+	observed := observeLatestCodexBinaryCatalog(t, modelsBody)
 
 	if observed.modelsCalls == 0 {
 		t.Fatalf("Codex did not fetch the command-auth model catalog:\n%s", observed.output)
@@ -62,6 +77,15 @@ func TestLatestCodexBinaryKeepsBundledSourceAheadOfMatchingAlias(t *testing.T) {
 	}
 	if observed.selectedModel != "gpt-5.6-sol" {
 		t.Errorf("selected model = %q, want untouched bundled source gpt-5.6-sol ahead of metadata-matching alias", observed.selectedModel)
+	}
+
+	const alias = "gpt-5.6-sol-audit-alias"
+	aliasObserved := observeLatestCodexBinaryCatalogWithModel(t, modelsBody, alias)
+	if aliasObserved.responsesCalls == 0 {
+		t.Fatalf("Codex did not make a Responses request with the accepted alias:\n%s", aliasObserved.output)
+	}
+	if aliasObserved.selectedModel != alias {
+		t.Errorf("explicitly selected model = %q, want accepted remote alias %q", aliasObserved.selectedModel, alias)
 	}
 }
 
@@ -79,6 +103,11 @@ type codexCatalogObservation struct {
 }
 
 func observeLatestCodexBinaryCatalog(t *testing.T, modelsBody []byte) codexCatalogObservation {
+	t.Helper()
+	return observeLatestCodexBinaryCatalogWithModel(t, modelsBody, "")
+}
+
+func observeLatestCodexBinaryCatalogWithModel(t *testing.T, modelsBody []byte, model string) codexCatalogObservation {
 	t.Helper()
 	binary := os.Getenv("CODEX_CATALOG_AUDIT_BINARY")
 	if binary == "" {
@@ -143,7 +172,12 @@ args = ["catalog-audit-token"]
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, binary, "exec", "--skip-git-repo-check", "--json", "return one short word")
+	args := []string{"exec", "--skip-git-repo-check", "--json"}
+	if model != "" {
+		args = append(args, "--model", model)
+	}
+	args = append(args, "return one short word")
+	cmd := exec.CommandContext(ctx, binary, args...)
 	cmd.Dir = t.TempDir()
 	cmd.Env = append(os.Environ(), "CODEX_HOME="+codexHome)
 	var output bytes.Buffer
@@ -184,6 +218,14 @@ func requireLatestCodexBinary(t *testing.T, binary string) {
 	if got := strings.TrimSpace(string(output)); got != "codex-cli 0.151.0" {
 		t.Fatalf("Codex version = %q, want codex-cli 0.151.0", got)
 	}
+}
+
+func replacedBundledDefaultModel(t *testing.T) []byte {
+	t.Helper()
+	model := latestCodexModel(t, "gpt-5.4")
+	model["priority"] = json.RawMessage("0")
+	model["visibility"] = json.RawMessage(`"list"`)
+	return marshalRemoteModels(t, model)
 }
 
 func matchingRemoteAliasAndSource(t *testing.T) []byte {
