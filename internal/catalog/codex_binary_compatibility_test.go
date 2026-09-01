@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -80,12 +81,23 @@ func TestLatestCodexBinaryKeepsBundledSourceAheadOfMatchingAlias(t *testing.T) {
 	}
 
 	const alias = "gpt-5.6-sol-audit-alias"
+	withoutAlias := observeLatestCodexBinaryCatalogWithModel(t, []byte(`{"models":[]}`), alias)
+	if withoutAlias.responsesCalls == 0 || withoutAlias.selectedModel != alias {
+		t.Fatalf("negative control changed: Codex no longer forwards arbitrary explicit model %q without a catalog entry:\n%s", alias, withoutAlias.output)
+	}
+	if slices.Contains(withoutAlias.listedModels, alias) {
+		t.Fatalf("empty remote catalog unexpectedly listed alias %q", alias)
+	}
+
 	aliasObserved := observeLatestCodexBinaryCatalogWithModel(t, modelsBody, alias)
 	if aliasObserved.responsesCalls == 0 {
 		t.Fatalf("Codex did not make a Responses request with the accepted alias:\n%s", aliasObserved.output)
 	}
 	if aliasObserved.selectedModel != alias {
 		t.Errorf("explicitly selected model = %q, want accepted remote alias %q", aliasObserved.selectedModel, alias)
+	}
+	if !slices.Contains(aliasObserved.listedModels, alias) {
+		t.Errorf("merged model list %q does not contain accepted alias %q", aliasObserved.listedModels, alias)
 	}
 }
 
@@ -99,6 +111,7 @@ type codexCatalogObservation struct {
 	originator      string
 	userAgent       string
 	selectedModel   string
+	listedModels    []string
 	output          string
 }
 
@@ -188,11 +201,100 @@ args = ["catalog-audit-token"]
 		t.Fatalf("Codex audit timed out: %v\n%s", ctx.Err(), output.String())
 	}
 
+	var listedModels []string
+	if model != "" {
+		listedModels = listLatestCodexBinaryModels(t, binary, codexHome)
+	}
 	mu.Lock()
+	got.listedModels = listedModels
 	got.output = output.String()
 	observed := got
 	mu.Unlock()
 	return observed
+}
+
+func listLatestCodexBinaryModels(t *testing.T, binary, codexHome string) []string {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, binary, "app-server", "--listen", "stdio://")
+	cmd.Dir = t.TempDir()
+	cmd.Env = append(os.Environ(), "CODEX_HOME="+codexHome)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatalf("open Codex app-server stdin: %v", err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatalf("open Codex app-server stdout: %v", err)
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start Codex app-server: %v", err)
+	}
+	defer func() {
+		_ = stdin.Close()
+		cancel()
+		_ = cmd.Wait()
+	}()
+
+	encoder := json.NewEncoder(stdin)
+	decoder := json.NewDecoder(stdout)
+	if err := encoder.Encode(map[string]any{
+		"id": 1, "method": "initialize",
+		"params": map[string]any{
+			"clientInfo": map[string]string{"name": "catalog-audit", "version": "1"},
+		},
+	}); err != nil {
+		t.Fatalf("initialize Codex app-server: %v", err)
+	}
+	readCodexAppServerResult(t, decoder, 1, &stderr)
+	if err := encoder.Encode(map[string]any{"method": "initialized"}); err != nil {
+		t.Fatalf("notify initialized Codex app-server: %v", err)
+	}
+	if err := encoder.Encode(map[string]any{
+		"id": 2, "method": "model/list",
+		"params": map[string]any{"includeHidden": true, "limit": 100},
+	}); err != nil {
+		t.Fatalf("list Codex app-server models: %v", err)
+	}
+	result := readCodexAppServerResult(t, decoder, 2, &stderr)
+	var response struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(result, &response); err != nil {
+		t.Fatalf("decode Codex app-server model list: %v: %s", err, result)
+	}
+	models := make([]string, len(response.Data))
+	for i, model := range response.Data {
+		models[i] = model.ID
+	}
+	return models
+}
+
+func readCodexAppServerResult(t *testing.T, decoder *json.Decoder, wantID int, stderr *bytes.Buffer) json.RawMessage {
+	t.Helper()
+	for {
+		var message struct {
+			ID     json.RawMessage `json:"id"`
+			Result json.RawMessage `json:"result"`
+			Error  json.RawMessage `json:"error"`
+		}
+		if err := decoder.Decode(&message); err != nil {
+			t.Fatalf("read Codex app-server response %d: %v: %s", wantID, err, stderr.String())
+		}
+		var id int
+		if json.Unmarshal(message.ID, &id) != nil || id != wantID {
+			continue
+		}
+		if len(message.Error) > 0 && !bytes.Equal(message.Error, []byte("null")) {
+			t.Fatalf("Codex app-server response %d error: %s", wantID, message.Error)
+		}
+		return message.Result
+	}
 }
 
 func requireLatestCodexBinary(t *testing.T, binary string) {
