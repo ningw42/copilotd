@@ -113,8 +113,9 @@ fields.
   the metadata source.
 - Widening Codex-shape negotiation so a non-empty alias map is independently
   "something to inject."
-- Deterministic skip reporting for configured aliases that cannot be emitted,
-  using ADR-0015's governed logging keys.
+- Deterministic reporting for configured mappings that are not applied — whether
+  because the alias is absent, shadowed by an exact official entry, or missing
+  its source — using ADR-0015's governed logging keys.
 - Configuration, pure-renderer, handler, server-boundary, compatibility, and
   regression tests.
 - Updates to the configuration reference, domain glossary, ADR-0005 fidelity
@@ -152,11 +153,12 @@ fields.
 | Metadata authority | Clone one complete accepted official entry | Preserves Codex's full `ModelInfo` contract without synthesizing missing fields. |
 | Source forwardability | Not required | The source supplies metadata only; requiring it in Copilot would unnecessarily couple metadata availability to inference routing. |
 | Resolution | Exact and single-hop | Keeps behavior auditable and prevents a configuration graph, cycles, or accidental transitive changes. |
-| Official collision | Exact official alias entry wins | Codex becomes authoritative as soon as it publishes first-party metadata for that slug. |
+| Official collision | Exact official alias entry wins, and the unapplied mapping is reported at Warn | Codex becomes authoritative as soon as it publishes first-party metadata for that slug. The operator's asserted metadata has been superseded, so the mapping is dead configuration the operator should see and delete. |
 | Rendering order | Resolve entries and complete `emitted` membership, then apply reviewer and limit mutations | Reviewer safety depends on knowing every resolvable alias; this order permits alias self-review and alias reviewers. |
 | Wire order | Preserve live Copilot order | The alias is a real Copilot model, so it occupies its existing live catalog position. |
 | Picker metadata | Mirror `display_name`, `priority`, and `visibility` | Complete-source fidelity wins over distinguishable labels or controlled ranking; duplicate labels and default-selection changes under client/catalog skew are documented operator hazards (§5.3, §9.2). |
-| Missing alias/source | Omit only that alias and report a skip | A stale mapping must not fabricate metadata or fail the otherwise valid catalog. |
+| Missing alias/source | Omit only that alias and report an unapplied mapping | A stale mapping must not fabricate metadata or fail the otherwise valid catalog. |
+| Reporting level | Every unapplied mapping is a Warn, at one uniform cardinality | A configured mapping that does not take effect is one condition with one operator remedy — edit configuration. Splitting it across levels by cause would make the vocabulary harder to reason about than the noise it saves. |
 | Empty aliases map | Exact current behavior | The feature is opt-in and introduces no output change at its zero value. |
 | Cached value | Keep exact official bytes; synthesize per render | Preserves ADR-0009 hashes, provenance, refresh ladder, and last-good semantics while retaining live Copilot gating. |
 
@@ -206,8 +208,9 @@ The descriptor should follow the existing
   `alias == source`. A self-map is locally detectable, never useful, and
   unambiguously signals operator confusion. By contrast, a non-self mapping
   shadowed by an exact official entry may have been valid when written and only
-  become redundant after a later Codex release, so shadowing is tolerated at
-  render time (§7.2).
+  become redundant after a later Codex release, so shadowing is not a startup
+  error. It is instead detected and reported at render time, where the official
+  catalog is actually known (§7.2).
 - Match slugs verbatim and case-sensitively; perform no normalization.
 - Parse every supplied flag, environment, and TOML layer eagerly. A malformed
   lower-precedence layer remains an error even if a higher-precedence layer is
@@ -276,6 +279,7 @@ else:
 An exact official entry always wins, even when `ModelAliases[M.ID]` is present.
 This makes a configured mapping automatically redundant when Codex gains
 first-party metadata, without pinning older cloned behavior over the new entry.
+The now-inert mapping is reported so the operator can remove it (§7.2).
 
 The source lookup is directly against `codexModels`. Given:
 
@@ -298,17 +302,25 @@ architecture.
 **Pass 1 — validate configured aliases and resolve membership**
 
 1. Index `forwardable` by live model ID.
-2. Walk configured aliases in alias-sorted order. Record
-   `alias_not_forwardable` for each alias absent from that index; a loop over
-   `forwardable` alone cannot observe this case.
+2. Walk configured aliases in alias-sorted order and record at most one
+   unapplied-mapping outcome for each, in this precedence:
+   `alias_not_forwardable` when the alias is absent from that index — a loop
+   over `forwardable` alone cannot observe this case; otherwise
+   `shadowed_by_official` when `codexModels` already carries the alias as an
+   exact entry, because first-party metadata supersedes the mapping.
 3. Walk `forwardable` in live order. Resolve an exact official entry first,
    otherwise resolve the configured source directly from `codexModels`; record
    `metadata_source_missing` when a live alias has no accepted source.
 4. Build the complete `emitted` set from each successfully resolved **served
    slug**, including aliases, and retain the source used by each served slug.
 
-Alias skips are sorted by alias after both skip paths are collected. Wire
-membership and later reviewer skips continue to follow live Copilot order.
+The three reasons are mutually exclusive by construction: a non-forwardable
+alias never reaches step 3, and step 3 consults a configured source only when no
+exact official entry exists. Every configured mapping therefore yields exactly
+zero or one outcome.
+
+Unapplied-mapping outcomes are sorted by alias after every path is collected.
+Wire membership and later reviewer skips continue to follow live Copilot order.
 
 **Pass 2 — clone and mutate**
 
@@ -326,9 +338,11 @@ In pseudocode:
 
 ```go
 forwardableByID := indexForwardable(forwardable)
-aliasSkips := findUnforwardableAliases(sortedAliases(cfg.ModelAliases), forwardableByID)
-resolved, emitted, sourceSkips := resolveCodexEntries(codexModels, forwardable, cfg.ModelAliases)
-outcome.SkippedAliases = sortAliasSkips(aliasSkips, sourceSkips)
+sorted := sortedAliases(cfg.ModelAliases)
+mappingIssues := classifyAliasMappings(sorted, forwardableByID, codexModels)
+resolved, emitted, sourceIssues := resolveCodexEntries(
+    codexModels, forwardable, cfg.ModelAliases)
+outcome.UnappliedAliases = sortByAlias(mappingIssues, sourceIssues)
 
 for _, model := range forwardable {
     source, ok := resolved[model.ID]
@@ -452,7 +466,12 @@ A deployment using aliases alone therefore receives the Codex-shaped
 - raw GitHub Copilot `/models` -> raw passthrough; and
 - inference requests -> unchanged forwarding.
 
-HEAD behavior is preserved when `ModelAliases` is empty.
+HEAD behavior is preserved when `ModelAliases` is empty. When the map is
+non-empty, HEAD keeps its existing contract rather than acquiring a new one: the
+handler renders the same alias-inclusive representation it would return for GET,
+reports that representation's length in `Content-Length`, and suppresses only the
+body. The header therefore tracks the emitted catalog automatically, and no
+separate aliased-HEAD policy exists to implement or test.
 
 ## 7. Failure and collision policy
 
@@ -462,64 +481,92 @@ Configuration resolution fails before binding for malformed syntax, empty
 values, duplicate aliases, and self-mappings. These failures are independent of
 live catalog state and belong in `internal/config`.
 
-### 7.2 Request-time skips
+### 7.2 Request-time unapplied mappings
 
 Live and cached catalog facts cannot be validated at startup. A syntactically
-valid mapping is skipped without failing the catalog when:
+valid mapping is **not applied** — without failing the catalog — when:
 
-- the alias is absent from the live Copilot-forwardable set; or
-- the metadata source is absent from the current accepted Codex model map.
+- the alias is absent from the live Copilot-forwardable set
+  (`alias_not_forwardable`);
+- the alias already has an exact entry in the current accepted Codex model map,
+  so first-party metadata supersedes it (`shadowed_by_official`); or
+- the metadata source is absent from the current accepted Codex model map
+  (`metadata_source_missing`).
 
-`CodexRenderOutcome` should report deterministic alias skip events so the handler
-can warn with the alias, source, and reason. One bad mapping omits only that
-alias; other exact and aliased entries still render. Alias skips are ordered by
+`CodexRenderOutcome` should report these deterministically so the handler can
+warn with the alias, source, and reason. One bad mapping affects only that
+mapping; other exact and aliased entries still render. Outcomes are ordered by
 alias slug because they originate partly from configuration-map entries that
 have no live position; existing `SkippedReviewers` remain in live Copilot order.
 The two sibling slices therefore have different, explicit deterministic
 orderings.
 
-A mapping shadowed by a new exact official entry is not an error. The renderer
-uses the official entry and may report the redundant mapping at info/debug level;
-it must not warn or alter the official metadata through alias cloning. Reviewer
-and live-limit mutations still apply normally to that served slug.
+The reason vocabulary names why the **configured mapping** was not applied, not
+whether a slug reached the wire. Under `shadowed_by_official` the alias slug is
+still served — from Codex's own entry — while the mapping that named it is inert.
+`alias_not_forwardable` and `metadata_source_missing` omit the alias entirely;
+all three mean the same thing to the operator, which is that a configured line
+had no effect.
 
-This design deliberately chooses visibility over silent inertness for a missing
-live alias: the configuration exists specifically to advertise that slug, and a
-Warn record explains entitlement or lineup drift as a contained abnormality.
-The warning is emitted once per skipped mapping on every Codex catalog request.
+A shadowed mapping is not an error and never alters the official metadata
+through alias cloning. Reviewer and live-limit mutations apply normally to that
+served slug, exactly as they would for any exact entry.
+
+This design deliberately chooses visibility over silent inertness for every
+unapplied mapping: the configuration exists specifically to make that slug
+resolve a particular way, and a Warn record explains entitlement drift, lineup
+drift, or Codex catalog evolution as a contained abnormality. Shadowing warns at
+the same level as the other two reasons rather than at info/debug, because all
+three describe one condition with one operator remedy — edit the configuration —
+and a level split by cause would cost more comprehension than the noise it saves.
+The operator consequence of shadowing is also not merely cosmetic: the metadata
+Codex now serves for that slug is first-party and may differ behaviorally from
+the source the operator asserted was compatible.
+
+Shadowing is the one reason that never clears on its own; it persists until the
+operator deletes the mapping. That permanence is accepted deliberately as the
+price of one uniform rule.
+
+The warning is emitted once per unapplied mapping on every Codex catalog request.
 The pinned client is observed to fetch the catalog at session start rather than
 per turn, so practical cardinality is closer to sessions than inference turns;
 that cadence is an observed compatibility fact, not a contract. Deliberate
 staging and entitlement drift are indistinguishable to the renderer.
 Process-wide deduplication is rejected because mutable cross-request state would
-cost more than the bounded noise and compromise the pure render seam. Existing
+cost more than the noise and compromise the pure render seam. That trade is
+least comfortable for `shadowed_by_official`, whose condition is permanent — but
+per-request repetition is precisely the pressure that gets a dead mapping
+deleted, and the remedy is a one-line configuration edit. Existing
 unconfigured Copilot-only models remain silently absent as today.
 
 A possible outcome shape is:
 
 ```go
-type SkippedCatalogAlias struct {
+type UnappliedCatalogAlias struct {
     Alias  string
     Source string
     Reason CatalogAliasSkipReason
 }
 
 type CodexRenderOutcome struct {
-    SkippedAliases   []SkippedCatalogAlias
+    UnappliedAliases []UnappliedCatalogAlias
     SkippedReviewers []SkippedReviewer
 }
 ```
 
-The exact private/exported split is an implementation detail. The interface must
-let the handler distinguish `alias_not_forwardable` from
-`metadata_source_missing` without parsing an error string. The handler logs the
-alias with `logging.ModelKey`, the source with a new
-`logging.MetadataSourceKey = "metadata_source"`, and the reason with a new
-`logging.SkipReasonKey = "skip_reason"`. `SkipReasonKey` is intentionally
-distinct from `FailureClassKey`: alias omission is a successful-render skip, not
-a request failure. Existing reviewer-skip warnings retain only `model` and
-`reviewer` because they have one reason—an unemitted reviewer—and need no reason
-vocabulary.
+The exact private/exported split and the final Go names are implementation
+details, but the type should not be called "skipped": under
+`shadowed_by_official` the slug is served and only the mapping is inert. The
+interface must let the handler distinguish `alias_not_forwardable`,
+`shadowed_by_official`, and `metadata_source_missing` without parsing an error
+string. The handler logs the alias with `logging.ModelKey`, the source with a
+new `logging.MetadataSourceKey = "metadata_source"`, and the reason with a new
+`logging.SkipReasonKey = "skip_reason"`. The wire key stays `skip_reason`
+because what was skipped is the mapping. `SkipReasonKey` is intentionally
+distinct from `FailureClassKey`: an unapplied mapping is a successful-render
+outcome, not a request failure. Existing reviewer-skip warnings retain only
+`model` and `reviewer` because they have one reason—an unemitted reviewer—and
+need no reason vocabulary.
 
 ### 7.3 Catalog-level errors
 
@@ -545,7 +592,7 @@ internal/config/config.go
 
 internal/catalog/handler.go
     aliases-only Codex-shape gate
-    turn alias skip outcomes into structured logs
+    turn unapplied alias-mapping outcomes into structured logs
 
 internal/catalog/codex_render.go
     resolve exact entries and alias sources
@@ -683,18 +730,25 @@ unnecessary because the alias is already the ID Copilot accepts.
 ### 11.2 Pure renderer
 
 - A live Copilot alias clones its official source; every raw field is
-  byte-identical except `slug` and any separately enabled reviewer/limit
-  mutations.
+  byte-identical except `slug`, the inherited `auto_review_model_override`, and
+  any separately enabled limit mutations. The inherited reviewer field is
+  deleted unconditionally (§5.2 Pass 2 step 3, §5.4), so a source carrying that
+  field differs from its clone even when no reviewer is configured.
 - The source may be absent from the live Copilot set and still supply metadata.
-- An alias absent from the live forwardable set is omitted and reported.
-- A live alias with a missing official source is omitted and reported.
-- A future exact official alias entry wins over a configured mapping and remains
-  byte-identical to that official entry apart from ordinary reviewer/limit
-  mutations.
+- An alias absent from the live forwardable set is omitted and reported
+  `alias_not_forwardable`.
+- A live alias with a missing official source is omitted and reported
+  `metadata_source_missing`.
+- An alias with an exact official entry is served from that official entry,
+  byte-identical to it apart from ordinary reviewer/limit mutations, and
+  reported `shadowed_by_official`.
+- A configured mapping produces at most one outcome, and an alias that is both
+  non-forwardable and shadowed reports `alias_not_forwardable` only.
 - Resolution is single-hop and never follows another configured alias.
 - Emission order remains the live Copilot order regardless of map insertion
   order.
-- Skip outcomes remain deterministic regardless of map insertion order.
+- Unapplied-mapping outcomes remain deterministic regardless of map insertion
+  order.
 - An alias-only configuration leaves unrelated exact entries unchanged.
 - An empty alias map reproduces current bytes and outcomes.
 
@@ -724,13 +778,18 @@ unnecessary because the alias is already the ID Copilot accepts.
 - Enabled catalog + `client_version` + aliases only serves the Codex shape.
 - Disabled catalog, missing `client_version`, and an empty mutations set preserve
   provider-shaped behavior.
-- Alias skip warnings use governed `model`, `metadata_source`, and `skip_reason`
+- Alias warnings use governed `model`, `metadata_source`, and `skip_reason`
   keys; the logging registry's two-way inventory includes both new constants.
-- Skip reasons are `alias_not_forwardable` and `metadata_source_missing`;
-  reviewer skips remain unchanged without a `skip_reason`.
-- Warning cardinality is one record per skipped mapping per Codex catalog
+- Skip reasons are `alias_not_forwardable`, `shadowed_by_official`, and
+  `metadata_source_missing`; reviewer skips remain unchanged without a
+  `skip_reason`.
+- Warning cardinality is one record per unapplied mapping per Codex catalog
   request, with no process-wide deduplication.
-- Exact-official collision does not produce a warning.
+- An exact-official collision warns with `shadowed_by_official` while still
+  serving the official entry unaltered, with ordinary reviewer and limit
+  mutations applied.
+- A configured mapping yields at most one outcome; a non-forwardable alias that
+  also has an exact official entry reports `alias_not_forwardable` only.
 - Provider-shaped OpenAI, Anthropic, and raw `/models` responses are unchanged.
 - A direct `/responses` request using the alias reaches the Copilot stub with the
   same model ID, proving no inference rewrite was introduced.
@@ -771,8 +830,10 @@ Implementation updates:
    ADR-0005, or make that reconciliation an explicit tracked blocker.
 5. Release notes: call out the dependency on live Copilot picker visibility and
    Responses forwardability, duplicate alias/source picker labels, possible
-   default-model changes under client/catalog skew, and per-catalog-request skip
-   warnings.
+   default-model changes under client/catalog skew, and per-catalog-request
+   warnings for every unapplied mapping — including the `shadowed_by_official`
+   warning that persists until the operator removes a mapping Codex has
+   superseded.
 
 No migration is needed. The default map is empty, so existing configurations and
 wire output remain unchanged. Operators enable the feature by adding the map to
@@ -808,21 +869,26 @@ The implementation is complete when all of the following hold:
 2. A configured alias is emitted only when its slug is live Copilot
    picker-visible/Responses-forwardable and its source exists in the accepted
    official Codex map.
-3. An alias entry is a complete clone of its source. Only `slug`, configured
+3. An alias entry is a complete clone of its source. Only `slug`, the
+   unconditionally removed inherited `auto_review_model_override`, configured
    reviewer routing, and opt-in live limits may differ.
-4. Exact official metadata wins if Codex later adds the alias slug.
+4. Exact official metadata wins if Codex later adds the alias slug, and the
+   superseded mapping is reported as `shadowed_by_official` without altering
+   that official entry.
 5. Complete alias membership is built before reviewer injection; per-main-model
    overrides are keyed by the served alias and an emitted alias can review
    itself.
 6. Live-limit overlays use the alias's Copilot facts, with the existing
    independent official fallback for missing fields.
-7. Alias output preserves live Copilot order; alias skips are alias-sorted,
-   reviewer skips retain live order, and normalized config logging is
-   deterministic.
-8. Missing live aliases or official sources omit only the affected alias and
-   produce governed `model` / `metadata_source` / `skip_reason` Warn
-   observability once per skipped mapping per catalog request, without
-   cross-request deduplication; malformed local syntax remains a startup error.
+7. Alias output preserves live Copilot order; unapplied-mapping outcomes are
+   alias-sorted, reviewer skips retain live order, and normalized config logging
+   is deterministic.
+8. Every unapplied mapping — missing live alias, shadowed by an exact official
+   entry, or missing official source — produces governed `model` /
+   `metadata_source` / `skip_reason` Warn observability once per mapping per
+   catalog request at one uniform level, without cross-request deduplication.
+   The first and third omit only the affected alias; the second omits nothing.
+   Malformed local syntax remains a startup error.
 9. Aliases alone activate the enabled, `client_version`-negotiated Codex shape;
    all other catalog and inference paths retain current behavior.
 10. The official cached bytes, refresh ladder, forwarder, WebSocket forwarder,
