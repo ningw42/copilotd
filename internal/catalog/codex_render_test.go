@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/ningw42/copilotd/internal/endpoint"
@@ -81,6 +82,22 @@ func TestRenderCodexClonesOfficialMetadataForLiveAlias(t *testing.T) {
 	}
 	if _, ok := aliased["auto_review_model_override"]; ok {
 		t.Error("alias retained the metadata source reviewer")
+	}
+}
+
+func TestRenderCodexRejectsInvalidRawMetadataSourceField(t *testing.T) {
+	const alias = "gpt-invalid-raw-alias"
+	codexModels := CodexModels{
+		"gpt-source": {
+			"slug":   json.RawMessage(`"gpt-source"`),
+			"future": json.RawMessage(`{`),
+		},
+	}
+	_, _, err := RenderCodex(codexModels, []Model{{ID: alias}}, CodexRenderConfig{
+		ModelAliases: map[string]string{alias: "gpt-source"},
+	})
+	if err == nil || !strings.Contains(err.Error(), `Codex field "future" contains invalid JSON`) {
+		t.Fatalf("RenderCodex error = %v, want invalid raw source field rejected", err)
 	}
 }
 

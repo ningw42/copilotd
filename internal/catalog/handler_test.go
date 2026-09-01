@@ -422,6 +422,53 @@ func TestHandlerRendersAliasFromCurrentAndFallbackCodexModels(t *testing.T) {
 	}
 }
 
+func TestHandlerAliasFailuresRemainOpenAIBadGateway(t *testing.T) {
+	const alias = "gpt-error-alias"
+	validUpstream := []byte(`{"data":[{"id":"` + alias + `","vendor":"OpenAI","model_picker_enabled":true,"supported_endpoints":["/responses"]}]}`)
+	invalidCurrent := cache.New(discardHandlerLogger(), cache.Cacheable[[]byte]{
+		Fallback:        []byte(`{"models":[`),
+		FallbackVersion: "invalid",
+		TTL:             0,
+		Fetch: func(context.Context) ([]byte, string, error) {
+			return nil, "", errors.New("unused")
+		},
+		Hash: hashModels,
+	})
+
+	tests := []struct {
+		name         string
+		upstreamBody []byte
+		models       *cache.Value[[]byte]
+		wantMessage  string
+	}{
+		{name: "invalid live Copilot JSON", upstreamBody: []byte(`{"data":[`), wantMessage: "upstream models response was invalid"},
+		{name: "invalid current Codex bytes", upstreamBody: validUpstream, models: invalidCurrent, wantMessage: "could not render the models catalog"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			handler := Handler(discardHandlerLogger(), endpoint.OpenAICatalog(), Rendering{
+				Render: RenderOpenAI,
+				Codex: CodexDescriptor{
+					Enabled: true,
+					Models:  tc.models,
+					RenderConfig: CodexRenderConfig{
+						ModelAliases: map[string]string{alias: "gpt-5.4"},
+					},
+				},
+			}, stubSource{status: http.StatusOK, body: tc.upstreamBody})
+			recorder := httptest.NewRecorder()
+			handler(recorder, httptest.NewRequest(http.MethodGet, "/openai/v1/models?client_version=0.151.0", nil))
+
+			if recorder.Code != http.StatusBadGateway {
+				t.Fatalf("status = %d, want 502: %s", recorder.Code, recorder.Body.String())
+			}
+			if !strings.Contains(recorder.Body.String(), `"type":"api_error"`) || !strings.Contains(recorder.Body.String(), tc.wantMessage) {
+				t.Errorf("body = %s, want OpenAI api_error containing %q", recorder.Body.String(), tc.wantMessage)
+			}
+		})
+	}
+}
+
 func testCodexModelsValue(t *testing.T, current []byte, fetchErr error) *cache.Value[[]byte] {
 	t.Helper()
 	modelsValue := cache.New(discardHandlerLogger(), cache.Cacheable[[]byte]{

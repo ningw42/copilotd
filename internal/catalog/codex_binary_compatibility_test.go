@@ -60,8 +60,8 @@ func TestLatestCodexBinaryKeepsBundledSourceAheadOfMatchingAlias(t *testing.T) {
 	if observed.responsesCalls == 0 {
 		t.Fatalf("Codex did not make a Responses request after catalog merge:\n%s", observed.output)
 	}
-	if observed.selectedModel != "gpt-5.4" {
-		t.Errorf("selected model = %q, want bundled source gpt-5.4 ahead of metadata-matching alias", observed.selectedModel)
+	if observed.selectedModel != "gpt-5.6-sol" {
+		t.Errorf("selected model = %q, want untouched bundled source gpt-5.6-sol ahead of metadata-matching alias", observed.selectedModel)
 	}
 }
 
@@ -188,15 +188,13 @@ func requireLatestCodexBinary(t *testing.T, binary string) {
 
 func matchingRemoteAliasAndSource(t *testing.T) []byte {
 	t.Helper()
-	model := latestCodexModel(t, "gpt-5.4")
-	model["priority"] = json.RawMessage("0")
-	model["visibility"] = json.RawMessage(`"list"`)
-	alias := make(map[string]json.RawMessage, len(model))
-	for key, value := range model {
+	source := latestCodexModel(t, "gpt-5.6-sol")
+	alias := make(map[string]json.RawMessage, len(source))
+	for key, value := range source {
 		alias[key] = value
 	}
-	alias["slug"] = json.RawMessage(`"gpt-5.4-audit-alias"`)
-	return marshalRemoteModels(t, model, alias)
+	alias["slug"] = json.RawMessage(`"gpt-5.6-sol-audit-alias"`)
+	return marshalRemoteModels(t, alias)
 }
 
 func singleRemoteDefaultModel(t *testing.T) []byte {
