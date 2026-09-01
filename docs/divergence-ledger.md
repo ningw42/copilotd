@@ -29,7 +29,7 @@ single place the divergence is defined, and this row is a pointer to it.
 | Codex catalog live-limit overlay | [ADR-0005](adr/0005-codex-catalog-reemits-pinned-modelinfo.md) | Replaces accepted official `context_window` and `max_context_window` values, when available, with the served model's live Copilot limits. | `--codex-catalog-enabled` plus `--codex-catalog-override-limits` — **off by default** |
 | Explicit Codex catalog alias | [ADR-0005](adr/0005-codex-catalog-reemits-pinned-modelinfo.md) + [design](design/2026-09-01-codex-catalog-model-aliases-design.md) | Clones one complete accepted official Codex entry and replaces its `slug` with a configured real, live Copilot Responses model ID; inference forwards that alias unchanged. | `--codex-catalog-enabled` plus `--codex-catalog-model-aliases` — **off by default** |
 
-## Omission — dropping or coalescing upstream content
+## Omission — dropping or coalescing Copilot-forwarded content
 
 None for Copilot-forwarded content. The shim seam permits it (`emit=false`,
 coalesce-via-state), but no shipped divergence drops or coalesces forwarded
