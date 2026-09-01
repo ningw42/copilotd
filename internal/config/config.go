@@ -270,24 +270,6 @@ func stringMapField(name string, get func(*ServeConfig) *map[string]string, pars
 	}
 }
 
-func codexCatalogModelAliasesField() spec[ServeConfig] {
-	return stringMapField(
-		"codex-catalog-model-aliases",
-		func(c *ServeConfig) *map[string]string { return &c.CodexCatalogModelAliases },
-		parseCodexCatalogModelAliases,
-		"Codex catalog aliases (live-alias=metadata-source,...)",
-	)
-}
-
-func codexAutoReviewModelOverridesField() spec[ServeConfig] {
-	return stringMapField(
-		"codex-auto-review-model-overrides",
-		func(c *ServeConfig) *map[string]string { return &c.CodexAutoReviewModelOverrides },
-		parseAutoReviewModelOverrides,
-		"per-main-model reviewer overrides (main=reviewer,...)",
-	)
-}
-
 // serveSpecs declares every serve setting once, in registration order. Each
 // registered handle retains one instance for resolution; LogValue creates a
 // read-only view from this same declaration. The common rows remain first in
@@ -315,9 +297,9 @@ func serveSpecs() ([]spec[ServeConfig], *configPathField[ServeConfig]) {
 		boolField("shim-nop-enabled", defaultShimNopEnabled, func(c *ServeConfig) *bool { return &c.ShimNopEnabled }, "enable the canonical no-op shim"),
 		boolField("shim-responses-item-id-stabilizer-enabled", defaultShimResponsesItemIDStabilizerEnabled, func(c *ServeConfig) *bool { return &c.ShimResponsesItemIDStabilizerEnabled }, "stabilize churning OpenAI Responses item ids (opt-in)"),
 		boolField("codex-catalog-enabled", defaultCodexCatalogEnabled, func(c *ServeConfig) *bool { return &c.CodexCatalogEnabled }, "enable the Codex client-shaped catalog"),
-		codexCatalogModelAliasesField(),
+		stringMapField("codex-catalog-model-aliases", func(c *ServeConfig) *map[string]string { return &c.CodexCatalogModelAliases }, parseCodexCatalogModelAliases, "Codex catalog aliases (live-alias=metadata-source,...)"),
 		stringField("codex-auto-review-model", defaultCodexAutoReviewModel, func(c *ServeConfig) *string { return &c.CodexAutoReviewModel }, nil, "reviewer model injected into the Codex catalog"),
-		codexAutoReviewModelOverridesField(),
+		stringMapField("codex-auto-review-model-overrides", func(c *ServeConfig) *map[string]string { return &c.CodexAutoReviewModelOverrides }, parseAutoReviewModelOverrides, "per-main-model reviewer overrides (main=reviewer,...)"),
 		boolField("codex-catalog-override-limits", defaultCodexOverrideLimits, func(c *ServeConfig) *bool { return &c.CodexOverrideLimits }, "override Codex catalog limits with live Copilot limits"),
 		durationField("codex-catalog-refresh-interval", defaultCodexCatalogRefreshInterval, inHours, func(c *ServeConfig) *time.Duration { return &c.CodexCatalogRefreshInterval }, nonNegative, "Codex models.json refresh cadence (0 pins the embedded floor)"),
 		secretStringField("github-oauth-token", func(c *ServeConfig) *string { return &c.GithubOAuthToken }, nil, "inline GitHub OAuth token (secret; precedence over the GitHub OAuth token file)"),
@@ -377,10 +359,10 @@ func (f *ServeFlags) Resolve(lookupEnv func(string) (string, bool)) (ServeConfig
 }
 
 type stringMapSyntax struct {
-	setting string
-	pair    string
-	key     string
-	value   string
+	settingName string
+	pairForm    string
+	keyLabel    string
+	valueLabel  string
 }
 
 func parseStringMap(raw string, syntax stringMapSyntax, validatePair func(string, string) error) (map[string]string, error) {
@@ -395,18 +377,18 @@ func parseStringMap(raw string, syntax stringMapSyntax, validatePair func(string
 		}
 		pair := strings.SplitN(segment, "=", 2)
 		if len(pair) != 2 {
-			return nil, fmt.Errorf("invalid %s segment %q: expected %s", syntax.setting, segment, syntax.pair)
+			return nil, fmt.Errorf("invalid %s segment %q: expected %s", syntax.settingName, segment, syntax.pairForm)
 		}
 		key := strings.TrimSpace(pair[0])
 		value := strings.TrimSpace(pair[1])
 		if key == "" {
-			return nil, fmt.Errorf("invalid %s segment %q: %s is empty", syntax.setting, segment, syntax.key)
+			return nil, fmt.Errorf("invalid %s segment %q: %s is empty", syntax.settingName, segment, syntax.keyLabel)
 		}
 		if value == "" {
-			return nil, fmt.Errorf("invalid %s segment %q: %s is empty", syntax.setting, segment, syntax.value)
+			return nil, fmt.Errorf("invalid %s segment %q: %s is empty", syntax.settingName, segment, syntax.valueLabel)
 		}
 		if _, exists := values[key]; exists {
-			return nil, fmt.Errorf("invalid %s: duplicate %s %q", syntax.setting, syntax.key, key)
+			return nil, fmt.Errorf("invalid %s: duplicate %s %q", syntax.settingName, syntax.keyLabel, key)
 		}
 		if validatePair != nil {
 			if err := validatePair(key, value); err != nil {
@@ -424,10 +406,10 @@ func parseStringMap(raw string, syntax stringMapSyntax, validatePair func(string
 func parseCodexCatalogModelAliases(raw string) (map[string]string, error) {
 	const setting = "codex-catalog-model-aliases"
 	return parseStringMap(raw, stringMapSyntax{
-		setting: setting,
-		pair:    "alias=source",
-		key:     "alias",
-		value:   "metadata source",
+		settingName: setting,
+		pairForm:    "alias=source",
+		keyLabel:    "alias",
+		valueLabel:  "metadata source",
 	}, func(alias, source string) error {
 		if alias == source {
 			return fmt.Errorf("invalid %s: alias %q maps to itself", setting, alias)
@@ -438,10 +420,10 @@ func parseCodexCatalogModelAliases(raw string) (map[string]string, error) {
 
 func parseAutoReviewModelOverrides(raw string) (map[string]string, error) {
 	return parseStringMap(raw, stringMapSyntax{
-		setting: "codex-auto-review-model-overrides",
-		pair:    "main=reviewer",
-		key:     "main model",
-		value:   "reviewer model",
+		settingName: "codex-auto-review-model-overrides",
+		pairForm:    "main=reviewer",
+		keyLabel:    "main model",
+		valueLabel:  "reviewer model",
 	}, nil)
 }
 

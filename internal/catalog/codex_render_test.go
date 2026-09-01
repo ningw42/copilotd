@@ -120,8 +120,8 @@ func TestRenderCodexReportsAliasThatIsNotForwardable(t *testing.T) {
 	if got := renderedSlugs(t, decodeRenderedCodex(t, body)); !reflect.DeepEqual(got, []string{"gpt-5.4"}) {
 		t.Errorf("rendered slugs = %q, want unaffected exact entry", got)
 	}
-	want := []UnappliedCatalogAlias{{
-		Alias: alias, MetadataSource: "gpt-5.4-mini", Reason: CatalogAliasNotForwardable,
+	want := []UnappliedCodexAlias{{
+		Alias: alias, MetadataSource: "gpt-5.4-mini", Reason: CodexAliasNotForwardable,
 	}}
 	if !reflect.DeepEqual(outcome.UnappliedAliases, want) {
 		t.Errorf("unapplied aliases = %#v, want %#v", outcome.UnappliedAliases, want)
@@ -162,8 +162,8 @@ func TestRenderCodexOfficialEntryShadowsConfiguredAlias(t *testing.T) {
 	}
 	assertJSONInt(t, entries[0], "context_window", promptLimit)
 	assertJSONInt(t, entries[0], "max_context_window", contextLimit)
-	want := []UnappliedCatalogAlias{{
-		Alias: alias, MetadataSource: "gpt-5.5", Reason: CatalogAliasShadowedByOfficial,
+	want := []UnappliedCodexAlias{{
+		Alias: alias, MetadataSource: "gpt-5.5", Reason: CodexAliasShadowedByOfficial,
 	}}
 	if !reflect.DeepEqual(outcome.UnappliedAliases, want) {
 		t.Errorf("unapplied aliases = %#v, want %#v", outcome.UnappliedAliases, want)
@@ -189,8 +189,8 @@ func TestRenderCodexReportsMissingMetadataSourceAndContinues(t *testing.T) {
 	if got := renderedSlugs(t, decodeRenderedCodex(t, body)); !reflect.DeepEqual(got, wantSlugs) {
 		t.Errorf("rendered slugs = %q, want unaffected models %q", got, wantSlugs)
 	}
-	want := []UnappliedCatalogAlias{{
-		Alias: missingAlias, MetadataSource: "gpt-no-such-source", Reason: CatalogAliasMetadataSourceMissing,
+	want := []UnappliedCodexAlias{{
+		Alias: missingAlias, MetadataSource: "gpt-no-such-source", Reason: CodexAliasMetadataSourceMissing,
 	}}
 	if !reflect.DeepEqual(outcome.UnappliedAliases, want) {
 		t.Errorf("unapplied aliases = %#v, want %#v", outcome.UnappliedAliases, want)
@@ -205,8 +205,8 @@ func TestRenderCodexReportsEachConfiguredAliasAtMostOnce(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RenderCodex: %v", err)
 	}
-	want := []UnappliedCatalogAlias{{
-		Alias: alias, MetadataSource: "gpt-no-such-source", Reason: CatalogAliasMetadataSourceMissing,
+	want := []UnappliedCodexAlias{{
+		Alias: alias, MetadataSource: "gpt-no-such-source", Reason: CodexAliasMetadataSourceMissing,
 	}}
 	if !reflect.DeepEqual(outcome.UnappliedAliases, want) {
 		t.Errorf("unapplied aliases = %#v, want one outcome %#v", outcome.UnappliedAliases, want)
@@ -230,8 +230,8 @@ func TestRenderCodexAliasResolutionIsSingleHop(t *testing.T) {
 	if got := renderedSlugs(t, decodeRenderedCodex(t, body)); !reflect.DeepEqual(got, []string{secondAlias}) {
 		t.Errorf("rendered slugs = %q, want only directly resolvable alias", got)
 	}
-	want := []UnappliedCatalogAlias{{
-		Alias: firstAlias, MetadataSource: secondAlias, Reason: CatalogAliasMetadataSourceMissing,
+	want := []UnappliedCodexAlias{{
+		Alias: firstAlias, MetadataSource: secondAlias, Reason: CodexAliasMetadataSourceMissing,
 	}}
 	if !reflect.DeepEqual(outcome.UnappliedAliases, want) {
 		t.Errorf("unapplied aliases = %#v, want %#v", outcome.UnappliedAliases, want)
@@ -257,10 +257,10 @@ func TestRenderCodexUnappliedAliasReasonsAreExclusiveAndAliasSorted(t *testing.T
 	if got := renderedSlugs(t, decodeRenderedCodex(t, body)); !reflect.DeepEqual(got, []string{shadowed}) {
 		t.Errorf("rendered slugs = %q, want shadowed official entry only", got)
 	}
-	want := []UnappliedCatalogAlias{
-		{Alias: missingSource, MetadataSource: "gpt-no-such-source", Reason: CatalogAliasMetadataSourceMissing},
-		{Alias: notForwarded, MetadataSource: "gpt-5.6-sol", Reason: CatalogAliasNotForwardable},
-		{Alias: shadowed, MetadataSource: "gpt-5.4-mini", Reason: CatalogAliasShadowedByOfficial},
+	want := []UnappliedCodexAlias{
+		{Alias: missingSource, MetadataSource: "gpt-no-such-source", Reason: CodexAliasMetadataSourceMissing},
+		{Alias: notForwarded, MetadataSource: "gpt-5.6-sol", Reason: CodexAliasNotForwardable},
+		{Alias: shadowed, MetadataSource: "gpt-5.4-mini", Reason: CodexAliasShadowedByOfficial},
 	}
 	if !reflect.DeepEqual(outcome.UnappliedAliases, want) {
 		t.Errorf("unapplied aliases = %#v, want alias-sorted exclusive outcomes %#v", outcome.UnappliedAliases, want)
@@ -413,7 +413,10 @@ func TestRenderCodexAliasRemovesSourceReviewerAndUsesAliasLiveLimits(t *testing.
 	for slug, entry := range testCodexModels {
 		codexModels[slug] = entry
 	}
-	sourceEntry := copyCodexEntry(testCodexModels[source])
+	sourceEntry := make(map[string]json.RawMessage, len(testCodexModels[source]))
+	for field, raw := range testCodexModels[source] {
+		sourceEntry[field] = bytes.Clone(raw)
+	}
 	sourceEntry["auto_review_model_override"] = json.RawMessage(`"source-reviewer"`)
 	codexModels[source] = sourceEntry
 
