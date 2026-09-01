@@ -258,6 +258,7 @@ func TestHandlerLogsEveryUnappliedCodexAliasOnEveryRequest(t *testing.T) {
 	const (
 		notForwarded  = "a-not-forwarded"
 		missingSource = "b-missing-source"
+		unconfigured  = "c-unconfigured-copilot-only"
 		shadowed      = "gpt-5.4"
 	)
 	var logs bytes.Buffer
@@ -267,7 +268,8 @@ func TestHandlerLogsEveryUnappliedCodexAliasOnEveryRequest(t *testing.T) {
 	}
 	upstreamBody := []byte(`{"data":[` +
 		`{"id":"` + shadowed + `","vendor":"OpenAI","model_picker_enabled":true,"supported_endpoints":["/responses"]},` +
-		`{"id":"` + missingSource + `","vendor":"OpenAI","model_picker_enabled":true,"supported_endpoints":["/responses"]}` +
+		`{"id":"` + missingSource + `","vendor":"OpenAI","model_picker_enabled":true,"supported_endpoints":["/responses"]},` +
+		`{"id":"` + unconfigured + `","vendor":"OpenAI","model_picker_enabled":true,"supported_endpoints":["/responses"]}` +
 		`]}`)
 	handler := Handler(logger, endpoint.OpenAICatalog(), Rendering{
 		Render: RenderOpenAI,
@@ -317,6 +319,9 @@ func TestHandlerLogsEveryUnappliedCodexAliasOnEveryRequest(t *testing.T) {
 		if !strings.Contains(output, want) {
 			t.Errorf("warning output missing %q:\n%s", want, output)
 		}
+	}
+	if strings.Contains(output, "model="+unconfigured) {
+		t.Errorf("unconfigured Copilot-only model produced a warning:\n%s", output)
 	}
 	if strings.Contains(output, "failure_class=") {
 		t.Errorf("unapplied alias warning used failure_class:\n%s", output)
@@ -435,6 +440,11 @@ func TestHandlerAliasFailuresRemainOpenAIBadGateway(t *testing.T) {
 		Hash: hashModels,
 	})
 
+	// These are the two alias-configured 502 causes reachable through Handler.
+	// parseCodexModels rejects invalid cached JSON before RawMessages reach the
+	// renderer, while the renderer's json.Marshal inputs are strings and cannot
+	// fail. TestRenderCodexRejectsInvalidRawMetadataSourceField covers the pure
+	// renderer's defensive invalid-RawMessage branch.
 	tests := []struct {
 		name         string
 		upstreamBody []byte

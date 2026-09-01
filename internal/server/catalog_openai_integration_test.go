@@ -61,6 +61,7 @@ func TestCodexCatalogAliasOverRealListener(t *testing.T) {
 	cfg := testConfig()
 	cfg.CodexCatalogEnabled = true
 	cfg.CodexCatalogModelAliases = map[string]string{alias: "gpt-5.4"}
+	cfg.CodexAutoReviewModelOverrides = map[string]string{alias: alias}
 	provider := identity.NewStatic(identity.Credential{BaseURL: upstream.URL, Token: "copilot-token"}, true)
 	forwarder := newTestForwarder(provider, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 	base := startServer(t, newTestServerFromBase(cfg, discardLogger(t), provider, newTestReadyObservers(), forwarder, newTestCatalogSource(provider), newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.RenderDescriptors{Codex: testCodexDescriptor(cfg)}))
@@ -86,6 +87,7 @@ func TestCodexCatalogAliasOverRealListener(t *testing.T) {
 			Slug             string `json:"slug"`
 			DisplayName      string `json:"display_name"`
 			BaseInstructions string `json:"base_instructions"`
+			Reviewer         string `json:"auto_review_model_override"`
 		} `json:"models"`
 	}
 	if err := json.Unmarshal(body, &envelope); err != nil {
@@ -96,6 +98,9 @@ func TestCodexCatalogAliasOverRealListener(t *testing.T) {
 	}
 	if envelope.Models[0].DisplayName != "GPT-5.4" || envelope.Models[0].BaseInstructions == "" {
 		t.Errorf("alias metadata = %+v, want complete gpt-5.4 source metadata", envelope.Models[0])
+	}
+	if envelope.Models[0].Reviewer != alias {
+		t.Errorf("alias reviewer = %q, want self-review %q over real listener", envelope.Models[0].Reviewer, alias)
 	}
 
 	headRequest, err := http.NewRequest(http.MethodHead, base+"/openai/v1/models?client_version=0.151.0", nil)
@@ -196,6 +201,7 @@ func TestCodexCatalogAliasWarningsOverRealListener(t *testing.T) {
 	const (
 		notForwarded  = "gpt-5.4-mini"
 		missingSource = "gpt-missing-source"
+		unconfigured  = "gpt-unconfigured-copilot-only"
 		shadowed      = "gpt-5.4"
 		querySecret   = "alias-query-secret"
 		bodySecret    = "alias-model-body-secret"
@@ -204,7 +210,8 @@ func TestCodexCatalogAliasWarningsOverRealListener(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, `{"data":[`+
 			`{"id":"`+shadowed+`","vendor":"OpenAI","secret":"`+bodySecret+`","model_picker_enabled":true,"supported_endpoints":["/responses"]},`+
-			`{"id":"`+missingSource+`","vendor":"OpenAI","model_picker_enabled":true,"supported_endpoints":["/responses"]}`+
+			`{"id":"`+missingSource+`","vendor":"OpenAI","model_picker_enabled":true,"supported_endpoints":["/responses"]},`+
+			`{"id":"`+unconfigured+`","vendor":"OpenAI","model_picker_enabled":true,"supported_endpoints":["/responses"]}`+
 			`]}`)
 	}))
 	defer upstream.Close()
@@ -271,6 +278,9 @@ func TestCodexCatalogAliasWarningsOverRealListener(t *testing.T) {
 		if !strings.Contains(output, want) {
 			t.Errorf("alias warnings missing %q:\n%s", want, output)
 		}
+	}
+	if strings.Contains(output, "model="+unconfigured) {
+		t.Errorf("unconfigured Copilot-only model produced a warning:\n%s", output)
 	}
 	for _, secret := range []string{querySecret, bodySecret, tokenSecret} {
 		if strings.Contains(output, secret) {
