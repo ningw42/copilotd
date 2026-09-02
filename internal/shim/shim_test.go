@@ -323,7 +323,7 @@ func TestStreamAdapterMonitorsDirectEventTransform(t *testing.T) {
 			})
 		},
 	}}).NewChain(ctx, endpoint.OpenAI, endpoint.RouteOpenAIResponses)
-	adapter := chain.StreamAdapter(monitor, ctx)
+	adapter := chain.StreamAdapter(ctx, monitor)
 
 	got := adapter.Transform(ctx, sse.Frame{Type: "delta", Raw: []byte("verbatim")})
 
@@ -365,7 +365,7 @@ func TestStreamAdapterMonitoredPanicKeepsValueAndAttribution(t *testing.T) {
 	var recovered any
 	func() {
 		defer func() { recovered = recover() }()
-		chain.StreamAdapter(monitor, ctx).Transform(ctx, sse.Frame{})
+		chain.StreamAdapter(ctx, monitor).Transform(ctx, sse.Frame{})
 	}()
 
 	if recovered != panicValue {
@@ -397,7 +397,7 @@ func TestStreamAdapterConfiguredZeroDisablesMonitoring(t *testing.T) {
 		},
 	}}).NewChain(ctx, endpoint.OpenAI, endpoint.RouteOpenAIResponses)
 
-	frames := chain.StreamAdapter(monitor, ctx).Transform(ctx, sse.Frame{Raw: []byte("verbatim")})
+	frames := chain.StreamAdapter(ctx, monitor).Transform(ctx, sse.Frame{Raw: []byte("verbatim")})
 	publication := summary.Finish(requestsummary.ResponseResult{})
 
 	if len(frames) != 1 || string(frames[0].Raw) != "verbatim" {
@@ -429,7 +429,7 @@ func TestStreamAdapterFoldsInnerToOuterWithFanout(t *testing.T) {
 		}},
 		{Name: "inner", Enabled: true, New: func(context.Context, endpoint.Surface, endpoint.Route) any { return wrap("inner") }},
 	}
-	adapter := registry.NewChain(context.Background(), endpoint.Anthropic, endpoint.RouteAnthropicMessages).StreamAdapter(nil, context.Background())
+	adapter := registry.NewChain(context.Background(), endpoint.Anthropic, endpoint.RouteAnthropicMessages).StreamAdapter(context.Background(), nil)
 
 	frames := adapter.Transform(context.Background(), sse.Frame{Type: "delta", Raw: []byte("seed")})
 	want := []sse.Frame{
@@ -457,7 +457,7 @@ func TestStreamAdapterMonitorsFinalizerAndFinalizationSweepTransforms(t *testing
 	adapter := (Registry{
 		{Name: "outer-transform", Enabled: true, New: func(context.Context, endpoint.Surface, endpoint.Route) any { return outer }},
 		{Name: "inner-finalize", Enabled: true, New: func(context.Context, endpoint.Surface, endpoint.Route) any { return inner }},
-	}).NewChain(ctx, endpoint.Anthropic, endpoint.RouteAnthropicMessages).StreamAdapter(monitor, ctx)
+	}).NewChain(ctx, endpoint.Anthropic, endpoint.RouteAnthropicMessages).StreamAdapter(ctx, monitor)
 
 	frames := adapter.Finalize(ctx)
 
@@ -504,7 +504,7 @@ func TestStreamAdapterRetransformsInnerFinalizeOutputThroughOuterHooks(t *testin
 		{Name: "outer-alter", Enabled: true, New: func(context.Context, endpoint.Surface, endpoint.Route) any { return outer }},
 		{Name: "inner-hold", Enabled: true, New: func(context.Context, endpoint.Surface, endpoint.Route) any { return inner }},
 	}
-	adapter := registry.NewChain(context.Background(), endpoint.Anthropic, endpoint.RouteAnthropicMessages).StreamAdapter(nil, context.Background())
+	adapter := registry.NewChain(context.Background(), endpoint.Anthropic, endpoint.RouteAnthropicMessages).StreamAdapter(context.Background(), nil)
 
 	frames := adapter.Transform(context.Background(), sse.Frame{Type: "message_stop", Raw: []byte("X")})
 	if len(frames) != 0 {
@@ -520,7 +520,7 @@ func TestStreamAdapterRetransformsInnerFinalizeOutputThroughOuterHooks(t *testin
 func TestStreamAdapterSelectionAndHoldSemantics(t *testing.T) {
 	ctx := context.Background()
 	if adapter := (Registry{{Name: "nop", Enabled: true, New: func(context.Context, endpoint.Surface, endpoint.Route) any { return NopShim{} }}}).
-		NewChain(ctx, endpoint.Anthropic, endpoint.RouteAnthropicMessages).StreamAdapter(nil, ctx); adapter != nil {
+		NewChain(ctx, endpoint.Anthropic, endpoint.RouteAnthropicMessages).StreamAdapter(ctx, nil); adapter != nil {
 		t.Errorf("nop StreamAdapter() = %T, want nil fast path", adapter)
 	}
 	finalizerOnly := Registry{{
@@ -530,7 +530,7 @@ func TestStreamAdapterSelectionAndHoldSemantics(t *testing.T) {
 			return streamFinalizerFunc(func(context.Context) []sse.Frame { return nil })
 		},
 	}}
-	if adapter := finalizerOnly.NewChain(ctx, endpoint.Anthropic, endpoint.RouteAnthropicMessages).StreamAdapter(nil, ctx); adapter == nil {
+	if adapter := finalizerOnly.NewChain(ctx, endpoint.Anthropic, endpoint.RouteAnthropicMessages).StreamAdapter(ctx, nil); adapter == nil {
 		t.Error("finalizer-only StreamAdapter() = nil, want composed transformer")
 	}
 
@@ -543,7 +543,7 @@ func TestStreamAdapterSelectionAndHoldSemantics(t *testing.T) {
 	adapter := (Registry{
 		{Name: "outer", Enabled: true, New: func(context.Context, endpoint.Surface, endpoint.Route) any { return outer }},
 		{Name: "inner-hold", Enabled: true, New: func(context.Context, endpoint.Surface, endpoint.Route) any { return hold }},
-	}).NewChain(ctx, endpoint.Anthropic, endpoint.RouteAnthropicMessages).StreamAdapter(nil, ctx)
+	}).NewChain(ctx, endpoint.Anthropic, endpoint.RouteAnthropicMessages).StreamAdapter(ctx, nil)
 	frames := adapter.Transform(ctx, sse.Frame{Type: "delta", Raw: []byte("held")})
 	if len(frames) != 0 || outerCalls != 0 {
 		t.Errorf("held Transform() = %#v, outer calls %d; want no output/calls", frames, outerCalls)
@@ -615,10 +615,10 @@ func TestWebSocketAdaptersMonitorBothDirectionsWithSharedRecorder(t *testing.T) 
 		},
 	}}).NewChain(requestCtx, endpoint.OpenAI, endpoint.RouteOpenAIResponses)
 
-	if emit := chain.WSClientAdapter(monitor, logCtx)(executionCtx, &Message{}); !emit {
+	if emit := chain.WSClientAdapter(logCtx, monitor)(executionCtx, &Message{}); !emit {
 		t.Fatal("client adapter dropped message")
 	}
-	if emit := chain.WSServerAdapter(monitor, logCtx)(executionCtx, &Message{}); !emit {
+	if emit := chain.WSServerAdapter(logCtx, monitor)(executionCtx, &Message{}); !emit {
 		t.Fatal("server adapter dropped message")
 	}
 
@@ -671,8 +671,8 @@ func TestWebSocketDirectionsCountConcurrentOverrunsOnSharedRecorder(t *testing.T
 			return hooks
 		},
 	}}).NewChain(ctx, endpoint.OpenAI, endpoint.RouteOpenAIResponses)
-	client := chain.WSClientAdapter(monitor, ctx)
-	server := chain.WSServerAdapter(monitor, ctx)
+	client := chain.WSClientAdapter(ctx, monitor)
+	server := chain.WSServerAdapter(ctx, monitor)
 
 	var calls sync.WaitGroup
 	calls.Add(2)
@@ -713,8 +713,8 @@ func TestWebSocketAdaptersConfiguredZeroDisableMonitoring(t *testing.T) {
 		},
 	}}).NewChain(ctx, endpoint.OpenAI, endpoint.RouteOpenAIResponses)
 
-	if !chain.WSClientAdapter(monitor, ctx)(context.Background(), &Message{}) ||
-		!chain.WSServerAdapter(monitor, ctx)(context.Background(), &Message{}) {
+	if !chain.WSClientAdapter(ctx, monitor)(context.Background(), &Message{}) ||
+		!chain.WSServerAdapter(ctx, monitor)(context.Background(), &Message{}) {
 		t.Fatal("disabled monitoring changed WebSocket emission")
 	}
 	publication := summary.Finish(requestsummary.ResponseResult{})
@@ -736,7 +736,7 @@ func TestPostCommitAdaptersRetainExactRegistrationIdentity(t *testing.T) {
 	if got := []string{chain.instances[0].name, chain.instances[1].name}; !reflect.DeepEqual(got, []string{"first", "second"}) {
 		t.Fatalf("Chain registration names = %v, want [first second]", got)
 	}
-	stream := chain.StreamAdapter(nil, context.Background()).(*sseAdapter)
+	stream := chain.StreamAdapter(context.Background(), nil).(*sseAdapter)
 	if got := []string{stream.instances[0].name, stream.instances[1].name}; !reflect.DeepEqual(got, []string{"first", "second"}) {
 		t.Fatalf("SSE participant names = %v, want [first second]", got)
 	}
@@ -835,13 +835,13 @@ func TestResponsesItemIDStabilizerRegistrationSelectsOnlyResponsesTransports(t *
 			if constructorCalls != tc.wantConstructorCalls {
 				t.Fatalf("stabilizer constructor calls = %d, want %d", constructorCalls, tc.wantConstructorCalls)
 			}
-			if got := chain.StreamAdapter(nil, context.Background()) != nil; got != tc.wantStreamAdapter {
+			if got := chain.StreamAdapter(context.Background(), nil) != nil; got != tc.wantStreamAdapter {
 				t.Errorf("StreamAdapter() presence = %t, want %t", got, tc.wantStreamAdapter)
 			}
-			if chain.WSClientAdapter(nil, context.Background()) != nil {
+			if chain.WSClientAdapter(context.Background(), nil) != nil {
 				t.Error("WSClientAdapter() is non-nil, want server-direction-only stabilizer")
 			}
-			if got := chain.WSServerAdapter(nil, context.Background()) != nil; got != tc.wantWSServerAdapter {
+			if got := chain.WSServerAdapter(context.Background(), nil) != nil; got != tc.wantWSServerAdapter {
 				t.Errorf("WSServerAdapter() presence = %t, want %t", got, tc.wantWSServerAdapter)
 			}
 		})

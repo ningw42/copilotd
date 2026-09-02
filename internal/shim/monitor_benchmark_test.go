@@ -48,7 +48,7 @@ func BenchmarkHookMonitoring(b *testing.B) {
 	} {
 		b.Run("sse_event_transform/"+monitoring.name, func(b *testing.B) {
 			chain := registry.NewChain(ctx, endpoint.OpenAI, endpoint.RouteOpenAIResponses)
-			adapter := chain.StreamAdapter(NewMonitor(logger, monitoring.threshold), ctx)
+			adapter := chain.StreamAdapter(ctx, NewMonitor(logger, monitoring.threshold))
 			frame := sse.Frame{Type: "response.output_text.delta", Raw: []byte("event: response.output_text.delta\ndata: {}\n\n")}
 			b.ReportAllocs()
 			b.ResetTimer()
@@ -59,7 +59,7 @@ func BenchmarkHookMonitoring(b *testing.B) {
 
 		b.Run("websocket_client_message/"+monitoring.name, func(b *testing.B) {
 			chain := registry.NewChain(ctx, endpoint.OpenAI, endpoint.RouteOpenAIResponses)
-			adapter := chain.WSClientAdapter(NewMonitor(logger, monitoring.threshold), ctx)
+			adapter := chain.WSClientAdapter(ctx, NewMonitor(logger, monitoring.threshold))
 			message := Message{Kind: MessageText, Data: []byte(`{"type":"response.create"}`)}
 			b.ReportAllocs()
 			b.ResetTimer()
@@ -70,7 +70,7 @@ func BenchmarkHookMonitoring(b *testing.B) {
 
 		b.Run("websocket_server_message/"+monitoring.name, func(b *testing.B) {
 			chain := registry.NewChain(ctx, endpoint.OpenAI, endpoint.RouteOpenAIResponses)
-			adapter := chain.WSServerAdapter(NewMonitor(logger, monitoring.threshold), ctx)
+			adapter := chain.WSServerAdapter(ctx, NewMonitor(logger, monitoring.threshold))
 			message := Message{Kind: MessageText, Data: []byte(`{"type":"response.output_text.delta"}`)}
 			b.ReportAllocs()
 			b.ResetTimer()

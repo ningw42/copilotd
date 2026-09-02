@@ -10,6 +10,8 @@ import (
 )
 
 // Clock is the Hook overrun monitor's monotonic time and callback-timer seam.
+// It is intentionally distinct from the SSE transport clock: Hook overrun
+// monitoring is shared by SSE and WebSocket transports.
 // Tests replace it with a deterministic fake shared across both transports.
 type Clock interface {
 	Now() time.Time
@@ -79,29 +81,45 @@ const (
 	hookStatePanicked hookState = "panicked"
 )
 
+type hookPublication struct {
+	ctx       context.Context
+	shim      string
+	hook      hookRole
+	state     hookState
+	elapsed   time.Duration
+	threshold time.Duration
+}
+
 // Watchdog monitors sequential invocations in one synchronous transport
-// direction. It allocates one callback timer at construction and reuses it.
+// direction. It allocates one callback timer at construction and reuses it. If
+// a future caller violates the single-flight transport invariant, that
+// invocation runs unmonitored rather than letting observability change its
+// behavior.
 type Watchdog struct {
 	monitor  *Monitor
 	recorder overrunRecorder
 	timer    Timer
+	logCtx   context.Context
 
-	mu      sync.Mutex
-	active  bool
-	crossed bool
-	started time.Time
-	shim    string
-	hook    hookRole
-	logCtx  context.Context
+	// mu protects invocation state only. publishMu preserves crossing-before-
+	// ending order without holding mu across logger or recorder I/O.
+	mu        sync.Mutex
+	publishMu sync.Mutex
+	active    bool
+	crossed   bool
+	started   time.Time
+	shim      string
+	hook      hookRole
 }
 
-// NewWatchdog returns a reusable watchdog, or nil when monitoring is disabled.
-// The nil receiver fast path invokes hooks directly.
-func (m *Monitor) NewWatchdog(recorder overrunRecorder) *Watchdog {
+// NewWatchdog returns a reusable watchdog bound to one correlated logging
+// context, or nil when monitoring is disabled. The nil receiver fast path
+// invokes hooks directly.
+func (m *Monitor) NewWatchdog(logCtx context.Context, recorder overrunRecorder) *Watchdog {
 	if m == nil || m.threshold <= 0 {
 		return nil
 	}
-	watchdog := &Watchdog{monitor: m, recorder: recorder}
+	watchdog := &Watchdog{monitor: m, recorder: recorder, logCtx: logCtx}
 	watchdog.timer = m.clock.AfterFunc(m.threshold, watchdog.publishCrossing)
 	watchdog.timer.Stop()
 	return watchdog
@@ -110,13 +128,12 @@ func (m *Monitor) NewWatchdog(recorder overrunRecorder) *Watchdog {
 // Invoke observes one named post-commit hook call without changing its
 // execution. If invoke panics, the ending state is recorded when applicable and
 // the exact recovered value is re-panicked for the transport recovery boundary.
-func (w *Watchdog) Invoke(logCtx context.Context, shimName string, hook hookRole, invoke func()) {
-	if w == nil {
+func (w *Watchdog) Invoke(shimName string, hook hookRole, invoke func()) {
+	if w == nil || !w.begin(shimName, hook) {
 		invoke()
 		return
 	}
 
-	w.begin(logCtx, shimName, hook)
 	returned := false
 	defer func() {
 		panicValue := recover()
@@ -138,25 +155,25 @@ func (w *Watchdog) Invoke(logCtx context.Context, shimName string, hook hookRole
 	returned = true
 }
 
-func (w *Watchdog) begin(logCtx context.Context, shimName string, hook hookRole) {
+func (w *Watchdog) begin(shimName string, hook hookRole) bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.active {
-		panic("shim: concurrent watchdog invocation")
+		return false
 	}
 	w.active = true
 	w.crossed = false
 	w.started = w.monitor.clock.Now()
 	w.shim = shimName
 	w.hook = hook
-	w.logCtx = logCtx
 	w.timer.Reset(w.monitor.threshold)
+	return true
 }
 
 func (w *Watchdog) publishCrossing() {
 	w.mu.Lock()
-	defer w.mu.Unlock()
 	if !w.active || w.crossed {
+		w.mu.Unlock()
 		return
 	}
 	now := w.monitor.clock.Now()
@@ -164,27 +181,44 @@ func (w *Watchdog) publishCrossing() {
 	// invocation run concurrently with the newly armed timer. Its old callback
 	// must not publish against the new invocation before the new deadline.
 	if now.Sub(w.started) < w.monitor.threshold {
+		w.mu.Unlock()
 		return
 	}
+
+	// Acquire publication ownership before exposing crossed=true. finish can
+	// then snapshot state promptly and wait only on publication ordering, never
+	// on the state mutex while the logger or recorder is blocked.
+	w.publishMu.Lock()
 	w.crossed = true
-	w.log(hookStateInFlight, now.Sub(w.started))
+	publication := w.publication(hookStateInFlight, now)
+	w.mu.Unlock()
+
+	w.log(publication)
 	if w.recorder != nil {
 		w.recorder.Increment()
 	}
+	w.publishMu.Unlock()
 }
 
 func (w *Watchdog) finish(state hookState) {
 	w.mu.Lock()
-	defer w.mu.Unlock()
 	if !w.active {
+		w.mu.Unlock()
 		return
 	}
 	w.timer.Stop()
-	if w.crossed {
-		w.log(state, w.monitor.clock.Now().Sub(w.started))
+	if !w.crossed {
+		w.active = false
+		w.mu.Unlock()
+		return
 	}
+	publication := w.publication(state, w.monitor.clock.Now())
 	w.active = false
-	w.logCtx = nil
+	w.mu.Unlock()
+
+	w.publishMu.Lock()
+	w.log(publication)
+	w.publishMu.Unlock()
 }
 
 func (w *Watchdog) abandon() {
@@ -195,15 +229,25 @@ func (w *Watchdog) abandon() {
 	}
 	w.timer.Stop()
 	w.active = false
-	w.logCtx = nil
 }
 
-func (w *Watchdog) log(state hookState, elapsed time.Duration) {
-	w.monitor.logger.LogAttrs(w.logCtx, slog.LevelWarn, "shim hook overrun",
-		slog.String(logging.ShimKey, w.shim),
-		slog.String(logging.HookKey, string(w.hook)),
-		slog.String(logging.HookStateKey, string(state)),
-		slog.Duration(logging.DurationKey, elapsed),
-		slog.Duration(logging.ThresholdKey, w.monitor.threshold),
+func (w *Watchdog) publication(state hookState, now time.Time) hookPublication {
+	return hookPublication{
+		ctx:       w.logCtx,
+		shim:      w.shim,
+		hook:      w.hook,
+		state:     state,
+		elapsed:   now.Sub(w.started),
+		threshold: w.monitor.threshold,
+	}
+}
+
+func (w *Watchdog) log(publication hookPublication) {
+	w.monitor.logger.LogAttrs(publication.ctx, slog.LevelWarn, "shim hook overrun",
+		slog.String(logging.ShimKey, publication.shim),
+		slog.String(logging.HookKey, string(publication.hook)),
+		slog.String(logging.HookStateKey, string(publication.state)),
+		slog.Duration(logging.DurationKey, publication.elapsed),
+		slog.Duration(logging.ThresholdKey, publication.threshold),
 	)
 }

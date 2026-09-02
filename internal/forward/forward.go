@@ -42,36 +42,49 @@ type Forwarder struct {
 	clock                   sse.Clock
 	fallbacks               *sse.FallbackCounter
 	// sseLogger belongs to internal/sse, the only package that emits through it.
-	sseLogger            *slog.Logger
-	shimMonitor          *shim.Monitor
-	suppressedShimErrors *sse.SuppressedShimErrorCounter
-	maxRequestBytes      int64
-	registry             shim.Registry
+	sseLogger                *slog.Logger
+	shimLogger               *slog.Logger
+	shimHookOverrunThreshold time.Duration
+	shimMonitorOptions       []shim.MonitorOption
+	shimMonitor              *shim.Monitor
+	suppressedShimErrors     *sse.SuppressedShimErrorCounter
+	maxRequestBytes          int64
+	registry                 shim.Registry
 }
 
 // Option configures an optional Forwarder dependency.
 type Option func(*Forwarder)
 
+// WithShimMonitorClock replaces only the Hook overrun monitor's clock. It is a
+// deterministic transport-test seam; production uses shim's monotonic clock.
+func WithShimMonitorClock(clock shim.Clock) Option {
+	return func(f *Forwarder) {
+		f.shimMonitorOptions = append(f.shimMonitorOptions, shim.WithClock(clock))
+	}
+}
+
 // New builds a Forwarder from its injected dependencies.
 func New(caller *upstream.Caller, outboundTimeout, writeTimeout, streamIdleTimeout, streamKeepaliveInterval time.Duration, maxRequestBytes int64, registry shim.Registry, sseLogger, shimLogger *slog.Logger, hookOverrunThreshold time.Duration, options ...Option) *Forwarder {
 	registry = append(shim.Registry(nil), registry...)
 	f := &Forwarder{
-		caller:                  caller,
-		outboundTimeout:         outboundTimeout,
-		writeTimeout:            writeTimeout,
-		streamIdleTimeout:       streamIdleTimeout,
-		streamKeepaliveInterval: streamKeepaliveInterval,
-		clock:                   sse.RealClock{},
-		fallbacks:               sse.NewFallbackCounter(),
-		sseLogger:               sseLogger,
-		shimMonitor:             shim.NewMonitor(shimLogger, hookOverrunThreshold),
-		suppressedShimErrors:    sse.NewSuppressedShimErrorCounter(),
-		maxRequestBytes:         maxRequestBytes,
-		registry:                registry,
+		caller:                   caller,
+		outboundTimeout:          outboundTimeout,
+		writeTimeout:             writeTimeout,
+		streamIdleTimeout:        streamIdleTimeout,
+		streamKeepaliveInterval:  streamKeepaliveInterval,
+		clock:                    sse.RealClock{},
+		fallbacks:                sse.NewFallbackCounter(),
+		sseLogger:                sseLogger,
+		shimLogger:               shimLogger,
+		shimHookOverrunThreshold: hookOverrunThreshold,
+		suppressedShimErrors:     sse.NewSuppressedShimErrorCounter(),
+		maxRequestBytes:          maxRequestBytes,
+		registry:                 registry,
 	}
 	for _, configure := range options {
 		configure(f)
 	}
+	f.shimMonitor = shim.NewMonitor(f.shimLogger, f.shimHookOverrunThreshold, f.shimMonitorOptions...)
 	return f
 }
 
@@ -277,7 +290,7 @@ func (f *Forwarder) forward(w http.ResponseWriter, r *http.Request, header http.
 		w.WriteHeader(status)
 		policy := streamPolicy(ep.Surface(), f.writeTimeout, f.streamIdleTimeout, f.streamKeepaliveInterval, f.clock, f.fallbacks.Increment)
 		policy.SuppressedShimErrors = f.suppressedShimErrors
-		result := sse.Pump(responseCtx, cancel, resp.Body, w, f.sseLogger, policy, chain.StreamAdapter(f.shimMonitor, responseCtx))
+		result := sse.Pump(responseCtx, cancel, resp.Body, w, f.sseLogger, policy, chain.StreamAdapter(responseCtx, f.shimMonitor))
 		requestsummary.RecordStream(r.Context(), requestsummary.StreamResult{
 			Surface:   ep.Surface().String(),
 			Outcome:   result.Outcome,

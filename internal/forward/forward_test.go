@@ -37,6 +37,12 @@ func newTestForwarderWithLogger(provider identity.Provider, client *http.Client,
 	return New(caller, outboundTimeout, writeTimeout, streamIdleTimeout, streamKeepaliveInterval, maxRequestBytes, registry, logger, logger, 0, options...)
 }
 
+func newMonitoredStreamTestForwarder(provider identity.Provider, client *http.Client, logger *slog.Logger, registry shim.Registry, threshold time.Duration, clock shim.Clock) *Forwarder {
+	caller := upstreampolicy.New(provider, client, time.Second, 1<<20, logger)
+	return New(caller, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, registry,
+		logger, logger, threshold, WithShimMonitorClock(clock))
+}
+
 type requestMutationShim struct {
 	query string
 }
@@ -1144,18 +1150,26 @@ func (s *advancingEventShim) TransformEvent(_ context.Context, frame sse.Frame) 
 	return []sse.Frame{frame}
 }
 
-type panickingEventShim struct{}
+type panickingEventShim struct {
+	clock *manualHookClock
+	delay time.Duration
+}
 
-func (*panickingEventShim) TransformEvent(context.Context, sse.Frame) []sse.Frame {
+func (s *panickingEventShim) TransformEvent(context.Context, sse.Frame) []sse.Frame {
+	s.clock.Advance(s.delay)
 	panic("SECRET-PANIC-VALUE")
 }
 
-type postTerminalPanickingEventShim struct{}
+type postTerminalPanickingEventShim struct {
+	clock *manualHookClock
+	delay time.Duration
+}
 
-func (*postTerminalPanickingEventShim) TransformEvent(_ context.Context, frame sse.Frame) []sse.Frame {
+func (s *postTerminalPanickingEventShim) TransformEvent(_ context.Context, frame sse.Frame) []sse.Frame {
 	if frame.Type == "message_stop" {
 		return []sse.Frame{frame}
 	}
+	s.clock.Advance(s.delay)
 	panic("SECRET-POST-TERMINAL-PANIC")
 }
 
@@ -1179,14 +1193,37 @@ func (*prefixingEventShim) TransformEvent(_ context.Context, frame sse.Frame) []
 	return []sse.Frame{frame}
 }
 
-type finalizePanickingEventShim struct{}
+type finalizePanickingEventShim struct {
+	clock *manualHookClock
+	delay time.Duration
+}
 
 func (*finalizePanickingEventShim) TransformEvent(context.Context, sse.Frame) []sse.Frame {
 	return nil
 }
 
-func (*finalizePanickingEventShim) Finalize(context.Context) []sse.Frame {
+func (s *finalizePanickingEventShim) Finalize(context.Context) []sse.Frame {
+	s.clock.Advance(s.delay)
 	panic("SECRET-FINALIZE-PANIC")
+}
+
+func assertHookOverrunPair(t *testing.T, logText, shimName, hook string) {
+	t.Helper()
+	var states []string
+	for _, line := range strings.Split(strings.TrimSpace(logText), "\n") {
+		if !strings.Contains(line, `msg="shim hook overrun"`) || !strings.Contains(line, "shim="+shimName) || !strings.Contains(line, "hook="+hook) {
+			continue
+		}
+		switch {
+		case strings.Contains(line, "hook_state=in_flight"):
+			states = append(states, "in_flight")
+		case strings.Contains(line, "hook_state=panicked"):
+			states = append(states, "panicked")
+		}
+	}
+	if !reflect.DeepEqual(states, []string{"in_flight", "panicked"}) {
+		t.Fatalf("Hook overrun states for %s/%s = %v, want [in_flight panicked]\n%s", shimName, hook, states, logText)
+	}
 }
 
 func TestForwardUsesConfiguredHookOverrunThresholdAndCorrelatedContext(t *testing.T) {
@@ -1224,8 +1261,7 @@ func TestForwardUsesConfiguredHookOverrunThresholdAndCorrelatedContext(t *testin
 	caller := upstreampolicy.New(provider, client, time.Second, 1<<20, logging.ForComponent(base, "internal/upstream"))
 	shimLogger := logging.ForComponent(base, "internal/shim")
 	forwarder := New(caller, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, registry,
-		logging.ForComponent(base, "internal/sse"), shimLogger, threshold)
-	forwarder.shimMonitor = shim.NewMonitor(shimLogger, threshold, shim.WithClock(clock))
+		logging.ForComponent(base, "internal/sse"), shimLogger, threshold, WithShimMonitorClock(clock))
 
 	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{"stream":true}`))
 	requestCtx := logging.WithRequestID(req.Context(), requestID)
@@ -1270,6 +1306,8 @@ func TestForwardUsesConfiguredHookOverrunThresholdAndCorrelatedContext(t *testin
 
 func TestForwardStreamShimPanicRendersNativeTerminalAndReleasesUpstream(t *testing.T) {
 	const upstreamFrame = "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"secret\":\"must-not-leak\"}\n\n"
+	threshold := 375 * time.Millisecond
+	clock := newManualHookClock()
 	body := &observedReadCloser{reader: strings.NewReader(upstreamFrame)}
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		return &http.Response{
@@ -1283,10 +1321,15 @@ func TestForwardStreamShimPanicRendersNativeTerminalAndReleasesUpstream(t *testi
 		Name:    "panicking-event",
 		Enabled: true,
 		New: func(context.Context, endpoint.Surface, endpoint.Route) any {
-			return &panickingEventShim{}
+			return &panickingEventShim{clock: clock, delay: threshold}
 		},
 	}}
-	f := newTestForwarder(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, registry)
+	var logs bytes.Buffer
+	logger, err := logging.NewWithWriter(&logs, config.ServeConfig{LogLevel: "info", LogFormat: "text"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := newMonitoredStreamTestForwarder(readyStub("https://upstream.invalid"), client, logger, registry, threshold, clock)
 	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{"stream":true}`))
 	ctx, stream := beginStreamPublication(req.Context())
 	req = req.WithContext(ctx)
@@ -1305,6 +1348,10 @@ func TestForwardStreamShimPanicRendersNativeTerminalAndReleasesUpstream(t *testi
 	if !body.closed {
 		t.Error("upstream body is open after stream shim panic")
 	}
+	assertHookOverrunPair(t, logs.String(), "panicking-event", "event_transform")
+	if strings.Contains(logs.String(), "SECRET-PANIC-VALUE") || strings.Contains(logs.String(), "must-not-leak") {
+		t.Errorf("monitored panic logs leaked private data:\n%s", logs.String())
+	}
 }
 
 func TestForwardSuppressesPostTerminalShimPanicAndRecordsIt(t *testing.T) {
@@ -1312,6 +1359,8 @@ func TestForwardSuppressesPostTerminalShimPanicAndRecordsIt(t *testing.T) {
 	const trailing = "event: vendor.trailing\ndata: SECRET-TRAILING-CONTENT\n\n"
 	const requestID = "suppressed-shim-request-id"
 	const upstreamRequestID = "suppressed-shim-upstream-id"
+	threshold := 375 * time.Millisecond
+	clock := newManualHookClock()
 	body := &observedReadCloser{reader: strings.NewReader(terminal + trailing)}
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		return &http.Response{
@@ -1328,7 +1377,7 @@ func TestForwardSuppressesPostTerminalShimPanicAndRecordsIt(t *testing.T) {
 		Name:    "post-terminal-panic",
 		Enabled: true,
 		New: func(context.Context, endpoint.Surface, endpoint.Route) any {
-			return &postTerminalPanickingEventShim{}
+			return &postTerminalPanickingEventShim{clock: clock, delay: threshold}
 		},
 	}}
 	var logs bytes.Buffer
@@ -1336,7 +1385,7 @@ func TestForwardSuppressesPostTerminalShimPanicAndRecordsIt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := newTestForwarderWithLogger(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, logger, registry)
+	f := newMonitoredStreamTestForwarder(readyStub("https://upstream.invalid"), client, logger, registry, threshold, clock)
 	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{"stream":true}`))
 	ctx, stream := beginStreamPublication(logging.WithRequestID(req.Context(), requestID))
 	req = req.WithContext(ctx)
@@ -1358,6 +1407,7 @@ func TestForwardSuppressesPostTerminalShimPanicAndRecordsIt(t *testing.T) {
 	if !strings.Contains(logText, "suppressed post-terminal shim error") || !strings.Contains(logText, "stage=transform") || !strings.Contains(logText, "request_id="+requestID) || !strings.Contains(logText, "upstream_request_id="+upstreamRequestID) {
 		t.Errorf("warning = %q, want suppression metadata", logText)
 	}
+	assertHookOverrunPair(t, logText, "post-terminal-panic", "event_transform")
 	for _, secret := range []string{"SECRET-POST-TERMINAL-PANIC", "SECRET-TRAILING-CONTENT"} {
 		if strings.Contains(logText, secret) {
 			t.Errorf("warning leaked %q: %s", secret, logText)
@@ -1406,6 +1456,8 @@ func TestForwardComposesHeldFinalizeOutputThroughOuterShim(t *testing.T) {
 
 func TestForwardFinalizePanicRendersNativeTerminalAndReleasesUpstream(t *testing.T) {
 	const upstreamFrame = "event: content_block_delta\ndata: {\"type\":\"content_block_delta\"}\n\n"
+	threshold := 375 * time.Millisecond
+	clock := newManualHookClock()
 	body := &observedReadCloser{reader: strings.NewReader(upstreamFrame)}
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		return &http.Response{
@@ -1419,10 +1471,15 @@ func TestForwardFinalizePanicRendersNativeTerminalAndReleasesUpstream(t *testing
 		Name:    "finalize-panic",
 		Enabled: true,
 		New: func(context.Context, endpoint.Surface, endpoint.Route) any {
-			return &finalizePanickingEventShim{}
+			return &finalizePanickingEventShim{clock: clock, delay: threshold}
 		},
 	}}
-	f := newTestForwarder(readyStub("https://upstream.invalid"), client, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, registry)
+	var logs bytes.Buffer
+	logger, err := logging.NewWithWriter(&logs, config.ServeConfig{LogLevel: "info", LogFormat: "text"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := newMonitoredStreamTestForwarder(readyStub("https://upstream.invalid"), client, logger, registry, threshold, clock)
 	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{"stream":true}`))
 	ctx, stream := beginStreamPublication(req.Context())
 	req = req.WithContext(ctx)
@@ -1441,6 +1498,7 @@ func TestForwardFinalizePanicRendersNativeTerminalAndReleasesUpstream(t *testing
 	if !body.closed {
 		t.Error("upstream body is open after Finalize panic")
 	}
+	assertHookOverrunPair(t, logs.String(), "finalize-panic", "stream_finalize")
 }
 
 func TestForwardEndpointContractControlsEventStreamProcessing(t *testing.T) {

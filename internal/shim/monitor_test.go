@@ -2,6 +2,7 @@ package shim
 
 import (
 	"context"
+	"io"
 	"log/slog"
 	"runtime"
 	"sync"
@@ -120,6 +121,35 @@ func (h *hookLogRecorder) snapshot() []recordedHookLog {
 	return append([]recordedHookLog(nil), h.records...)
 }
 
+type blockingHookLogHandler struct {
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (h *blockingHookLogHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h *blockingHookLogHandler) Handle(context.Context, slog.Record) error {
+	h.once.Do(func() {
+		close(h.entered)
+		<-h.release
+	})
+	return nil
+}
+
+func (h *blockingHookLogHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *blockingHookLogHandler) WithGroup(string) slog.Handler      { return h }
+
+type blockingOverrunRecorder struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (r *blockingOverrunRecorder) Increment() {
+	close(r.entered)
+	<-r.release
+}
+
 type countingOverrunRecorder struct {
 	mu    sync.Mutex
 	count int
@@ -141,18 +171,124 @@ func recordedHookState(record recordedHookLog) hookState {
 	return hookState(record.attrs["hook_state"].String())
 }
 
+func TestCrossingPublicationDoesNotHoldWatchdogStateMutex(t *testing.T) {
+	t.Run("logger", func(t *testing.T) {
+		clock := newFakeMonitorClock()
+		handler := &blockingHookLogHandler{entered: make(chan struct{}), release: make(chan struct{})}
+		watchdog := NewMonitor(slog.New(handler), time.Second, WithClock(clock)).NewWatchdog(context.Background(), &countingOverrunRecorder{})
+		hookStarted := make(chan struct{})
+		hookRelease := make(chan struct{})
+		hookDone := make(chan struct{})
+		go func() {
+			watchdog.Invoke("blocked-log", hookEventTransform, func() {
+				close(hookStarted)
+				<-hookRelease
+			})
+			close(hookDone)
+		}()
+		<-hookStarted
+		advanceDone := make(chan struct{})
+		go func() {
+			clock.Advance(time.Second)
+			close(advanceDone)
+		}()
+		<-handler.entered
+
+		stateUnlocked := watchdog.mu.TryLock()
+		if stateUnlocked {
+			watchdog.mu.Unlock()
+		}
+		close(handler.release)
+		<-advanceDone
+		close(hookRelease)
+		<-hookDone
+		if !stateUnlocked {
+			t.Fatal("watchdog state mutex remained locked during log publication")
+		}
+	})
+
+	t.Run("recorder", func(t *testing.T) {
+		clock := newFakeMonitorClock()
+		recorder := &blockingOverrunRecorder{entered: make(chan struct{}), release: make(chan struct{})}
+		watchdog := NewMonitor(slog.New(slog.NewTextHandler(io.Discard, nil)), time.Second, WithClock(clock)).NewWatchdog(context.Background(), recorder)
+		hookStarted := make(chan struct{})
+		hookRelease := make(chan struct{})
+		hookDone := make(chan struct{})
+		go func() {
+			watchdog.Invoke("blocked-recorder", hookEventTransform, func() {
+				close(hookStarted)
+				<-hookRelease
+			})
+			close(hookDone)
+		}()
+		<-hookStarted
+		advanceDone := make(chan struct{})
+		go func() {
+			clock.Advance(time.Second)
+			close(advanceDone)
+		}()
+		<-recorder.entered
+
+		stateUnlocked := watchdog.mu.TryLock()
+		if stateUnlocked {
+			watchdog.mu.Unlock()
+		}
+		close(recorder.release)
+		<-advanceDone
+		close(hookRelease)
+		<-hookDone
+		if !stateUnlocked {
+			t.Fatal("watchdog state mutex remained locked during recorder publication")
+		}
+	})
+}
+
+func TestConcurrentWatchdogInvocationPreservesHookBehaviorUnmonitored(t *testing.T) {
+	clock := newFakeMonitorClock()
+	watchdog := NewMonitor(slog.New(slog.NewTextHandler(io.Discard, nil)), time.Second, WithClock(clock)).NewWatchdog(context.Background(), &countingOverrunRecorder{})
+	firstStarted := make(chan struct{})
+	firstRelease := make(chan struct{})
+	firstDone := make(chan struct{})
+	go func() {
+		watchdog.Invoke("first", hookEventTransform, func() {
+			close(firstStarted)
+			<-firstRelease
+		})
+		close(firstDone)
+	}()
+	<-firstStarted
+
+	secondCalled := false
+	var recovered any
+	func() {
+		defer func() { recovered = recover() }()
+		watchdog.Invoke("second", hookEventTransform, func() {
+			secondCalled = true
+		})
+	}()
+	close(firstRelease)
+	<-firstDone
+
+	if recovered != nil {
+		t.Fatalf("concurrent invocation panicked: %v", recovered)
+	}
+	if !secondCalled {
+		t.Fatal("concurrent hook behavior was not preserved")
+	}
+}
+
 func TestWatchdogReportsCrossingAndReturn(t *testing.T) {
 	clock := newFakeMonitorClock()
 	logs := &hookLogRecorder{minimum: slog.LevelDebug}
 	counts := &countingOverrunRecorder{}
 	monitor := NewMonitor(slog.New(logs), time.Second, WithClock(clock))
-	watchdog := monitor.NewWatchdog(counts)
+	watchdog := monitor.NewWatchdog(context.Background(), counts)
 
 	started := make(chan struct{})
 	release := make(chan struct{})
 	done := make(chan struct{})
 	go func() {
-		watchdog.Invoke(context.Background(), "named-shim", hookEventTransform, func() {
+		watchdog.Invoke("named-shim", hookEventTransform, func() {
 			close(started)
 			<-release
 		})
@@ -205,13 +341,13 @@ func TestWatchdogReportsPanicThenRepanicsSameValue(t *testing.T) {
 	clock := newFakeMonitorClock()
 	logs := &hookLogRecorder{minimum: slog.LevelDebug}
 	counts := &countingOverrunRecorder{}
-	watchdog := NewMonitor(slog.New(logs), time.Second, WithClock(clock)).NewWatchdog(counts)
+	watchdog := NewMonitor(slog.New(logs), time.Second, WithClock(clock)).NewWatchdog(context.Background(), counts)
 	panicValue := &struct{ label string }{label: "same panic"}
 
 	var recovered any
 	func() {
 		defer func() { recovered = recover() }()
-		watchdog.Invoke(context.Background(), "panicking-shim", hookStreamFinalize, func() {
+		watchdog.Invoke("panicking-shim", hookStreamFinalize, func() {
 			clock.Advance(time.Second)
 			panic(panicValue)
 		})
@@ -235,7 +371,7 @@ func TestWatchdogReportsPanicThenRepanicsSameValue(t *testing.T) {
 func TestWatchdogPreservesRuntimeGoexit(t *testing.T) {
 	clock := newFakeMonitorClock()
 	logs := &hookLogRecorder{minimum: slog.LevelDebug}
-	watchdog := NewMonitor(slog.New(logs), time.Second, WithClock(clock)).NewWatchdog(&countingOverrunRecorder{})
+	watchdog := NewMonitor(slog.New(logs), time.Second, WithClock(clock)).NewWatchdog(context.Background(), &countingOverrunRecorder{})
 	outcome := make(chan string, 1)
 
 	go func() {
@@ -246,7 +382,7 @@ func TestWatchdogPreservesRuntimeGoexit(t *testing.T) {
 			}
 			outcome <- "goexit"
 		}()
-		watchdog.Invoke(context.Background(), "goexit", hookEventTransform, runtime.Goexit)
+		watchdog.Invoke("goexit", hookEventTransform, runtime.Goexit)
 		outcome <- "returned"
 	}()
 
@@ -262,7 +398,7 @@ func TestWatchdogDoesNotMisclassifyGoexitAfterCrossing(t *testing.T) {
 	clock := newFakeMonitorClock()
 	logs := &hookLogRecorder{minimum: slog.LevelDebug}
 	counts := &countingOverrunRecorder{}
-	watchdog := NewMonitor(slog.New(logs), time.Second, WithClock(clock)).NewWatchdog(counts)
+	watchdog := NewMonitor(slog.New(logs), time.Second, WithClock(clock)).NewWatchdog(context.Background(), counts)
 	outcome := make(chan string, 1)
 
 	go func() {
@@ -273,7 +409,7 @@ func TestWatchdogDoesNotMisclassifyGoexitAfterCrossing(t *testing.T) {
 			}
 			outcome <- "goexit"
 		}()
-		watchdog.Invoke(context.Background(), "goexit", hookEventTransform, func() {
+		watchdog.Invoke("goexit", hookEventTransform, func() {
 			clock.Advance(time.Second)
 			runtime.Goexit()
 		})
@@ -296,10 +432,10 @@ func TestWatchdogReportsEverySequentialOverrun(t *testing.T) {
 	clock := newFakeMonitorClock()
 	logs := &hookLogRecorder{minimum: slog.LevelDebug}
 	counts := &countingOverrunRecorder{}
-	watchdog := NewMonitor(slog.New(logs), time.Second, WithClock(clock)).NewWatchdog(counts)
+	watchdog := NewMonitor(slog.New(logs), time.Second, WithClock(clock)).NewWatchdog(context.Background(), counts)
 
 	for range 3 {
-		watchdog.Invoke(context.Background(), "repeat", hookClientMessageTransform, func() {
+		watchdog.Invoke("repeat", hookClientMessageTransform, func() {
 			clock.Advance(time.Second)
 		})
 	}
@@ -317,10 +453,10 @@ func TestWatchdogFastPathsAndTimerReuse(t *testing.T) {
 		clock := newFakeMonitorClock()
 		logs := &hookLogRecorder{minimum: slog.LevelDebug}
 		counts := &countingOverrunRecorder{}
-		watchdog := NewMonitor(slog.New(logs), 0, WithClock(clock)).NewWatchdog(counts)
+		watchdog := NewMonitor(slog.New(logs), 0, WithClock(clock)).NewWatchdog(context.Background(), counts)
 		called := false
 
-		watchdog.Invoke(context.Background(), "disabled", hookEventTransform, func() { called = true })
+		watchdog.Invoke("disabled", hookEventTransform, func() { called = true })
 
 		if !called || clock.created != 0 || len(logs.snapshot()) != 0 || counts.Count() != 0 {
 			t.Fatalf("disabled path = called:%t timers:%d logs:%d count:%d, want direct call only", called, clock.created, len(logs.snapshot()), counts.Count())
@@ -330,10 +466,10 @@ func TestWatchdogFastPathsAndTimerReuse(t *testing.T) {
 	t.Run("ordinary invocations reuse one timer", func(t *testing.T) {
 		clock := newFakeMonitorClock()
 		logs := &hookLogRecorder{minimum: slog.LevelDebug}
-		watchdog := NewMonitor(slog.New(logs), time.Second, WithClock(clock)).NewWatchdog(&countingOverrunRecorder{})
+		watchdog := NewMonitor(slog.New(logs), time.Second, WithClock(clock)).NewWatchdog(context.Background(), &countingOverrunRecorder{})
 
 		for range 3 {
-			watchdog.Invoke(context.Background(), "quick", hookClientMessageTransform, func() {
+			watchdog.Invoke("quick", hookClientMessageTransform, func() {
 				clock.Advance(100 * time.Millisecond)
 			})
 		}
@@ -351,13 +487,13 @@ func TestWatchdogCountsWhenWarnIsFilteredAfterRequestCancellation(t *testing.T) 
 	clock := newFakeMonitorClock()
 	logs := &hookLogRecorder{minimum: slog.LevelError}
 	counts := &countingOverrunRecorder{}
-	watchdog := NewMonitor(slog.New(logs), time.Second, WithClock(clock)).NewWatchdog(counts)
 	ctx, cancel := context.WithCancel(context.Background())
+	watchdog := NewMonitor(slog.New(logs), time.Second, WithClock(clock)).NewWatchdog(ctx, counts)
 	started := make(chan struct{})
 	release := make(chan struct{})
 	done := make(chan struct{})
 	go func() {
-		watchdog.Invoke(ctx, "canceled-context", hookServerMessageTransform, func() {
+		watchdog.Invoke("canceled-context", hookServerMessageTransform, func() {
 			close(started)
 			<-release
 		})
@@ -380,13 +516,13 @@ func TestWatchdogCountsWhenWarnIsFilteredAfterRequestCancellation(t *testing.T) 
 func TestWatchdogSurvivesServerDrainWhileInvocationStillRuns(t *testing.T) {
 	clock := newFakeMonitorClock()
 	logs := &hookLogRecorder{minimum: slog.LevelDebug}
-	watchdog := NewMonitor(slog.New(logs), time.Second, WithClock(clock)).NewWatchdog(&countingOverrunRecorder{})
+	watchdog := NewMonitor(slog.New(logs), time.Second, WithClock(clock)).NewWatchdog(context.Background(), &countingOverrunRecorder{})
 	drainCtx, startDrain := context.WithCancel(context.Background())
 	started := make(chan struct{})
 	release := make(chan struct{})
 	done := make(chan struct{})
 	go func() {
-		watchdog.Invoke(context.Background(), "draining", hookClientMessageTransform, func() {
+		watchdog.Invoke("draining", hookClientMessageTransform, func() {
 			close(started)
 			<-release
 			_ = drainCtx.Err()
@@ -412,14 +548,14 @@ func TestStaleTimerCallbackCannotCrossNextInvocationEarly(t *testing.T) {
 	clock := newFakeMonitorClock()
 	logs := &hookLogRecorder{minimum: slog.LevelDebug}
 	counts := &countingOverrunRecorder{}
-	watchdog := NewMonitor(slog.New(logs), time.Second, WithClock(clock)).NewWatchdog(counts)
+	watchdog := NewMonitor(slog.New(logs), time.Second, WithClock(clock)).NewWatchdog(context.Background(), counts)
 
 	invoke := func() (chan struct{}, chan struct{}) {
 		started := make(chan struct{})
 		release := make(chan struct{})
 		done := make(chan struct{})
 		go func() {
-			watchdog.Invoke(context.Background(), "reused", hookEventTransform, func() {
+			watchdog.Invoke("reused", hookEventTransform, func() {
 				close(started)
 				<-release
 			})
@@ -454,12 +590,12 @@ func TestWatchdogThresholdCompletionRaceIsAbsentOrPaired(t *testing.T) {
 	for iteration := 0; iteration < 250; iteration++ {
 		clock := newFakeMonitorClock()
 		logs := &hookLogRecorder{minimum: slog.LevelDebug}
-		watchdog := NewMonitor(slog.New(logs), time.Second, WithClock(clock)).NewWatchdog(&countingOverrunRecorder{})
+		watchdog := NewMonitor(slog.New(logs), time.Second, WithClock(clock)).NewWatchdog(context.Background(), &countingOverrunRecorder{})
 		started := make(chan struct{})
 		release := make(chan struct{})
 		done := make(chan struct{})
 		go func() {
-			watchdog.Invoke(context.Background(), "racing", hookEventTransform, func() {
+			watchdog.Invoke("racing", hookEventTransform, func() {
 				close(started)
 				<-release
 			})
@@ -543,12 +679,12 @@ func TestPermanentOverrunPublishesOneWarningAndWarningExecutionReturns(t *testin
 	clock := newFakeMonitorClock()
 	logs := &hookLogRecorder{minimum: slog.LevelDebug}
 	counts := &countingOverrunRecorder{}
-	watchdog := NewMonitor(slog.New(logs), time.Second, WithClock(clock)).NewWatchdog(counts)
+	watchdog := NewMonitor(slog.New(logs), time.Second, WithClock(clock)).NewWatchdog(context.Background(), counts)
 	started := make(chan struct{})
 	stuck := make(chan struct{})
 	done := make(chan struct{})
 	go func() {
-		watchdog.Invoke(context.Background(), "stuck", hookEventTransform, func() {
+		watchdog.Invoke("stuck", hookEventTransform, func() {
 			close(started)
 			<-stuck
 		})

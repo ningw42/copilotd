@@ -442,8 +442,7 @@ func TestProxyMonitorsBothDirectionsWithCorrelatedScopeAndProcessRootedExecution
 		},
 	}}
 	proxy := New(newTestCaller(provider, proxyLogger), http.DefaultClient, time.Second, time.Second, 1<<20,
-		registry, proxyLogger, shimLogger, 375*time.Millisecond, WsMetrics{})
-	proxy.shimMonitor = shim.NewMonitor(shimLogger, 375*time.Millisecond, shim.WithClock(clock))
+		registry, proxyLogger, shimLogger, 375*time.Millisecond, WsMetrics{}, WithShimMonitorClock(clock))
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()

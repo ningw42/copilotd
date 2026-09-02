@@ -233,7 +233,7 @@ func (c *Chain) HasBufferedTransformer() bool {
 
 // StreamAdapter composes the enabled stream hooks into the SSE engine's single
 // transformer seam. Nil selects the engine's byte-verbatim fast path.
-func (c *Chain) StreamAdapter(monitor *Monitor, logCtx context.Context) sse.FrameTransformer {
+func (c *Chain) StreamAdapter(logCtx context.Context, monitor *Monitor) sse.FrameTransformer {
 	var streamInstances []namedInstance
 	for _, registered := range c.instances {
 		_, transforms := registered.instance.(EventTransformer)
@@ -247,8 +247,7 @@ func (c *Chain) StreamAdapter(monitor *Monitor, logCtx context.Context) sse.Fram
 	}
 	return &sseAdapter{
 		instances: streamInstances,
-		watchdog:  monitor.NewWatchdog(c.overruns),
-		logCtx:    logCtx,
+		watchdog:  monitor.NewWatchdog(logCtx, c.overruns),
 	}
 }
 
@@ -283,12 +282,12 @@ func (c *Chain) serverMessageParticipants() []namedServerMessageTransformer {
 }
 
 // WSClientAdapter composes enabled client-to-upstream WebSocket message hooks.
-func (c *Chain) WSClientAdapter(monitor *Monitor, logCtx context.Context) MessageTransform {
+func (c *Chain) WSClientAdapter(logCtx context.Context, monitor *Monitor) MessageTransform {
 	participants := c.clientMessageParticipants()
 	if len(participants) == 0 {
 		return nil
 	}
-	watchdog := monitor.NewWatchdog(c.overruns)
+	watchdog := monitor.NewWatchdog(logCtx, c.overruns)
 	return func(ctx context.Context, message *Message) bool {
 		for _, participant := range participants {
 			if watchdog == nil {
@@ -298,7 +297,7 @@ func (c *Chain) WSClientAdapter(monitor *Monitor, logCtx context.Context) Messag
 				continue
 			}
 			emit := false
-			watchdog.Invoke(logCtx, participant.name, hookClientMessageTransform, func() {
+			watchdog.Invoke(participant.name, hookClientMessageTransform, func() {
 				emit = participant.transformer.TransformClientMessage(ctx, message)
 			})
 			if !emit {
@@ -310,12 +309,12 @@ func (c *Chain) WSClientAdapter(monitor *Monitor, logCtx context.Context) Messag
 }
 
 // WSServerAdapter composes enabled upstream-to-client WebSocket message hooks.
-func (c *Chain) WSServerAdapter(monitor *Monitor, logCtx context.Context) MessageTransform {
+func (c *Chain) WSServerAdapter(logCtx context.Context, monitor *Monitor) MessageTransform {
 	participants := c.serverMessageParticipants()
 	if len(participants) == 0 {
 		return nil
 	}
-	watchdog := monitor.NewWatchdog(c.overruns)
+	watchdog := monitor.NewWatchdog(logCtx, c.overruns)
 	return func(ctx context.Context, message *Message) bool {
 		for i := len(participants) - 1; i >= 0; i-- {
 			if watchdog == nil {
@@ -325,7 +324,7 @@ func (c *Chain) WSServerAdapter(monitor *Monitor, logCtx context.Context) Messag
 				continue
 			}
 			emit := false
-			watchdog.Invoke(logCtx, participants[i].name, hookServerMessageTransform, func() {
+			watchdog.Invoke(participants[i].name, hookServerMessageTransform, func() {
 				emit = participants[i].transformer.TransformServerMessage(ctx, message)
 			})
 			if !emit {
@@ -339,7 +338,6 @@ func (c *Chain) WSServerAdapter(monitor *Monitor, logCtx context.Context) Messag
 type sseAdapter struct {
 	instances []namedInstance
 	watchdog  *Watchdog
-	logCtx    context.Context
 }
 
 var _ sse.FrameTransformer = (*sseAdapter)(nil)
@@ -373,7 +371,7 @@ func (a *sseAdapter) Finalize(ctx context.Context) []sse.Frame {
 				continue
 			}
 			var output []sse.Frame
-			a.watchdog.Invoke(a.logCtx, a.instances[i].name, hookStreamFinalize, func() {
+			a.watchdog.Invoke(a.instances[i].name, hookStreamFinalize, func() {
 				output = finalizer.Finalize(ctx)
 			})
 			pending = append(pending, output...)
@@ -390,7 +388,7 @@ func (a *sseAdapter) transformFrames(ctx context.Context, shimName string, trans
 			continue
 		}
 		var output []sse.Frame
-		a.watchdog.Invoke(a.logCtx, shimName, hookEventTransform, func() {
+		a.watchdog.Invoke(shimName, hookEventTransform, func() {
 			output = transformer.TransformEvent(ctx, frame)
 		})
 		transformed = append(transformed, output...)

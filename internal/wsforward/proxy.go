@@ -25,15 +25,18 @@ import (
 // Proxy owns the upstream dial and both message pumps for Responses WebSocket
 // sessions.
 type Proxy struct {
-	caller          *upstream.Caller
-	dialClient      *http.Client
-	dialTimeout     time.Duration
-	writeTimeout    time.Duration
-	maxMessageBytes int64
-	logger          *slog.Logger
-	shimMonitor     *shim.Monitor
-	metrics         WsMetrics
-	registry        shim.Registry
+	caller                   *upstream.Caller
+	dialClient               *http.Client
+	dialTimeout              time.Duration
+	writeTimeout             time.Duration
+	maxMessageBytes          int64
+	logger                   *slog.Logger
+	shimLogger               *slog.Logger
+	shimHookOverrunThreshold time.Duration
+	shimMonitorOptions       []shim.MonitorOption
+	shimMonitor              *shim.Monitor
+	metrics                  WsMetrics
+	registry                 shim.Registry
 
 	baseCtx     context.Context
 	cancel      context.CancelFunc
@@ -98,27 +101,44 @@ func (w *capturingResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) 
 	return conn, readWriter, err
 }
 
+// Option configures an optional Proxy dependency.
+type Option func(*Proxy)
+
+// WithShimMonitorClock replaces only the Hook overrun monitor's clock. It is a
+// deterministic transport-test seam; production uses shim's monotonic clock.
+func WithShimMonitorClock(clock shim.Clock) Option {
+	return func(p *Proxy) {
+		p.shimMonitorOptions = append(p.shimMonitorOptions, shim.WithClock(clock))
+	}
+}
+
 // New returns a WebSocket Proxy with an independently cancellable session
 // context. dialClient must not impose a total client timeout.
-func New(caller *upstream.Caller, dialClient *http.Client, dialTimeout, writeTimeout time.Duration, maxMessageBytes int64, registry shim.Registry, logger, shimLogger *slog.Logger, hookOverrunThreshold time.Duration, metrics WsMetrics) *Proxy {
+func New(caller *upstream.Caller, dialClient *http.Client, dialTimeout, writeTimeout time.Duration, maxMessageBytes int64, registry shim.Registry, logger, shimLogger *slog.Logger, hookOverrunThreshold time.Duration, metrics WsMetrics, options ...Option) *Proxy {
 	baseCtx, cancel := context.WithCancel(context.Background())
 	drainCtx, cancelDrain := context.WithCancel(context.Background())
-	return &Proxy{
-		caller:          caller,
-		dialClient:      dialClient,
-		dialTimeout:     dialTimeout,
-		writeTimeout:    writeTimeout,
-		maxMessageBytes: maxMessageBytes,
-		logger:          logger,
-		shimMonitor:     shim.NewMonitor(shimLogger, hookOverrunThreshold),
-		metrics:         metrics,
-		registry:        append(shim.Registry(nil), registry...),
-		baseCtx:         baseCtx,
-		cancel:          cancel,
-		drainCtx:        drainCtx,
-		cancelDrain:     cancelDrain,
-		sessions:        make(map[*activeSession]struct{}),
+	proxy := &Proxy{
+		caller:                   caller,
+		dialClient:               dialClient,
+		dialTimeout:              dialTimeout,
+		writeTimeout:             writeTimeout,
+		maxMessageBytes:          maxMessageBytes,
+		logger:                   logger,
+		shimLogger:               shimLogger,
+		shimHookOverrunThreshold: hookOverrunThreshold,
+		metrics:                  metrics,
+		registry:                 append(shim.Registry(nil), registry...),
+		baseCtx:                  baseCtx,
+		cancel:                   cancel,
+		drainCtx:                 drainCtx,
+		cancelDrain:              cancelDrain,
+		sessions:                 make(map[*activeSession]struct{}),
 	}
+	for _, configure := range options {
+		configure(proxy)
+	}
+	proxy.shimMonitor = shim.NewMonitor(proxy.shimLogger, proxy.shimHookOverrunThreshold, proxy.shimMonitorOptions...)
+	return proxy
 }
 
 // Handler returns the WebSocket forwarding handler for one endpoint contract.
@@ -201,7 +221,7 @@ func (p *Proxy) Handler(ep endpoint.WSForward) http.HandlerFunc {
 			return
 		}
 		defer func() { _ = client.CloseNow() }()
-		chain := p.registry.NewChain(r.Context(), surface, upstreamRoute)
+		chain := p.registry.NewChain(responseCtx, surface, upstreamRoute)
 		p.logger.LogAttrs(responseCtx, slog.LevelInfo, "websocket established",
 			slog.Int(logging.StatusKey, http.StatusSwitchingProtocols),
 			slog.Duration(logging.HandshakeDurationKey, time.Since(handshakeStart)),
@@ -218,7 +238,7 @@ func (p *Proxy) Handler(ep endpoint.WSForward) http.HandlerFunc {
 		defer p.untrackSession(session)
 
 		result := runSession(p.drainCtx, p.baseCtx, client, upstreamConn, p.writeTimeout, p.maxMessageBytes,
-			chain.WSClientAdapter(p.shimMonitor, responseCtx), chain.WSServerAdapter(p.shimMonitor, responseCtx))
+			chain.WSClientAdapter(responseCtx, p.shimMonitor), chain.WSServerAdapter(responseCtx, p.shimMonitor))
 		requestsummary.RecordWebSocket(r.Context(), requestsummary.WebSocketResult{
 			Terminal:  requestsummary.WebSocketTerminal(result.terminal),
 			CloseCode: int(result.closeCode),

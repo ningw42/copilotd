@@ -92,7 +92,7 @@ func TestMonitoredClientMessagePanicReachesExistingRecoveryBoundary(t *testing.T
 			})
 		},
 	}}).NewChain(ctx, endpoint.OpenAI, endpoint.RouteOpenAIResponses)
-	adapter := chain.WSClientAdapter(shim.NewMonitor(logger, time.Second, shim.WithClock(clock)), ctx)
+	adapter := chain.WSClientAdapter(ctx, shim.NewMonitor(logger, time.Second, shim.WithClock(clock)))
 
 	emit, panicked := invokeMessageTransform(context.Background(), adapter, &shim.Message{})
 	publication := summary.Finish(requestsummary.ResponseResult{})
