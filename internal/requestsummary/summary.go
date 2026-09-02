@@ -38,6 +38,9 @@ type Summary struct {
 
 	webSocket    WebSocketResult
 	hasWebSocket bool
+
+	hookOverrunsApplicable bool
+	hookOverruns           int
 }
 
 // StreamOutcomeObserver observes the completed SSE outcome for one Surface.
@@ -207,6 +210,43 @@ func RecordWebSocket(ctx context.Context, result WebSocketResult) {
 	summary.hasWebSocket = true
 }
 
+// HookOverrunRecorder counts individual post-commit shim hook invocations that
+// cross the configured threshold for one request. Its methods are safe for
+// concurrent use by both WebSocket directions.
+type HookOverrunRecorder struct {
+	summary *Summary
+}
+
+// NewHookOverrunRecorder marks Hook overrun counts as applicable to the request
+// carrying ctx and returns its recorder. Calling it without an installed
+// Summary returns a no-op recorder. Calls after Finish cannot reopen the summary.
+func NewHookOverrunRecorder(ctx context.Context) *HookOverrunRecorder {
+	summary, ok := summaryFromContext(ctx)
+	if !ok {
+		return &HookOverrunRecorder{}
+	}
+	summary.mu.Lock()
+	if !summary.closed {
+		summary.hookOverrunsApplicable = true
+	}
+	summary.mu.Unlock()
+	return &HookOverrunRecorder{summary: summary}
+}
+
+// Increment records one threshold crossing. Increments after Finish and calls
+// on a recorder created without a Summary are ignored.
+func (r *HookOverrunRecorder) Increment() {
+	if r == nil || r.summary == nil {
+		return
+	}
+	r.summary.mu.Lock()
+	defer r.summary.mu.Unlock()
+	if r.summary.closed || !r.summary.hookOverrunsApplicable {
+		return
+	}
+	r.summary.hookOverruns++
+}
+
 // MatchedContext returns the registration-owned binding context before Finish,
 // if recorded. It never substitutes a later correlation context; after Finish it
 // returns no context.
@@ -291,6 +331,9 @@ func (s *Summary) Finish(response ResponseResult) Publication {
 			slog.Int64(logging.BytesC2UKey, s.webSocket.BytesC2U),
 			slog.Int64(logging.BytesU2CKey, s.webSocket.BytesU2C),
 		)
+	}
+	if s.hookOverrunsApplicable {
+		attrs = append(attrs, slog.Int(logging.HookOverrunsKey, s.hookOverruns))
 	}
 	s.publication = Publication{Context: ctx, Level: level, Attrs: attrs}
 	publication := clonePublication(s.publication)

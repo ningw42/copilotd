@@ -20,6 +20,7 @@ import (
 	"github.com/ningw42/copilotd/internal/endpoint"
 	"github.com/ningw42/copilotd/internal/identity"
 	"github.com/ningw42/copilotd/internal/logging"
+	"github.com/ningw42/copilotd/internal/requestsummary"
 	"github.com/ningw42/copilotd/internal/shim"
 )
 
@@ -74,6 +75,43 @@ func TestProxyAppliesClientMessageShimAndPreservesKinds(t *testing.T) {
 		case <-time.After(time.Second):
 			t.Fatalf("message %d was not forwarded", i)
 		}
+	}
+}
+
+func TestMonitoredClientMessagePanicReachesExistingRecoveryBoundary(t *testing.T) {
+	clock := newWebSocketMonitorClock()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ctx, summary := requestsummary.Begin(context.Background(), telemetryStreamObserver{})
+	chain := (shim.Registry{{
+		Name:    "monitored-panic",
+		Enabled: true,
+		New: func(context.Context, endpoint.Surface, endpoint.Route) any {
+			return clientMessageTransformFunc(func(context.Context, *shim.Message) bool {
+				clock.Advance(time.Second)
+				panic("private panic")
+			})
+		},
+	}}).NewChain(ctx, endpoint.OpenAI, endpoint.RouteOpenAIResponses)
+	adapter := chain.WSClientAdapter(ctx, shim.NewMonitor(logger, time.Second, shim.WithClock(clock)))
+
+	emit, panicked := invokeMessageTransform(context.Background(), adapter, &shim.Message{})
+	publication := summary.Finish(requestsummary.ResponseResult{})
+
+	if emit || !panicked {
+		t.Fatalf("invokeMessageTransform() = emit:%t panicked:%t, want false/true", emit, panicked)
+	}
+	wantOverruns := slog.Int(logging.HookOverrunsKey, 1)
+	foundOverruns := false
+	for _, attr := range publication.Attrs {
+		if attr.Key == logging.HookOverrunsKey {
+			foundOverruns = true
+			if !attr.Equal(wantOverruns) {
+				t.Fatalf("Hook overrun attribute = %#v, want %#v", attr, wantOverruns)
+			}
+		}
+	}
+	if !foundOverruns {
+		t.Fatalf("publication attributes = %#v, want %#v", publication.Attrs, wantOverruns)
 	}
 }
 
@@ -685,6 +723,8 @@ func TestProxySnapshotsRegistryAndBuildsFreshContextualChainPerSession(t *testin
 		1<<20,
 		registry,
 		logger,
+		logger,
+		0,
 		WsMetrics{},
 	)
 	defer func() {
@@ -786,6 +826,8 @@ func TestProxyShutdownCancelsRunningClientTransformAndSiblingPump(t *testing.T) 
 		1<<20,
 		registry,
 		logger,
+		logger,
+		0,
 		WsMetrics{},
 	)
 	handlerDone := make(chan struct{})
@@ -1155,6 +1197,8 @@ func startSessionWithRegistryAndMetrics(t *testing.T, maxMessageBytes int64, wri
 		maxMessageBytes,
 		registry,
 		logger,
+		logger,
+		0,
 		metrics,
 	)
 	sessionDone := make(chan struct{})

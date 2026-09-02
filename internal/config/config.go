@@ -47,6 +47,7 @@ const (
 	defaultAnthropicCatalogModelIDNormalizationEnabled = false
 	defaultShimNopEnabled                              = false
 	defaultShimResponsesItemIDStabilizerEnabled        = false
+	defaultShimHookOverrunThreshold                    = time.Second
 	defaultCodexCatalogEnabled                         = false
 	defaultCodexAutoReviewModel                        = ""
 	defaultCodexOverrideLimits                         = false
@@ -139,6 +140,10 @@ type ServeConfig struct {
 	// ShimResponsesItemIDStabilizerEnabled controls the opt-in OpenAI Responses
 	// item-id stabilizer shim. It is disabled by default.
 	ShimResponsesItemIDStabilizerEnabled bool
+
+	// ShimHookOverrunThreshold is the global duration after which an executing
+	// post-commit shim hook is reported. Zero disables monitoring.
+	ShimHookOverrunThreshold time.Duration
 
 	// The Codex settings control the opt-in client-shaped Codex catalog and its
 	// overlays. They are non-secret and remain valid but inert while the catalog
@@ -296,6 +301,7 @@ func serveSpecs() ([]spec[ServeConfig], *configPathField[ServeConfig]) {
 		boolField("anthropic-catalog-model-id-normalization-enabled", defaultAnthropicCatalogModelIDNormalizationEnabled, func(c *ServeConfig) *bool { return &c.AnthropicCatalogModelIDNormalizationEnabled }, "normalize Anthropic-vendored Claude model IDs to hyphenated slugs (opt-in)"),
 		boolField("shim-nop-enabled", defaultShimNopEnabled, func(c *ServeConfig) *bool { return &c.ShimNopEnabled }, "enable the canonical no-op shim"),
 		boolField("shim-responses-item-id-stabilizer-enabled", defaultShimResponsesItemIDStabilizerEnabled, func(c *ServeConfig) *bool { return &c.ShimResponsesItemIDStabilizerEnabled }, "stabilize churning OpenAI Responses item ids (opt-in)"),
+		durationField("shim-hook-overrun-threshold", defaultShimHookOverrunThreshold, inSeconds, func(c *ServeConfig) *time.Duration { return &c.ShimHookOverrunThreshold }, nonNegative, "warn when a post-commit shim hook remains in flight (0 disables monitoring)"),
 		boolField("codex-catalog-enabled", defaultCodexCatalogEnabled, func(c *ServeConfig) *bool { return &c.CodexCatalogEnabled }, "enable the Codex client-shaped catalog"),
 		stringMapField("codex-catalog-model-aliases", func(c *ServeConfig) *map[string]string { return &c.CodexCatalogModelAliases }, parseCodexCatalogModelAliases, "Codex catalog aliases (live-alias=metadata-source,...)"),
 		stringField("codex-auto-review-model", defaultCodexAutoReviewModel, func(c *ServeConfig) *string { return &c.CodexAutoReviewModel }, nil, "reviewer model injected into the Codex catalog"),

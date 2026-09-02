@@ -89,14 +89,21 @@ var expectedLogKeys = map[string]string{
 	"BuildKey":              "build",
 	"ConfigKey":             "config",
 	"EnabledShimsKey":       "enabled_shims",
+	"ShimKey":               "shim",
+	"HookKey":               "hook",
+	"HookStateKey":          "hook_state",
+	"ThresholdKey":          "threshold",
+	"HookOverrunsKey":       "hook_overruns",
 }
 
 var expectedComponentSinks = map[componentSink]struct{}{
 	{function: "runServe", consumer: "local", component: "cmd/copilotd"}:                                 {},
 	{function: "runBoundServe", consumer: "runServeStartup", component: "cmd/copilotd"}:                  {},
 	{function: "runBoundServe", consumer: "upstream.New", component: "internal/upstream"}:                {},
-	{function: "runBoundServe", consumer: "forward.New", component: "internal/sse"}:                      {},
-	{function: "runBoundServe", consumer: "wsforward.New", component: "internal/wsforward"}:              {},
+	{function: "runBoundServe", consumer: "forward.New arg 7", component: "internal/sse"}:                {},
+	{function: "runBoundServe", consumer: "forward.New arg 8", component: "internal/shim"}:               {},
+	{function: "runBoundServe", consumer: "wsforward.New arg 6", component: "internal/wsforward"}:        {},
+	{function: "runBoundServe", consumer: "wsforward.New arg 7", component: "internal/shim"}:             {},
 	{function: "runBoundServe", consumer: "server.New arg 1", component: "internal/server"}:              {},
 	{function: "runBoundServe", consumer: "server.New arg 2", component: "internal/catalog"}:             {},
 	{function: "buildServeProvider", consumer: "identity.NewManager", component: "internal/identity"}:    {},
@@ -171,6 +178,7 @@ func TestProductionLogStructure(t *testing.T) {
 	checkProductionCallsAndKeys(t, fset, files, registry)
 	checkWebSocketKeySource(t, fset, files)
 	checkComponentInventory(t, fset, files)
+	checkShimThresholdAssembly(t, fset, files)
 	checkBaseUses(t, fset, files)
 }
 
@@ -501,6 +509,47 @@ func checkComponentInventory(t *testing.T, fset *token.FileSet, files []producti
 	for sink := range expectedComponentSinks {
 		if actual[sink] != 1 {
 			t.Errorf("missing component sink: function=%s consumer=%s component=%s", sink.function, sink.consumer, sink.component)
+		}
+	}
+}
+
+func checkShimThresholdAssembly(t *testing.T, fset *token.FileSet, files []productionFile) {
+	t.Helper()
+	mainFile := findProductionFile(t, files, "cmd/copilotd/main.go")
+	expected := map[string]int{
+		"forward.New":   9,
+		"wsforward.New": 8,
+	}
+	found := make(map[string]int)
+	ast.Inspect(mainFile.syntax, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		consumer := callName(call.Fun)
+		argument, governed := expected[consumer]
+		if !governed {
+			return true
+		}
+		found[consumer]++
+		if len(call.Args) <= argument {
+			t.Errorf("%s: %s has no Hook overrun threshold argument %d", position(fset, call), consumer, argument)
+			return true
+		}
+		selection, ok := call.Args[argument].(*ast.SelectorExpr)
+		if !ok {
+			t.Errorf("%s: %s Hook overrun threshold must be cfg.ShimHookOverrunThreshold", position(fset, call.Args[argument]), consumer)
+			return true
+		}
+		cfg, cfgOK := selection.X.(*ast.Ident)
+		if !cfgOK || cfg.Name != "cfg" || selection.Sel.Name != "ShimHookOverrunThreshold" {
+			t.Errorf("%s: %s Hook overrun threshold must be cfg.ShimHookOverrunThreshold", position(fset, call.Args[argument]), consumer)
+		}
+		return true
+	})
+	for consumer := range expected {
+		if found[consumer] != 1 {
+			t.Errorf("cmd/copilotd assembly has %d %s calls, want exactly one", found[consumer], consumer)
 		}
 	}
 }

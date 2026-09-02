@@ -42,7 +42,7 @@ func newTestReadyObservers() server.ReadyObservers {
 
 func newTestForwarderWithLogger(provider identity.Provider, client *http.Client, outboundTimeout, writeTimeout, streamIdleTimeout, streamKeepaliveInterval time.Duration, maxRequestBytes, maxBufferedResponseBytes int64, logger *slog.Logger, registry shim.Registry, options ...forward.Option) *forward.Forwarder {
 	caller := upstream.New(provider, client, outboundTimeout, maxBufferedResponseBytes, logger)
-	return forward.New(caller, outboundTimeout, writeTimeout, streamIdleTimeout, streamKeepaliveInterval, maxRequestBytes, registry, logger, options...)
+	return forward.New(caller, outboundTimeout, writeTimeout, streamIdleTimeout, streamKeepaliveInterval, maxRequestBytes, registry, logger, logger, 0, options...)
 }
 
 func newTestCatalogSource(provider identity.Provider) *upstream.Caller {
@@ -60,6 +60,8 @@ func newTestWSProxy(provider identity.Provider) *wsforward.Proxy {
 		1<<20,
 		nil,
 		logger,
+		logger,
+		0,
 		wsforward.WsMetrics{},
 	)
 }

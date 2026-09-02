@@ -73,7 +73,7 @@ func TestWebSocketTelemetryEmitsEstablishmentAndTerminalAccessRecords(t *testing
 	forwarder := newTestForwarder(provider, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 	accepts := NewWsAcceptCounter()
 	terminals := NewWsSessionTerminalCounter()
-	proxy := wsforward.New(newTestWSCaller(provider, logger), http.DefaultClient, time.Second, time.Second, 1<<20, nil, logger, wsforward.WsMetrics{
+	proxy := wsforward.New(newTestWSCaller(provider, logger), http.DefaultClient, time.Second, time.Second, 1<<20, nil, logger, logger, 0, wsforward.WsMetrics{
 		Accept:          accepts,
 		SessionTerminal: terminals,
 	})
@@ -168,6 +168,7 @@ func TestWebSocketTelemetryEmitsEstablishmentAndTerminalAccessRecords(t *testing
 		"bytes_u2c=23",
 		"close_code=1000",
 		"terminal_reason=client_closed",
+		"hook_overruns=0",
 	} {
 		if !strings.Contains(accessLine, want) {
 			t.Errorf("terminal access telemetry missing %q: %s", want, accessLine)
@@ -199,7 +200,7 @@ func TestWebSocketErrorTerminalMakesAccessWarn(t *testing.T) {
 	logger, logs := websocketTelemetryLogger(t)
 	forwarder := newTestForwarder(provider, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 	terminals := NewWsSessionTerminalCounter()
-	proxy := wsforward.New(newTestWSCaller(provider, logger), http.DefaultClient, time.Second, time.Second, 4, nil, logger, wsforward.WsMetrics{SessionTerminal: terminals})
+	proxy := wsforward.New(newTestWSCaller(provider, logger), http.DefaultClient, time.Second, time.Second, 4, nil, logger, logger, 0, wsforward.WsMetrics{SessionTerminal: terminals})
 	base := startServer(t, newTestServerFromBase(testConfig(), logger, provider, newTestReadyObservers(), forwarder, newTestCatalogSource(provider), proxy, NewStreamOutcomeCounter(), catalog.RenderDescriptors{}))
 
 	clientURL := "ws" + strings.TrimPrefix(base, "http") + "/openai/v1/responses"
@@ -231,7 +232,7 @@ func TestWebSocketErrorTerminalMakesAccessWarn(t *testing.T) {
 		t.Fatalf("access records = %d, want one:\n%s", len(accessLines), logs.String())
 	}
 	accessLine := accessLines[0]
-	for _, want := range []string{"level=WARN", "terminal_reason=error", "close_code=1009", "request_id=ws-error-request"} {
+	for _, want := range []string{"level=WARN", "terminal_reason=error", "close_code=1009", "request_id=ws-error-request", "hook_overruns=0"} {
 		if !strings.Contains(accessLine, want) {
 			t.Errorf("error-terminal access missing %q: %s", want, accessLine)
 		}
@@ -247,7 +248,7 @@ func TestWebSocketPreUpgradeFailureEmitsOnlyAccessRecord(t *testing.T) {
 	forwarder := newTestForwarder(provider, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 	accepts := NewWsAcceptCounter()
 	terminals := NewWsSessionTerminalCounter()
-	proxy := wsforward.New(newTestWSCaller(provider, logger), http.DefaultClient, time.Second, time.Second, 1<<20, nil, logger, wsforward.WsMetrics{
+	proxy := wsforward.New(newTestWSCaller(provider, logger), http.DefaultClient, time.Second, time.Second, 1<<20, nil, logger, logger, 0, wsforward.WsMetrics{
 		Accept:          accepts,
 		SessionTerminal: terminals,
 	})
@@ -286,7 +287,7 @@ func TestWebSocketPreUpgradeFailureEmitsOnlyAccessRecord(t *testing.T) {
 	if len(accessLines) != 1 {
 		t.Fatalf("access lines = %d, want 1:\n%s", len(accessLines), out)
 	}
-	for _, sessionOnly := range []string{"terminal_reason=", "close_code=", "msgs_c2u=", "msgs_u2c=", "bytes_c2u=", "bytes_u2c="} {
+	for _, sessionOnly := range []string{"terminal_reason=", "close_code=", "msgs_c2u=", "msgs_u2c=", "bytes_c2u=", "bytes_u2c=", "hook_overruns="} {
 		if strings.Contains(accessLines[0], sessionOnly) {
 			t.Errorf("pre-upgrade access record unexpectedly contains %q: %s", sessionOnly, accessLines[0])
 		}
@@ -336,7 +337,7 @@ func TestAssembledServerRecoversPostUpgradeObserverPanicAndClosesBothSockets(t *
 	}, true)
 	logger, logs := websocketTelemetryLogger(t)
 	forwarder := newTestForwarder(provider, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
-	proxy := wsforward.New(newTestWSCaller(provider, logger), http.DefaultClient, time.Second, time.Second, 1<<20, nil, logger, wsforward.WsMetrics{
+	proxy := wsforward.New(newTestWSCaller(provider, logger), http.DefaultClient, time.Second, time.Second, 1<<20, nil, logger, logger, 0, wsforward.WsMetrics{
 		Accept: panicOnEstablished{},
 	})
 	base := startServer(t, newTestServerFromBase(testConfig(), logger, provider, newTestReadyObservers(), forwarder, newTestCatalogSource(provider), proxy, NewStreamOutcomeCounter(), catalog.RenderDescriptors{}))

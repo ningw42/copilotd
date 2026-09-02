@@ -359,14 +359,16 @@ func runBoundServe(ctx context.Context, cfg config.ServeConfig, base *slog.Logge
 	registry := configuredShimRegistry(cfg)
 	forwardClient := forward.NewClient(cfg.ResponseHeaderTimeout)
 	caller := upstream.New(mgr, forwardClient, cfg.OutboundTimeout, cfg.MaxBufferedResponseBytes, logging.ForComponent(base, "internal/upstream"))
-	fwd := forward.New(caller, cfg.OutboundTimeout, cfg.WriteTimeout, cfg.StreamIdleTimeout, cfg.StreamKeepaliveInterval, cfg.MaxRequestBytes, registry, logging.ForComponent(base, "internal/sse"))
+	fwd := forward.New(caller, cfg.OutboundTimeout, cfg.WriteTimeout, cfg.StreamIdleTimeout, cfg.StreamKeepaliveInterval, cfg.MaxRequestBytes, registry,
+		logging.ForComponent(base, "internal/sse"), logging.ForComponent(base, "internal/shim"), cfg.ShimHookOverrunThreshold)
 	wsDialClient := &http.Client{Transport: &http.Transport{Proxy: http.ProxyFromEnvironment}}
 	wsAccepts := server.NewWsAcceptCounter()
 	wsTerminals := server.NewWsSessionTerminalCounter()
-	wsProxy := wsforward.New(caller, wsDialClient, cfg.WebSocketHandshakeTimeout, cfg.WriteTimeout, cfg.MaxRequestBytes, registry, logging.ForComponent(base, "internal/wsforward"), wsforward.WsMetrics{
-		Accept:          wsAccepts,
-		SessionTerminal: wsTerminals,
-	})
+	wsProxy := wsforward.New(caller, wsDialClient, cfg.WebSocketHandshakeTimeout, cfg.WriteTimeout, cfg.MaxRequestBytes, registry,
+		logging.ForComponent(base, "internal/wsforward"), logging.ForComponent(base, "internal/shim"), cfg.ShimHookOverrunThreshold, wsforward.WsMetrics{
+			Accept:          wsAccepts,
+			SessionTerminal: wsTerminals,
+		})
 	streamOutcomes := server.NewStreamOutcomeCounter()
 
 	return server.New(cfg, logging.ForComponent(base, "internal/server"), logging.ForComponent(base, "internal/catalog"), logging.DependencyErrorLog(base, slog.LevelWarn), mgr, server.ReadyObservers{

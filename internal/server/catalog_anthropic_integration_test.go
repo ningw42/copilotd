@@ -16,6 +16,7 @@ import (
 	"github.com/ningw42/copilotd/internal/catalog"
 	"github.com/ningw42/copilotd/internal/forward"
 	"github.com/ningw42/copilotd/internal/identity"
+	"github.com/ningw42/copilotd/internal/logging"
 )
 
 func TestAnthropicModelCatalogOverRealListener(t *testing.T) {
@@ -136,7 +137,7 @@ func TestAnthropicModelCatalogOverRealListener(t *testing.T) {
 				t.Errorf("%s access record missing %q: %s", request.method, want, lines[0])
 			}
 		}
-		for _, omitted := range []string{"outcome=", "frames=", "fallbacks=", "catalog_shape=", "claude-opus-4.6"} {
+		for _, omitted := range []string{"outcome=", "frames=", "fallbacks=", "catalog_shape=", logging.HookOverrunsKey + "=", "claude-opus-4.6"} {
 			if strings.Contains(lines[0], omitted) {
 				t.Errorf("%s access record unexpectedly contains %q: %s", request.method, omitted, lines[0])
 			}

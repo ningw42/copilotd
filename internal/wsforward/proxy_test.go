@@ -54,6 +54,8 @@ func TestProxyClientCancelDuringUpstreamHandshakeWritesNothingAndBooksNoMetric(t
 		1<<20,
 		nil,
 		logger,
+		logger,
+		0,
 		WsMetrics{Accept: observed},
 	)
 	t.Cleanup(func() {
@@ -116,6 +118,8 @@ func TestProxyForwardsClientHeaderAndStripsWebSocketOffers(t *testing.T) {
 		1<<20,
 		nil,
 		logger,
+		logger,
+		0,
 		WsMetrics{},
 	)
 	t.Cleanup(func() {
@@ -160,6 +164,8 @@ func TestProxyCredentialResolutionUsesPhaseContextWithoutDialDeadline(t *testing
 		1<<20,
 		nil,
 		logger,
+		logger,
+		0,
 		WsMetrics{},
 	)
 	t.Cleanup(func() {
@@ -200,6 +206,8 @@ func TestProxyPreservesBareQuestionMarkInUpstreamHandshake(t *testing.T) {
 		1<<20,
 		nil,
 		logger,
+		logger,
+		0,
 		WsMetrics{},
 	)
 	t.Cleanup(func() {
@@ -355,6 +363,8 @@ func testProxyShutdownForceClosesSessionThatOverrunsDeadline(t *testing.T, tlsUp
 		1<<20,
 		nil,
 		logger,
+		logger,
+		0,
 		WsMetrics{},
 	)
 	client, handlerDone, downstream := dialProxy(t, proxy)
@@ -436,6 +446,8 @@ func newTestProxy(provider identity.Provider) *Proxy {
 		1<<20,
 		nil,
 		logger,
+		logger,
+		0,
 		WsMetrics{},
 	)
 }
@@ -519,6 +531,8 @@ func TestProxyForwardsMessagesAndBuildsUpstreamHandshake(t *testing.T) {
 		1<<20,
 		nil,
 		logger,
+		logger,
+		0,
 		WsMetrics{},
 	)
 	downstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -629,7 +643,7 @@ func TestProxyUsesConfiguredProxyAndVerifiedTLSForWSSDial(t *testing.T) {
 	}}
 	provider := identity.NewStatic(identity.Credential{BaseURL: upstreamServer.URL, Token: "copilot-token"}, true)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	proxy := New(newTestCaller(provider, logger), dialClient, time.Second, time.Second, 1<<20, nil, logger, WsMetrics{})
+	proxy := New(newTestCaller(provider, logger), dialClient, time.Second, time.Second, 1<<20, nil, logger, logger, 0, WsMetrics{})
 	downstream := httptest.NewServer(proxy.Handler(endpoint.OpenAIResponsesWS()))
 	t.Cleanup(downstream.Close)
 	t.Cleanup(func() {

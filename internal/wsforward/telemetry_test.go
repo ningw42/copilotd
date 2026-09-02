@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/ningw42/copilotd/internal/config"
 	"github.com/ningw42/copilotd/internal/endpoint"
 	"github.com/ningw42/copilotd/internal/identity"
 	"github.com/ningw42/copilotd/internal/logging"
@@ -20,6 +21,122 @@ import (
 	"github.com/ningw42/copilotd/internal/shim"
 	"github.com/ningw42/copilotd/internal/sse"
 )
+
+type lockedLogBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedLogBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedLogBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+type websocketMonitorClock struct {
+	mu     sync.Mutex
+	now    time.Time
+	timers []*websocketMonitorTimer
+}
+
+type websocketMonitorTimer struct {
+	clock    *websocketMonitorClock
+	deadline time.Time
+	callback func()
+	active   bool
+}
+
+func newWebSocketMonitorClock() *websocketMonitorClock {
+	return &websocketMonitorClock{now: time.Unix(3_000, 0)}
+}
+
+func (c *websocketMonitorClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *websocketMonitorClock) AfterFunc(d time.Duration, callback func()) shim.Timer {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	timer := &websocketMonitorTimer{clock: c, deadline: c.now.Add(d), callback: callback, active: true}
+	c.timers = append(c.timers, timer)
+	return timer
+}
+
+func (c *websocketMonitorClock) Advance(d time.Duration) {
+	c.mu.Lock()
+	c.now = c.now.Add(d)
+	var callbacks []func()
+	for _, timer := range c.timers {
+		if timer.active && !timer.deadline.After(c.now) {
+			timer.active = false
+			callbacks = append(callbacks, timer.callback)
+		}
+	}
+	c.mu.Unlock()
+	for _, callback := range callbacks {
+		callback()
+	}
+}
+
+func (t *websocketMonitorTimer) Stop() bool {
+	t.clock.mu.Lock()
+	defer t.clock.mu.Unlock()
+	wasActive := t.active
+	t.active = false
+	return wasActive
+}
+
+func (t *websocketMonitorTimer) Reset(d time.Duration) bool {
+	t.clock.mu.Lock()
+	defer t.clock.mu.Unlock()
+	wasActive := t.active
+	t.deadline = t.clock.now.Add(d)
+	t.active = true
+	return wasActive
+}
+
+type monitoredBidirectionalShim struct {
+	clock *websocketMonitorClock
+
+	mu                sync.Mutex
+	executionHadScope bool
+	clientInvocations int
+	serverInvocations int
+}
+
+func (s *monitoredBidirectionalShim) TransformClientMessage(ctx context.Context, _ *shim.Message) bool {
+	s.mu.Lock()
+	_, s.executionHadScope = logging.RequestIDFrom(ctx)
+	s.clientInvocations++
+	s.mu.Unlock()
+	s.clock.Advance(375 * time.Millisecond)
+	return true
+}
+
+func (s *monitoredBidirectionalShim) TransformServerMessage(ctx context.Context, _ *shim.Message) bool {
+	s.mu.Lock()
+	if _, scoped := logging.RequestIDFrom(ctx); scoped {
+		s.executionHadScope = true
+	}
+	s.serverInvocations++
+	s.mu.Unlock()
+	s.clock.Advance(375 * time.Millisecond)
+	return true
+}
+
+func (s *monitoredBidirectionalShim) snapshot() (bool, int, int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.executionHadScope, s.clientInvocations, s.serverInvocations
+}
 
 type telemetryStreamObserver struct{}
 
@@ -169,6 +286,8 @@ func TestProxyObservesOnePreUpgradeAcceptOutcome(t *testing.T) {
 				1<<20,
 				nil,
 				logger,
+				logger,
+				0,
 				WsMetrics{Accept: observed, SessionTerminal: observed},
 			)
 			t.Cleanup(func() {
@@ -275,6 +394,139 @@ func TestProxyPublishesClientClosedSessionWithDirectionalCounts(t *testing.T) {
 		if strings.Contains(out, secret) {
 			t.Errorf("session log leaked %q:\n%s", secret, out)
 		}
+	}
+}
+
+func TestProxyMonitorsBothDirectionsWithCorrelatedScopeAndProcessRootedExecution(t *testing.T) {
+	const (
+		requestID         = "ws-hook-request"
+		upstreamRequestID = "ws-hook-upstream"
+	)
+	clock := newWebSocketMonitorClock()
+	hooks := &monitoredBidirectionalShim{clock: clock}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Request-Id", upstreamRequestID)
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Errorf("accept upstream WebSocket: %v", err)
+			return
+		}
+		defer func() { _ = conn.CloseNow() }()
+		if err := conn.Write(context.Background(), websocket.MessageText, []byte("server-first")); err != nil {
+			return
+		}
+		kind, payload, err := conn.Read(context.Background())
+		if err != nil {
+			return
+		}
+		if err := conn.Write(context.Background(), kind, payload); err != nil {
+			return
+		}
+		_ = conn.Close(websocket.StatusNormalClosure, "done")
+	}))
+	defer upstream.Close()
+
+	logs := &lockedLogBuffer{}
+	base, err := logging.NewWithWriter(logs, config.ServeConfig{LogLevel: "info", LogFormat: "text"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxyLogger := logging.ForComponent(base, "internal/wsforward")
+	shimLogger := logging.ForComponent(base, "internal/shim")
+	provider := identity.NewStatic(identity.Credential{BaseURL: upstream.URL, Token: "private-copilot-token"}, true)
+	registry := shim.Registry{{
+		Name:    "observed-bidirectional",
+		Enabled: true,
+		New: func(context.Context, endpoint.Surface, endpoint.Route) any {
+			return hooks
+		},
+	}}
+	proxy := New(newTestCaller(provider, proxyLogger), http.DefaultClient, time.Second, time.Second, 1<<20,
+		registry, proxyLogger, shimLogger, 375*time.Millisecond, WsMetrics{}, WithShimMonitorClock(clock))
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := proxy.Shutdown(ctx); err != nil {
+			t.Errorf("shutdown proxy: %v", err)
+		}
+	}()
+
+	publications := make(chan requestsummary.Publication, 1)
+	downstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := logging.WithRequestID(r.Context(), requestID)
+		ctx = logging.With(ctx,
+			slog.String(logging.SurfaceKey, endpoint.OpenAI.String()),
+			slog.String(logging.InboundKey, "GET /openai/v1/responses"),
+			slog.Bool(logging.WSKey, true),
+		)
+		ctx, summary := requestsummary.Begin(ctx, telemetryStreamObserver{})
+		proxy.Handler(endpoint.OpenAIResponsesWS()).ServeHTTP(w, r.WithContext(ctx))
+		publications <- summary.Finish(requestsummary.ResponseResult{})
+	}))
+	defer downstream.Close()
+
+	client, response, err := websocket.Dial(context.Background(), "ws"+strings.TrimPrefix(downstream.URL, "http"), nil)
+	if err != nil {
+		if response != nil && response.Body != nil {
+			_ = response.Body.Close()
+		}
+		t.Fatalf("dial downstream: %v", err)
+	}
+	defer func() { _ = client.CloseNow() }()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if _, payload, err := client.Read(ctx); err != nil || string(payload) != "server-first" {
+		t.Fatalf("server-first message = %q, %v", payload, err)
+	}
+	if err := client.Write(ctx, websocket.MessageText, []byte("client-echo")); err != nil {
+		t.Fatalf("write client message: %v", err)
+	}
+	if _, payload, err := client.Read(ctx); err != nil || string(payload) != "client-echo" {
+		t.Fatalf("echoed message = %q, %v", payload, err)
+	}
+	_, _, _ = client.Read(ctx)
+	publication := <-publications
+
+	wantOverruns := slog.Int(logging.HookOverrunsKey, 3)
+	foundOverruns := false
+	for _, attr := range publication.Attrs {
+		if attr.Key == logging.HookOverrunsKey {
+			foundOverruns = true
+			if !attr.Equal(wantOverruns) {
+				t.Fatalf("Hook overrun attribute = %#v, want %#v", attr, wantOverruns)
+			}
+		}
+	}
+	if !foundOverruns {
+		t.Fatalf("publication attributes = %#v, want %#v", publication.Attrs, wantOverruns)
+	}
+	hadScope, clientCalls, serverCalls := hooks.snapshot()
+	if hadScope || clientCalls != 1 || serverCalls != 2 {
+		t.Fatalf("hook execution scope/calls = scoped:%t client:%d server:%d, want false/1/2", hadScope, clientCalls, serverCalls)
+	}
+	var overrunLines []string
+	for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+		if strings.Contains(line, `msg="shim hook overrun"`) {
+			overrunLines = append(overrunLines, line)
+		}
+	}
+	if len(overrunLines) != 6 {
+		t.Fatalf("Hook overrun records = %d, want three pairs:\n%s", len(overrunLines), logs.String())
+	}
+	for _, line := range overrunLines {
+		for _, want := range []string{
+			"component=internal/shim", "shim=observed-bidirectional", "threshold=375ms",
+			"request_id=" + requestID, "surface=openai", `inbound="GET /openai/v1/responses"`,
+			"ws=true", "upstream_request_id=" + upstreamRequestID,
+		} {
+			if !strings.Contains(line, want) {
+				t.Errorf("overrun record missing %q: %s", want, line)
+			}
+		}
+	}
+	if strings.Count(strings.Join(overrunLines, "\n"), "hook=client_message_transform") != 2 ||
+		strings.Count(strings.Join(overrunLines, "\n"), "hook=server_message_transform") != 4 {
+		t.Errorf("directional roles missing from records:\n%s", strings.Join(overrunLines, "\n"))
 	}
 }
 
@@ -575,6 +827,8 @@ func startTelemetrySessionWithRegistry(t *testing.T, logger *slog.Logger, observ
 		maxMessageBytes,
 		registry,
 		logger,
+		logger,
+		0,
 		WsMetrics{Accept: observed, SessionTerminal: observed},
 	)
 	handlerDone := make(chan struct{})

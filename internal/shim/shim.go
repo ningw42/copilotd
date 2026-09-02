@@ -39,6 +39,7 @@ import (
 	"net/http"
 
 	"github.com/ningw42/copilotd/internal/endpoint"
+	"github.com/ningw42/copilotd/internal/requestsummary"
 	"github.com/ningw42/copilotd/internal/sse"
 )
 
@@ -150,19 +151,33 @@ type Registration struct {
 // onion order.
 type Registry []Registration
 
+// namedInstance keeps the stable registration identity beside the per-request
+// or per-session implementation. Post-commit adapters preserve this association
+// through each individual hook call boundary.
+type namedInstance struct {
+	name     string
+	instance any
+}
+
 // Chain holds the enabled shim instances for one HTTP request or WebSocket
 // session.
 type Chain struct {
-	instances []any
+	instances []namedInstance
+	overruns  *requestsummary.HookOverrunRecorder
 }
 
-// NewChain constructs each enabled shim once in registration order for the
-// caller's request or session lifetime.
+// NewChain marks Hook overrun counts as applicable to the terminal request
+// summary, then constructs each enabled shim once in registration order for the
+// caller's request or session lifetime. Applicability includes an explicit zero
+// even when monitoring is disabled or no post-commit hook participates.
 func (r Registry) NewChain(ctx context.Context, surface endpoint.Surface, route endpoint.Route) *Chain {
-	chain := &Chain{}
+	chain := &Chain{overruns: requestsummary.NewHookOverrunRecorder(ctx)}
 	for _, registration := range r {
 		if registration.Enabled && (registration.Scope == nil || registration.Scope(surface, route)) {
-			chain.instances = append(chain.instances, registration.New(ctx, surface, route))
+			chain.instances = append(chain.instances, namedInstance{
+				name:     registration.Name,
+				instance: registration.New(ctx, surface, route),
+			})
 		}
 	}
 	return chain
@@ -171,8 +186,8 @@ func (r Registry) NewChain(ctx context.Context, surface endpoint.Surface, route 
 // RunRequest applies the request half of the onion.
 func (c *Chain) RunRequest(ctx context.Context, query string, header http.Header, body []byte) (http.Header, []byte, error) {
 	request := &Request{Header: header, Body: body, query: query}
-	for _, instance := range c.instances {
-		if transformer, ok := instance.(RequestTransformer); ok {
+	for _, registered := range c.instances {
+		if transformer, ok := registered.instance.(RequestTransformer); ok {
 			if err := transformer.TransformRequest(ctx, request); err != nil {
 				return request.Header, request.Body, err
 			}
@@ -185,7 +200,7 @@ func (c *Chain) RunRequest(ctx context.Context, query string, header http.Header
 func (c *Chain) RunPrelude(ctx context.Context, status int, header http.Header) (int, http.Header, error) {
 	prelude := &Prelude{Status: status, Header: header}
 	for i := len(c.instances) - 1; i >= 0; i-- {
-		if transformer, ok := c.instances[i].(PreludeTransformer); ok {
+		if transformer, ok := c.instances[i].instance.(PreludeTransformer); ok {
 			if err := transformer.TransformPrelude(ctx, prelude); err != nil {
 				return prelude.Status, prelude.Header, err
 			}
@@ -198,7 +213,7 @@ func (c *Chain) RunPrelude(ctx context.Context, status int, header http.Header) 
 func (c *Chain) RunBuffered(ctx context.Context, body []byte) ([]byte, error) {
 	buffered := &Body{Bytes: body}
 	for i := len(c.instances) - 1; i >= 0; i-- {
-		if transformer, ok := c.instances[i].(BufferedTransformer); ok {
+		if transformer, ok := c.instances[i].instance.(BufferedTransformer); ok {
 			if err := transformer.TransformBuffered(ctx, buffered); err != nil {
 				return buffered.Bytes, err
 			}
@@ -210,8 +225,8 @@ func (c *Chain) RunBuffered(ctx context.Context, body []byte) ([]byte, error) {
 // HasBufferedTransformer reports whether hook presence opts this response into
 // whole-body buffering.
 func (c *Chain) HasBufferedTransformer() bool {
-	for _, instance := range c.instances {
-		if _, ok := instance.(BufferedTransformer); ok {
+	for _, registered := range c.instances {
+		if _, ok := registered.instance.(BufferedTransformer); ok {
 			return true
 		}
 	}
@@ -220,35 +235,74 @@ func (c *Chain) HasBufferedTransformer() bool {
 
 // StreamAdapter composes the enabled stream hooks into the SSE engine's single
 // transformer seam. Nil selects the engine's byte-verbatim fast path.
-func (c *Chain) StreamAdapter() sse.FrameTransformer {
-	var streamInstances []any
-	for _, instance := range c.instances {
-		_, transforms := instance.(EventTransformer)
-		_, finalizes := instance.(StreamFinalizer)
+func (c *Chain) StreamAdapter(logCtx context.Context, monitor *Monitor) sse.FrameTransformer {
+	var streamInstances []namedInstance
+	for _, registered := range c.instances {
+		_, transforms := registered.instance.(EventTransformer)
+		_, finalizes := registered.instance.(StreamFinalizer)
 		if transforms || finalizes {
-			streamInstances = append(streamInstances, instance)
+			streamInstances = append(streamInstances, registered)
 		}
 	}
 	if len(streamInstances) == 0 {
 		return nil
 	}
-	return &sseAdapter{instances: streamInstances}
+	return &sseAdapter{
+		instances: streamInstances,
+		watchdog:  monitor.NewWatchdog(logCtx, c.overruns),
+	}
+}
+
+type namedClientMessageTransformer struct {
+	name        string
+	transformer ClientMessageTransformer
+}
+
+type namedServerMessageTransformer struct {
+	name        string
+	transformer ServerMessageTransformer
+}
+
+func (c *Chain) clientMessageParticipants() []namedClientMessageTransformer {
+	var participants []namedClientMessageTransformer
+	for _, registered := range c.instances {
+		if transformer, ok := registered.instance.(ClientMessageTransformer); ok {
+			participants = append(participants, namedClientMessageTransformer{name: registered.name, transformer: transformer})
+		}
+	}
+	return participants
+}
+
+func (c *Chain) serverMessageParticipants() []namedServerMessageTransformer {
+	var participants []namedServerMessageTransformer
+	for _, registered := range c.instances {
+		if transformer, ok := registered.instance.(ServerMessageTransformer); ok {
+			participants = append(participants, namedServerMessageTransformer{name: registered.name, transformer: transformer})
+		}
+	}
+	return participants
 }
 
 // WSClientAdapter composes enabled client-to-upstream WebSocket message hooks.
-func (c *Chain) WSClientAdapter() MessageTransform {
-	var participants []ClientMessageTransformer
-	for _, instance := range c.instances {
-		if transformer, ok := instance.(ClientMessageTransformer); ok {
-			participants = append(participants, transformer)
-		}
-	}
+func (c *Chain) WSClientAdapter(logCtx context.Context, monitor *Monitor) MessageTransform {
+	participants := c.clientMessageParticipants()
 	if len(participants) == 0 {
 		return nil
 	}
+	watchdog := monitor.NewWatchdog(logCtx, c.overruns)
 	return func(ctx context.Context, message *Message) bool {
-		for _, transformer := range participants {
-			if !transformer.TransformClientMessage(ctx, message) {
+		for _, participant := range participants {
+			if watchdog == nil {
+				if !participant.transformer.TransformClientMessage(ctx, message) {
+					return false
+				}
+				continue
+			}
+			emit := false
+			watchdog.Invoke(participant.name, hookClientMessageTransform, func() {
+				emit = participant.transformer.TransformClientMessage(ctx, message)
+			})
+			if !emit {
 				return false
 			}
 		}
@@ -257,19 +311,25 @@ func (c *Chain) WSClientAdapter() MessageTransform {
 }
 
 // WSServerAdapter composes enabled upstream-to-client WebSocket message hooks.
-func (c *Chain) WSServerAdapter() MessageTransform {
-	var participants []ServerMessageTransformer
-	for _, instance := range c.instances {
-		if transformer, ok := instance.(ServerMessageTransformer); ok {
-			participants = append(participants, transformer)
-		}
-	}
+func (c *Chain) WSServerAdapter(logCtx context.Context, monitor *Monitor) MessageTransform {
+	participants := c.serverMessageParticipants()
 	if len(participants) == 0 {
 		return nil
 	}
+	watchdog := monitor.NewWatchdog(logCtx, c.overruns)
 	return func(ctx context.Context, message *Message) bool {
 		for i := len(participants) - 1; i >= 0; i-- {
-			if !participants[i].TransformServerMessage(ctx, message) {
+			if watchdog == nil {
+				if !participants[i].transformer.TransformServerMessage(ctx, message) {
+					return false
+				}
+				continue
+			}
+			emit := false
+			watchdog.Invoke(participants[i].name, hookServerMessageTransform, func() {
+				emit = participants[i].transformer.TransformServerMessage(ctx, message)
+			})
+			if !emit {
 				return false
 			}
 		}
@@ -278,7 +338,8 @@ func (c *Chain) WSServerAdapter() MessageTransform {
 }
 
 type sseAdapter struct {
-	instances []any
+	instances []namedInstance
+	watchdog  *Watchdog
 }
 
 var _ sse.FrameTransformer = (*sseAdapter)(nil)
@@ -288,11 +349,11 @@ var _ sse.FrameTransformer = (*sseAdapter)(nil)
 func (a *sseAdapter) Transform(ctx context.Context, frame sse.Frame) []sse.Frame {
 	frames := []sse.Frame{frame}
 	for i := len(a.instances) - 1; i >= 0; i-- {
-		transformer, ok := a.instances[i].(EventTransformer)
+		transformer, ok := a.instances[i].instance.(EventTransformer)
 		if !ok {
 			continue
 		}
-		frames = transformFrames(ctx, transformer, frames)
+		frames = a.transformFrames(ctx, a.instances[i].name, transformer, frames)
 	}
 	return frames
 }
@@ -303,20 +364,36 @@ func (a *sseAdapter) Transform(ctx context.Context, frame sse.Frame) []sse.Frame
 func (a *sseAdapter) Finalize(ctx context.Context) []sse.Frame {
 	var pending []sse.Frame
 	for i := len(a.instances) - 1; i >= 0; i-- {
-		if transformer, ok := a.instances[i].(EventTransformer); ok {
-			pending = transformFrames(ctx, transformer, pending)
+		if transformer, ok := a.instances[i].instance.(EventTransformer); ok {
+			pending = a.transformFrames(ctx, a.instances[i].name, transformer, pending)
 		}
-		if finalizer, ok := a.instances[i].(StreamFinalizer); ok {
-			pending = append(pending, finalizer.Finalize(ctx)...)
+		if finalizer, ok := a.instances[i].instance.(StreamFinalizer); ok {
+			if a.watchdog == nil {
+				pending = append(pending, finalizer.Finalize(ctx)...)
+				continue
+			}
+			var output []sse.Frame
+			a.watchdog.Invoke(a.instances[i].name, hookStreamFinalize, func() {
+				output = finalizer.Finalize(ctx)
+			})
+			pending = append(pending, output...)
 		}
 	}
 	return pending
 }
 
-func transformFrames(ctx context.Context, transformer EventTransformer, frames []sse.Frame) []sse.Frame {
+func (a *sseAdapter) transformFrames(ctx context.Context, shimName string, transformer EventTransformer, frames []sse.Frame) []sse.Frame {
 	var transformed []sse.Frame
 	for _, frame := range frames {
-		transformed = append(transformed, transformer.TransformEvent(ctx, frame)...)
+		if a.watchdog == nil {
+			transformed = append(transformed, transformer.TransformEvent(ctx, frame)...)
+			continue
+		}
+		var output []sse.Frame
+		a.watchdog.Invoke(shimName, hookEventTransform, func() {
+			output = transformer.TransformEvent(ctx, frame)
+		})
+		transformed = append(transformed, output...)
 	}
 	return transformed
 }

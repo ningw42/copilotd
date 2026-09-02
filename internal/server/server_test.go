@@ -181,6 +181,9 @@ func TestAccessLogHealthzAtDebug(t *testing.T) {
 				t.Errorf("access line missing %q:\n%s", want, out)
 			}
 		}
+		if strings.Contains(out, logging.HookOverrunsKey+"=") {
+			t.Errorf("Chain-less health probe published hook_overruns:\n%s", out)
+		}
 	})
 
 	t.Run("silent at info so health polling does not flood logs", func(t *testing.T) {
@@ -236,7 +239,7 @@ func TestAccessLogUnmatchedRequestCarriesNoBinding(t *testing.T) {
 	if !strings.Contains(out, "status=404") {
 		t.Errorf("access line missing status=404:\n%s", out)
 	}
-	for _, streamOnly := range []string{"outcome=", "frames=", "fallbacks="} {
+	for _, streamOnly := range []string{"outcome=", "frames=", "fallbacks=", logging.HookOverrunsKey + "="} {
 		if strings.Contains(out, streamOnly) {
 			t.Errorf("non-stream access line unexpectedly contains %q:\n%s", streamOnly, out)
 		}

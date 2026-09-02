@@ -10,8 +10,9 @@ uses the flat TOML keys shown below. Durations use Go duration syntax such as
 `500ms`, `30s`, or `24h`; quote duration and other string values in TOML.
 
 Each duration default below is stated in that setting's canonical unit —
-seconds for timeouts, hours for refresh intervals — and `copilotd serve --help`
-prints the same string. The canonical unit is presentation only: any Go duration
+seconds for timeouts and monitoring thresholds, hours for refresh intervals —
+and `copilotd serve --help` prints the same string. The canonical unit is
+presentation only: any Go duration
 form is accepted as input, so `--stream-idle-timeout 5m` and
 `--stream-idle-timeout 300s` are equivalent.
 
@@ -34,6 +35,7 @@ form is accepted as input, so `--stream-idle-timeout 5m` and
 | [`--config <PATH>`](#--config) | `COPILOTD_CONFIG` | — | No file |
 | [`--shim-responses-item-id-stabilizer-enabled=<BOOL>`](#--shim-responses-item-id-stabilizer-enabled) | `COPILOTD_SHIM_RESPONSES_ITEM_ID_STABILIZER_ENABLED` | `shim-responses-item-id-stabilizer-enabled` | `false` |
 | [`--shim-nop-enabled=<BOOL>`](#--shim-nop-enabled) | `COPILOTD_SHIM_NOP_ENABLED` | `shim-nop-enabled` | `false` |
+| [`--shim-hook-overrun-threshold <DURATION>`](#--shim-hook-overrun-threshold) | `COPILOTD_SHIM_HOOK_OVERRUN_THRESHOLD` | `shim-hook-overrun-threshold` | `1s` |
 | [`--anthropic-catalog-model-id-normalization-enabled=<BOOL>`](#--anthropic-catalog-model-id-normalization-enabled) | `COPILOTD_ANTHROPIC_CATALOG_MODEL_ID_NORMALIZATION_ENABLED` | `anthropic-catalog-model-id-normalization-enabled` | `false` |
 | [`--codex-catalog-enabled=<BOOL>`](#--codex-catalog-enabled) | `COPILOTD_CODEX_CATALOG_ENABLED` | `codex-catalog-enabled` | `false` |
 | [`--codex-catalog-model-aliases <MAP>`](#--codex-catalog-model-aliases) | `COPILOTD_CODEX_CATALOG_MODEL_ALIASES` | `codex-catalog-model-aliases` | Empty |
@@ -161,6 +163,15 @@ to it; no id is minted, and any payload it cannot confidently rewrite is
 forwarded verbatim. Scoped to the OpenAI `/responses` endpoint, so every other
 surface is untouched. Disabled by default, leaving both transports
 byte-for-byte verbatim.
+
+### `--shim-hook-overrun-threshold`
+
+Sets the one global duration after which a still-running post-commit Shim hook
+becomes a **Hook overrun**. The default is `1s`; `0` disables monitoring, and
+negative values are rejected before the server binds. This setting applies to
+all monitored SSE and WebSocket hook roles — there are no per-role or
+per-registration overrides. Monitoring reports threshold crossings but never
+bounds, interrupts, or cancels hook execution.
 
 ### `--codex-catalog-enabled`
 

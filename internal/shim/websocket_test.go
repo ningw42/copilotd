@@ -30,10 +30,10 @@ func TestWebSocketAdaptersAreNilWithoutDirectionalParticipants(t *testing.T) {
 		},
 	}}).NewChain(context.Background(), endpoint.OpenAI, endpoint.RouteOpenAIResponses)
 
-	if adapter := chain.WSClientAdapter(); adapter != nil {
+	if adapter := chain.WSClientAdapter(context.Background(), nil); adapter != nil {
 		t.Errorf("WSClientAdapter() = %T, want nil", adapter)
 	}
-	if adapter := chain.WSServerAdapter(); adapter != nil {
+	if adapter := chain.WSServerAdapter(context.Background(), nil); adapter != nil {
 		t.Errorf("WSServerAdapter() = %T, want nil", adapter)
 	}
 }
@@ -54,7 +54,7 @@ func TestWSClientAdapterFoldsParticipantsInRegistrationOrder(t *testing.T) {
 			},
 		})
 	}
-	adapter := registry.NewChain(context.Background(), endpoint.OpenAI, endpoint.RouteOpenAIResponses).WSClientAdapter()
+	adapter := registry.NewChain(context.Background(), endpoint.OpenAI, endpoint.RouteOpenAIResponses).WSClientAdapter(context.Background(), nil)
 	if adapter == nil {
 		t.Fatal("WSClientAdapter() = nil, want composed transform")
 	}
@@ -89,7 +89,7 @@ func TestWSServerAdapterFoldsParticipantsInReverseRegistrationOrder(t *testing.T
 			},
 		})
 	}
-	adapter := registry.NewChain(context.Background(), endpoint.OpenAI, endpoint.RouteOpenAIResponses).WSServerAdapter()
+	adapter := registry.NewChain(context.Background(), endpoint.OpenAI, endpoint.RouteOpenAIResponses).WSServerAdapter(context.Background(), nil)
 	if adapter == nil {
 		t.Fatal("WSServerAdapter() = nil, want composed transform")
 	}
@@ -127,7 +127,7 @@ func TestWSClientAdapterDropShortCircuitsRemainingParticipants(t *testing.T) {
 			return clientTransform("never", true)
 		}},
 	}
-	adapter := registry.NewChain(context.Background(), endpoint.OpenAI, endpoint.RouteOpenAIResponses).WSClientAdapter()
+	adapter := registry.NewChain(context.Background(), endpoint.OpenAI, endpoint.RouteOpenAIResponses).WSClientAdapter(context.Background(), nil)
 
 	if emit := adapter(context.Background(), &shim.Message{}); emit {
 		t.Fatal("adapter() = emit true, want intentional drop")
@@ -156,7 +156,7 @@ func TestWSServerAdapterDropShortCircuitsRemainingParticipants(t *testing.T) {
 			return serverTransform("first", true)
 		}},
 	}
-	adapter := registry.NewChain(context.Background(), endpoint.OpenAI, endpoint.RouteOpenAIResponses).WSServerAdapter()
+	adapter := registry.NewChain(context.Background(), endpoint.OpenAI, endpoint.RouteOpenAIResponses).WSServerAdapter(context.Background(), nil)
 
 	if emit := adapter(context.Background(), &shim.Message{}); emit {
 		t.Fatal("adapter() = emit true, want intentional drop")

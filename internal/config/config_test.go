@@ -59,6 +59,7 @@ func defaultConfig() ServeConfig {
 		WriteTimeout:                 90 * time.Second,
 		ResponseHeaderTimeout:        600 * time.Second,
 		WebSocketHandshakeTimeout:    10 * time.Second,
+		ShimHookOverrunThreshold:     time.Second,
 		MaxRequestBytes:              33554432,
 		MaxBufferedResponseBytes:     33554432,
 		CodexCatalogRefreshInterval:  24 * time.Hour,
@@ -1159,6 +1160,45 @@ func TestStreamIdleTimeoutConfigPrecedence(t *testing.T) {
 	}
 }
 
+func TestShimHookOverrunThresholdConfigPrecedenceAndValidation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "copilotd.toml")
+	if err := os.WriteFile(path, []byte("shim-hook-overrun-threshold = \"250ms\"\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		args []string
+		env  map[string]string
+		want time.Duration
+	}{
+		{name: "default", want: time.Second},
+		{name: "TOML", args: []string{"--config", path}, want: 250 * time.Millisecond},
+		{name: "environment", args: []string{"--config", path}, env: map[string]string{"COPILOTD_SHIM_HOOK_OVERRUN_THRESHOLD": "500ms"}, want: 500 * time.Millisecond},
+		{name: "flag", args: []string{"--config", path, "--shim-hook-overrun-threshold", "750ms"}, env: map[string]string{"COPILOTD_SHIM_HOOK_OVERRUN_THRESHOLD": "500ms"}, want: 750 * time.Millisecond},
+		{name: "zero disables", args: []string{"--shim-hook-overrun-threshold", "0"}, want: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := map[string]string{"COPILOTD_APIKEY": testAPIKey}
+			for key, value := range tc.env {
+				env[key] = value
+			}
+			cfg, err := loadServe(tc.args, envFunc(env))
+			if err != nil {
+				t.Fatalf("loadServe() error = %v", err)
+			}
+			if cfg.ShimHookOverrunThreshold != tc.want {
+				t.Errorf("ShimHookOverrunThreshold = %v, want %v", cfg.ShimHookOverrunThreshold, tc.want)
+			}
+		})
+	}
+
+	_, err := loadServe([]string{"--apikey", testAPIKey, "--shim-hook-overrun-threshold", "-1ns"}, noEnv())
+	if err == nil || !strings.Contains(err.Error(), "shim-hook-overrun-threshold") {
+		t.Fatalf("negative threshold error = %v, want setting-specific validation failure", err)
+	}
+}
+
 // TestDurationDefaultsRenderInDeclaredUnit pins the help text of every duration
 // setting to the notation CONFIGURATION.md documents. Go's Duration.String()
 // would print these as 10m0s/1m30s/24h0m0s, so without this guard the two
@@ -1174,6 +1214,7 @@ func TestDurationDefaultsRenderInDeclaredUnit(t *testing.T) {
 		"write-timeout":                  "90s",
 		"response-header-timeout":        "600s",
 		"ws-handshake-timeout":           "10s",
+		"shim-hook-overrun-threshold":    "1s",
 		"codex-catalog-refresh-interval": "24h",
 		"impersonation-refresh-interval": "24h",
 	}
@@ -1284,6 +1325,7 @@ func TestLoadPrecedence(t *testing.T) {
 		c.WriteTimeout = 90 * time.Second
 		c.ResponseHeaderTimeout = 600 * time.Second
 		c.WebSocketHandshakeTimeout = 10 * time.Second
+		c.ShimHookOverrunThreshold = time.Second
 		c.MaxBufferedResponseBytes = 33554432
 		c.CodexCatalogRefreshInterval = 24 * time.Hour
 		c.StartupMintRetries = 3
@@ -1489,6 +1531,7 @@ func TestConfigLogValueEmitsOnlyNonSecretFields(t *testing.T) {
 		AnthropicCatalogModelIDNormalizationEnabled: true,
 		ShimNopEnabled:                       true,
 		ShimResponsesItemIDStabilizerEnabled: true,
+		ShimHookOverrunThreshold:             750 * time.Millisecond,
 		GithubOAuthToken:                     "gho-super-secret-oauth-value",
 		CodexCatalogEnabled:                  true,
 		CodexCatalogModelAliases: map[string]string{
@@ -1532,6 +1575,7 @@ func TestConfigLogValueEmitsOnlyNonSecretFields(t *testing.T) {
 		"config.anthropic-catalog-model-id-normalization-enabled=true",
 		"config.shim-nop-enabled=true",
 		"config.shim-responses-item-id-stabilizer-enabled=true",
+		"config.shim-hook-overrun-threshold=750ms",
 		"config.startup-mint-retries=3",
 		"config.vscode-version=1.135.0",
 		"config.plugin-version=0.48.1",
@@ -1589,6 +1633,7 @@ func TestConfigLogValueEmitsOnlyNonSecretFields(t *testing.T) {
 		"anthropic-catalog-model-id-normalization-enabled",
 		"shim-nop-enabled",
 		"shim-responses-item-id-stabilizer-enabled",
+		"shim-hook-overrun-threshold",
 		"codex-catalog-enabled",
 		"codex-catalog-model-aliases",
 		"codex-auto-review-model",
