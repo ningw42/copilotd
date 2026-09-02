@@ -397,6 +397,54 @@ func TestNopShimImplementsNoHooks(t *testing.T) {
 	}
 }
 
+type allPostCommitHooks struct{}
+
+func (allPostCommitHooks) TransformEvent(_ context.Context, frame sse.Frame) []sse.Frame {
+	return []sse.Frame{frame}
+}
+
+func (allPostCommitHooks) Finalize(context.Context) []sse.Frame { return nil }
+
+func (allPostCommitHooks) TransformClientMessage(context.Context, *Message) bool { return true }
+
+func (allPostCommitHooks) TransformServerMessage(context.Context, *Message) bool { return true }
+
+func TestPostCommitAdaptersRetainExactRegistrationIdentity(t *testing.T) {
+	chain := (Registry{
+		{Name: "first", Enabled: true, New: func(context.Context, endpoint.Surface, endpoint.Route) any { return allPostCommitHooks{} }},
+		{Name: "second", Enabled: true, New: func(context.Context, endpoint.Surface, endpoint.Route) any { return allPostCommitHooks{} }},
+	}).NewChain(context.Background(), endpoint.OpenAI, endpoint.RouteOpenAIResponses)
+
+	if got := []string{chain.instances[0].name, chain.instances[1].name}; !reflect.DeepEqual(got, []string{"first", "second"}) {
+		t.Fatalf("Chain registration names = %v, want [first second]", got)
+	}
+	stream := chain.StreamAdapter().(*sseAdapter)
+	if got := []string{stream.instances[0].name, stream.instances[1].name}; !reflect.DeepEqual(got, []string{"first", "second"}) {
+		t.Fatalf("SSE participant names = %v, want [first second]", got)
+	}
+	clients := chain.clientMessageParticipants()
+	if got := []string{clients[0].name, clients[1].name}; !reflect.DeepEqual(got, []string{"first", "second"}) {
+		t.Fatalf("client-message participant names = %v, want [first second]", got)
+	}
+	servers := chain.serverMessageParticipants()
+	if got := []string{servers[0].name, servers[1].name}; !reflect.DeepEqual(got, []string{"first", "second"}) {
+		t.Fatalf("server-message participant names = %v, want [first second]", got)
+	}
+}
+
+func TestCanonicalRegistryNamesAreNonEmptyAndUnique(t *testing.T) {
+	seen := make(map[string]struct{})
+	for i, registration := range CanonicalRegistry() {
+		if registration.Name == "" {
+			t.Errorf("CanonicalRegistry()[%d] has an empty name", i)
+		}
+		if _, duplicate := seen[registration.Name]; duplicate {
+			t.Errorf("CanonicalRegistry()[%d] repeats name %q", i, registration.Name)
+		}
+		seen[registration.Name] = struct{}{}
+	}
+}
+
 func TestCanonicalRegistryShipsDisabledNop(t *testing.T) {
 	registry := CanonicalRegistry()
 	if len(registry) < 1 || registry[0].Name != "nop" || registry[0].Enabled {
