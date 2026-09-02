@@ -43,6 +43,7 @@ type Forwarder struct {
 	fallbacks               *sse.FallbackCounter
 	// sseLogger belongs to internal/sse, the only package that emits through it.
 	sseLogger            *slog.Logger
+	shimMonitor          *shim.Monitor
 	suppressedShimErrors *sse.SuppressedShimErrorCounter
 	maxRequestBytes      int64
 	registry             shim.Registry
@@ -52,7 +53,7 @@ type Forwarder struct {
 type Option func(*Forwarder)
 
 // New builds a Forwarder from its injected dependencies.
-func New(caller *upstream.Caller, outboundTimeout, writeTimeout, streamIdleTimeout, streamKeepaliveInterval time.Duration, maxRequestBytes int64, registry shim.Registry, sseLogger *slog.Logger, options ...Option) *Forwarder {
+func New(caller *upstream.Caller, outboundTimeout, writeTimeout, streamIdleTimeout, streamKeepaliveInterval time.Duration, maxRequestBytes int64, registry shim.Registry, sseLogger, shimLogger *slog.Logger, hookOverrunThreshold time.Duration, options ...Option) *Forwarder {
 	registry = append(shim.Registry(nil), registry...)
 	f := &Forwarder{
 		caller:                  caller,
@@ -63,6 +64,7 @@ func New(caller *upstream.Caller, outboundTimeout, writeTimeout, streamIdleTimeo
 		clock:                   sse.RealClock{},
 		fallbacks:               sse.NewFallbackCounter(),
 		sseLogger:               sseLogger,
+		shimMonitor:             shim.NewMonitor(shimLogger, hookOverrunThreshold),
 		suppressedShimErrors:    sse.NewSuppressedShimErrorCounter(),
 		maxRequestBytes:         maxRequestBytes,
 		registry:                registry,

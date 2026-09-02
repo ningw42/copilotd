@@ -73,7 +73,7 @@ func TestWebSocketTelemetryEmitsEstablishmentAndTerminalAccessRecords(t *testing
 	forwarder := newTestForwarder(provider, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 	accepts := NewWsAcceptCounter()
 	terminals := NewWsSessionTerminalCounter()
-	proxy := wsforward.New(newTestWSCaller(provider, logger), http.DefaultClient, time.Second, time.Second, 1<<20, nil, logger, wsforward.WsMetrics{
+	proxy := wsforward.New(newTestWSCaller(provider, logger), http.DefaultClient, time.Second, time.Second, 1<<20, nil, logger, logger, 0, wsforward.WsMetrics{
 		Accept:          accepts,
 		SessionTerminal: terminals,
 	})
@@ -199,7 +199,7 @@ func TestWebSocketErrorTerminalMakesAccessWarn(t *testing.T) {
 	logger, logs := websocketTelemetryLogger(t)
 	forwarder := newTestForwarder(provider, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 	terminals := NewWsSessionTerminalCounter()
-	proxy := wsforward.New(newTestWSCaller(provider, logger), http.DefaultClient, time.Second, time.Second, 4, nil, logger, wsforward.WsMetrics{SessionTerminal: terminals})
+	proxy := wsforward.New(newTestWSCaller(provider, logger), http.DefaultClient, time.Second, time.Second, 4, nil, logger, logger, 0, wsforward.WsMetrics{SessionTerminal: terminals})
 	base := startServer(t, newTestServerFromBase(testConfig(), logger, provider, newTestReadyObservers(), forwarder, newTestCatalogSource(provider), proxy, NewStreamOutcomeCounter(), catalog.RenderDescriptors{}))
 
 	clientURL := "ws" + strings.TrimPrefix(base, "http") + "/openai/v1/responses"
@@ -247,7 +247,7 @@ func TestWebSocketPreUpgradeFailureEmitsOnlyAccessRecord(t *testing.T) {
 	forwarder := newTestForwarder(provider, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 	accepts := NewWsAcceptCounter()
 	terminals := NewWsSessionTerminalCounter()
-	proxy := wsforward.New(newTestWSCaller(provider, logger), http.DefaultClient, time.Second, time.Second, 1<<20, nil, logger, wsforward.WsMetrics{
+	proxy := wsforward.New(newTestWSCaller(provider, logger), http.DefaultClient, time.Second, time.Second, 1<<20, nil, logger, logger, 0, wsforward.WsMetrics{
 		Accept:          accepts,
 		SessionTerminal: terminals,
 	})
@@ -336,7 +336,7 @@ func TestAssembledServerRecoversPostUpgradeObserverPanicAndClosesBothSockets(t *
 	}, true)
 	logger, logs := websocketTelemetryLogger(t)
 	forwarder := newTestForwarder(provider, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
-	proxy := wsforward.New(newTestWSCaller(provider, logger), http.DefaultClient, time.Second, time.Second, 1<<20, nil, logger, wsforward.WsMetrics{
+	proxy := wsforward.New(newTestWSCaller(provider, logger), http.DefaultClient, time.Second, time.Second, 1<<20, nil, logger, logger, 0, wsforward.WsMetrics{
 		Accept: panicOnEstablished{},
 	})
 	base := startServer(t, newTestServerFromBase(testConfig(), logger, provider, newTestReadyObservers(), forwarder, newTestCatalogSource(provider), proxy, NewStreamOutcomeCounter(), catalog.RenderDescriptors{}))

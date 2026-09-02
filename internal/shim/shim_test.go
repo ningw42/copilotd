@@ -2,11 +2,14 @@ package shim
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"reflect"
 	"testing"
 
 	"github.com/ningw42/copilotd/internal/endpoint"
+	"github.com/ningw42/copilotd/internal/logging"
+	"github.com/ningw42/copilotd/internal/requestsummary"
 	"github.com/ningw42/copilotd/internal/sse"
 )
 
@@ -38,6 +41,23 @@ func (s *wrappingShim) TransformPrelude(_ context.Context, p *Prelude) error {
 	p.Status++
 	p.Header = http.Header{"X-Prelude-Order": {s.name + "(" + p.Header.Get("X-Prelude-Order") + ")"}}
 	return nil
+}
+
+type streamOutcomeObserverFunc func(string, sse.Outcome)
+
+func (f streamOutcomeObserverFunc) ObserveStreamOutcome(surface string, outcome sse.Outcome) {
+	f(surface, outcome)
+}
+
+func TestChainConstructionMarksHookOverrunCountApplicable(t *testing.T) {
+	ctx, summary := requestsummary.Begin(context.Background(), streamOutcomeObserverFunc(func(string, sse.Outcome) {}))
+	_ = (Registry(nil)).NewChain(ctx, endpoint.OpenAI, endpoint.RouteOpenAIResponses)
+
+	publication := summary.Finish(requestsummary.ResponseResult{})
+	want := slog.Int(logging.HookOverrunsKey, 0)
+	if len(publication.Attrs) == 0 || !publication.Attrs[len(publication.Attrs)-1].Equal(want) {
+		t.Fatalf("last publication attr = %#v, want %#v", publication.Attrs, want)
+	}
 }
 
 func TestChainConstructsEnabledShimsOnceWithSurfaceAndRoute(t *testing.T) {

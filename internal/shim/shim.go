@@ -39,6 +39,7 @@ import (
 	"net/http"
 
 	"github.com/ningw42/copilotd/internal/endpoint"
+	"github.com/ningw42/copilotd/internal/requestsummary"
 	"github.com/ningw42/copilotd/internal/sse"
 )
 
@@ -162,12 +163,13 @@ type namedInstance struct {
 // session.
 type Chain struct {
 	instances []namedInstance
+	overruns  *requestsummary.HookOverrunRecorder
 }
 
 // NewChain constructs each enabled shim once in registration order for the
 // caller's request or session lifetime.
 func (r Registry) NewChain(ctx context.Context, surface endpoint.Surface, route endpoint.Route) *Chain {
-	chain := &Chain{}
+	chain := &Chain{overruns: requestsummary.NewHookOverrunRecorder(ctx)}
 	for _, registration := range r {
 		if registration.Enabled && (registration.Scope == nil || registration.Scope(surface, route)) {
 			chain.instances = append(chain.instances, namedInstance{

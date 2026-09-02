@@ -31,6 +31,7 @@ type Proxy struct {
 	writeTimeout    time.Duration
 	maxMessageBytes int64
 	logger          *slog.Logger
+	shimMonitor     *shim.Monitor
 	metrics         WsMetrics
 	registry        shim.Registry
 
@@ -99,7 +100,7 @@ func (w *capturingResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) 
 
 // New returns a WebSocket Proxy with an independently cancellable session
 // context. dialClient must not impose a total client timeout.
-func New(caller *upstream.Caller, dialClient *http.Client, dialTimeout, writeTimeout time.Duration, maxMessageBytes int64, registry shim.Registry, logger *slog.Logger, metrics WsMetrics) *Proxy {
+func New(caller *upstream.Caller, dialClient *http.Client, dialTimeout, writeTimeout time.Duration, maxMessageBytes int64, registry shim.Registry, logger, shimLogger *slog.Logger, hookOverrunThreshold time.Duration, metrics WsMetrics) *Proxy {
 	baseCtx, cancel := context.WithCancel(context.Background())
 	drainCtx, cancelDrain := context.WithCancel(context.Background())
 	return &Proxy{
@@ -109,6 +110,7 @@ func New(caller *upstream.Caller, dialClient *http.Client, dialTimeout, writeTim
 		writeTimeout:    writeTimeout,
 		maxMessageBytes: maxMessageBytes,
 		logger:          logger,
+		shimMonitor:     shim.NewMonitor(shimLogger, hookOverrunThreshold),
 		metrics:         metrics,
 		registry:        append(shim.Registry(nil), registry...),
 		baseCtx:         baseCtx,

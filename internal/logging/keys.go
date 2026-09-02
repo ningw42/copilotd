@@ -51,4 +51,9 @@ const (
 	BuildKey              = "build"
 	ConfigKey             = "config"
 	EnabledShimsKey       = "enabled_shims"
+	ShimKey               = "shim"
+	HookKey               = "hook"
+	HookStateKey          = "hook_state"
+	ThresholdKey          = "threshold"
+	HookOverrunsKey       = "hook_overruns"
 )

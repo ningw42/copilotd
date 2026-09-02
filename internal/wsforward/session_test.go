@@ -685,6 +685,8 @@ func TestProxySnapshotsRegistryAndBuildsFreshContextualChainPerSession(t *testin
 		1<<20,
 		registry,
 		logger,
+		logger,
+		0,
 		WsMetrics{},
 	)
 	defer func() {
@@ -786,6 +788,8 @@ func TestProxyShutdownCancelsRunningClientTransformAndSiblingPump(t *testing.T) 
 		1<<20,
 		registry,
 		logger,
+		logger,
+		0,
 		WsMetrics{},
 	)
 	handlerDone := make(chan struct{})
@@ -1155,6 +1159,8 @@ func startSessionWithRegistryAndMetrics(t *testing.T, maxMessageBytes int64, wri
 		maxMessageBytes,
 		registry,
 		logger,
+		logger,
+		0,
 		metrics,
 	)
 	sessionDone := make(chan struct{})

@@ -169,6 +169,8 @@ func TestProxyObservesOnePreUpgradeAcceptOutcome(t *testing.T) {
 				1<<20,
 				nil,
 				logger,
+				logger,
+				0,
 				WsMetrics{Accept: observed, SessionTerminal: observed},
 			)
 			t.Cleanup(func() {
@@ -575,6 +577,8 @@ func startTelemetrySessionWithRegistry(t *testing.T, logger *slog.Logger, observ
 		maxMessageBytes,
 		registry,
 		logger,
+		logger,
+		0,
 		WsMetrics{Accept: observed, SessionTerminal: observed},
 	)
 	handlerDone := make(chan struct{})

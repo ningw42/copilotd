@@ -34,7 +34,7 @@ func newTestForwarder(provider identity.Provider, client *http.Client, outboundT
 
 func newTestForwarderWithLogger(provider identity.Provider, client *http.Client, outboundTimeout, writeTimeout, streamIdleTimeout, streamKeepaliveInterval time.Duration, maxRequestBytes, maxBufferedResponseBytes int64, logger *slog.Logger, registry shim.Registry, options ...Option) *Forwarder {
 	caller := upstreampolicy.New(provider, client, outboundTimeout, maxBufferedResponseBytes, logger)
-	return New(caller, outboundTimeout, writeTimeout, streamIdleTimeout, streamKeepaliveInterval, maxRequestBytes, registry, logger, options...)
+	return New(caller, outboundTimeout, writeTimeout, streamIdleTimeout, streamKeepaliveInterval, maxRequestBytes, registry, logger, logger, 0, options...)
 }
 
 type requestMutationShim struct {
@@ -395,7 +395,7 @@ func TestForwardBufferedResponseOverCapRendersBeforeCommit(t *testing.T) {
 	provider := readyStub("https://upstream.invalid")
 	caller := upstreampolicy.New(provider, client, time.Second, 8, slog.Default())
 	// The inference path must use the cap owned by the shared Caller.
-	f := New(caller, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, registry, slog.Default())
+	f := New(caller, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, registry, slog.Default(), slog.Default(), 0)
 	rec := newDeadlineRecorder()
 
 	f.Handler(endpoint.OpenAIResponsesHTTP())(rec, httptest.NewRequest(http.MethodPost, "/openai/v1/responses", strings.NewReader(`{}`)))
@@ -1710,6 +1710,7 @@ func TestForwardPublishesActualPumpResult(t *testing.T) {
 		slog.String(logging.OutcomeKey, "clean"),
 		slog.Int(logging.FramesKey, 2),
 		slog.Int(logging.FallbacksKey, 0),
+		slog.Int(logging.HookOverrunsKey, 0),
 	}
 	if !reflect.DeepEqual(publication.Attrs, wantAttrs) {
 		t.Errorf("summary attrs = %#v, want pump projection %#v", publication.Attrs, wantAttrs)

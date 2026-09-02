@@ -73,6 +73,8 @@ func startPhase3CapstoneServerWithObservers(
 		cfg.MaxRequestBytes,
 		registry,
 		logging.ForComponent(logger, "internal/sse"),
+		logging.ForComponent(logger, "internal/shim"),
+		0,
 	)
 	serverLogger := logging.ForComponent(logger, "internal/server")
 	catalogLogger := logging.ForComponent(logger, "internal/catalog")

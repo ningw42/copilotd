@@ -118,6 +118,7 @@ func TestRecordOperationsWithoutSummaryAreNoOps(t *testing.T) {
 		Terminal: requestsummary.WebSocketClientClosed, CloseCode: 1000,
 		MsgsC2U: 1, MsgsU2C: 2, BytesC2U: 3, BytesU2C: 4,
 	})
+	requestsummary.NewHookOverrunRecorder(ctx).Increment()
 
 	if matched, ok := requestsummary.MatchedContext(ctx); ok || matched != nil {
 		t.Fatalf("MatchedContext without a summary = (%v, %v), want (nil, false)", matched, ok)
@@ -423,6 +424,9 @@ func TestFinishOrdersEveryAttributeGroup(t *testing.T) {
 		BytesC2U:  30,
 		BytesU2C:  40,
 	})
+	overruns := requestsummary.NewHookOverrunRecorder(ctx)
+	overruns.Increment()
+	overruns.Increment()
 
 	publication := summary.Finish(requestsummary.ResponseResult{
 		Method: "GET", Status: 202, Bytes: 80, Duration: 3 * time.Second,
@@ -442,6 +446,7 @@ func TestFinishOrdersEveryAttributeGroup(t *testing.T) {
 		slog.Int64(logging.MsgsU2CKey, 4),
 		slog.Int64(logging.BytesC2UKey, 30),
 		slog.Int64(logging.BytesU2CKey, 40),
+		slog.Int(logging.HookOverrunsKey, 2),
 	}
 	if !reflect.DeepEqual(publication.Attrs, want) {
 		t.Fatalf("publication attrs = %#v, want %#v", publication.Attrs, want)
@@ -482,6 +487,46 @@ func TestStreamObserverCanReenterSummaryWithoutDeadlock(t *testing.T) {
 	}
 	if reentered.Context != publication.Context || reentered.Level != publication.Level || !reflect.DeepEqual(reentered.Attrs, publication.Attrs) {
 		t.Fatalf("reentrant Finish = %#v, want cached publication %#v", reentered, publication)
+	}
+}
+
+func TestHookOverrunRecorderGatesAndCountsTerminalSummary(t *testing.T) {
+	_, baseSummary := requestsummary.Begin(context.Background(), observerFunc(func(string, sse.Outcome) {}))
+	basePublication := baseSummary.Finish(requestsummary.ResponseResult{})
+	for _, attr := range basePublication.Attrs {
+		if attr.Key == logging.HookOverrunsKey {
+			t.Fatal("summary without a constructed Chain published hook_overruns")
+		}
+	}
+
+	zeroCtx, zeroSummary := requestsummary.Begin(context.Background(), observerFunc(func(string, sse.Outcome) {}))
+	_ = requestsummary.NewHookOverrunRecorder(zeroCtx)
+	zeroPublication := zeroSummary.Finish(requestsummary.ResponseResult{})
+	if got := zeroPublication.Attrs[len(zeroPublication.Attrs)-1]; !got.Equal(slog.Int(logging.HookOverrunsKey, 0)) {
+		t.Fatalf("applicable zero attr = %#v, want hook_overruns=0", got)
+	}
+
+	countCtx, countSummary := requestsummary.Begin(context.Background(), observerFunc(func(string, sse.Outcome) {}))
+	recorder := requestsummary.NewHookOverrunRecorder(countCtx)
+	const increments = 100
+	var wg sync.WaitGroup
+	wg.Add(increments)
+	for range increments {
+		go func() {
+			defer wg.Done()
+			recorder.Increment()
+		}()
+	}
+	wg.Wait()
+	countPublication := countSummary.Finish(requestsummary.ResponseResult{})
+	if got := countPublication.Attrs[len(countPublication.Attrs)-1]; !got.Equal(slog.Int(logging.HookOverrunsKey, increments)) {
+		t.Fatalf("count attr = %#v, want hook_overruns=%d", got, increments)
+	}
+
+	recorder.Increment()
+	latePublication := countSummary.Finish(requestsummary.ResponseResult{})
+	if !reflect.DeepEqual(latePublication.Attrs, countPublication.Attrs) {
+		t.Fatalf("late increment changed publication: before=%#v after=%#v", countPublication.Attrs, latePublication.Attrs)
 	}
 }
 
