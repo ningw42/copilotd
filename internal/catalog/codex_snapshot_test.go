@@ -309,15 +309,10 @@ func TestValidateCodexModelsAcceptsKnownOptionalFieldsAbsentFromVendoredSnapshot
 		messages["multi_agent"] = map[string]any{
 			"mode": map[string]any{"proactive": "Proactive instructions"},
 		}
-		messages["token_budget"] = map[string]any{
-			"enabled":                             true,
-			"use_history_notes_extension":         true,
-			"reminder_threshold_tokens":           100,
-			"reminder_message_template":           "Reminder",
-			"guidance_message":                    "Guidance",
-			"auto_compact_fallback_prompt":        "Compact",
-			"auto_compact_fallback_buffer_tokens": 10,
-		}
+		budget := completeCodexTokenBudget()
+		budget["enabled"] = true
+		budget["use_history_notes_extension"] = true
+		messages["token_budget"] = budget
 		messages["confirmation_policies"] = map[string]any{
 			"browser_use":  "Browser policy",
 			"computer_use": nil,
@@ -340,6 +335,40 @@ func TestValidateCodexModelsAcceptsKnownOptionalFieldsAbsentFromVendoredSnapshot
 		if messages[field] == nil {
 			t.Errorf("validateCodexModels did not preserve model_messages.%s", field)
 		}
+	}
+}
+
+func TestValidateCodexModelsAcceptsNullableMessageLeavesAndDefaultedTokenBudgetFlags(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(map[string]any)
+	}{
+		{name: "tool description null", mutate: func(messages map[string]any) {
+			messages["tools"] = map[string]any{
+				"send_user_message_async": map[string]any{"description": nil},
+			}
+		}},
+		{name: "auto-review node repl policy null", mutate: func(messages map[string]any) {
+			messages["auto_review"] = map[string]any{"node_repl_policy": nil}
+		}},
+		{name: "proactive mode message null", mutate: func(messages map[string]any) {
+			messages["multi_agent"] = map[string]any{
+				"mode": map[string]any{"proactive": nil},
+			}
+		}},
+		{name: "token budget flags absent", mutate: func(messages map[string]any) {
+			messages["token_budget"] = completeCodexTokenBudget()
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			modelsBytes := mutateCodexModelsBytes(t, func(entry map[string]any) {
+				tc.mutate(entry["model_messages"].(map[string]any))
+			})
+			if _, err := validateCodexModels(modelsBytes); err != nil {
+				t.Fatalf("validateCodexModels rejected current optional field form: %v", err)
+			}
+		})
 	}
 }
 
@@ -427,6 +456,51 @@ func TestValidateCodexModelsRejectsInstructionSourceThatRendersEmpty(t *testing.
 	}
 }
 
+func TestValidateCodexModelsRejectsInvalidTokenBudgetDefaultFlags(t *testing.T) {
+	tests := []struct {
+		name    string
+		values  map[string]any
+		wantErr string
+	}{
+		{
+			name:    "null",
+			values:  map[string]any{"enabled": nil},
+			wantErr: `has null non-optional field "model_messages.token_budget.enabled"`,
+		},
+		{
+			name:    "non-boolean",
+			values:  map[string]any{"use_history_notes_extension": "bad"},
+			wantErr: "model_messages.token_budget.use_history_notes_extension is not a boolean",
+		},
+		{
+			name: "both invalid report enabled first",
+			values: map[string]any{
+				"enabled":                     "bad",
+				"use_history_notes_extension": "bad",
+			},
+			wantErr: "model_messages.token_budget.enabled is not a boolean",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			modelsBytes := mutateCodexModelsBytes(t, func(entry map[string]any) {
+				budget := completeCodexTokenBudget()
+				for field, value := range tc.values {
+					budget[field] = value
+				}
+				entry["model_messages"].(map[string]any)["token_budget"] = budget
+			})
+			_, err := validateCodexModels(modelsBytes)
+			if err == nil {
+				t.Fatal("validateCodexModels accepted an invalid token-budget default flag")
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("validateCodexModels error = %q, want substring %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
 func TestValidateCodexModelsRejectsMalformedPresentOptionalAndDefaultFields(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -455,26 +529,6 @@ func TestValidateCodexModelsRejectsMalformedPresentOptionalAndDefaultFields(t *t
 		{name: "malformed proactive mode message", mutate: func(entry map[string]any) {
 			entry["model_messages"].(map[string]any)["multi_agent"] = map[string]any{
 				"mode": map[string]any{"proactive": 1},
-			}
-		}},
-		{name: "null token budget default flag", mutate: func(entry map[string]any) {
-			entry["model_messages"].(map[string]any)["token_budget"] = map[string]any{
-				"enabled":                             nil,
-				"reminder_threshold_tokens":           100,
-				"reminder_message_template":           "Reminder",
-				"guidance_message":                    "Guidance",
-				"auto_compact_fallback_prompt":        "Compact",
-				"auto_compact_fallback_buffer_tokens": 10,
-			}
-		}},
-		{name: "malformed token budget history-notes flag", mutate: func(entry map[string]any) {
-			entry["model_messages"].(map[string]any)["token_budget"] = map[string]any{
-				"use_history_notes_extension":         "bad",
-				"reminder_threshold_tokens":           100,
-				"reminder_message_template":           "Reminder",
-				"guidance_message":                    "Guidance",
-				"auto_compact_fallback_prompt":        "Compact",
-				"auto_compact_fallback_buffer_tokens": 10,
 			}
 		}},
 		{name: "guardian threshold outside u16", mutate: func(entry map[string]any) {
@@ -520,6 +574,16 @@ func TestValidateCodexModelsRejectsUnknownClosedEnumValues(t *testing.T) {
 				t.Fatal("validateCodexModels accepted a closed enum value current Codex rejects")
 			}
 		})
+	}
+}
+
+func completeCodexTokenBudget() map[string]any {
+	return map[string]any{
+		"reminder_threshold_tokens":           100,
+		"reminder_message_template":           "Reminder",
+		"guidance_message":                    "Guidance",
+		"auto_compact_fallback_prompt":        "Compact",
+		"auto_compact_fallback_buffer_tokens": 10,
 	}
 }
 

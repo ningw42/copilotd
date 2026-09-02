@@ -486,7 +486,7 @@ func testCodexModelsValue(t *testing.T, current []byte, fetchErr error) *cache.V
 		FallbackVersion: embeddedCodexModelsVersion,
 		TTL:             time.Hour,
 		Fetch: func(context.Context) ([]byte, string, error) {
-			return current, "rust-v0.152.0", fetchErr
+			return current, "rust-v0.153.0", fetchErr
 		},
 		Hash: hashModels,
 		Validate: func(currentBytes []byte) error {

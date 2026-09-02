@@ -237,11 +237,11 @@ repository.
 [checksums]: https://api.github.com/repos/openai/codex/releases/assets/540234309
 [source-tar]: https://api.github.com/repos/openai/codex/tarball/5adb68a49933ae446bf11935662c83dba55a0804
 [source-zip]: https://api.github.com/repos/openai/codex/zipball/5adb68a49933ae446bf11935662c83dba55a0804
-[model-types]: https://github.com/openai/codex/blob/5adb68a49933ae446bf11935662c83dba55a0804/codex-rs/protocol/src/openai_models.rs#L1-L900
+[model-types]: https://github.com/openai/codex/blob/5adb68a49933ae446bf11935662c83dba55a0804/codex-rs/protocol/src/openai_models.rs#L1-L941
 [model-messages]: https://github.com/openai/codex/blob/5adb68a49933ae446bf11935662c83dba55a0804/codex-rs/protocol/src/openai_models.rs#L544-L682
 [guardian-v2]: https://github.com/openai/codex/blob/5adb68a49933ae446bf11935662c83dba55a0804/codex-rs/protocol/src/openai_models/guardian_v2.rs
-[instruction-promotion]: https://github.com/openai/codex/blob/5adb68a49933ae446bf11935662c83dba55a0804/codex-rs/protocol/src/openai_models.rs#L787-L857
-[model-tests]: https://github.com/openai/codex/blob/5adb68a49933ae446bf11935662c83dba55a0804/codex-rs/protocol/src/openai_models.rs#L910-L1800
+[instruction-promotion]: https://github.com/openai/codex/blob/5adb68a49933ae446bf11935662c83dba55a0804/codex-rs/protocol/src/openai_models.rs#L745-L850
+[model-tests]: https://github.com/openai/codex/blob/5adb68a49933ae446bf11935662c83dba55a0804/codex-rs/protocol/src/openai_models.rs#L942-L2089
 [model-runtime]: https://github.com/openai/codex/blob/5adb68a49933ae446bf11935662c83dba55a0804/codex-rs/models-manager/src/model_info.rs
 [models-client]: https://github.com/openai/codex/blob/5adb68a49933ae446bf11935662c83dba55a0804/codex-rs/codex-api/src/endpoint/models.rs
 [models-endpoint]: https://github.com/openai/codex/blob/5adb68a49933ae446bf11935662c83dba55a0804/codex-rs/model-provider/src/models_endpoint.rs
@@ -250,6 +250,6 @@ repository.
 [models-lib]: https://github.com/openai/codex/blob/5adb68a49933ae446bf11935662c83dba55a0804/codex-rs/models-manager/src/lib.rs
 [manager]: https://github.com/openai/codex/blob/5adb68a49933ae446bf11935662c83dba55a0804/codex-rs/models-manager/src/manager.rs#L120-L680
 [manager-tests]: https://github.com/openai/codex/blob/5adb68a49933ae446bf11935662c83dba55a0804/codex-rs/models-manager/src/manager_tests.rs#L831-L1045
-[provider]: https://github.com/openai/codex/blob/5adb68a49933ae446bf11935662c83dba55a0804/codex-rs/model-provider/src/provider.rs#L120-L370
+[provider]: https://github.com/openai/codex/blob/5adb68a49933ae446bf11935662c83dba55a0804/codex-rs/model-provider/src/provider.rs#L120-L380
 [guardian]: https://github.com/openai/codex/blob/5adb68a49933ae446bf11935662c83dba55a0804/codex-rs/core/src/guardian/review.rs#L831-L940
 [codex-binary]: https://github.com/openai/codex/releases/download/rust-v0.152.1/codex-x86_64-unknown-linux-musl.zst

@@ -443,16 +443,22 @@ func validateCodexModelMessages(index int, messages *codexModelMessages) error {
 			budget.AutoCompactFallbackBufferTokens == nil {
 			return fmt.Errorf("models[%d].model_messages.token_budget is incomplete", index)
 		}
-		for field, raw := range map[string]json.RawMessage{
-			"enabled":                     budget.Enabled,
-			"use_history_notes_extension": budget.UseHistoryNotesExtension,
+		for _, flag := range []struct {
+			name string
+			raw  json.RawMessage
+		}{
+			{name: "enabled", raw: budget.Enabled},
+			{name: "use_history_notes_extension", raw: budget.UseHistoryNotesExtension},
 		} {
-			if len(raw) == 0 {
+			if len(flag.raw) == 0 {
 				continue
 			}
+			if bytes.Equal(bytes.TrimSpace(flag.raw), []byte("null")) {
+				return fmt.Errorf("models[%d] has null non-optional field %q", index, "model_messages.token_budget."+flag.name)
+			}
 			var value bool
-			if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) || json.Unmarshal(raw, &value) != nil {
-				return fmt.Errorf("models[%d].model_messages.token_budget.%s is not a boolean", index, field)
+			if json.Unmarshal(flag.raw, &value) != nil {
+				return fmt.Errorf("models[%d].model_messages.token_budget.%s is not a boolean", index, flag.name)
 			}
 		}
 	}
