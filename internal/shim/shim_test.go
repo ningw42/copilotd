@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 
@@ -577,6 +578,152 @@ func (allPostCommitHooks) TransformClientMessage(context.Context, *Message) bool
 
 func (allPostCommitHooks) TransformServerMessage(context.Context, *Message) bool { return true }
 
+type monitoredWebSocketHooks struct {
+	clock     *fakeMonitorClock
+	clientCtx context.Context
+	serverCtx context.Context
+}
+
+func (h *monitoredWebSocketHooks) TransformClientMessage(ctx context.Context, _ *Message) bool {
+	h.clientCtx = ctx
+	h.clock.Advance(time.Second)
+	return true
+}
+
+func (h *monitoredWebSocketHooks) TransformServerMessage(ctx context.Context, _ *Message) bool {
+	h.serverCtx = ctx
+	h.clock.Advance(time.Second)
+	return true
+}
+
+func TestWebSocketAdaptersMonitorBothDirectionsWithSharedRecorder(t *testing.T) {
+	clock := newFakeMonitorClock()
+	logs := &hookLogRecorder{minimum: slog.LevelDebug}
+	monitor := NewMonitor(slog.New(logs), time.Second, WithClock(clock))
+	requestCtx, summary := requestsummary.Begin(context.Background(), streamOutcomeObserverFunc(func(string, sse.Outcome) {}))
+	executionCtx := context.WithValue(context.Background(), struct{ name string }{"context"}, "process-rooted execution")
+	logCtx := context.WithValue(requestCtx, struct{ name string }{"context"}, "correlated response")
+	hooks := &monitoredWebSocketHooks{clock: clock}
+	chain := (Registry{{
+		Name:    "both-directions",
+		Enabled: true,
+		New: func(context.Context, endpoint.Surface, endpoint.Route) any {
+			return hooks
+		},
+	}}).NewChain(requestCtx, endpoint.OpenAI, endpoint.RouteOpenAIResponses)
+
+	if emit := chain.WSClientAdapter(monitor, logCtx)(executionCtx, &Message{}); !emit {
+		t.Fatal("client adapter dropped message")
+	}
+	if emit := chain.WSServerAdapter(monitor, logCtx)(executionCtx, &Message{}); !emit {
+		t.Fatal("server adapter dropped message")
+	}
+
+	if hooks.clientCtx != executionCtx || hooks.serverCtx != executionCtx {
+		t.Fatal("monitor replaced the process-rooted hook execution context")
+	}
+	records := logs.snapshot()
+	if len(records) != 4 {
+		t.Fatalf("WebSocket overrun records = %d, want two pairs", len(records))
+	}
+	wantHooks := []string{"client_message_transform", "client_message_transform", "server_message_transform", "server_message_transform"}
+	for i, want := range wantHooks {
+		if got := records[i].attrs[logging.HookKey].String(); got != want {
+			t.Errorf("record %d hook = %q, want %q", i, got, want)
+		}
+	}
+	publication := summary.Finish(requestsummary.ResponseResult{})
+	if got := publication.Attrs[len(publication.Attrs)-1].Value.Int64(); got != 2 {
+		t.Fatalf("shared WebSocket hook_overruns = %d, want 2", got)
+	}
+}
+
+type blockingWebSocketHooks struct {
+	entered chan string
+	release chan struct{}
+}
+
+func (h *blockingWebSocketHooks) TransformClientMessage(context.Context, *Message) bool {
+	h.entered <- "client"
+	<-h.release
+	return true
+}
+
+func (h *blockingWebSocketHooks) TransformServerMessage(context.Context, *Message) bool {
+	h.entered <- "server"
+	<-h.release
+	return true
+}
+
+func TestWebSocketDirectionsCountConcurrentOverrunsOnSharedRecorder(t *testing.T) {
+	clock := newFakeMonitorClock()
+	logs := &hookLogRecorder{minimum: slog.LevelDebug}
+	monitor := NewMonitor(slog.New(logs), time.Second, WithClock(clock))
+	ctx, summary := requestsummary.Begin(context.Background(), streamOutcomeObserverFunc(func(string, sse.Outcome) {}))
+	hooks := &blockingWebSocketHooks{entered: make(chan string, 2), release: make(chan struct{})}
+	chain := (Registry{{
+		Name:    "concurrent-directions",
+		Enabled: true,
+		New: func(context.Context, endpoint.Surface, endpoint.Route) any {
+			return hooks
+		},
+	}}).NewChain(ctx, endpoint.OpenAI, endpoint.RouteOpenAIResponses)
+	client := chain.WSClientAdapter(monitor, ctx)
+	server := chain.WSServerAdapter(monitor, ctx)
+
+	var calls sync.WaitGroup
+	calls.Add(2)
+	go func() {
+		defer calls.Done()
+		client(context.Background(), &Message{})
+	}()
+	go func() {
+		defer calls.Done()
+		server(context.Background(), &Message{})
+	}()
+	<-hooks.entered
+	<-hooks.entered
+	clock.Advance(time.Second)
+	close(hooks.release)
+	calls.Wait()
+	publication := summary.Finish(requestsummary.ResponseResult{})
+
+	if got := publication.Attrs[len(publication.Attrs)-1].Value.Int64(); got != 2 {
+		t.Fatalf("concurrent hook_overruns = %d, want 2", got)
+	}
+	if got := len(logs.snapshot()); got != 4 {
+		t.Fatalf("concurrent directional records = %d, want two pairs", got)
+	}
+}
+
+func TestWebSocketAdaptersConfiguredZeroDisableMonitoring(t *testing.T) {
+	clock := newFakeMonitorClock()
+	logs := &hookLogRecorder{minimum: slog.LevelDebug}
+	monitor := NewMonitor(slog.New(logs), 0, WithClock(clock))
+	ctx, summary := requestsummary.Begin(context.Background(), streamOutcomeObserverFunc(func(string, sse.Outcome) {}))
+	hooks := &monitoredWebSocketHooks{clock: clock}
+	chain := (Registry{{
+		Name:    "disabled-monitoring",
+		Enabled: true,
+		New: func(context.Context, endpoint.Surface, endpoint.Route) any {
+			return hooks
+		},
+	}}).NewChain(ctx, endpoint.OpenAI, endpoint.RouteOpenAIResponses)
+
+	if !chain.WSClientAdapter(monitor, ctx)(context.Background(), &Message{}) ||
+		!chain.WSServerAdapter(monitor, ctx)(context.Background(), &Message{}) {
+		t.Fatal("disabled monitoring changed WebSocket emission")
+	}
+	publication := summary.Finish(requestsummary.ResponseResult{})
+
+	if clock.created != 0 || len(logs.snapshot()) != 0 {
+		t.Fatalf("disabled WebSocket path created %d timers and %d records, want none", clock.created, len(logs.snapshot()))
+	}
+	if got := publication.Attrs[len(publication.Attrs)-1].Value.Int64(); got != 0 {
+		t.Fatalf("disabled WebSocket hook_overruns = %d, want 0", got)
+	}
+}
+
 func TestPostCommitAdaptersRetainExactRegistrationIdentity(t *testing.T) {
 	chain := (Registry{
 		{Name: "first", Enabled: true, New: func(context.Context, endpoint.Surface, endpoint.Route) any { return allPostCommitHooks{} }},
@@ -688,10 +835,10 @@ func TestResponsesItemIDStabilizerRegistrationSelectsOnlyResponsesTransports(t *
 			if got := chain.StreamAdapter(nil, context.Background()) != nil; got != tc.wantStreamAdapter {
 				t.Errorf("StreamAdapter() presence = %t, want %t", got, tc.wantStreamAdapter)
 			}
-			if chain.WSClientAdapter() != nil {
+			if chain.WSClientAdapter(nil, context.Background()) != nil {
 				t.Error("WSClientAdapter() is non-nil, want server-direction-only stabilizer")
 			}
-			if got := chain.WSServerAdapter() != nil; got != tc.wantWSServerAdapter {
+			if got := chain.WSServerAdapter(nil, context.Background()) != nil; got != tc.wantWSServerAdapter {
 				t.Errorf("WSServerAdapter() presence = %t, want %t", got, tc.wantWSServerAdapter)
 			}
 		})

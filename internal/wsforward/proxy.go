@@ -217,7 +217,8 @@ func (p *Proxy) Handler(ep endpoint.WSForward) http.HandlerFunc {
 		p.trackSession(session)
 		defer p.untrackSession(session)
 
-		result := runSession(p.drainCtx, p.baseCtx, client, upstreamConn, p.writeTimeout, p.maxMessageBytes, chain.WSClientAdapter(), chain.WSServerAdapter())
+		result := runSession(p.drainCtx, p.baseCtx, client, upstreamConn, p.writeTimeout, p.maxMessageBytes,
+			chain.WSClientAdapter(p.shimMonitor, responseCtx), chain.WSServerAdapter(p.shimMonitor, responseCtx))
 		requestsummary.RecordWebSocket(r.Context(), requestsummary.WebSocketResult{
 			Terminal:  requestsummary.WebSocketTerminal(result.terminal),
 			CloseCode: int(result.closeCode),

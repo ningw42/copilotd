@@ -20,6 +20,7 @@ import (
 	"github.com/ningw42/copilotd/internal/endpoint"
 	"github.com/ningw42/copilotd/internal/identity"
 	"github.com/ningw42/copilotd/internal/logging"
+	"github.com/ningw42/copilotd/internal/requestsummary"
 	"github.com/ningw42/copilotd/internal/shim"
 )
 
@@ -74,6 +75,33 @@ func TestProxyAppliesClientMessageShimAndPreservesKinds(t *testing.T) {
 		case <-time.After(time.Second):
 			t.Fatalf("message %d was not forwarded", i)
 		}
+	}
+}
+
+func TestMonitoredClientMessagePanicReachesExistingRecoveryBoundary(t *testing.T) {
+	clock := newWebSocketMonitorClock()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ctx, summary := requestsummary.Begin(context.Background(), telemetryStreamObserver{})
+	chain := (shim.Registry{{
+		Name:    "monitored-panic",
+		Enabled: true,
+		New: func(context.Context, endpoint.Surface, endpoint.Route) any {
+			return clientMessageTransformFunc(func(context.Context, *shim.Message) bool {
+				clock.Advance(time.Second)
+				panic("private panic")
+			})
+		},
+	}}).NewChain(ctx, endpoint.OpenAI, endpoint.RouteOpenAIResponses)
+	adapter := chain.WSClientAdapter(shim.NewMonitor(logger, time.Second, shim.WithClock(clock)), ctx)
+
+	emit, panicked := invokeMessageTransform(context.Background(), adapter, &shim.Message{})
+	publication := summary.Finish(requestsummary.ResponseResult{})
+
+	if emit || !panicked {
+		t.Fatalf("invokeMessageTransform() = emit:%t panicked:%t, want false/true", emit, panicked)
+	}
+	if got := publication.Attrs[len(publication.Attrs)-1]; got.Key != logging.HookOverrunsKey || got.Value.Int64() != 1 {
+		t.Fatalf("panic hook_overruns = %#v, want 1", got)
 	}
 }
 

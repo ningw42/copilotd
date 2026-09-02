@@ -283,14 +283,25 @@ func (c *Chain) serverMessageParticipants() []namedServerMessageTransformer {
 }
 
 // WSClientAdapter composes enabled client-to-upstream WebSocket message hooks.
-func (c *Chain) WSClientAdapter() MessageTransform {
+func (c *Chain) WSClientAdapter(monitor *Monitor, logCtx context.Context) MessageTransform {
 	participants := c.clientMessageParticipants()
 	if len(participants) == 0 {
 		return nil
 	}
+	watchdog := monitor.NewWatchdog(c.overruns)
 	return func(ctx context.Context, message *Message) bool {
 		for _, participant := range participants {
-			if !participant.transformer.TransformClientMessage(ctx, message) {
+			if watchdog == nil {
+				if !participant.transformer.TransformClientMessage(ctx, message) {
+					return false
+				}
+				continue
+			}
+			emit := false
+			watchdog.Invoke(logCtx, participant.name, hookClientMessageTransform, func() {
+				emit = participant.transformer.TransformClientMessage(ctx, message)
+			})
+			if !emit {
 				return false
 			}
 		}
@@ -299,14 +310,25 @@ func (c *Chain) WSClientAdapter() MessageTransform {
 }
 
 // WSServerAdapter composes enabled upstream-to-client WebSocket message hooks.
-func (c *Chain) WSServerAdapter() MessageTransform {
+func (c *Chain) WSServerAdapter(monitor *Monitor, logCtx context.Context) MessageTransform {
 	participants := c.serverMessageParticipants()
 	if len(participants) == 0 {
 		return nil
 	}
+	watchdog := monitor.NewWatchdog(c.overruns)
 	return func(ctx context.Context, message *Message) bool {
 		for i := len(participants) - 1; i >= 0; i-- {
-			if !participants[i].transformer.TransformServerMessage(ctx, message) {
+			if watchdog == nil {
+				if !participants[i].transformer.TransformServerMessage(ctx, message) {
+					return false
+				}
+				continue
+			}
+			emit := false
+			watchdog.Invoke(logCtx, participants[i].name, hookServerMessageTransform, func() {
+				emit = participants[i].transformer.TransformServerMessage(ctx, message)
+			})
+			if !emit {
 				return false
 			}
 		}

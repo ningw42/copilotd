@@ -168,6 +168,7 @@ func TestWebSocketTelemetryEmitsEstablishmentAndTerminalAccessRecords(t *testing
 		"bytes_u2c=23",
 		"close_code=1000",
 		"terminal_reason=client_closed",
+		"hook_overruns=0",
 	} {
 		if !strings.Contains(accessLine, want) {
 			t.Errorf("terminal access telemetry missing %q: %s", want, accessLine)
@@ -231,7 +232,7 @@ func TestWebSocketErrorTerminalMakesAccessWarn(t *testing.T) {
 		t.Fatalf("access records = %d, want one:\n%s", len(accessLines), logs.String())
 	}
 	accessLine := accessLines[0]
-	for _, want := range []string{"level=WARN", "terminal_reason=error", "close_code=1009", "request_id=ws-error-request"} {
+	for _, want := range []string{"level=WARN", "terminal_reason=error", "close_code=1009", "request_id=ws-error-request", "hook_overruns=0"} {
 		if !strings.Contains(accessLine, want) {
 			t.Errorf("error-terminal access missing %q: %s", want, accessLine)
 		}
@@ -286,7 +287,7 @@ func TestWebSocketPreUpgradeFailureEmitsOnlyAccessRecord(t *testing.T) {
 	if len(accessLines) != 1 {
 		t.Fatalf("access lines = %d, want 1:\n%s", len(accessLines), out)
 	}
-	for _, sessionOnly := range []string{"terminal_reason=", "close_code=", "msgs_c2u=", "msgs_u2c=", "bytes_c2u=", "bytes_u2c="} {
+	for _, sessionOnly := range []string{"terminal_reason=", "close_code=", "msgs_c2u=", "msgs_u2c=", "bytes_c2u=", "bytes_u2c=", "hook_overruns="} {
 		if strings.Contains(accessLines[0], sessionOnly) {
 			t.Errorf("pre-upgrade access record unexpectedly contains %q: %s", sessionOnly, accessLines[0])
 		}
