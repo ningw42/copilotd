@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/ningw42/copilotd/internal/endpoint"
 	"github.com/ningw42/copilotd/internal/logging"
@@ -306,6 +307,109 @@ func (s *finalizingEventShim) Finalize(ctx context.Context) []sse.Frame {
 	return s.finalize(ctx)
 }
 
+func TestStreamAdapterMonitorsDirectEventTransform(t *testing.T) {
+	clock := newFakeMonitorClock()
+	logs := &hookLogRecorder{minimum: slog.LevelDebug}
+	monitor := NewMonitor(slog.New(logs), time.Second, WithClock(clock))
+	ctx, summary := requestsummary.Begin(context.Background(), streamOutcomeObserverFunc(func(string, sse.Outcome) {}))
+	chain := (Registry{{
+		Name:    "slow-event",
+		Enabled: true,
+		New: func(context.Context, endpoint.Surface, endpoint.Route) any {
+			return eventTransformFunc(func(_ context.Context, frame sse.Frame) []sse.Frame {
+				clock.Advance(time.Second)
+				return []sse.Frame{frame}
+			})
+		},
+	}}).NewChain(ctx, endpoint.OpenAI, endpoint.RouteOpenAIResponses)
+	adapter := chain.StreamAdapter(monitor, ctx)
+
+	got := adapter.Transform(ctx, sse.Frame{Type: "delta", Raw: []byte("verbatim")})
+
+	if len(got) != 1 || string(got[0].Raw) != "verbatim" {
+		t.Fatalf("Transform() = %#v, want unchanged frame", got)
+	}
+	records := logs.snapshot()
+	if len(records) != 2 || hookState(records[0]) != hookStateInFlight || hookState(records[1]) != hookStateReturned {
+		t.Fatalf("event-transform records = %#v, want in_flight/returned pair", records)
+	}
+	for i, record := range records {
+		if record.attrs[logging.ShimKey].String() != "slow-event" || record.attrs[logging.HookKey].String() != "event_transform" {
+			t.Errorf("record %d identity = shim:%q hook:%q", i, record.attrs[logging.ShimKey].String(), record.attrs[logging.HookKey].String())
+		}
+	}
+	publication := summary.Finish(requestsummary.ResponseResult{})
+	if got := publication.Attrs[len(publication.Attrs)-1].Value.Int64(); got != 1 {
+		t.Fatalf("hook_overruns = %d, want 1", got)
+	}
+}
+
+func TestStreamAdapterMonitoredPanicKeepsValueAndAttribution(t *testing.T) {
+	clock := newFakeMonitorClock()
+	logs := &hookLogRecorder{minimum: slog.LevelDebug}
+	monitor := NewMonitor(slog.New(logs), time.Second, WithClock(clock))
+	ctx, summary := requestsummary.Begin(context.Background(), streamOutcomeObserverFunc(func(string, sse.Outcome) {}))
+	panicValue := &struct{ label string }{label: "original"}
+	chain := (Registry{{
+		Name:    "panicking-event",
+		Enabled: true,
+		New: func(context.Context, endpoint.Surface, endpoint.Route) any {
+			return eventTransformFunc(func(context.Context, sse.Frame) []sse.Frame {
+				clock.Advance(time.Second)
+				panic(panicValue)
+			})
+		},
+	}}).NewChain(ctx, endpoint.OpenAI, endpoint.RouteOpenAIResponses)
+
+	var recovered any
+	func() {
+		defer func() { recovered = recover() }()
+		chain.StreamAdapter(monitor, ctx).Transform(ctx, sse.Frame{})
+	}()
+
+	if recovered != panicValue {
+		t.Fatalf("recovered panic = %#v, want original %#v", recovered, panicValue)
+	}
+	records := logs.snapshot()
+	if len(records) != 2 || hookState(records[1]) != hookStatePanicked || records[1].attrs[logging.ShimKey].String() != "panicking-event" {
+		t.Fatalf("panic records = %#v, want attributed in_flight/panicked pair", records)
+	}
+	publication := summary.Finish(requestsummary.ResponseResult{})
+	if got := publication.Attrs[len(publication.Attrs)-1].Value.Int64(); got != 1 {
+		t.Fatalf("panic hook_overruns = %d, want 1", got)
+	}
+}
+
+func TestStreamAdapterConfiguredZeroDisablesMonitoring(t *testing.T) {
+	clock := newFakeMonitorClock()
+	logs := &hookLogRecorder{minimum: slog.LevelDebug}
+	monitor := NewMonitor(slog.New(logs), 0, WithClock(clock))
+	ctx, summary := requestsummary.Begin(context.Background(), streamOutcomeObserverFunc(func(string, sse.Outcome) {}))
+	chain := (Registry{{
+		Name:    "unmonitored-event",
+		Enabled: true,
+		New: func(context.Context, endpoint.Surface, endpoint.Route) any {
+			return eventTransformFunc(func(_ context.Context, frame sse.Frame) []sse.Frame {
+				clock.Advance(10 * time.Second)
+				return []sse.Frame{frame}
+			})
+		},
+	}}).NewChain(ctx, endpoint.OpenAI, endpoint.RouteOpenAIResponses)
+
+	frames := chain.StreamAdapter(monitor, ctx).Transform(ctx, sse.Frame{Raw: []byte("verbatim")})
+	publication := summary.Finish(requestsummary.ResponseResult{})
+
+	if len(frames) != 1 || string(frames[0].Raw) != "verbatim" {
+		t.Fatalf("disabled Transform() = %#v, want unchanged frame", frames)
+	}
+	if clock.created != 0 || len(logs.snapshot()) != 0 {
+		t.Fatalf("disabled SSE path created %d timers and %d records, want none", clock.created, len(logs.snapshot()))
+	}
+	if got := publication.Attrs[len(publication.Attrs)-1].Value.Int64(); got != 0 {
+		t.Fatalf("disabled SSE hook_overruns = %d, want 0", got)
+	}
+}
+
 func TestStreamAdapterFoldsInnerToOuterWithFanout(t *testing.T) {
 	wrap := func(name string) eventTransformFunc {
 		return func(_ context.Context, frame sse.Frame) []sse.Frame {
@@ -324,7 +428,7 @@ func TestStreamAdapterFoldsInnerToOuterWithFanout(t *testing.T) {
 		}},
 		{Name: "inner", Enabled: true, New: func(context.Context, endpoint.Surface, endpoint.Route) any { return wrap("inner") }},
 	}
-	adapter := registry.NewChain(context.Background(), endpoint.Anthropic, endpoint.RouteAnthropicMessages).StreamAdapter()
+	adapter := registry.NewChain(context.Background(), endpoint.Anthropic, endpoint.RouteAnthropicMessages).StreamAdapter(nil, context.Background())
 
 	frames := adapter.Transform(context.Background(), sse.Frame{Type: "delta", Raw: []byte("seed")})
 	want := []sse.Frame{
@@ -333,6 +437,50 @@ func TestStreamAdapterFoldsInnerToOuterWithFanout(t *testing.T) {
 	}
 	if !reflect.DeepEqual(frames, want) {
 		t.Errorf("frames = %#v, want %#v", frames, want)
+	}
+}
+
+func TestStreamAdapterMonitorsFinalizerAndFinalizationSweepTransforms(t *testing.T) {
+	clock := newFakeMonitorClock()
+	logs := &hookLogRecorder{minimum: slog.LevelDebug}
+	monitor := NewMonitor(slog.New(logs), time.Second, WithClock(clock))
+	ctx, summary := requestsummary.Begin(context.Background(), streamOutcomeObserverFunc(func(string, sse.Outcome) {}))
+	outer := eventTransformFunc(func(_ context.Context, frame sse.Frame) []sse.Frame {
+		clock.Advance(time.Second)
+		return []sse.Frame{frame}
+	})
+	inner := streamFinalizerFunc(func(context.Context) []sse.Frame {
+		clock.Advance(time.Second)
+		return []sse.Frame{{Type: "message_stop", Raw: []byte("terminal")}}
+	})
+	adapter := (Registry{
+		{Name: "outer-transform", Enabled: true, New: func(context.Context, endpoint.Surface, endpoint.Route) any { return outer }},
+		{Name: "inner-finalize", Enabled: true, New: func(context.Context, endpoint.Surface, endpoint.Route) any { return inner }},
+	}).NewChain(ctx, endpoint.Anthropic, endpoint.RouteAnthropicMessages).StreamAdapter(monitor, ctx)
+
+	frames := adapter.Finalize(ctx)
+
+	if len(frames) != 1 || string(frames[0].Raw) != "terminal" {
+		t.Fatalf("Finalize() = %#v, want terminal frame", frames)
+	}
+	records := logs.snapshot()
+	if len(records) != 4 {
+		t.Fatalf("finalization records = %d, want two crossing/ending pairs", len(records))
+	}
+	want := []struct{ shim, hook, state string }{
+		{shim: "inner-finalize", hook: "stream_finalize", state: hookStateInFlight},
+		{shim: "inner-finalize", hook: "stream_finalize", state: hookStateReturned},
+		{shim: "outer-transform", hook: "event_transform", state: hookStateInFlight},
+		{shim: "outer-transform", hook: "event_transform", state: hookStateReturned},
+	}
+	for i, expected := range want {
+		if got := records[i]; got.attrs[logging.ShimKey].String() != expected.shim || got.attrs[logging.HookKey].String() != expected.hook || hookState(got) != expected.state {
+			t.Errorf("record %d = %#v, want shim=%s hook=%s state=%s", i, got, expected.shim, expected.hook, expected.state)
+		}
+	}
+	publication := summary.Finish(requestsummary.ResponseResult{})
+	if got := publication.Attrs[len(publication.Attrs)-1].Value.Int64(); got != 2 {
+		t.Fatalf("finalization hook_overruns = %d, want 2", got)
 	}
 }
 
@@ -352,7 +500,7 @@ func TestStreamAdapterRetransformsInnerFinalizeOutputThroughOuterHooks(t *testin
 		{Name: "outer-alter", Enabled: true, New: func(context.Context, endpoint.Surface, endpoint.Route) any { return outer }},
 		{Name: "inner-hold", Enabled: true, New: func(context.Context, endpoint.Surface, endpoint.Route) any { return inner }},
 	}
-	adapter := registry.NewChain(context.Background(), endpoint.Anthropic, endpoint.RouteAnthropicMessages).StreamAdapter()
+	adapter := registry.NewChain(context.Background(), endpoint.Anthropic, endpoint.RouteAnthropicMessages).StreamAdapter(nil, context.Background())
 
 	frames := adapter.Transform(context.Background(), sse.Frame{Type: "message_stop", Raw: []byte("X")})
 	if len(frames) != 0 {
@@ -368,7 +516,7 @@ func TestStreamAdapterRetransformsInnerFinalizeOutputThroughOuterHooks(t *testin
 func TestStreamAdapterSelectionAndHoldSemantics(t *testing.T) {
 	ctx := context.Background()
 	if adapter := (Registry{{Name: "nop", Enabled: true, New: func(context.Context, endpoint.Surface, endpoint.Route) any { return NopShim{} }}}).
-		NewChain(ctx, endpoint.Anthropic, endpoint.RouteAnthropicMessages).StreamAdapter(); adapter != nil {
+		NewChain(ctx, endpoint.Anthropic, endpoint.RouteAnthropicMessages).StreamAdapter(nil, ctx); adapter != nil {
 		t.Errorf("nop StreamAdapter() = %T, want nil fast path", adapter)
 	}
 	finalizerOnly := Registry{{
@@ -378,7 +526,7 @@ func TestStreamAdapterSelectionAndHoldSemantics(t *testing.T) {
 			return streamFinalizerFunc(func(context.Context) []sse.Frame { return nil })
 		},
 	}}
-	if adapter := finalizerOnly.NewChain(ctx, endpoint.Anthropic, endpoint.RouteAnthropicMessages).StreamAdapter(); adapter == nil {
+	if adapter := finalizerOnly.NewChain(ctx, endpoint.Anthropic, endpoint.RouteAnthropicMessages).StreamAdapter(nil, ctx); adapter == nil {
 		t.Error("finalizer-only StreamAdapter() = nil, want composed transformer")
 	}
 
@@ -391,7 +539,7 @@ func TestStreamAdapterSelectionAndHoldSemantics(t *testing.T) {
 	adapter := (Registry{
 		{Name: "outer", Enabled: true, New: func(context.Context, endpoint.Surface, endpoint.Route) any { return outer }},
 		{Name: "inner-hold", Enabled: true, New: func(context.Context, endpoint.Surface, endpoint.Route) any { return hold }},
-	}).NewChain(ctx, endpoint.Anthropic, endpoint.RouteAnthropicMessages).StreamAdapter()
+	}).NewChain(ctx, endpoint.Anthropic, endpoint.RouteAnthropicMessages).StreamAdapter(nil, ctx)
 	frames := adapter.Transform(ctx, sse.Frame{Type: "delta", Raw: []byte("held")})
 	if len(frames) != 0 || outerCalls != 0 {
 		t.Errorf("held Transform() = %#v, outer calls %d; want no output/calls", frames, outerCalls)
@@ -438,7 +586,7 @@ func TestPostCommitAdaptersRetainExactRegistrationIdentity(t *testing.T) {
 	if got := []string{chain.instances[0].name, chain.instances[1].name}; !reflect.DeepEqual(got, []string{"first", "second"}) {
 		t.Fatalf("Chain registration names = %v, want [first second]", got)
 	}
-	stream := chain.StreamAdapter().(*sseAdapter)
+	stream := chain.StreamAdapter(nil, context.Background()).(*sseAdapter)
 	if got := []string{stream.instances[0].name, stream.instances[1].name}; !reflect.DeepEqual(got, []string{"first", "second"}) {
 		t.Fatalf("SSE participant names = %v, want [first second]", got)
 	}
@@ -537,7 +685,7 @@ func TestResponsesItemIDStabilizerRegistrationSelectsOnlyResponsesTransports(t *
 			if constructorCalls != tc.wantConstructorCalls {
 				t.Fatalf("stabilizer constructor calls = %d, want %d", constructorCalls, tc.wantConstructorCalls)
 			}
-			if got := chain.StreamAdapter() != nil; got != tc.wantStreamAdapter {
+			if got := chain.StreamAdapter(nil, context.Background()) != nil; got != tc.wantStreamAdapter {
 				t.Errorf("StreamAdapter() presence = %t, want %t", got, tc.wantStreamAdapter)
 			}
 			if chain.WSClientAdapter() != nil {

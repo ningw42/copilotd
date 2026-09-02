@@ -522,6 +522,9 @@ func TestHookOverrunRecorderGatesAndCountsTerminalSummary(t *testing.T) {
 	if got := countPublication.Attrs[len(countPublication.Attrs)-1]; !got.Equal(slog.Int(logging.HookOverrunsKey, increments)) {
 		t.Fatalf("count attr = %#v, want hook_overruns=%d", got, increments)
 	}
+	if countPublication.Level != slog.LevelInfo {
+		t.Fatalf("positive hook_overruns changed access level to %s, want INFO", countPublication.Level)
+	}
 
 	recorder.Increment()
 	latePublication := countSummary.Finish(requestsummary.ResponseResult{})

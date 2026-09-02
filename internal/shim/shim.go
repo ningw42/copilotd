@@ -233,7 +233,7 @@ func (c *Chain) HasBufferedTransformer() bool {
 
 // StreamAdapter composes the enabled stream hooks into the SSE engine's single
 // transformer seam. Nil selects the engine's byte-verbatim fast path.
-func (c *Chain) StreamAdapter() sse.FrameTransformer {
+func (c *Chain) StreamAdapter(monitor *Monitor, logCtx context.Context) sse.FrameTransformer {
 	var streamInstances []namedInstance
 	for _, registered := range c.instances {
 		_, transforms := registered.instance.(EventTransformer)
@@ -245,7 +245,11 @@ func (c *Chain) StreamAdapter() sse.FrameTransformer {
 	if len(streamInstances) == 0 {
 		return nil
 	}
-	return &sseAdapter{instances: streamInstances}
+	return &sseAdapter{
+		instances: streamInstances,
+		watchdog:  monitor.NewWatchdog(c.overruns),
+		logCtx:    logCtx,
+	}
 }
 
 type namedClientMessageTransformer struct {
@@ -312,6 +316,8 @@ func (c *Chain) WSServerAdapter() MessageTransform {
 
 type sseAdapter struct {
 	instances []namedInstance
+	watchdog  *Watchdog
+	logCtx    context.Context
 }
 
 var _ sse.FrameTransformer = (*sseAdapter)(nil)
@@ -325,7 +331,7 @@ func (a *sseAdapter) Transform(ctx context.Context, frame sse.Frame) []sse.Frame
 		if !ok {
 			continue
 		}
-		frames = transformFrames(ctx, transformer, frames)
+		frames = a.transformFrames(ctx, a.instances[i].name, transformer, frames)
 	}
 	return frames
 }
@@ -337,19 +343,35 @@ func (a *sseAdapter) Finalize(ctx context.Context) []sse.Frame {
 	var pending []sse.Frame
 	for i := len(a.instances) - 1; i >= 0; i-- {
 		if transformer, ok := a.instances[i].instance.(EventTransformer); ok {
-			pending = transformFrames(ctx, transformer, pending)
+			pending = a.transformFrames(ctx, a.instances[i].name, transformer, pending)
 		}
 		if finalizer, ok := a.instances[i].instance.(StreamFinalizer); ok {
-			pending = append(pending, finalizer.Finalize(ctx)...)
+			if a.watchdog == nil {
+				pending = append(pending, finalizer.Finalize(ctx)...)
+				continue
+			}
+			var output []sse.Frame
+			a.watchdog.Invoke(a.logCtx, a.instances[i].name, hookStreamFinalize, func() {
+				output = finalizer.Finalize(ctx)
+			})
+			pending = append(pending, output...)
 		}
 	}
 	return pending
 }
 
-func transformFrames(ctx context.Context, transformer EventTransformer, frames []sse.Frame) []sse.Frame {
+func (a *sseAdapter) transformFrames(ctx context.Context, shimName string, transformer EventTransformer, frames []sse.Frame) []sse.Frame {
 	var transformed []sse.Frame
 	for _, frame := range frames {
-		transformed = append(transformed, transformer.TransformEvent(ctx, frame)...)
+		if a.watchdog == nil {
+			transformed = append(transformed, transformer.TransformEvent(ctx, frame)...)
+			continue
+		}
+		var output []sse.Frame
+		a.watchdog.Invoke(a.logCtx, shimName, hookEventTransform, func() {
+			output = transformer.TransformEvent(ctx, frame)
+		})
+		transformed = append(transformed, output...)
 	}
 	return transformed
 }

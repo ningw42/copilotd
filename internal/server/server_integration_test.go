@@ -1513,6 +1513,7 @@ func TestAnthropicStreamingEndToEnd(t *testing.T) {
 			"outcome=" + outcome,
 			"frames=" + strconv.Itoa(frames),
 			"fallbacks=0",
+			"hook_overruns=0",
 		} {
 			if !strings.Contains(lines[0], want) {
 				t.Errorf("access record missing %q: %s", want, lines[0])

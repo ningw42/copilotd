@@ -277,7 +277,7 @@ func (f *Forwarder) forward(w http.ResponseWriter, r *http.Request, header http.
 		w.WriteHeader(status)
 		policy := streamPolicy(ep.Surface(), f.writeTimeout, f.streamIdleTimeout, f.streamKeepaliveInterval, f.clock, f.fallbacks.Increment)
 		policy.SuppressedShimErrors = f.suppressedShimErrors
-		result := sse.Pump(responseCtx, cancel, resp.Body, w, f.sseLogger, policy, chain.StreamAdapter())
+		result := sse.Pump(responseCtx, cancel, resp.Body, w, f.sseLogger, policy, chain.StreamAdapter(f.shimMonitor, responseCtx))
 		requestsummary.RecordStream(r.Context(), requestsummary.StreamResult{
 			Surface:   ep.Surface().String(),
 			Outcome:   result.Outcome,

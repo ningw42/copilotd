@@ -1090,6 +1090,60 @@ func (r *observedReadCloser) Close() error {
 	return nil
 }
 
+type manualHookClock struct {
+	now   time.Time
+	timer *manualHookTimer
+}
+
+type manualHookTimer struct {
+	clock    *manualHookClock
+	deadline time.Time
+	callback func()
+	active   bool
+}
+
+func newManualHookClock() *manualHookClock {
+	return &manualHookClock{now: time.Unix(2_000, 0)}
+}
+
+func (c *manualHookClock) Now() time.Time { return c.now }
+
+func (c *manualHookClock) AfterFunc(d time.Duration, callback func()) shim.Timer {
+	c.timer = &manualHookTimer{clock: c, deadline: c.now.Add(d), callback: callback, active: true}
+	return c.timer
+}
+
+func (c *manualHookClock) Advance(d time.Duration) {
+	c.now = c.now.Add(d)
+	if c.timer != nil && c.timer.active && !c.timer.deadline.After(c.now) {
+		c.timer.active = false
+		c.timer.callback()
+	}
+}
+
+func (t *manualHookTimer) Stop() bool {
+	wasActive := t.active
+	t.active = false
+	return wasActive
+}
+
+func (t *manualHookTimer) Reset(d time.Duration) bool {
+	wasActive := t.active
+	t.deadline = t.clock.now.Add(d)
+	t.active = true
+	return wasActive
+}
+
+type advancingEventShim struct {
+	clock *manualHookClock
+	delay time.Duration
+}
+
+func (s *advancingEventShim) TransformEvent(_ context.Context, frame sse.Frame) []sse.Frame {
+	s.clock.Advance(s.delay)
+	return []sse.Frame{frame}
+}
+
 type panickingEventShim struct{}
 
 func (*panickingEventShim) TransformEvent(context.Context, sse.Frame) []sse.Frame {
@@ -1133,6 +1187,85 @@ func (*finalizePanickingEventShim) TransformEvent(context.Context, sse.Frame) []
 
 func (*finalizePanickingEventShim) Finalize(context.Context) []sse.Frame {
 	panic("SECRET-FINALIZE-PANIC")
+}
+
+func TestForwardUsesConfiguredHookOverrunThresholdAndCorrelatedContext(t *testing.T) {
+	const (
+		terminal          = "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+		requestID         = "hook-overrun-request"
+		upstreamRequestID = "hook-overrun-upstream"
+	)
+	threshold := 375 * time.Millisecond
+	clock := newManualHookClock()
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header: http.Header{
+				"Content-Type":                 {"text/event-stream"},
+				upstreampolicy.RequestIDHeader: {upstreamRequestID},
+			},
+			Body:    io.NopCloser(strings.NewReader(terminal)),
+			Request: r,
+		}, nil
+	})}
+	registry := shim.Registry{{
+		Name:    "delayed-event",
+		Enabled: true,
+		New: func(context.Context, endpoint.Surface, endpoint.Route) any {
+			return &advancingEventShim{clock: clock, delay: threshold}
+		},
+	}}
+	var logs bytes.Buffer
+	base, err := logging.NewWithWriter(&logs, config.ServeConfig{LogLevel: "info", LogFormat: "text"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider := readyStub("https://upstream.invalid")
+	caller := upstreampolicy.New(provider, client, time.Second, 1<<20, logging.ForComponent(base, "internal/upstream"))
+	shimLogger := logging.ForComponent(base, "internal/shim")
+	forwarder := New(caller, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, registry,
+		logging.ForComponent(base, "internal/sse"), shimLogger, threshold)
+	forwarder.shimMonitor = shim.NewMonitor(shimLogger, threshold, shim.WithClock(clock))
+
+	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{"stream":true}`))
+	requestCtx := logging.WithRequestID(req.Context(), requestID)
+	requestCtx = logging.With(requestCtx,
+		slog.String(logging.SurfaceKey, endpoint.Anthropic.String()),
+		slog.String(logging.InboundKey, "POST /anthropic/v1/messages"),
+	)
+	ctx, summary := requestsummary.Begin(requestCtx, &recordingStreamOutcomeObserver{})
+	req = req.WithContext(ctx)
+	recorder := newDeadlineRecorder()
+
+	forwarder.Handler(endpoint.AnthropicMessages())(recorder, req)
+	publication := summary.Finish(requestsummary.ResponseResult{})
+
+	if got := recorder.Body.String(); got != terminal {
+		t.Fatalf("body = %q, want unchanged terminal %q", got, terminal)
+	}
+	if got := publication.Attrs[len(publication.Attrs)-1]; got.Key != logging.HookOverrunsKey || got.Value.Int64() != 1 {
+		t.Fatalf("last access attr = %#v, want hook_overruns=1", got)
+	}
+	overrunLines := []string{}
+	for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+		if strings.Contains(line, `msg="shim hook overrun"`) {
+			overrunLines = append(overrunLines, line)
+		}
+	}
+	if len(overrunLines) != 2 {
+		t.Fatalf("Hook overrun records = %d, want pair:\n%s", len(overrunLines), logs.String())
+	}
+	for _, line := range overrunLines {
+		for _, want := range []string{
+			"component=internal/shim", "shim=delayed-event", "hook=event_transform",
+			"threshold=375ms", "request_id=" + requestID, "surface=anthropic",
+			`inbound="POST /anthropic/v1/messages"`, "upstream_request_id=" + upstreamRequestID,
+		} {
+			if !strings.Contains(line, want) {
+				t.Errorf("overrun record missing %q: %s", want, line)
+			}
+		}
+	}
 }
 
 func TestForwardStreamShimPanicRendersNativeTerminalAndReleasesUpstream(t *testing.T) {

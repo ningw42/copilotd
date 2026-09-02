@@ -196,7 +196,7 @@ func TestCatalogLocalFailuresHaveGETEquivalentHEADFramingOverRealListener(t *tes
 							t.Errorf("%s access record missing %q: %s", request.method, want, lines[0])
 						}
 					}
-					for _, omitted := range []string{"outcome=", "frames=", "fallbacks=", "catalog_shape=", "secret"} {
+					for _, omitted := range []string{"outcome=", "frames=", "fallbacks=", "catalog_shape=", logging.HookOverrunsKey + "=", "secret"} {
 						if strings.Contains(lines[0], omitted) {
 							t.Errorf("%s access record unexpectedly contains %q: %s", request.method, omitted, lines[0])
 						}
