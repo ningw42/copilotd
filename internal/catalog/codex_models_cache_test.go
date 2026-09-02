@@ -71,7 +71,7 @@ func TestModelsCacheServesLatestReleaseBytesWithoutCredentials(t *testing.T) {
 }
 
 func TestModelsCacheFetchesLatestReleaseAtResolvedCommit(t *testing.T) {
-	const tag = "rust-v0.152.0"
+	const tag = "rust-v0.153.0"
 	fetched := validCodexModelsBytes(t, "gpt-5.4", "commit pinned")
 	var commitCalls atomic.Int32
 	github := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -159,7 +159,7 @@ func TestModelsCacheAcceptsCurrentInstructionSources(t *testing.T) {
 			github := newCodexModelsServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch r.URL.Path {
 				case latestCodexReleasePath:
-					_, _ = io.WriteString(w, `{"tag_name":"rust-v0.152.0"}`)
+					_, _ = io.WriteString(w, `{"tag_name":"rust-v0.153.0"}`)
 				case codexModelsContentPath:
 					_, _ = w.Write(tc.fetched)
 				default:
@@ -179,7 +179,7 @@ func TestModelsCacheAcceptsCurrentInstructionSources(t *testing.T) {
 			if !bytes.Equal(got, tc.fetched) {
 				t.Fatalf("Current returned %d bytes, want exact %d-byte fetched release", len(got), len(tc.fetched))
 			}
-			if status.Source != "fetched" || status.Version != "rust-v0.152.0" || status.LastSuccess == nil {
+			if status.Source != "fetched" || status.Version != "rust-v0.153.0" || status.LastSuccess == nil {
 				t.Fatalf("status = %#v, want fetched current instruction source", status)
 			}
 		})

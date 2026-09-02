@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-// embeddedCodexModels is Codex's bundled model catalog at rust-v0.151.0.
+// embeddedCodexModels is Codex's bundled model catalog at rust-v0.152.1.
 // Its exact origin and license are recorded alongside the vendored file.
 //
 //go:embed codexdata/models.json
@@ -83,8 +83,9 @@ type codexTruncationPolicy struct {
 }
 
 type codexModelMessages struct {
-	PersistentInstructions *string `json:"persistent_instructions"`
-	InstructionsTemplate   *string `json:"instructions_template"`
+	PersistentInstructions *string            `json:"persistent_instructions"`
+	Tools                  *codexToolMessages `json:"tools"`
+	InstructionsTemplate   *string            `json:"instructions_template"`
 	// Codex treats absent or null variables as literal-template mode.
 	InstructionsVariables *codexModelInstructionVariables `json:"instructions_variables"`
 	Approvals             *codexApprovalMessages          `json:"approvals"`
@@ -95,6 +96,14 @@ type codexModelMessages struct {
 	TokenBudget           *codexModelTokenBudgetConfig    `json:"token_budget"`
 	GuardianV2            *codexGuardianV2ModelConfig     `json:"guardian_v2"`
 	ConfirmationPolicies  *codexConfirmationPolicies      `json:"confirmation_policies"`
+}
+
+type codexToolMessages struct {
+	SendUserMessageAsync *codexToolMessage `json:"send_user_message_async"`
+}
+
+type codexToolMessage struct {
+	Description *string `json:"description"`
 }
 
 type codexModelInstructionVariables struct {
@@ -169,6 +178,7 @@ type codexCollaborationModeMessages struct {
 type codexAutoReviewMessages struct {
 	Policy                *string `json:"policy"`
 	PolicyTemplate        *string `json:"policy_template"`
+	NodeREPLPolicy        *string `json:"node_repl_policy"`
 	RejectionInstructions *string `json:"rejection_instructions"`
 	TimeoutInstructions   *string `json:"timeout_instructions"`
 }
@@ -190,16 +200,19 @@ type codexMultiAgentRoleMessages struct {
 }
 
 type codexMultiAgentModeMessages struct {
-	Explicit *string `json:"explicit"`
-	HintText *string `json:"hint_text"`
+	Explicit  *string `json:"explicit"`
+	Proactive *string `json:"proactive"`
+	HintText  *string `json:"hint_text"`
 }
 
 type codexModelTokenBudgetConfig struct {
-	ReminderThresholdTokens         *int64  `json:"reminder_threshold_tokens"`
-	ReminderMessageTemplate         *string `json:"reminder_message_template"`
-	GuidanceMessage                 *string `json:"guidance_message"`
-	AutoCompactFallbackPrompt       *string `json:"auto_compact_fallback_prompt"`
-	AutoCompactFallbackBufferTokens *int64  `json:"auto_compact_fallback_buffer_tokens"`
+	Enabled                         json.RawMessage `json:"enabled"`
+	UseHistoryNotesExtension        json.RawMessage `json:"use_history_notes_extension"`
+	ReminderThresholdTokens         *int64          `json:"reminder_threshold_tokens"`
+	ReminderMessageTemplate         *string         `json:"reminder_message_template"`
+	GuidanceMessage                 *string         `json:"guidance_message"`
+	AutoCompactFallbackPrompt       *string         `json:"auto_compact_fallback_prompt"`
+	AutoCompactFallbackBufferTokens *int64          `json:"auto_compact_fallback_buffer_tokens"`
 }
 
 type codexGuardianV2ModelConfig struct {
@@ -422,13 +435,32 @@ func validateCodexModelMessages(index int, messages *codexModelMessages) error {
 	if messages == nil {
 		return nil
 	}
-	if budget := messages.TokenBudget; budget != nil &&
-		(budget.ReminderThresholdTokens == nil ||
+	if budget := messages.TokenBudget; budget != nil {
+		if budget.ReminderThresholdTokens == nil ||
 			budget.ReminderMessageTemplate == nil ||
 			budget.GuidanceMessage == nil ||
 			budget.AutoCompactFallbackPrompt == nil ||
-			budget.AutoCompactFallbackBufferTokens == nil) {
-		return fmt.Errorf("models[%d].model_messages.token_budget is incomplete", index)
+			budget.AutoCompactFallbackBufferTokens == nil {
+			return fmt.Errorf("models[%d].model_messages.token_budget is incomplete", index)
+		}
+		for _, flag := range []struct {
+			name string
+			raw  json.RawMessage
+		}{
+			{name: "enabled", raw: budget.Enabled},
+			{name: "use_history_notes_extension", raw: budget.UseHistoryNotesExtension},
+		} {
+			if len(flag.raw) == 0 {
+				continue
+			}
+			if bytes.Equal(bytes.TrimSpace(flag.raw), []byte("null")) {
+				return fmt.Errorf("models[%d] has null non-optional field %q", index, "model_messages.token_budget."+flag.name)
+			}
+			var value bool
+			if json.Unmarshal(flag.raw, &value) != nil {
+				return fmt.Errorf("models[%d].model_messages.token_budget.%s is not a boolean", index, flag.name)
+			}
+		}
 	}
 	if guardian := messages.GuardianV2; guardian != nil {
 		if guardian.ReasoningEffort != nil && *guardian.ReasoningEffort == "" {

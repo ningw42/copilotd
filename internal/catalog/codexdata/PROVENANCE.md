@@ -3,8 +3,8 @@
 ## Vendored snapshot identity
 
 - Source repository: <https://github.com/openai/codex>
-- Tag: `rust-v0.151.0`
-- Commit: [`78c290807ce710180111df227df3b7a4fe845452`][commit]
+- Tag: `rust-v0.152.1`
+- Commit: [`5adb68a49933ae446bf11935662c83dba55a0804`][commit]
 - Source path:
   [`codex-rs/models-manager/models.json`][catalog]
 - Git blob: [`0c4137ad9560e1ac7b9baf1adc95dbc7051e2b6c`][catalog-object]
@@ -13,18 +13,21 @@
 - Immutable raw source: [raw `models.json`][catalog-raw]
 
 `models.json` is vendored without modification from the source above. `LICENSE`
-and `NOTICE` are copied from the repository root at the same commit.
+and `NOTICE` are copied from the repository root at the same commit. All three
+files are byte-identical to their `rust-v0.151.0` counterparts; this bump
+advances the release identity and accepted schema contract without changing
+the embedded bytes.
 
 The round-trip test computes Git's `blob <length>\0<content>` object identity
 locally and requires the blob ID above, in addition to the SHA-256 check.
 
 ## Stable release audit
 
-The identity above was audited on 2026-08-31. GitHub's first-party
-`/repos/openai/codex/releases/latest` endpoint returned release ID `378941035`,
-published `2026-08-29T09:55:39Z`, with `draft: false` and `prerelease: false`,
+The identity above was audited on 2026-09-02. GitHub's first-party
+`/repos/openai/codex/releases/latest` endpoint returned release ID `380862087`,
+published `2026-09-01T22:33:02Z`, with `draft: false` and `prerelease: false`,
 and named the pinned tag. The annotated [tag object][tag-object]
-`d8673cb68e349c208659b986697773d3145dbb14` peels to the pinned commit; that
+`3c6cfbab81e44218c729dc8c6b304cb760d1b8a1` peels to the pinned commit; that
 commit, rather than the release's `target_commitish: "main"`, is the source pin.
 [Release][release]
 
@@ -42,7 +45,7 @@ type, and every response on this credential-free edge is capped at 8 MiB.
 
 The release also publishes `codex-package_SHA256SUMS`; GitHub records the
 manifest asset itself as
-`sha256:197e852956ef6fcd48d9959c6ab3df8eb81ce0dbe7f5cc472215554bfbd2b1d5`.
+`sha256:6c287edb8ec9b153febd7e385d00fd1cc5ccf0cce6cc6405d7263dad4a1595ef`.
 GitHub's generated [commit tarball][source-tar] and [commit ZIP][source-zip]
 have no API-provided digest, so they are not used as the vendored snapshot
 identity. [Manifest metadata][checksums]
@@ -51,12 +54,10 @@ identity. [Manifest metadata][checksums]
 
 `TestVendoredCodexCatalogRoundTripFidelity` proves that the exact vendored
 snapshot passes validation, cache acceptance, handler rendering, reviewer
-resolution, a derived limits overlay, and field-for-field preservation. It is
-not the regression witness for the relaxed acceptance rules: parent commit
-`931b566` also accepts this exact 0.151 snapshot because every entry still
-carries both instruction forms, the two removed legacy booleans, and non-empty
-reasoning levels. The synthetic contract tests exercise those Serde-valid
-alternatives and fail against the parent implementation.
+resolution, a derived limits overlay, and field-for-field preservation. The
+unchanged blob is not a regression witness for the nested message fields added
+in `rust-v0.152.1`, because none of those fields is populated. Synthetic
+contract tests exercise their optional/default forms and malformed values.
 
 `ModelsResponse` requires a non-null `models` array. Each element is decoded
 as `ModelInfo`; unknown object members are accepted because the type does not
@@ -99,14 +100,20 @@ are intentionally downgraded to `None`; non-string values still fail.
 [Types][model-types] [reasoning tests][model-tests]
 
 `ModelMessages` itself is optional. Its instruction template, instruction
-variables, approval/collaboration/auto-review/permission/multi-agent sections,
-persistent instructions, token-budget settings, Guardian V2 settings, and
-confirmation policies are all optional and accept missing or `null`. When one
-of the nested objects is present, its non-optional leaves remain required (for
-example every `ModelTokenBudgetConfig` field); option-valued leaves preserve
-the distinction between a missing/null value and an empty string. Guardian V2
-and its transcript contain only optional leaves. [Messages][model-messages]
-[Guardian V2][guardian-v2] [message tests][model-tests]
+variables, built-in tool messages,
+approval/collaboration/auto-review/permission/multi-agent sections, persistent
+instructions, token-budget settings, Guardian V2 settings, and confirmation
+policies are all optional and accept missing or `null`. The optional
+`tools.send_user_message_async.description`, `auto_review.node_repl_policy`,
+and `multi_agent.mode.proactive` leaves likewise accept missing, `null`, or a
+string. When one of the nested objects is present, its non-optional leaves
+remain required. `ModelTokenBudgetConfig`'s five original leaves are required;
+its new `enabled` and `use_history_notes_extension` booleans default to `false`
+when absent but reject explicit `null` or a non-boolean. Other option-valued
+leaves preserve the distinction between a missing/null value and an empty
+string. Guardian V2 and its transcript contain only optional leaves.
+[Messages][model-messages] [Guardian V2][guardian-v2]
+[message tests][model-tests]
 
 Instruction validity is a `ModelsResponse` semantic, not a requirement that
 both representations be populated. A legacy `base_instructions` string is
@@ -129,14 +136,19 @@ entries explicitly set `instructions_variables` to `null`; the other four use
 an object. Newer sibling sections (`auto_review`, `collaboration_modes`,
 `guardian_v2`, `multi_agent`, `permissions`, and `token_budget`) are present as
 objects or explicit `null` and must survive copilotd rendering unchanged unless
-an ADR-governed overlay names the field. [Catalog][catalog]
+an ADR-governed overlay names the field. The `rust-v0.152.1` additions under
+`tools`, `auto_review`, `multi_agent`, and `token_budget` are absent from the
+unchanged catalog blob. [Catalog][catalog]
 
 The vendored snapshot does not positively exercise every mirrored
 optional/default field: `effective_context_window_percent` and
 `multi_agent_reasoning_effort` are absent from all ten entries;
-`availability_nux` is null throughout; and
-`persistent_instructions` and `confirmation_policies` are absent. Synthetic
-positive and malformed-shape tests cover the corresponding validator paths.
+`availability_nux` is null throughout; `persistent_instructions`,
+`confirmation_policies`, and `tools` are absent; and the new
+`auto_review.node_repl_policy`, `multi_agent.mode.proactive`,
+`token_budget.enabled`, and `token_budget.use_history_notes_extension` fields
+are absent. Synthetic positive and malformed-shape tests cover the corresponding
+validator paths.
 
 Reasoning levels are an array of `{effort, description}` objects: both members
 are required, descriptions are strings, and effort is any non-empty string
@@ -207,37 +219,37 @@ witnessing the merge before `/responses` forwarding is checked. The audit ran
 them against the official
 [`codex-x86_64-unknown-linux-musl.zst`][codex-binary] asset after verifying
 SHA-256
-`4041e6a1b600a20420505984ecc534d56d9c10fddcdeaf03736b22a0b3308c1a`;
+`343c79bd7f979d1650cb41d3756bd5524bddf7edcc2f6796594c50ae5db994c2`;
 the resulting executable has SHA-256
-`9739cbc928b9c573be83256acd46668f5dd4f119d2d09e05246895ca2aaf0c9a`.
-The contract test enforces that executable digest and `codex-cli 0.151.0`
+`b82018241214a4a7c6b97b198585192d1dbc3aab1ddcdc640f04d8dee8c606f9`.
+The contract test enforces that executable digest and `codex-cli 0.152.1`
 before exercising the client. It discovers the command-auth `printf` executable
 from `PATH` and skips with an explicit prerequisite message when unavailable.
 The downloaded Codex executable was temporary and is not stored in the
 repository.
 
-[release]: https://api.github.com/repos/openai/codex/releases/378941035
-[tag-object]: https://api.github.com/repos/openai/codex/git/tags/d8673cb68e349c208659b986697773d3145dbb14
-[commit]: https://github.com/openai/codex/commit/78c290807ce710180111df227df3b7a4fe845452
-[catalog]: https://github.com/openai/codex/blob/78c290807ce710180111df227df3b7a4fe845452/codex-rs/models-manager/models.json
+[release]: https://api.github.com/repos/openai/codex/releases/380862087
+[tag-object]: https://api.github.com/repos/openai/codex/git/tags/3c6cfbab81e44218c729dc8c6b304cb760d1b8a1
+[commit]: https://github.com/openai/codex/commit/5adb68a49933ae446bf11935662c83dba55a0804
+[catalog]: https://github.com/openai/codex/blob/5adb68a49933ae446bf11935662c83dba55a0804/codex-rs/models-manager/models.json
 [catalog-object]: https://api.github.com/repos/openai/codex/git/blobs/0c4137ad9560e1ac7b9baf1adc95dbc7051e2b6c
-[catalog-raw]: https://raw.githubusercontent.com/openai/codex/78c290807ce710180111df227df3b7a4fe845452/codex-rs/models-manager/models.json
-[checksums]: https://api.github.com/repos/openai/codex/releases/assets/535048190
-[source-tar]: https://api.github.com/repos/openai/codex/tarball/78c290807ce710180111df227df3b7a4fe845452
-[source-zip]: https://api.github.com/repos/openai/codex/zipball/78c290807ce710180111df227df3b7a4fe845452
-[model-types]: https://github.com/openai/codex/blob/78c290807ce710180111df227df3b7a4fe845452/codex-rs/protocol/src/openai_models.rs#L1-L910
-[model-messages]: https://github.com/openai/codex/blob/78c290807ce710180111df227df3b7a4fe845452/codex-rs/protocol/src/openai_models.rs#L533-L678
-[guardian-v2]: https://github.com/openai/codex/blob/78c290807ce710180111df227df3b7a4fe845452/codex-rs/protocol/src/openai_models/guardian_v2.rs
-[instruction-promotion]: https://github.com/openai/codex/blob/78c290807ce710180111df227df3b7a4fe845452/codex-rs/protocol/src/openai_models.rs#L713-L816
-[model-tests]: https://github.com/openai/codex/blob/78c290807ce710180111df227df3b7a4fe845452/codex-rs/protocol/src/openai_models.rs#L910-L1680
-[model-runtime]: https://github.com/openai/codex/blob/78c290807ce710180111df227df3b7a4fe845452/codex-rs/models-manager/src/model_info.rs
-[models-client]: https://github.com/openai/codex/blob/78c290807ce710180111df227df3b7a4fe845452/codex-rs/codex-api/src/endpoint/models.rs
-[models-endpoint]: https://github.com/openai/codex/blob/78c290807ce710180111df227df3b7a4fe845452/codex-rs/model-provider/src/models_endpoint.rs
-[default-headers]: https://github.com/openai/codex/blob/78c290807ce710180111df227df3b7a4fe845452/codex-rs/login/src/auth/default_client.rs#L278-L350
-[command-auth]: https://github.com/openai/codex/blob/78c290807ce710180111df227df3b7a4fe845452/codex-rs/login/src/auth/external_bearer.rs
-[models-lib]: https://github.com/openai/codex/blob/78c290807ce710180111df227df3b7a4fe845452/codex-rs/models-manager/src/lib.rs
-[manager]: https://github.com/openai/codex/blob/78c290807ce710180111df227df3b7a4fe845452/codex-rs/models-manager/src/manager.rs#L120-L680
-[manager-tests]: https://github.com/openai/codex/blob/78c290807ce710180111df227df3b7a4fe845452/codex-rs/models-manager/src/manager_tests.rs#L831-L1045
-[provider]: https://github.com/openai/codex/blob/78c290807ce710180111df227df3b7a4fe845452/codex-rs/model-provider/src/provider.rs#L120-L370
-[guardian]: https://github.com/openai/codex/blob/78c290807ce710180111df227df3b7a4fe845452/codex-rs/core/src/guardian/review.rs#L831-L931
-[codex-binary]: https://github.com/openai/codex/releases/download/rust-v0.151.0/codex-x86_64-unknown-linux-musl.zst
+[catalog-raw]: https://raw.githubusercontent.com/openai/codex/5adb68a49933ae446bf11935662c83dba55a0804/codex-rs/models-manager/models.json
+[checksums]: https://api.github.com/repos/openai/codex/releases/assets/540234309
+[source-tar]: https://api.github.com/repos/openai/codex/tarball/5adb68a49933ae446bf11935662c83dba55a0804
+[source-zip]: https://api.github.com/repos/openai/codex/zipball/5adb68a49933ae446bf11935662c83dba55a0804
+[model-types]: https://github.com/openai/codex/blob/5adb68a49933ae446bf11935662c83dba55a0804/codex-rs/protocol/src/openai_models.rs#L1-L941
+[model-messages]: https://github.com/openai/codex/blob/5adb68a49933ae446bf11935662c83dba55a0804/codex-rs/protocol/src/openai_models.rs#L544-L682
+[guardian-v2]: https://github.com/openai/codex/blob/5adb68a49933ae446bf11935662c83dba55a0804/codex-rs/protocol/src/openai_models/guardian_v2.rs
+[instruction-promotion]: https://github.com/openai/codex/blob/5adb68a49933ae446bf11935662c83dba55a0804/codex-rs/protocol/src/openai_models.rs#L750-L850
+[model-tests]: https://github.com/openai/codex/blob/5adb68a49933ae446bf11935662c83dba55a0804/codex-rs/protocol/src/openai_models.rs#L942-L2089
+[model-runtime]: https://github.com/openai/codex/blob/5adb68a49933ae446bf11935662c83dba55a0804/codex-rs/models-manager/src/model_info.rs
+[models-client]: https://github.com/openai/codex/blob/5adb68a49933ae446bf11935662c83dba55a0804/codex-rs/codex-api/src/endpoint/models.rs
+[models-endpoint]: https://github.com/openai/codex/blob/5adb68a49933ae446bf11935662c83dba55a0804/codex-rs/model-provider/src/models_endpoint.rs
+[default-headers]: https://github.com/openai/codex/blob/5adb68a49933ae446bf11935662c83dba55a0804/codex-rs/login/src/auth/default_client.rs#L278-L350
+[command-auth]: https://github.com/openai/codex/blob/5adb68a49933ae446bf11935662c83dba55a0804/codex-rs/login/src/auth/external_bearer.rs
+[models-lib]: https://github.com/openai/codex/blob/5adb68a49933ae446bf11935662c83dba55a0804/codex-rs/models-manager/src/lib.rs
+[manager]: https://github.com/openai/codex/blob/5adb68a49933ae446bf11935662c83dba55a0804/codex-rs/models-manager/src/manager.rs#L120-L680
+[manager-tests]: https://github.com/openai/codex/blob/5adb68a49933ae446bf11935662c83dba55a0804/codex-rs/models-manager/src/manager_tests.rs#L831-L1045
+[provider]: https://github.com/openai/codex/blob/5adb68a49933ae446bf11935662c83dba55a0804/codex-rs/model-provider/src/provider.rs#L120-L380
+[guardian]: https://github.com/openai/codex/blob/5adb68a49933ae446bf11935662c83dba55a0804/codex-rs/core/src/guardian/review.rs#L831-L940
+[codex-binary]: https://github.com/openai/codex/releases/download/rust-v0.152.1/codex-x86_64-unknown-linux-musl.zst
