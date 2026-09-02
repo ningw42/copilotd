@@ -159,6 +159,12 @@ _Avoid_: middleware as the *name* of the mechanism — call it a shim (nested vi
 onion); "middleware" stays reserved for the `http.Handler` request pipeline. Also
 plugin, filter.
 
+**Shim registration**:
+The ordered registry entry that names and constructs a Shim. A shipped
+registration's non-empty, unique name is its stable operator-facing identity;
+the per-request or per-session object it constructs is a shim instance.
+_Avoid_: using shim instance for the registry entry
+
 **Decline by passthrough**:
 The required outcome when a post-commit shim cannot confidently interpret an SSE
 frame or WebSocket Message: return that input unchanged and continue the stream or
@@ -349,6 +355,12 @@ Unadapted records emitted inside external dependencies have no Component and
 are not attributed to the integrating copilotd package. Component is record
 metadata only and never a filtering axis.
 _Avoid_: package name alone (`main`, `server`); full module import path
+
+**Hook overrun**:
+A post-commit Shim hook invocation that remains in flight after its configured
+warning threshold. It reports elapsed time, not a conclusion that the invocation
+will never return, and it never interrupts or bounds execution.
+_Avoid_: wedged hook, slow hook, hook timeout
 
 ### Runtime state
 
