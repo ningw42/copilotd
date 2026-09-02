@@ -331,7 +331,7 @@ func TestStreamAdapterMonitorsDirectEventTransform(t *testing.T) {
 		t.Fatalf("Transform() = %#v, want unchanged frame", got)
 	}
 	records := logs.snapshot()
-	if len(records) != 2 || hookState(records[0]) != hookStateInFlight || hookState(records[1]) != hookStateReturned {
+	if len(records) != 2 || recordedHookState(records[0]) != hookStateInFlight || recordedHookState(records[1]) != hookStateReturned {
 		t.Fatalf("event-transform records = %#v, want in_flight/returned pair", records)
 	}
 	for i, record := range records {
@@ -372,7 +372,7 @@ func TestStreamAdapterMonitoredPanicKeepsValueAndAttribution(t *testing.T) {
 		t.Fatalf("recovered panic = %#v, want original %#v", recovered, panicValue)
 	}
 	records := logs.snapshot()
-	if len(records) != 2 || hookState(records[1]) != hookStatePanicked || records[1].attrs[logging.ShimKey].String() != "panicking-event" {
+	if len(records) != 2 || recordedHookState(records[1]) != hookStatePanicked || records[1].attrs[logging.ShimKey].String() != "panicking-event" {
 		t.Fatalf("panic records = %#v, want attributed in_flight/panicked pair", records)
 	}
 	publication := summary.Finish(requestsummary.ResponseResult{})
@@ -468,14 +468,17 @@ func TestStreamAdapterMonitorsFinalizerAndFinalizationSweepTransforms(t *testing
 	if len(records) != 4 {
 		t.Fatalf("finalization records = %d, want two crossing/ending pairs", len(records))
 	}
-	want := []struct{ shim, hook, state string }{
+	want := []struct {
+		shim, hook string
+		state      hookState
+	}{
 		{shim: "inner-finalize", hook: "stream_finalize", state: hookStateInFlight},
 		{shim: "inner-finalize", hook: "stream_finalize", state: hookStateReturned},
 		{shim: "outer-transform", hook: "event_transform", state: hookStateInFlight},
 		{shim: "outer-transform", hook: "event_transform", state: hookStateReturned},
 	}
 	for i, expected := range want {
-		if got := records[i]; got.attrs[logging.ShimKey].String() != expected.shim || got.attrs[logging.HookKey].String() != expected.hook || hookState(got) != expected.state {
+		if got := records[i]; got.attrs[logging.ShimKey].String() != expected.shim || got.attrs[logging.HookKey].String() != expected.hook || recordedHookState(got) != expected.state {
 			t.Errorf("record %d = %#v, want shim=%s hook=%s state=%s", i, got, expected.shim, expected.hook, expected.state)
 		}
 	}

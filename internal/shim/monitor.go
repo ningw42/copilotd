@@ -71,10 +71,12 @@ const (
 	hookServerMessageTransform hookRole = "server_message_transform"
 )
 
+type hookState string
+
 const (
-	hookStateInFlight = "in_flight"
-	hookStateReturned = "returned"
-	hookStatePanicked = "panicked"
+	hookStateInFlight hookState = "in_flight"
+	hookStateReturned hookState = "returned"
+	hookStatePanicked hookState = "panicked"
 )
 
 // Watchdog monitors sequential invocations in one synchronous transport
@@ -118,14 +120,19 @@ func (w *Watchdog) Invoke(logCtx context.Context, shimName string, hook hookRole
 	returned := false
 	defer func() {
 		panicValue := recover()
-		state := hookStatePanicked
 		if returned {
-			state = hookStateReturned
+			w.finish(hookStateReturned)
+			return
 		}
-		w.finish(state)
-		if !returned {
-			panic(panicValue)
+		if panicValue == nil {
+			// runtime.Goexit runs deferred functions but is not a panic. Returning
+			// from this defer preserves the goroutine exit instead of converting
+			// it into panic(nil).
+			w.abandon()
+			return
 		}
+		w.finish(hookStatePanicked)
+		panic(panicValue)
 	}()
 	invoke()
 	returned = true
@@ -166,7 +173,7 @@ func (w *Watchdog) publishCrossing() {
 	}
 }
 
-func (w *Watchdog) finish(state string) {
+func (w *Watchdog) finish(state hookState) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if !w.active {
@@ -180,11 +187,22 @@ func (w *Watchdog) finish(state string) {
 	w.logCtx = nil
 }
 
-func (w *Watchdog) log(state string, elapsed time.Duration) {
+func (w *Watchdog) abandon() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if !w.active {
+		return
+	}
+	w.timer.Stop()
+	w.active = false
+	w.logCtx = nil
+}
+
+func (w *Watchdog) log(state hookState, elapsed time.Duration) {
 	w.monitor.logger.LogAttrs(w.logCtx, slog.LevelWarn, "shim hook overrun",
 		slog.String(logging.ShimKey, w.shim),
 		slog.String(logging.HookKey, string(w.hook)),
-		slog.String(logging.HookStateKey, state),
+		slog.String(logging.HookStateKey, string(state)),
 		slog.Duration(logging.DurationKey, elapsed),
 		slog.Duration(logging.ThresholdKey, w.monitor.threshold),
 	)

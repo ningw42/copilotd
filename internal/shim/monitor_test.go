@@ -3,6 +3,7 @@ package shim
 import (
 	"context"
 	"log/slog"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -136,8 +137,8 @@ func (r *countingOverrunRecorder) Count() int {
 	return r.count
 }
 
-func hookState(record recordedHookLog) string {
-	return record.attrs["hook_state"].String()
+func recordedHookState(record recordedHookLog) hookState {
+	return hookState(record.attrs["hook_state"].String())
 }
 
 func TestWatchdogReportsCrossingAndReturn(t *testing.T) {
@@ -220,7 +221,7 @@ func TestWatchdogReportsPanicThenRepanicsSameValue(t *testing.T) {
 		t.Fatalf("recovered panic = %#v, want original value %#v", recovered, panicValue)
 	}
 	records := logs.snapshot()
-	if len(records) != 2 || hookState(records[0]) != hookStateInFlight || hookState(records[1]) != hookStatePanicked {
+	if len(records) != 2 || recordedHookState(records[0]) != hookStateInFlight || recordedHookState(records[1]) != hookStatePanicked {
 		t.Fatalf("panic records = %#v, want in_flight/panicked pair", records)
 	}
 	if got := records[1].attrs["hook"].String(); got != "stream_finalize" {
@@ -228,6 +229,32 @@ func TestWatchdogReportsPanicThenRepanicsSameValue(t *testing.T) {
 	}
 	if counts.Count() != 1 {
 		t.Fatalf("panic overrun count = %d, want 1", counts.Count())
+	}
+}
+
+func TestWatchdogPreservesRuntimeGoexit(t *testing.T) {
+	clock := newFakeMonitorClock()
+	logs := &hookLogRecorder{minimum: slog.LevelDebug}
+	watchdog := NewMonitor(slog.New(logs), time.Second, WithClock(clock)).NewWatchdog(&countingOverrunRecorder{})
+	outcome := make(chan string, 1)
+
+	go func() {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				outcome <- "panicked"
+				return
+			}
+			outcome <- "goexit"
+		}()
+		watchdog.Invoke(context.Background(), "goexit", hookEventTransform, runtime.Goexit)
+		outcome <- "returned"
+	}()
+
+	if got := <-outcome; got != "goexit" {
+		t.Fatalf("runtime.Goexit outcome = %q, want preserved goroutine exit", got)
+	}
+	if records := logs.snapshot(); len(records) != 0 {
+		t.Fatalf("runtime.Goexit records = %#v, want no fabricated ending", records)
 	}
 }
 
@@ -286,23 +313,64 @@ func TestWatchdogFastPathsAndTimerReuse(t *testing.T) {
 	})
 }
 
-func TestWatchdogCountsWhenWarnIsFilteredAndIgnoresContextLifetime(t *testing.T) {
+func TestWatchdogCountsWhenWarnIsFilteredAfterRequestCancellation(t *testing.T) {
 	clock := newFakeMonitorClock()
 	logs := &hookLogRecorder{minimum: slog.LevelError}
 	counts := &countingOverrunRecorder{}
 	watchdog := NewMonitor(slog.New(logs), time.Second, WithClock(clock)).NewWatchdog(counts)
 	ctx, cancel := context.WithCancel(context.Background())
+	started := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		watchdog.Invoke(ctx, "canceled-context", hookServerMessageTransform, func() {
+			close(started)
+			<-release
+		})
+		close(done)
+	}()
+	<-started
 	cancel()
-
-	watchdog.Invoke(ctx, "canceled-context", hookServerMessageTransform, func() {
-		clock.Advance(time.Second)
-	})
+	clock.Advance(time.Second)
+	close(release)
+	<-done
 
 	if records := logs.snapshot(); len(records) != 0 {
 		t.Fatalf("filtered handler captured records = %#v, want none", records)
 	}
 	if counts.Count() != 1 {
 		t.Fatalf("filtered-Warn overrun count = %d, want 1", counts.Count())
+	}
+}
+
+func TestWatchdogSurvivesServerDrainWhileInvocationStillRuns(t *testing.T) {
+	clock := newFakeMonitorClock()
+	logs := &hookLogRecorder{minimum: slog.LevelDebug}
+	watchdog := NewMonitor(slog.New(logs), time.Second, WithClock(clock)).NewWatchdog(&countingOverrunRecorder{})
+	drainCtx, startDrain := context.WithCancel(context.Background())
+	started := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		watchdog.Invoke(context.Background(), "draining", hookClientMessageTransform, func() {
+			close(started)
+			<-release
+			_ = drainCtx.Err()
+		})
+		close(done)
+	}()
+	<-started
+	startDrain()
+	clock.Advance(time.Second)
+
+	records := logs.snapshot()
+	if len(records) != 1 || recordedHookState(records[0]) != hookStateInFlight {
+		t.Fatalf("records after server drain = %#v, want crossing while hook remains in flight", records)
+	}
+	close(release)
+	<-done
+	if records = logs.snapshot(); len(records) != 2 || recordedHookState(records[1]) != hookStateReturned {
+		t.Fatalf("records after drained hook returns = %#v, want complete pair", records)
 	}
 }
 
@@ -382,8 +450,8 @@ func TestWatchdogThresholdCompletionRaceIsAbsentOrPaired(t *testing.T) {
 		if len(records) != 0 && len(records) != 2 {
 			t.Fatalf("iteration %d: race emitted %d records, want absent or pair", iteration, len(records))
 		}
-		if len(records) == 2 && (hookState(records[0]) != hookStateInFlight || hookState(records[1]) != hookStateReturned) {
-			t.Fatalf("iteration %d: paired states = %q/%q, want in_flight/returned", iteration, hookState(records[0]), hookState(records[1]))
+		if len(records) == 2 && (recordedHookState(records[0]) != hookStateInFlight || recordedHookState(records[1]) != hookStateReturned) {
+			t.Fatalf("iteration %d: paired states = %q/%q, want in_flight/returned", iteration, recordedHookState(records[0]), recordedHookState(records[1]))
 		}
 	}
 }
@@ -395,7 +463,17 @@ func (s preCommitAdvancingShim) TransformRequest(context.Context, *Request) erro
 	return nil
 }
 
-func TestPreCommitHookIsNotMonitored(t *testing.T) {
+func (s preCommitAdvancingShim) TransformPrelude(context.Context, *Prelude) error {
+	s.clock.Advance(2 * time.Second)
+	return nil
+}
+
+func (s preCommitAdvancingShim) TransformBuffered(context.Context, *Body) error {
+	s.clock.Advance(2 * time.Second)
+	return nil
+}
+
+func TestPreCommitHooksAreNotMonitored(t *testing.T) {
 	clock := newFakeMonitorClock()
 	logs := &hookLogRecorder{minimum: slog.LevelDebug}
 	_ = NewMonitor(slog.New(logs), time.Second, WithClock(clock))
@@ -410,6 +488,12 @@ func TestPreCommitHookIsNotMonitored(t *testing.T) {
 
 	if _, _, err := chain.RunRequest(ctx, "", nil, nil); err != nil {
 		t.Fatalf("RunRequest() error = %v", err)
+	}
+	if _, _, err := chain.RunPrelude(ctx, 200, nil); err != nil {
+		t.Fatalf("RunPrelude() error = %v", err)
+	}
+	if _, err := chain.RunBuffered(ctx, nil); err != nil {
+		t.Fatalf("RunBuffered() error = %v", err)
 	}
 	publication := summary.Finish(requestsummary.ResponseResult{})
 
@@ -447,7 +531,7 @@ func TestPermanentOverrunPublishesOneWarningAndWarningExecutionReturns(t *testin
 	clock.Advance(10 * time.Second)
 
 	records := logs.snapshot()
-	if len(records) != 1 || hookState(records[0]) != hookStateInFlight {
+	if len(records) != 1 || recordedHookState(records[0]) != hookStateInFlight {
 		t.Fatalf("permanent overrun records = %#v, want one in_flight warning", records)
 	}
 	if counts.Count() != 1 {
