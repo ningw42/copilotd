@@ -487,8 +487,18 @@ func TestProxyMonitorsBothDirectionsWithCorrelatedScopeAndProcessRootedExecution
 	_, _, _ = client.Read(ctx)
 	publication := <-publications
 
-	if got := publication.Attrs[len(publication.Attrs)-1]; got.Key != logging.HookOverrunsKey || got.Value.Int64() != 3 {
-		t.Fatalf("terminal hook_overruns = %#v, want 3", got)
+	wantOverruns := slog.Int(logging.HookOverrunsKey, 3)
+	foundOverruns := false
+	for _, attr := range publication.Attrs {
+		if attr.Key == logging.HookOverrunsKey {
+			foundOverruns = true
+			if !attr.Equal(wantOverruns) {
+				t.Fatalf("Hook overrun attribute = %#v, want %#v", attr, wantOverruns)
+			}
+		}
+	}
+	if !foundOverruns {
+		t.Fatalf("publication attributes = %#v, want %#v", publication.Attrs, wantOverruns)
 	}
 	hadScope, clientCalls, serverCalls := hooks.snapshot()
 	if hadScope || clientCalls != 1 || serverCalls != 2 {

@@ -2,6 +2,7 @@ package shim
 
 import (
 	"context"
+	"io"
 	"log/slog"
 	"net/http"
 	"reflect"
@@ -56,10 +57,7 @@ func TestChainConstructionMarksHookOverrunCountApplicable(t *testing.T) {
 	_ = (Registry(nil)).NewChain(ctx, endpoint.OpenAI, endpoint.RouteOpenAIResponses)
 
 	publication := summary.Finish(requestsummary.ResponseResult{})
-	want := slog.Int(logging.HookOverrunsKey, 0)
-	if len(publication.Attrs) == 0 || !publication.Attrs[len(publication.Attrs)-1].Equal(want) {
-		t.Fatalf("last publication attr = %#v, want %#v", publication.Attrs, want)
-	}
+	assertHookOverrunsAttr(t, publication, 0)
 }
 
 func TestChainConstructsEnabledShimsOnceWithSurfaceAndRoute(t *testing.T) {
@@ -340,9 +338,45 @@ func TestStreamAdapterMonitorsDirectEventTransform(t *testing.T) {
 		}
 	}
 	publication := summary.Finish(requestsummary.ResponseResult{})
-	if got := publication.Attrs[len(publication.Attrs)-1].Value.Int64(); got != 1 {
-		t.Fatalf("hook_overruns = %d, want 1", got)
+	assertHookOverrunsAttr(t, publication, 1)
+}
+
+func TestStreamAdapterContinuesMonitoringAfterRequestCancellation(t *testing.T) {
+	clock := newFakeMonitorClock()
+	logs := &hookLogRecorder{minimum: slog.LevelDebug}
+	monitor := NewMonitor(slog.New(logs), time.Second, WithClock(clock))
+	ctx, cancel := context.WithCancel(context.Background())
+	ctx, summary := requestsummary.Begin(ctx, streamOutcomeObserverFunc(func(string, sse.Outcome) {}))
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	chain := (Registry{{
+		Name:    "canceled-sse",
+		Enabled: true,
+		New: func(context.Context, endpoint.Surface, endpoint.Route) any {
+			return eventTransformFunc(func(_ context.Context, frame sse.Frame) []sse.Frame {
+				close(entered)
+				<-release
+				return []sse.Frame{frame}
+			})
+		},
+	}}).NewChain(ctx, endpoint.OpenAI, endpoint.RouteOpenAIResponses)
+	adapter := chain.StreamAdapter(ctx, monitor)
+	done := make(chan struct{})
+	go func() {
+		adapter.Transform(ctx, sse.Frame{Raw: []byte("unchanged")})
+		close(done)
+	}()
+	<-entered
+	cancel()
+	clock.Advance(time.Second)
+	close(release)
+	<-done
+
+	records := logs.snapshot()
+	if len(records) != 2 || recordedHookState(records[0]) != hookStateInFlight || recordedHookState(records[1]) != hookStateReturned {
+		t.Fatalf("canceled SSE records = %#v, want crossing/ending pair", records)
 	}
+	assertHookOverrunsAttr(t, summary.Finish(requestsummary.ResponseResult{}), 1)
 }
 
 func TestStreamAdapterMonitoredPanicKeepsValueAndAttribution(t *testing.T) {
@@ -376,9 +410,7 @@ func TestStreamAdapterMonitoredPanicKeepsValueAndAttribution(t *testing.T) {
 		t.Fatalf("panic records = %#v, want attributed in_flight/panicked pair", records)
 	}
 	publication := summary.Finish(requestsummary.ResponseResult{})
-	if got := publication.Attrs[len(publication.Attrs)-1].Value.Int64(); got != 1 {
-		t.Fatalf("panic hook_overruns = %d, want 1", got)
-	}
+	assertHookOverrunsAttr(t, publication, 1)
 }
 
 func TestStreamAdapterConfiguredZeroDisablesMonitoring(t *testing.T) {
@@ -406,9 +438,7 @@ func TestStreamAdapterConfiguredZeroDisablesMonitoring(t *testing.T) {
 	if clock.created != 0 || len(logs.snapshot()) != 0 {
 		t.Fatalf("disabled SSE path created %d timers and %d records, want none", clock.created, len(logs.snapshot()))
 	}
-	if got := publication.Attrs[len(publication.Attrs)-1].Value.Int64(); got != 0 {
-		t.Fatalf("disabled SSE hook_overruns = %d, want 0", got)
-	}
+	assertHookOverrunsAttr(t, publication, 0)
 }
 
 func TestStreamAdapterFoldsInnerToOuterWithFanout(t *testing.T) {
@@ -483,9 +513,7 @@ func TestStreamAdapterMonitorsFinalizerAndFinalizationSweepTransforms(t *testing
 		}
 	}
 	publication := summary.Finish(requestsummary.ResponseResult{})
-	if got := publication.Attrs[len(publication.Attrs)-1].Value.Int64(); got != 2 {
-		t.Fatalf("finalization hook_overruns = %d, want 2", got)
-	}
+	assertHookOverrunsAttr(t, publication, 2)
 }
 
 func TestStreamAdapterRetransformsInnerFinalizeOutputThroughOuterHooks(t *testing.T) {
@@ -514,6 +542,32 @@ func TestStreamAdapterRetransformsInnerFinalizeOutputThroughOuterHooks(t *testin
 	want := []sse.Frame{{Type: "message_stop", Raw: []byte("altered(X)")}}
 	if !reflect.DeepEqual(frames, want) {
 		t.Errorf("final frames = %#v, want %#v", frames, want)
+	}
+}
+
+func TestNilPostCommitAdaptersBypassEnabledMonitor(t *testing.T) {
+	clock := newFakeMonitorClock()
+	monitor := NewMonitor(slog.New(slog.NewTextHandler(io.Discard, nil)), time.Second, WithClock(clock))
+	ctx := context.Background()
+	chain := (Registry{{
+		Name:    "no-post-commit-hooks",
+		Enabled: true,
+		New: func(context.Context, endpoint.Surface, endpoint.Route) any {
+			return NopShim{}
+		},
+	}}).NewChain(ctx, endpoint.OpenAI, endpoint.RouteOpenAIResponses)
+
+	if adapter := chain.StreamAdapter(ctx, monitor); adapter != nil {
+		t.Errorf("StreamAdapter() = %T, want nil", adapter)
+	}
+	if adapter := chain.WSClientAdapter(ctx, monitor); adapter != nil {
+		t.Errorf("WSClientAdapter() = %T, want nil", adapter)
+	}
+	if adapter := chain.WSServerAdapter(ctx, monitor); adapter != nil {
+		t.Errorf("WSServerAdapter() = %T, want nil", adapter)
+	}
+	if clock.created != 0 {
+		t.Fatalf("nil adapters created %d watchdog timers, want 0", clock.created)
 	}
 }
 
@@ -636,9 +690,7 @@ func TestWebSocketAdaptersMonitorBothDirectionsWithSharedRecorder(t *testing.T) 
 		}
 	}
 	publication := summary.Finish(requestsummary.ResponseResult{})
-	if got := publication.Attrs[len(publication.Attrs)-1].Value.Int64(); got != 2 {
-		t.Fatalf("shared WebSocket hook_overruns = %d, want 2", got)
-	}
+	assertHookOverrunsAttr(t, publication, 2)
 }
 
 type blockingWebSocketHooks struct {
@@ -691,12 +743,43 @@ func TestWebSocketDirectionsCountConcurrentOverrunsOnSharedRecorder(t *testing.T
 	calls.Wait()
 	publication := summary.Finish(requestsummary.ResponseResult{})
 
-	if got := publication.Attrs[len(publication.Attrs)-1].Value.Int64(); got != 2 {
-		t.Fatalf("concurrent hook_overruns = %d, want 2", got)
-	}
+	assertHookOverrunsAttr(t, publication, 2)
 	if got := len(logs.snapshot()); got != 4 {
 		t.Fatalf("concurrent directional records = %d, want two pairs", got)
 	}
+}
+
+func TestWebSocketAdapterContinuesMonitoringAfterServerDrain(t *testing.T) {
+	clock := newFakeMonitorClock()
+	logs := &hookLogRecorder{minimum: slog.LevelDebug}
+	monitor := NewMonitor(slog.New(logs), time.Second, WithClock(clock))
+	requestCtx, summary := requestsummary.Begin(context.Background(), streamOutcomeObserverFunc(func(string, sse.Outcome) {}))
+	drainCtx, startDrain := context.WithCancel(context.Background())
+	hooks := &blockingWebSocketHooks{entered: make(chan string, 1), release: make(chan struct{})}
+	chain := (Registry{{
+		Name:    "draining-websocket",
+		Enabled: true,
+		New: func(context.Context, endpoint.Surface, endpoint.Route) any {
+			return hooks
+		},
+	}}).NewChain(requestCtx, endpoint.OpenAI, endpoint.RouteOpenAIResponses)
+	adapter := chain.WSClientAdapter(requestCtx, monitor)
+	done := make(chan struct{})
+	go func() {
+		adapter(drainCtx, &Message{})
+		close(done)
+	}()
+	<-hooks.entered
+	startDrain()
+	clock.Advance(time.Second)
+	close(hooks.release)
+	<-done
+
+	records := logs.snapshot()
+	if len(records) != 2 || recordedHookState(records[0]) != hookStateInFlight || recordedHookState(records[1]) != hookStateReturned {
+		t.Fatalf("draining WebSocket records = %#v, want crossing/ending pair", records)
+	}
+	assertHookOverrunsAttr(t, summary.Finish(requestsummary.ResponseResult{}), 1)
 }
 
 func TestWebSocketAdaptersConfiguredZeroDisableMonitoring(t *testing.T) {
@@ -722,9 +805,7 @@ func TestWebSocketAdaptersConfiguredZeroDisableMonitoring(t *testing.T) {
 	if clock.created != 0 || len(logs.snapshot()) != 0 {
 		t.Fatalf("disabled WebSocket path created %d timers and %d records, want none", clock.created, len(logs.snapshot()))
 	}
-	if got := publication.Attrs[len(publication.Attrs)-1].Value.Int64(); got != 0 {
-		t.Fatalf("disabled WebSocket hook_overruns = %d, want 0", got)
-	}
+	assertHookOverrunsAttr(t, publication, 0)
 }
 
 func TestPostCommitAdaptersRetainExactRegistrationIdentity(t *testing.T) {

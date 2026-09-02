@@ -1279,8 +1279,18 @@ func TestForwardUsesConfiguredHookOverrunThresholdAndCorrelatedContext(t *testin
 	if got := recorder.Body.String(); got != terminal {
 		t.Fatalf("body = %q, want unchanged terminal %q", got, terminal)
 	}
-	if got := publication.Attrs[len(publication.Attrs)-1]; got.Key != logging.HookOverrunsKey || got.Value.Int64() != 1 {
-		t.Fatalf("last access attr = %#v, want hook_overruns=1", got)
+	wantOverruns := slog.Int(logging.HookOverrunsKey, 1)
+	foundOverruns := false
+	for _, attr := range publication.Attrs {
+		if attr.Key == logging.HookOverrunsKey {
+			foundOverruns = true
+			if !attr.Equal(wantOverruns) {
+				t.Fatalf("Hook overrun attribute = %#v, want %#v", attr, wantOverruns)
+			}
+		}
+	}
+	if !foundOverruns {
+		t.Fatalf("publication attributes = %#v, want %#v", publication.Attrs, wantOverruns)
 	}
 	overrunLines := []string{}
 	for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {

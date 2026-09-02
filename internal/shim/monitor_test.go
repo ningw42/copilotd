@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/ningw42/copilotd/internal/endpoint"
+	"github.com/ningw42/copilotd/internal/logging"
 	"github.com/ningw42/copilotd/internal/requestsummary"
 	"github.com/ningw42/copilotd/internal/sse"
 )
@@ -169,6 +170,20 @@ func (r *countingOverrunRecorder) Count() int {
 
 func recordedHookState(record recordedHookLog) hookState {
 	return hookState(record.attrs["hook_state"].String())
+}
+
+func assertHookOverrunsAttr(t *testing.T, publication requestsummary.Publication, want int) {
+	t.Helper()
+	wantAttr := slog.Int(logging.HookOverrunsKey, want)
+	for _, attr := range publication.Attrs {
+		if attr.Key == logging.HookOverrunsKey {
+			if !attr.Equal(wantAttr) {
+				t.Fatalf("Hook overrun attribute = %#v, want %#v", attr, wantAttr)
+			}
+			return
+		}
+	}
+	t.Fatalf("publication attributes = %#v, want %#v", publication.Attrs, wantAttr)
 }
 
 func TestCrossingPublicationDoesNotHoldWatchdogStateMutex(t *testing.T) {
@@ -428,11 +443,12 @@ func TestWatchdogDoesNotMisclassifyGoexitAfterCrossing(t *testing.T) {
 	}
 }
 
-func TestWatchdogReportsEverySequentialOverrun(t *testing.T) {
+func TestWatchdogReportsAtMostOnePairPerThresholdPerDirection(t *testing.T) {
 	clock := newFakeMonitorClock()
 	logs := &hookLogRecorder{minimum: slog.LevelDebug}
 	counts := &countingOverrunRecorder{}
 	watchdog := NewMonitor(slog.New(logs), time.Second, WithClock(clock)).NewWatchdog(context.Background(), counts)
+	startedAt := clock.Now()
 
 	for range 3 {
 		watchdog.Invoke("repeat", hookClientMessageTransform, func() {
@@ -440,8 +456,21 @@ func TestWatchdogReportsEverySequentialOverrun(t *testing.T) {
 		})
 	}
 
-	if got := len(logs.snapshot()); got != 6 {
+	records := logs.snapshot()
+	if got := len(records); got != 6 {
 		t.Fatalf("records for three overruns = %d, want three complete pairs", got)
+	}
+	for i, record := range records {
+		want := hookStateInFlight
+		if i%2 == 1 {
+			want = hookStateReturned
+		}
+		if got := recordedHookState(record); got != want {
+			t.Fatalf("record %d state = %q, want %q", i, got, want)
+		}
+	}
+	if elapsed := clock.Now().Sub(startedAt); elapsed != 3*time.Second {
+		t.Fatalf("three directional pairs consumed %v fake time, want one threshold each", elapsed)
 	}
 	if counts.Count() != 3 {
 		t.Fatalf("count for three overruns = %d, want 3", counts.Count())
@@ -670,9 +699,7 @@ func TestPreCommitHooksAreNotMonitored(t *testing.T) {
 	if clock.created != 0 || len(logs.snapshot()) != 0 {
 		t.Fatalf("pre-commit path created %d timers and %d records, want none", clock.created, len(logs.snapshot()))
 	}
-	if got := publication.Attrs[len(publication.Attrs)-1].Value.Int64(); got != 0 {
-		t.Fatalf("pre-commit hook_overruns = %d, want 0", got)
-	}
+	assertHookOverrunsAttr(t, publication, 0)
 }
 
 func TestPermanentOverrunPublishesOneWarningAndWarningExecutionReturns(t *testing.T) {

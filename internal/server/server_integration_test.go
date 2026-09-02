@@ -18,6 +18,7 @@ import (
 	"github.com/ningw42/copilotd/internal/catalog"
 	"github.com/ningw42/copilotd/internal/forward"
 	"github.com/ningw42/copilotd/internal/identity"
+	"github.com/ningw42/copilotd/internal/logging"
 	"github.com/ningw42/copilotd/internal/sse"
 )
 
@@ -796,6 +797,9 @@ func TestModelsAuthoritativeResponseAtAssembledBoundaryOmitsResponseDataFromLogs
 	}
 	if got := logs.String(); !strings.Contains(got, `inbound="GET /models"`) || !strings.Contains(got, "status=418") || !strings.Contains(got, "request_id="+requestID) || !strings.Contains(got, "upstream_request_id="+upstreamRequestID) {
 		t.Errorf("access log lacks inbound/status/correlation metadata:\n%s", got)
+	}
+	if got := logs.String(); strings.Contains(got, logging.HookOverrunsKey+"=") {
+		t.Errorf("raw passthrough access record unexpectedly contains hook_overruns:\n%s", got)
 	}
 }
 
