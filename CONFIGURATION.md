@@ -169,7 +169,7 @@ byte-for-byte verbatim.
 Sets the one global duration after which a still-running post-commit Shim hook
 becomes a **Hook overrun**. The default is `1s`; `0` disables monitoring, and
 negative values are rejected before the server binds. This setting applies to
-all monitored SSE and WebSocket hook roles—there are no per-role or
+all monitored SSE and WebSocket hook roles — there are no per-role or
 per-registration overrides. Monitoring reports threshold crossings but never
 bounds, interrupts, or cancels hook execution.
 

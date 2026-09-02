@@ -166,8 +166,10 @@ type Chain struct {
 	overruns  *requestsummary.HookOverrunRecorder
 }
 
-// NewChain constructs each enabled shim once in registration order for the
-// caller's request or session lifetime.
+// NewChain marks Hook overrun counts as applicable to the terminal request
+// summary, then constructs each enabled shim once in registration order for the
+// caller's request or session lifetime. Applicability includes an explicit zero
+// even when monitoring is disabled or no post-commit hook participates.
 func (r Registry) NewChain(ctx context.Context, surface endpoint.Surface, route endpoint.Route) *Chain {
 	chain := &Chain{overruns: requestsummary.NewHookOverrunRecorder(ctx)}
 	for _, registration := range r {

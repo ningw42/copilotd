@@ -11,8 +11,8 @@ never cancels, interrupts, bounds, or tears down the hook.
 The global `shim-hook-overrun-threshold` setting defaults to `1s`. Zero disables
 monitoring; negative values are invalid. The threshold is intentionally
 conservative for hooks whose contract is prompt CPU-bound work: it avoids
-turning transient scheduler pressure into routine warnings while still making a
-wedge visible quickly. Per-role and per-registration overrides are not provided.
+turning transient scheduler pressure into routine warnings while still surfacing
+an overrun promptly. Per-role and per-registration overrides are not provided.
 
 ## Cross-transport record contract
 
@@ -33,8 +33,9 @@ A later normal return produces the same identifying and timing fields with
 `hook_state=panicked`, then re-panics the same value so the existing SSE or
 WebSocket recovery boundary retains its established wire behavior and terminal
 classification. For those two supported hook outcomes, a completion racing
-threshold publication yields either no records or one crossing/ending pair. A
-permanently stuck invocation deliberately has only its crossing record.
+threshold publication yields either no records or one crossing/ending pair. An
+invocation that remains permanently in flight deliberately has only its crossing
+record.
 
 `runtime.Goexit` is neither a return nor a panic and terminates the caller's
 goroutine after running defers. The monitor preserves that runtime behavior
@@ -64,9 +65,12 @@ publication increments it once. Both WebSocket directions can increment it
 concurrently.
 
 A returning request that constructed a Chain publishes the integer count,
-including an explicit zero. A request that never constructed a Chain omits the
-field as not applicable; examples include probes, unmatched requests, Catalogs,
-raw passthrough forwarding, and WebSocket failures before Chain construction.
+including an explicit zero. Chain construction remains the predicate when the
+threshold is zero or when no post-commit hook participates: zero records that the
+summary is in the applicable Chain scope, not that a watchdog ran. A request that
+never constructed a Chain omits the field as not applicable; examples include
+probes, unmatched requests, Catalogs, raw passthrough forwarding, and WebSocket
+failures before Chain construction.
 An increment racing or following terminal-summary `Finish` is ignored. A
 positive count does not independently alter access-record level.
 
@@ -87,10 +91,19 @@ timer, and a Chain with no participating post-commit hook retains its nil-adapte
 fast path.
 
 The timer callback performs only threshold publication and returns, including
-for a permanently stuck hook; monitoring adds no second execution waiting on
-the hook and emits no periodic reminders. Reset races reject a queued callback
-from a previous invocation until the current invocation has actually reached
-its own deadline.
+for a hook that remains permanently in flight; monitoring adds no second
+execution waiting on the hook and emits no periodic reminders. A transport-level
+test of that case would itself leak the deliberately non-returning hook
+goroutine; deterministic watchdog coverage pins callback termination, and the
+synchronous adapter call boundary carries that property to both transports.
+Reset races reject a queued callback from a previous invocation until the current
+invocation has actually reached its own deadline.
+
+The invocation-state mutex is released before logger or request-summary I/O. A
+separate publication lock preserves crossing-before-ending record order. The
+shipped adapters are synchronous and single-flight; if a future caller violates
+that invariant, its concurrent call runs unmonitored rather than letting
+observability manufacture a transport-visible panic.
 
 Focused benchmarks compare the enabled and unmonitored paths without imposing a
 machine-specific nanosecond ceiling. On the implementation host, enabled
@@ -103,7 +116,7 @@ direction. Consequently one direction can produce at most one crossing/ending
 pair per threshold interval. Every overrun is nevertheless reported: a
 sufficiently long stream may accumulate an unbounded number of pairs. That
 record-volume trade-off is accepted so a finite earlier overrun can never
-suppress a later permanent one.
+suppress a later permanently in-flight invocation.
 
 ## Considered alternatives
 
@@ -137,11 +150,15 @@ suppress a later permanent one.
 - Long-lived streams may legitimately emit many warning pairs; operators can
   disable monitoring globally with a zero threshold when that trade-off is not
   acceptable.
-- A permanently stuck hook produces its crossing warning but no ending warning,
-  terminal access record, or terminal metric.
+- A hook that remains permanently in flight produces its crossing warning but
+  no ending warning, terminal access record, or terminal metric.
 
 This decision extends
 [ADR-0014](0014-infallible-post-commit-shim-hooks.md), which leaves post-commit
 promptness review-enforced and execution unbounded, and follows
 [ADR-0015](0015-govern-log-record-structure-with-ordinary-slog.md) for Component,
-scope, level, and governed-key structure. It does not supersede either decision.
+scope, level, and governed-key structure. ADR-0015's statement that access adds
+no watchdog refers to the whole-handler access lifecycle: this decision adds only
+an individual-hook watchdog, still no request start line or handler timeout, and
+still no terminal access record when a hook prevents its handler from returning.
+It does not supersede either decision.
