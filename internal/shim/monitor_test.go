@@ -258,6 +258,40 @@ func TestWatchdogPreservesRuntimeGoexit(t *testing.T) {
 	}
 }
 
+func TestWatchdogDoesNotMisclassifyGoexitAfterCrossing(t *testing.T) {
+	clock := newFakeMonitorClock()
+	logs := &hookLogRecorder{minimum: slog.LevelDebug}
+	counts := &countingOverrunRecorder{}
+	watchdog := NewMonitor(slog.New(logs), time.Second, WithClock(clock)).NewWatchdog(counts)
+	outcome := make(chan string, 1)
+
+	go func() {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				outcome <- "panicked"
+				return
+			}
+			outcome <- "goexit"
+		}()
+		watchdog.Invoke(context.Background(), "goexit", hookEventTransform, func() {
+			clock.Advance(time.Second)
+			runtime.Goexit()
+		})
+		outcome <- "returned"
+	}()
+
+	if got := <-outcome; got != "goexit" {
+		t.Fatalf("runtime.Goexit outcome = %q, want preserved goroutine exit", got)
+	}
+	records := logs.snapshot()
+	if len(records) != 1 || recordedHookState(records[0]) != hookStateInFlight {
+		t.Fatalf("runtime.Goexit records = %#v, want only truthful crossing record", records)
+	}
+	if counts.Count() != 1 {
+		t.Fatalf("runtime.Goexit crossing count = %d, want 1", counts.Count())
+	}
+}
+
 func TestWatchdogReportsEverySequentialOverrun(t *testing.T) {
 	clock := newFakeMonitorClock()
 	logs := &hookLogRecorder{minimum: slog.LevelDebug}

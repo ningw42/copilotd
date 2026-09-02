@@ -32,9 +32,17 @@ A later normal return produces the same identifying and timing fields with
 `hook_state=returned` and total elapsed duration. A later panic uses
 `hook_state=panicked`, then re-panics the same value so the existing SSE or
 WebSocket recovery boundary retains its established wire behavior and terminal
-classification. A completion racing threshold publication yields either no
-records or one crossing/ending pair. A permanently stuck invocation deliberately
-has only its crossing record.
+classification. For those two supported hook outcomes, a completion racing
+threshold publication yields either no records or one crossing/ending pair. A
+permanently stuck invocation deliberately has only its crossing record.
+
+`runtime.Goexit` is neither a return nor a panic and terminates the caller's
+goroutine after running defers. The monitor preserves that runtime behavior
+instead of converting it to `panic(nil)`. Because the governed ending vocabulary
+must not falsely label it `returned` or `panicked`, a Goexit after threshold
+crossing retains only the crossing record; its caller cannot continue to a
+transport terminal summary. This is a transparency edge case outside the shim
+hook outcome contract, not a fourth `hook_state`.
 
 The monitor receives a correlated logging context separately from the hook's
 execution context. SSE supplies its correlated response context. WebSocket
