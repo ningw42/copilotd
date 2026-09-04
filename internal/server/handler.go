@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"github.com/ningw42/copilotd/internal/forward"
 	"github.com/ningw42/copilotd/internal/identity"
 	"github.com/ningw42/copilotd/internal/logging"
+	"github.com/ningw42/copilotd/internal/requestsummary"
 	"github.com/ningw42/copilotd/internal/wsforward"
 )
 
@@ -71,10 +73,19 @@ func newHandler(apikey string, provider identity.Provider, observers ReadyObserv
 	registerForward(endpoint.OpenAIResponsesHTTP())
 	registerWS(endpoint.OpenAIResponsesWS())
 	registerPassthrough(endpoint.Models())
-	registerCatalog(endpoint.AnthropicCatalog(), catalog.Rendering{Render: func(models []catalog.Model) ([]byte, error) {
-		return catalog.RenderAnthropicWithConfig(models, catalogs.Anthropic)
-	}})
-	registerCatalog(endpoint.OpenAICatalog(), catalog.Rendering{Render: catalog.RenderOpenAI, Codex: catalogs.Codex})
+	registerCatalog(endpoint.AnthropicCatalog(), catalog.Rendering{
+		Render: func(models []catalog.Model) ([]byte, error) {
+			return catalog.RenderAnthropicWithConfig(models, catalogs.Anthropic)
+		},
+		RecordShape: nil,
+	})
+	registerCatalog(endpoint.OpenAICatalog(), catalog.Rendering{
+		Render: catalog.RenderOpenAI,
+		Codex:  catalogs.Codex,
+		RecordShape: func(ctx context.Context, shape catalog.Shape) {
+			requestsummary.RecordCatalogShape(ctx, string(shape))
+		},
+	})
 
 	return requestID(accessLog(logger, streamOutcomes, recoverMW(logger, mux)))
 }

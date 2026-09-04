@@ -10,7 +10,6 @@ import (
 	"github.com/ningw42/copilotd/internal/cache"
 	"github.com/ningw42/copilotd/internal/endpoint"
 	"github.com/ningw42/copilotd/internal/logging"
-	"github.com/ningw42/copilotd/internal/requestsummary"
 	"github.com/ningw42/copilotd/internal/upstream"
 )
 
@@ -19,6 +18,47 @@ import (
 type Rendering struct {
 	Render func([]Model) ([]byte, error)
 	Codex  CodexDescriptor
+	// RecordShape, when non-nil, reports the catalog Shape that was served for an
+	// OpenAI Surface render. It is a narrow hook so catalog never imports requestsummary.
+	RecordShape func(context.Context, Shape)
+}
+
+// RenderOne renders the OpenAI Catalog for ep and returns the response bytes along
+// with the Shape that was actually served. It owns the shape decision: whether the
+// Codex client shape or the OpenAI provider shape wins.
+func RenderOne(ep endpoint.Catalog, rendering Rendering, r *http.Request, models []Model, responseCtx context.Context, logger *slog.Logger) ([]byte, Shape, error) {
+	if !rendering.Codex.servesCodexShape(ep, r) {
+		representation, err := rendering.Render(models)
+		if err != nil {
+			return nil, "", err
+		}
+		return representation, ShapeOpenAI, nil
+	}
+
+	currentBytes := embeddedCodexModels
+	if rendering.Codex.Models != nil {
+		currentBytes, _ = rendering.Codex.Models.Current()
+	}
+	codexModels, err := parseCodexModels(currentBytes)
+	if err != nil {
+		return nil, "", err
+	}
+	representation, outcome, err := RenderCodex(codexModels, models, rendering.Codex.RenderConfig)
+	if err != nil {
+		return nil, "", err
+	}
+	for _, unapplied := range outcome.UnappliedAliases {
+		logger.WarnContext(responseCtx, "Codex catalog alias mapping was not applied",
+			slog.String(logging.ModelKey, unapplied.Alias),
+			slog.String(logging.MetadataSourceKey, unapplied.MetadataSource),
+			slog.String(logging.SkipReasonKey, string(unapplied.Reason)))
+	}
+	for _, skipped := range outcome.SkippedReviewers {
+		logger.WarnContext(responseCtx, "Codex catalog reviewer was skipped",
+			slog.String(logging.ModelKey, skipped.Model),
+			slog.String(logging.ReviewerKey, skipped.Reviewer))
+	}
+	return representation, ShapeCodex, nil
 }
 
 // RenderDescriptors contains the complete renderer-specific contracts projected
@@ -69,42 +109,13 @@ func Handler(logger *slog.Logger, ep endpoint.Catalog, rendering Rendering, sour
 			return
 		}
 		filtered := Filter(models, ep.RequiredRoute())
-		shape := requestsummary.CatalogShapeOpenAI
-		var representation []byte
-		if servesCodexShape(ep, rendering, r) {
-			shape = requestsummary.CatalogShapeCodex
-			var outcome CodexRenderOutcome
-			currentBytes := embeddedCodexModels
-			if rendering.Codex.Models != nil {
-				currentBytes, _ = rendering.Codex.Models.Current()
-			}
-			var codexModels CodexModels
-			codexModels, err = parseCodexModels(currentBytes)
-			if err == nil {
-				representation, outcome, err = RenderCodex(codexModels, filtered, rendering.Codex.RenderConfig)
-			}
-			if err == nil {
-				for _, unapplied := range outcome.UnappliedAliases {
-					logger.WarnContext(responseCtx, "Codex catalog alias mapping was not applied",
-						slog.String(logging.ModelKey, unapplied.Alias),
-						slog.String(logging.MetadataSourceKey, unapplied.MetadataSource),
-						slog.String(logging.SkipReasonKey, string(unapplied.Reason)))
-				}
-				for _, skipped := range outcome.SkippedReviewers {
-					logger.WarnContext(responseCtx, "Codex catalog reviewer was skipped",
-						slog.String(logging.ModelKey, skipped.Model),
-						slog.String(logging.ReviewerKey, skipped.Reviewer))
-				}
-			}
-		} else {
-			representation, err = rendering.Render(filtered)
-		}
+		representation, shape, err := RenderOne(ep, rendering, r, filtered, responseCtx, logger)
 		if err != nil {
 			apierror.Write(w, ep.Surface(), apierror.BadGateway, "could not render the models catalog")
 			return
 		}
-		if ep.Surface() == endpoint.OpenAI {
-			requestsummary.RecordCatalogShape(r.Context(), shape)
+		if rendering.RecordShape != nil {
+			rendering.RecordShape(r.Context(), shape)
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -114,11 +125,4 @@ func Handler(logger *slog.Logger, ep endpoint.Catalog, rendering Rendering, sour
 			_, _ = w.Write(representation)
 		}
 	}
-}
-
-func servesCodexShape(ep endpoint.Catalog, rendering Rendering, r *http.Request) bool {
-	return ep.Surface() == endpoint.OpenAI &&
-		r.URL.Query().Has("client_version") &&
-		rendering.Codex.Enabled &&
-		rendering.Codex.RenderConfig.mutates()
 }

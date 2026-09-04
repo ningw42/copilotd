@@ -33,7 +33,7 @@ type Summary struct {
 	stream    StreamResult
 	hasStream bool
 
-	catalogShape    CatalogShape
+	catalogShape    string
 	hasCatalogShape bool
 
 	webSocket    WebSocketResult
@@ -62,14 +62,9 @@ type StreamResult struct {
 	Fallbacks int
 }
 
-// CatalogShape identifies a successfully rendered OpenAI Catalog shape.
-type CatalogShape string
-
 const (
-	// CatalogShapeOpenAI is the provider-shaped OpenAI Catalog.
-	CatalogShapeOpenAI CatalogShape = "openai"
-	// CatalogShapeCodex is the client-shaped Codex catalog.
-	CatalogShapeCodex CatalogShape = "codex"
+	catalogShapeOpenAI = "openai"
+	catalogShapeCodex  = "codex"
 )
 
 // WebSocketTerminal identifies how an established WebSocket session ended.
@@ -173,11 +168,11 @@ func RecordStream(ctx context.Context, result StreamResult) {
 	summary.hasStream = true
 }
 
-// RecordCatalogShape records a valid successfully rendered Catalog shape,
-// replacing an earlier valid shape. It does nothing without a summary, ignores
-// invalid shapes, and ignores calls after Finish.
-func RecordCatalogShape(ctx context.Context, shape CatalogShape) {
-	if shape != CatalogShapeOpenAI && shape != CatalogShapeCodex {
+// RecordCatalogShape records a successfully rendered OpenAI Catalog shape, replacing an
+// earlier valid shape. The shape is a known bounded token produced by internal/catalog.
+// It does nothing without a summary, ignores non-token shapes, and ignores calls after Finish.
+func RecordCatalogShape(ctx context.Context, shape string) {
+	if shape != catalogShapeOpenAI && shape != catalogShapeCodex {
 		return
 	}
 	summary, ok := summaryFromContext(ctx)
@@ -320,7 +315,7 @@ func (s *Summary) Finish(response ResponseResult) Publication {
 		)
 	}
 	if s.hasCatalogShape {
-		attrs = append(attrs, slog.String(logging.CatalogShapeKey, string(s.catalogShape)))
+		attrs = append(attrs, slog.String(logging.CatalogShapeKey, s.catalogShape))
 	}
 	if s.hasWebSocket {
 		attrs = append(attrs,
