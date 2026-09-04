@@ -113,7 +113,7 @@ func TestRecordOperationsWithoutSummaryAreNoOps(t *testing.T) {
 	requestsummary.RecordStream(ctx, requestsummary.StreamResult{
 		Surface: "openai", Outcome: sse.OutcomeClean, Frames: 1, Fallbacks: 2,
 	})
-	requestsummary.RecordCatalogShape(ctx, requestsummary.CatalogShapeOpenAI)
+	requestsummary.RecordCatalogShape(ctx, "openai")
 	requestsummary.RecordWebSocket(ctx, requestsummary.WebSocketResult{
 		Terminal: requestsummary.WebSocketClientClosed, CloseCode: 1000,
 		MsgsC2U: 1, MsgsU2C: 2, BytesC2U: 3, BytesU2C: 4,
@@ -210,10 +210,10 @@ func TestStreamAndValidCatalogShapeReplaceEarlierValues(t *testing.T) {
 	requestsummary.RecordStream(ctx, requestsummary.StreamResult{
 		Surface: "future-surface", Outcome: sse.Outcome("future_outcome"), Frames: -2, Fallbacks: -3,
 	})
-	requestsummary.RecordCatalogShape(ctx, requestsummary.CatalogShapeOpenAI)
-	requestsummary.RecordCatalogShape(ctx, requestsummary.CatalogShape("invalid"))
-	requestsummary.RecordCatalogShape(ctx, requestsummary.CatalogShapeCodex)
-	requestsummary.RecordCatalogShape(ctx, requestsummary.CatalogShape("still_invalid"))
+	requestsummary.RecordCatalogShape(ctx, "openai")
+	requestsummary.RecordCatalogShape(ctx, "invalid")
+	requestsummary.RecordCatalogShape(ctx, "codex")
+	requestsummary.RecordCatalogShape(ctx, "still_invalid")
 
 	publication := summary.Finish(requestsummary.ResponseResult{
 		Method: "FUTURE", Status: -9, Bytes: -10, Duration: -time.Second,
@@ -368,7 +368,7 @@ func TestRecordsAfterFinishAreIgnored(t *testing.T) {
 	requestsummary.RecordBinding(ctx, requestsummary.Binding{Context: context.WithValue(ctx, struct{}{}, "late"), Probe: true})
 	requestsummary.RecordCorrelation(ctx, context.WithValue(ctx, struct{}{}, "late correlation"))
 	requestsummary.RecordStream(ctx, requestsummary.StreamResult{Surface: "openai", Outcome: sse.OutcomeStall, Frames: 9, Fallbacks: 8})
-	requestsummary.RecordCatalogShape(ctx, requestsummary.CatalogShapeCodex)
+	requestsummary.RecordCatalogShape(ctx, "codex")
 	requestsummary.RecordWebSocket(ctx, requestsummary.WebSocketResult{Terminal: requestsummary.WebSocketError, CloseCode: 1011})
 
 	if matched, ok := requestsummary.MatchedContext(ctx); ok || matched != nil {
@@ -392,11 +392,11 @@ func TestCatalogShapeIsAnIndependentOptionalGroup(t *testing.T) {
 	}
 	tests := []struct {
 		name  string
-		shape requestsummary.CatalogShape
+		shape string
 		want  []slog.Attr
 	}{
-		{name: "invalid shape omitted", shape: requestsummary.CatalogShape("invalid"), want: baseAttrs},
-		{name: "valid shape present alone", shape: requestsummary.CatalogShapeCodex, want: append(append([]slog.Attr(nil), baseAttrs...), slog.String(logging.CatalogShapeKey, "codex"))},
+		{name: "invalid shape omitted", shape: "invalid", want: baseAttrs},
+		{name: "valid shape present alone", shape: "codex", want: append(append([]slog.Attr(nil), baseAttrs...), slog.String(logging.CatalogShapeKey, "codex"))},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -415,7 +415,7 @@ func TestFinishOrdersEveryAttributeGroup(t *testing.T) {
 	requestsummary.RecordStream(ctx, requestsummary.StreamResult{
 		Surface: "openai", Outcome: sse.OutcomeClean, Frames: 7, Fallbacks: 2,
 	})
-	requestsummary.RecordCatalogShape(ctx, requestsummary.CatalogShapeOpenAI)
+	requestsummary.RecordCatalogShape(ctx, "openai")
 	requestsummary.RecordWebSocket(ctx, requestsummary.WebSocketResult{
 		Terminal:  requestsummary.WebSocketUpstreamClosed,
 		CloseCode: 1001,
@@ -462,7 +462,7 @@ func TestStreamObserverCanReenterSummaryWithoutDeadlock(t *testing.T) {
 	)
 	ctx, summary = requestsummary.Begin(context.Background(), observerFunc(func(string, sse.Outcome) {
 		observed++
-		requestsummary.RecordCatalogShape(ctx, requestsummary.CatalogShapeCodex)
+		requestsummary.RecordCatalogShape(ctx, "codex")
 		reentered = summary.Finish(requestsummary.ResponseResult{Method: "reentrant", Status: 503})
 	}))
 	requestsummary.RecordBinding(ctx, requestsummary.Binding{Context: ctx, Probe: true})

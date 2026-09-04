@@ -19,8 +19,6 @@ import (
 	"github.com/ningw42/copilotd/internal/config"
 	"github.com/ningw42/copilotd/internal/endpoint"
 	"github.com/ningw42/copilotd/internal/logging"
-	"github.com/ningw42/copilotd/internal/requestsummary"
-	"github.com/ningw42/copilotd/internal/sse"
 	"github.com/ningw42/copilotd/internal/upstream"
 )
 
@@ -61,49 +59,87 @@ func TestHandlerCallsTheCatalogContractsUpstreamRoute(t *testing.T) {
 	}
 }
 
-type noOpStreamObserver struct{}
-
-func (noOpStreamObserver) ObserveStreamOutcome(string, sse.Outcome) {}
-
-func TestHandlerPublishesShapeOnlyAfterSuccessfulOpenAIRender(t *testing.T) {
+func TestHandlerRecordsShapeOnlyAfterSuccessfulRender(t *testing.T) {
 	rendered := false
+	var got Shape
 	handler := Handler(discardHandlerLogger(), endpoint.OpenAICatalog(), Rendering{
 		Render: func(models []Model) ([]byte, error) {
 			rendered = true
 			return RenderOpenAI(models)
 		},
+		RecordShape: func(_ context.Context, shape Shape) {
+			got = shape
+		},
 	}, stubSource{status: http.StatusOK, body: []byte(`{"data":[]}`)})
-	request := httptest.NewRequest(http.MethodGet, "/openai/v1/models", nil)
-	ctx, summary := requestsummary.Begin(request.Context(), noOpStreamObserver{})
-	request = request.WithContext(ctx)
 	recorder := httptest.NewRecorder()
 
-	handler(recorder, request)
+	handler(recorder, httptest.NewRequest(http.MethodGet, "/openai/v1/models", nil))
 
 	if !rendered || recorder.Code != http.StatusOK {
-		t.Fatalf("rendered/status = %t/%d, want successful render before publication", rendered, recorder.Code)
+		t.Fatalf("rendered/status = %t/%d, want successful render before recording", rendered, recorder.Code)
 	}
-	publication := summary.Finish(requestsummary.ResponseResult{})
-	var got string
-	for _, attr := range publication.Attrs {
-		if attr.Key == logging.CatalogShapeKey {
-			got = attr.Value.String()
-		}
-	}
-	if got != "openai" {
-		t.Errorf("published catalog shape = %q, want openai", got)
+	if got != ShapeOpenAI {
+		t.Errorf("recorded catalog shape = %q, want %q", got, ShapeOpenAI)
 	}
 
+	var failedGot Shape
 	failedHandler := Handler(discardHandlerLogger(), endpoint.OpenAICatalog(), Rendering{
 		Render: func([]Model) ([]byte, error) { return nil, errors.New("render failed") },
+		RecordShape: func(_ context.Context, shape Shape) {
+			failedGot = shape
+		},
 	}, stubSource{status: http.StatusOK, body: []byte(`{"data":[]}`)})
-	failedRequest := httptest.NewRequest(http.MethodGet, "/openai/v1/models", nil)
-	failedCtx, failedSummary := requestsummary.Begin(failedRequest.Context(), noOpStreamObserver{})
-	failedHandler(httptest.NewRecorder(), failedRequest.WithContext(failedCtx))
-	for _, attr := range failedSummary.Finish(requestsummary.ResponseResult{}).Attrs {
-		if attr.Key == logging.CatalogShapeKey {
-			t.Errorf("render failure published catalog shape %q", attr.Value.String())
-		}
+	failedHandler(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/openai/v1/models", nil))
+	if failedGot != "" {
+		t.Errorf("render failure recorded catalog shape %q", failedGot)
+	}
+}
+
+func TestRenderOneReturnsTheShapeThatMatchesItsRepresentation(t *testing.T) {
+	models := []Model{{ID: "gpt-5.4", Vendor: "OpenAI"}}
+	tests := []struct {
+		name       string
+		target     string
+		rendering  Rendering
+		wantShape  Shape
+		wantPrefix string
+	}{
+		{
+			name:       "provider-shaped OpenAI catalog",
+			target:     "/openai/v1/models",
+			rendering:  Rendering{Render: RenderOpenAI},
+			wantShape:  ShapeOpenAI,
+			wantPrefix: `{"object":"list","data":[`,
+		},
+		{
+			name:   "client-shaped Codex catalog",
+			target: "/openai/v1/models?client_version=0.152.1",
+			rendering: Rendering{
+				Render: RenderOpenAI,
+				Codex: CodexDescriptor{
+					Enabled:      true,
+					RenderConfig: CodexRenderConfig{AutoReviewModel: "gpt-5.4"},
+				},
+			},
+			wantShape:  ShapeCodex,
+			wantPrefix: `{"models":[`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, tc.target, nil)
+			representation, shape, err := RenderOne(endpoint.OpenAICatalog(), tc.rendering, request, models, request.Context(), discardHandlerLogger())
+			if err != nil {
+				t.Fatalf("RenderOne: %v", err)
+			}
+			if shape != tc.wantShape {
+				t.Errorf("shape = %q, want %q", shape, tc.wantShape)
+			}
+			if !strings.HasPrefix(string(representation), tc.wantPrefix) {
+				t.Errorf("representation = %s, want prefix %s", representation, tc.wantPrefix)
+			}
+		})
 	}
 }
 

@@ -519,7 +519,7 @@ func TestAccessLogDoesNotLogStreamBodiesOrSecrets(t *testing.T) {
 func TestAccessLogRecordsOnlyTheBoundedCatalogShape(t *testing.T) {
 	logger, buf := bufferLogger(t, "info")
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requestsummary.RecordCatalogShape(r.Context(), requestsummary.CatalogShapeCodex)
+		requestsummary.RecordCatalogShape(r.Context(), "codex")
 		_, _ = io.WriteString(w, "private-catalog-body")
 	})
 	h := accessLog(logger, NewStreamOutcomeCounter(), inner)
