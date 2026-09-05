@@ -1,0 +1,28 @@
+{
+  "release": {
+    "repository": "openai/codex",
+    "tag": "rust-v0.153.4",
+    "peeled_commit": "3d2ee51ca2d5db578f328aa75e20aa22c0197c9a",
+    "audit_date": "2026-09-05",
+    "github_release_id": 383061770,
+    "published_at": "2026-09-04T23:25:48Z",
+    "tag_object": "042fb41b7c813ac7999105e886b2b7aa715b5081"
+  },
+  "models": {
+    "source_path": "codex-rs/models-manager/models.json",
+    "git_blob": "698da6fb7a825cd3ede1696e4ce8579ef5c42c02",
+    "sha256": "d7136a413cfac1b5b1686d9e0dcc5c80ca05bebed5e9fc3911376561d0ef6ee8",
+    "size": 515145,
+    "audited_bundled_default": "gpt-6-astra"
+  },
+  "manifest": {
+    "asset_name": "codex-package_SHA256SUMS",
+    "github_asset_id": 545043391,
+    "sha256": "645fb8d4a1f821357a7160f04a6d15bf54ff97ab6946a79239c551ebed734d23"
+  },
+  "executable_audit": {
+    "asset_name": "codex-x86_64-unknown-linux-musl.zst",
+    "archive_sha256": "c485e889611b73ff5c3cc11fb5cea7551ef504465ad8675163766b9b1a9ec84a",
+    "executable_sha256": "56ef98ab4032d317ab26e9b5e5a175650717351edb16ed9cde0cb6d1734d62da"
+  }
+}

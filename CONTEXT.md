@@ -224,9 +224,11 @@ _Avoid_: target model, alias destination.
 **Reviewer model**:
 The real, forwardable model copilotd routes Codex's guardian auto-review to via
 `auto_review_model_override`, taking precedence over Codex's provider default.
-Current Codex defaults command/API-key providers to `gpt-5.6-luna` and ChatGPT
-auth to `codex-auto-review`; the explicit override keeps routing controllable
-across client versions and Copilot lineups. Chosen per **Main model** — a
+Provider defaults can vary by Codex release; dated audited behavior and source
+evidence are recorded in
+[`PROVENANCE.md`](internal/catalog/codexdata/PROVENANCE.md). The explicit
+override keeps routing controllable across client versions and Copilot lineups.
+Chosen per **Main model** — a
 per-main-model override map over a global default — so different main models can
 route to different reviewers.
 A configured reviewer is injected only when its served slug is emitted from the
@@ -249,11 +251,14 @@ which Codex fetches a self-hosted proxy's model catalog.
 _Avoid_: auth provider (unqualified).
 
 **Vendored snapshot**:
-The pinned copy of Codex's bundled `models.json` (`rust-v0.153.4`) embedded in
-copilotd, carried with Apache-2.0 `LICENSE`/`NOTICE` and a `PROVENANCE` record.
-It is the cached value's guaranteed-parseable embedded floor and defines the
-complete-entry accept contract for newer Codex release bytes; it is not
-necessarily the live source after a successful refresh.
+The pinned copy of Codex's bundled [`models.json`](internal/catalog/codexdata/models.json)
+embedded in copilotd, carried with Apache-2.0 `LICENSE`/`NOTICE`. Its current
+release and artifact identities live in [`release.json`](internal/catalog/codexdata/release.json),
+and its audit evidence and contract provenance live in
+[`PROVENANCE.md`](internal/catalog/codexdata/PROVENANCE.md). It is the cached
+value's guaranteed-parseable embedded floor and defines the complete-entry
+accept contract for newer Codex release bytes; it is not necessarily the live
+source after a successful refresh.
 _Avoid_: snapshot (unqualified) where ambiguous.
 
 ### Streaming

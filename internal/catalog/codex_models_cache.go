@@ -19,16 +19,17 @@ import (
 )
 
 const (
-	embeddedCodexModelsVersion = "rust-v0.153.4"
-	modelsRequestTimeout       = 5 * time.Second
-	modelsEdgeResponseLimit    = 8 << 20
-	latestCodexReleasePath     = "/repos/openai/codex/releases/latest"
-	codexReleaseCommitPath     = "/repos/openai/codex/commits/"
-	codexModelsContentPath     = "/repos/openai/codex/contents/codex-rs/models-manager/models.json"
-	githubRawMediaType         = "application/vnd.github.raw+json"
-	githubSHA1MediaType        = "application/vnd.github.sha"
-	codexModelsCacheName       = "codex_models"
+	modelsRequestTimeout    = 5 * time.Second
+	modelsEdgeResponseLimit = 8 << 20
+	latestCodexReleasePath  = "/repos/openai/codex/releases/latest"
+	codexReleaseCommitPath  = "/repos/openai/codex/commits/"
+	codexModelsContentPath  = "/repos/openai/codex/contents/codex-rs/models-manager/models.json"
+	githubRawMediaType      = "application/vnd.github.raw+json"
+	githubSHA1MediaType     = "application/vnd.github.sha"
+	codexModelsCacheName    = "codex_models"
 )
+
+var embeddedCodexModelsVersion = embeddedCodexRelease.Release.Tag
 
 // ModelsCacheConfig supplies the refresh cadence for Codex's models.json
 // cached value. A non-positive interval pins the embedded floor.

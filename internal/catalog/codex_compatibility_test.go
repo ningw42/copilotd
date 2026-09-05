@@ -20,44 +20,39 @@ import (
 	"github.com/ningw42/copilotd/internal/endpoint"
 )
 
-const (
-	vendoredCodexTag    = "rust-v0.153.4"
-	vendoredCodexCommit = "3d2ee51ca2d5db578f328aa75e20aa22c0197c9a"
-	vendoredCodexBlob   = "698da6fb7a825cd3ede1696e4ce8579ef5c42c02"
-	vendoredCodexSHA256 = "d7136a413cfac1b5b1686d9e0dcc5c80ca05bebed5e9fc3911376561d0ef6ee8"
-)
-
 func TestVendoredCodexCatalogRoundTripFidelity(t *testing.T) {
+	release := embeddedCodexRelease
 	wantFallbackBytes := bytes.Clone(embeddedCodexModels)
-	if got := hashModels(embeddedCodexModels); got != vendoredCodexSHA256 {
-		t.Fatalf("%s vendored snapshot hash = %s, want pinned %s", vendoredCodexTag, got, vendoredCodexSHA256)
+	if got := len(embeddedCodexModels); got != release.Models.Size {
+		t.Fatalf("%s vendored snapshot size = %d, want pinned %d", release.Release.Tag, got, release.Models.Size)
 	}
-	if got := gitBlobObjectID(embeddedCodexModels); got != vendoredCodexBlob {
-		t.Fatalf("%s vendored snapshot Git blob = %s, want upstream %s", vendoredCodexTag, got, vendoredCodexBlob)
+	if got := hashModels(embeddedCodexModels); got != release.Models.SHA256 {
+		t.Fatalf("%s vendored snapshot hash = %s, want pinned %s", release.Release.Tag, got, release.Models.SHA256)
+	}
+	if got := gitBlobObjectID(embeddedCodexModels); got != release.Models.GitBlob {
+		t.Fatalf("%s vendored snapshot Git blob = %s, want upstream %s", release.Release.Tag, got, release.Models.GitBlob)
 	}
 	if _, err := validateCodexModels(embeddedCodexModels); err != nil {
-		t.Fatalf("decode %s vendored snapshot at %s: %v", vendoredCodexTag, vendoredCodexCommit, err)
-	}
-	if embeddedCodexModelsVersion != vendoredCodexTag {
-		t.Fatalf("embedded catalog version = %s, want audited %s", embeddedCodexModelsVersion, vendoredCodexTag)
+		t.Fatalf("decode %s vendored snapshot at %s: %v", release.Release.Tag, release.Release.PeeledCommit, err)
 	}
 	vendoredModels := rawCodexModelsBySlug(t, embeddedCodexModels)
-	astra, present := vendoredModels["gpt-6-astra"]
+	defaultSlug := release.Models.AuditedBundledDefault
+	defaultModel, present := vendoredModels[defaultSlug]
 	if !present {
-		t.Fatal("vendored catalog has no gpt-6-astra entry")
+		t.Fatalf("vendored catalog has no audited bundled default %q", defaultSlug)
 	}
-	if _, present := astra["base_instructions"]; present {
-		t.Error("gpt-6-astra unexpectedly has legacy base_instructions")
+	if _, present := defaultModel["base_instructions"]; present {
+		t.Errorf("audited bundled default %q unexpectedly has legacy base_instructions", defaultSlug)
 	}
-	var astraMessages map[string]json.RawMessage
-	if err := json.Unmarshal(astra["model_messages"], &astraMessages); err != nil {
-		t.Fatalf("decode gpt-6-astra model_messages: %v", err)
+	var defaultMessages map[string]json.RawMessage
+	if err := json.Unmarshal(defaultModel["model_messages"], &defaultMessages); err != nil {
+		t.Fatalf("decode audited bundled default %q model_messages: %v", defaultSlug, err)
 	}
-	if template := decodeStringField(t, astraMessages, "instructions_template"); template == "" {
-		t.Error("gpt-6-astra has empty canonical instructions_template")
+	if template := decodeStringField(t, defaultMessages, "instructions_template"); template == "" {
+		t.Errorf("audited bundled default %q has empty canonical instructions_template", defaultSlug)
 	}
-	if got := bytes.TrimSpace(astra["requires_sandboxed_review"]); !bytes.Equal(got, []byte("false")) {
-		t.Errorf("gpt-6-astra.requires_sandboxed_review = %s, want preserved false", got)
+	if got := bytes.TrimSpace(defaultModel["requires_sandboxed_review"]); !bytes.Equal(got, []byte("false")) {
+		t.Errorf("%s.requires_sandboxed_review = %s, want preserved false", defaultSlug, got)
 	}
 
 	github := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -72,15 +67,15 @@ func TestVendoredCodexCatalogRoundTripFidelity(t *testing.T) {
 			if r.URL.RawQuery != "" {
 				t.Errorf("latest-release query = %q, want empty", r.URL.RawQuery)
 			}
-			_, _ = io.WriteString(w, `{"tag_name":"`+vendoredCodexTag+`","target_commitish":"main","prerelease":false,"draft":false}`)
-		case codexReleaseCommitPath + vendoredCodexTag:
+			_, _ = io.WriteString(w, `{"tag_name":"`+release.Release.Tag+`","target_commitish":"main","prerelease":false,"draft":false}`)
+		case codexReleaseCommitPath + release.Release.Tag:
 			if got := r.Header.Get("Accept"); got != githubSHA1MediaType {
 				t.Errorf("commit Accept = %q, want %q", got, githubSHA1MediaType)
 			}
-			_, _ = io.WriteString(w, vendoredCodexCommit)
+			_, _ = io.WriteString(w, release.Release.PeeledCommit)
 		case codexModelsContentPath:
-			if got := r.URL.Query().Get("ref"); got != vendoredCodexCommit {
-				t.Errorf("models ref = %q, want peeled commit %q", got, vendoredCodexCommit)
+			if got := r.URL.Query().Get("ref"); got != release.Release.PeeledCommit {
+				t.Errorf("models ref = %q, want peeled commit %q", got, release.Release.PeeledCommit)
 			}
 			if got := r.Header.Get("Accept"); got != githubRawMediaType {
 				t.Errorf("models Accept = %q, want %q", got, githubRawMediaType)
@@ -101,10 +96,10 @@ func TestVendoredCodexCatalogRoundTripFidelity(t *testing.T) {
 
 	currentBytes, status := modelsValue.Current()
 	if !bytes.Equal(currentBytes, wantFallbackBytes) {
-		t.Fatalf("cache retained %d bytes, want exact %d-byte %s catalog", len(currentBytes), len(wantFallbackBytes), vendoredCodexTag)
+		t.Fatalf("cache retained %d bytes, want exact %d-byte %s catalog", len(currentBytes), len(wantFallbackBytes), release.Release.Tag)
 	}
-	if status.Source != "fallback" || status.Version != vendoredCodexTag || status.LastSuccess != nil {
-		t.Fatalf("cache status = %#v, want unchanged vendored fallback %s", status, vendoredCodexTag)
+	if status.Source != "fallback" || status.Version != release.Release.Tag || status.LastSuccess != nil {
+		t.Fatalf("cache status = %#v, want unchanged vendored fallback %s", status, release.Release.Tag)
 	}
 
 	copilotBytes, err := os.ReadFile("testdata/copilot-models-2026-07-18.json")
@@ -130,7 +125,7 @@ func TestVendoredCodexCatalogRoundTripFidelity(t *testing.T) {
 		},
 	}, stubSource{status: http.StatusOK, body: copilotBytes})
 	recorder := httptest.NewRecorder()
-	handler(recorder, httptest.NewRequest(http.MethodGet, "/openai/v1/models?client_version=0.153.4", nil))
+	handler(recorder, httptest.NewRequest(http.MethodGet, "/openai/v1/models?client_version=1.2.3", nil))
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("handler status = %d, want 200: %s", recorder.Code, recorder.Body.String())

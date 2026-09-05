@@ -25,6 +25,7 @@ import (
 // ordinary repository tests remain network- and tool-independent.
 func TestLatestCodexBinaryAcceptsUnknownRemoteCatalogModel(t *testing.T) {
 	observed := observeLatestCodexBinaryCatalog(t, singleRemoteDefaultModel(t))
+	wantClientVersion := auditedCodexCLIVersion(t)
 
 	if observed.modelsCalls == 0 {
 		t.Fatalf("Codex did not fetch the command-auth model catalog:\n%s", observed.output)
@@ -32,8 +33,8 @@ func TestLatestCodexBinaryAcceptsUnknownRemoteCatalogModel(t *testing.T) {
 	if observed.modelsMethod != http.MethodGet {
 		t.Errorf("models method = %q, want GET", observed.modelsMethod)
 	}
-	if observed.clientVersion != "0.153.4" {
-		t.Errorf("client_version = %q, want 0.153.4", observed.clientVersion)
+	if observed.clientVersion != wantClientVersion {
+		t.Errorf("client_version = %q, want %s", observed.clientVersion, wantClientVersion)
 	}
 	if observed.authorization != "Bearer catalog-audit-token" {
 		t.Errorf("Authorization = %q, want command-auth bearer", observed.authorization)
@@ -67,7 +68,9 @@ func TestLatestCodexBinaryReplacesBundledRemoteCatalogModel(t *testing.T) {
 }
 
 func TestLatestCodexBinaryKeepsBundledSourceAheadOfMatchingAlias(t *testing.T) {
-	modelsBody := matchingRemoteAliasAndSource(t)
+	defaultSlug := embeddedCodexRelease.Models.AuditedBundledDefault
+	alias := defaultSlug + "-audit-alias"
+	modelsBody := matchingRemoteAliasAndSource(t, defaultSlug, alias)
 	observed := observeLatestCodexBinaryCatalog(t, modelsBody)
 
 	if observed.modelsCalls == 0 {
@@ -76,11 +79,10 @@ func TestLatestCodexBinaryKeepsBundledSourceAheadOfMatchingAlias(t *testing.T) {
 	if observed.responsesCalls == 0 {
 		t.Fatalf("Codex did not make a Responses request after catalog merge:\n%s", observed.output)
 	}
-	if observed.selectedModel != "gpt-6-astra" {
-		t.Errorf("selected model = %q, want untouched bundled source gpt-6-astra ahead of metadata-matching alias", observed.selectedModel)
+	if observed.selectedModel != defaultSlug {
+		t.Errorf("selected model = %q, want untouched audited bundled default %q ahead of metadata-matching alias", observed.selectedModel, defaultSlug)
 	}
 
-	const alias = "gpt-6-astra-audit-alias"
 	withoutAlias := observeLatestCodexBinaryCatalogWithModel(t, []byte(`{"models":[]}`), alias)
 	if withoutAlias.responsesCalls == 0 || withoutAlias.selectedModel != alias {
 		t.Fatalf("negative control changed: Codex no longer forwards arbitrary explicit model %q without a catalog entry:\n%s", alias, withoutAlias.output)
@@ -297,6 +299,15 @@ func readCodexAppServerResult(t *testing.T, decoder *json.Decoder, wantID int, s
 	}
 }
 
+func auditedCodexCLIVersion(t *testing.T) string {
+	t.Helper()
+	version, ok := strings.CutPrefix(embeddedCodexRelease.Release.Tag, "rust-v")
+	if !ok || version == "" {
+		t.Fatalf("audited Codex tag %q has no stable CLI version", embeddedCodexRelease.Release.Tag)
+	}
+	return version
+}
+
 func requireLatestCodexBinary(t *testing.T, binary string) {
 	t.Helper()
 	file, err := os.Open(binary)
@@ -308,7 +319,7 @@ func requireLatestCodexBinary(t *testing.T, binary string) {
 	if _, err := io.Copy(hasher, file); err != nil {
 		t.Fatalf("hash Codex binary: %v", err)
 	}
-	const wantSHA256 = "56ef98ab4032d317ab26e9b5e5a175650717351edb16ed9cde0cb6d1734d62da"
+	wantSHA256 := embeddedCodexRelease.ExecutableAudit.ExecutableSHA256
 	if got := hex.EncodeToString(hasher.Sum(nil)); got != wantSHA256 {
 		t.Fatalf("Codex binary SHA-256 = %s, want pinned %s", got, wantSHA256)
 	}
@@ -317,8 +328,9 @@ func requireLatestCodexBinary(t *testing.T, binary string) {
 	if err != nil {
 		t.Fatalf("Codex version: %v: %s", err, output)
 	}
-	if got := strings.TrimSpace(string(output)); got != "codex-cli 0.153.4" {
-		t.Fatalf("Codex version = %q, want codex-cli 0.153.4", got)
+	wantVersion := "codex-cli " + auditedCodexCLIVersion(t)
+	if got := strings.TrimSpace(string(output)); got != wantVersion {
+		t.Fatalf("Codex version = %q, want %s", got, wantVersion)
 	}
 }
 
@@ -330,14 +342,18 @@ func replacedBundledDefaultModel(t *testing.T) []byte {
 	return marshalRemoteModels(t, model)
 }
 
-func matchingRemoteAliasAndSource(t *testing.T) []byte {
+func matchingRemoteAliasAndSource(t *testing.T, sourceSlug, aliasSlug string) []byte {
 	t.Helper()
-	source := vendoredCodexModel(t, "gpt-6-astra")
+	source := vendoredCodexModel(t, sourceSlug)
 	alias := make(map[string]json.RawMessage, len(source))
 	for key, value := range source {
 		alias[key] = value
 	}
-	alias["slug"] = json.RawMessage(`"gpt-6-astra-audit-alias"`)
+	encodedAlias, err := json.Marshal(aliasSlug)
+	if err != nil {
+		t.Fatalf("encode audited default alias slug: %v", err)
+	}
+	alias["slug"] = encodedAlias
 	return marshalRemoteModels(t, alias)
 }
 
