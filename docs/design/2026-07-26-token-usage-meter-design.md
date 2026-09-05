@@ -29,8 +29,9 @@ Answer "what did I actually consume, on which model, when" without leaving the
 proxy and without a second process.
 
 _Outcome:_ with `--shim-usage-meter-enabled`, an eligible completion on the
-Anthropic `/v1/messages` or OpenAI `/responses` Route submits one row to
-`<os.UserConfigDir()>/copilotd/usage.db`. Both support buffered JSON and SSE;
+Anthropic `/v1/messages` or OpenAI `/responses` Route submits one row to the
+configured local usage database (OS-specific default in §10). Both support
+buffered JSON and SSE;
 only OpenAI Responses supports WebSocket. The GitHub Copilot Surface and the
 Catalogs are not metered.
 
@@ -53,7 +54,7 @@ Requested information:
 | (e) cache create | `cache_creation_input_tokens` (+ TTL split) / tentative `cache_write_tokens` (§11.3) |
 | (f) cache read | `cache_read_input_tokens` / `cached_tokens` |
 | (g) inference Surface | the **table name** — one table per metered Surface |
-| (h) anything else | `request_id`, `transport`, `turn_index`, `reasoning_tokens`, cache TTL split |
+| (h) anything else | `request_id`, upstream `message_id` / `response_id`, `transport`, `turn_index`, `reasoning_tokens`, cache TTL split |
 
 ---
 
@@ -140,9 +141,9 @@ read-only metering is the policy extension still to approve (§14).
 
 ### 4.2 An observer, not a payload transform
 
-The existing `nop` shim already returns inputs unchanged, so observation does not
-require a new hook mechanism. It does require resolving the parity-only Shim
-policy (§14). The meter returns the same buffered body, the same SSE frame, and
+Existing hook interfaces permit unchanged returns, so observation does not require
+a new hook mechanism (`NopShim` itself implements no hooks). It does require
+resolving the parity-only Shim policy (§14). The meter returns the same buffered body, the same SSE frame, and
 the same WebSocket Message with `emit=true`; it neither holds nor drops output.
 `Frame.Raw` remains authoritative, and `sse.Pump` writes it verbatim.
 
@@ -232,12 +233,13 @@ const (
 // Turn is the Surface-independent envelope. Usage carries the verbatim,
 // Surface-native token fields and selects the destination table.
 type Turn struct {
-	At        time.Time
-	RequestID string
-	Model     string    // as reported upstream, never the client's requested name
-	Transport Transport
-	TurnIndex int       // submission ordinal within the shim instance
-	Usage     Usage
+	At         time.Time
+	RequestID  string    // inbound HTTP correlation; empty if unavailable
+	ResponseID string    // upstream message.id / response.id, not an HTTP request ID
+	Model      string    // as reported upstream, never the client's requested name
+	Transport  Transport
+	TurnIndex  int       // submission ordinal within the shim instance
+	Usage      Usage
 }
 
 // Usage is a closed sum: only the two Surface-native records satisfy it.
@@ -255,8 +257,8 @@ type AnthropicUsage struct {
 	OutputTokens             int64
 	CacheCreationInputTokens *int64
 	CacheReadInputTokens     *int64
-	Ephemeral5mInputTokens   *int64
-	Ephemeral1hInputTokens   *int64
+	Ephemeral5mInputTokens   *int64 // usage.cache_creation.ephemeral_5m_input_tokens
+	Ephemeral1hInputTokens   *int64 // usage.cache_creation.ephemeral_1h_input_tokens
 }
 
 // OpenAIUsage mirrors Responses API usage verbatim.
@@ -279,11 +281,14 @@ func (OpenAIUsage) isUsage()    {}
 ```
 
 Those doc comments carry the nesting asymmetry alongside the fields it governs.
-Parsers must track presence separately from zero for core fields too: absent,
-null, negative, out-of-range, or wrong-typed required counts suppress a row;
-a genuinely reported zero does not. Optional absence/null maps to nil; a reported
-but invalid optional count suppresses the row rather than being silently erased.
-Resetting a meter must not mutate values already submitted to the writer.
+Parsers distinguish missing counts from genuine zero. Required counts must be
+present and valid in the **final candidate**: after accumulation for Anthropic
+SSE, or within the buffered/completion object elsewhere. Missing/null cumulative
+updates preserve earlier numbers (§6.2); they are not early rejection signals.
+Negative, out-of-range, or wrong-typed reported counts invalidate the candidate,
+including optional counts rather than silently erasing them. An optional field
+with no reported numeric value maps to nil. Resetting a meter must not mutate
+values already submitted to the writer.
 
 ---
 
@@ -309,8 +314,16 @@ store. Each duplicate qualifying event can make another submission.
 **`RequestID` is captured once at construction** via `logging.RequestIDFrom(ctx)`.
 Every WebSocket row shares the handshake's ID; message hooks execute under a
 session cancellation context, which is not a substitute for that correlated
-construction context. `(request_id, turn_index)` is a correlation aid, not a
-globally unique key (§7.2).
+construction context. If `RequestIDFrom` returns `ok=false`, keep `RequestID` empty
+rather than fabricate correlation or discard otherwise valid usage. Production
+inference handlers install it; tests and standalone internal callers may not.
+`(request_id, turn_index)` is a correlation aid, not a globally unique key (§7.2).
+
+Persist the upstream inference object's identity as well: `Turn.ResponseID` maps
+to Anthropic `message_id` or OpenAI `response_id`. This is the message/response
+object ID, **not** the upstream HTTP `X-Request-Id`. Repeated completion
+observations can then be investigated without adding a uniqueness constraint or
+assuming that ID scope is global.
 
 ### 6.1 Surface-specific parsers
 
@@ -339,13 +352,21 @@ hooks leave Message kind/data unchanged and return `emit=true`. Malformed SSE
 input also **declines by passthrough**; skipping a usage observation is not a drop
 of forwarded content.
 
+The buffered Anthropic validator requires `type:"message"`, non-empty `id` and
+`model`, a non-empty string `stop_reason`, and valid required counts in `usage`.
+It does not enumerate stop reasons: `tool_use`, `max_tokens`, and other reported
+reasons still end an inference turn. Unknown extra fields remain untouched.
+The buffered OpenAI validator is specified in §6.3.
+
 ### 6.2 Anthropic SSE: request-scoped accumulation
 
 Anthropic reports input/cache usage at `message_start` and cumulative updates at
 `message_delta`; the completion marker is `message_stop`. Keep one request-scoped
 accumulator, including presence flags, message identity, model, and a poison flag.
-Update **only fields actually reported**: the last reported value per field wins,
-never a sum, and an omitted later field does not erase an earlier value.
+Update **only numeric values actually reported**: the last reported number per
+field wins, never a sum. An omitted field or explicit JSON `null` is no new
+numeric report and preserves an earlier value, including zero. If no numeric
+value for a required field arrives by completion, the turn is not eligible.
 
 Schematic hook using the shared SSE data-payload interface:
 
@@ -415,6 +436,7 @@ CREATE TABLE anthropic_turn (
                                 strftime('%Y-%m-%dT%H:%M:%fZ', at_ms/1000.0, 'unixepoch')
                               ) VIRTUAL,
   request_id                  TEXT    NOT NULL,
+  message_id                  TEXT    NOT NULL,
   turn_index                  INTEGER NOT NULL,
   model                       TEXT    NOT NULL,
   transport                   TEXT    NOT NULL CHECK (transport IN ('buffered','sse')),
@@ -434,6 +456,7 @@ CREATE TABLE openai_turn (
                        strftime('%Y-%m-%dT%H:%M:%fZ', at_ms/1000.0, 'unixepoch')
                      ) VIRTUAL,
   request_id         TEXT    NOT NULL,
+  response_id        TEXT    NOT NULL,
   turn_index         INTEGER NOT NULL,
   model              TEXT    NOT NULL,
   transport          TEXT    NOT NULL CHECK (transport IN ('buffered','sse','websocket')),
@@ -500,9 +523,16 @@ the DDL, so a half-applied migration is impossible.
 var migrations = []string{ /* 1: initial schema */ }
 ```
 
-Open sequence: read `user_version`, apply every migration beyond it, each in its
-own transaction, forward-only. **No down migrations** — this is a single-user local
-file; rollback is restoring a copy.
+Open sequence on the configured connection (§9): acquire `BEGIN IMMEDIATE`, then
+read `user_version` **inside that write transaction**, apply every migration beyond
+it, set the final version, and commit. All pending migrations and their version
+bump are atomic together. A second simultaneous opener waits or retries within the
+startup contention budget (§8.3), then re-reads the committed version instead of
+acting on a stale pre-lock value.
+
+**No down migrations** — this is a single-user local file; rollback means stopping
+all writers and restoring a consistent backup, not copying just a live WAL
+database's main file.
 
 **`user_version > len(migrations)`** means an older copilotd opened a file a newer
 one wrote. Fail closed with an error naming both numbers. Never write against a
@@ -527,14 +557,49 @@ Startup failure belongs to `cmd/copilotd`. Level follows consequence: a containe
 transient loss can be Warn; persistent inability to write requiring operator
 action is Error. No prompt bodies or credential values enter rows or logs.
 
+### 8.3 Concurrent access
+
+Multiple same-version `serve` processes for one user may share a **local** database;
+SQLite serializes their writes. Give startup lock contention one overall
+five-second budget, including connection setup, WAL activation, and transaction
+acquisition. `PRAGMA busy_timeout` alone is insufficient: concurrent fresh opens
+can return `SQLITE_BUSY` immediately while switching `journal_mode` to WAL.
+
+On `SQLITE_BUSY` **before the schema transaction is acquired**, close the attempted
+connection and retry setup from a clean connection with a short bounded backoff,
+recomputing the remaining monotonic budget and capping the native busy timeout
+**before each potentially blocking setup/acquisition operation**. Do not reset
+the budget on each attempt or retry non-contention errors. Read/check the actual
+journal mode result; inability to establish WAL is a startup failure, not a
+silent fallback. Once configured and admitted, use `busy_timeout=5000` on the
+store's dedicated connection for runtime writes.
+
+These waits occur only during startup or in the writer, never in hooks. Exhausting
+the startup budget fails before bind; an exhausted runtime write attempt
+loses/counts that batch and keeps serving. Do not automatically replay failed or
+ambiguously committed runtime batches. A migration error after acquisition rolls
+back and fails startup; it is not part of the pre-transaction contention retry.
+The budget bounds contention waits/retries, not arbitrary filesystem I/O or
+post-acquisition migration execution.
+
+This is not an online mixed-version migration protocol. Stop existing writers
+before starting a binary that upgrades the schema; concurrent fresh opens by the
+same binary are supported. External tools may read while serving, but external
+schema mutation and long-lived external write transactions are unsupported.
+The WAL database and sidecars must stay together on a local filesystem; network
+shares and roaming/synchronized copies of a live database are not supported.
+
 ---
 
 ## 9. Writer and durability
 
 Buffered channel (1024) → one writer goroutine → bounded batches inserted in one
 transaction, flushed on a ~1s timer, on batch fill, and on shutdown.
-`journal_mode=WAL`, `synchronous=NORMAL`; keep database connection use and PRAGMA
-application explicit so a pooled connection cannot bypass connection-local setup.
+After startup succeeds, use one dedicated SQLite connection per store for its
+lifetime. Configure the busy timeout, verify `journal_mode=WAL`, and set
+`synchronous=NORMAL` before migration, with setup retries confined to §8.3. The
+writer uses the admitted connection with its full runtime busy timeout. Do not
+silently open a replacement or pooled connection without repeating setup.
 
 **Channel full → drop the record and count the drop. Never block.** `Record` also
 must not synchronously log a drop. The writer can report aggregated losses from
@@ -544,11 +609,16 @@ Costs and lifecycle obligations:
 
 - **WAL can leave three files at rest** — `usage.db`, `usage.db-wal`, and
   `usage.db-shm`. The persistence ADR must account for all of them. On Unix,
-  create a private parent directory (`0700`) and database (`0600`), and validate
-  an existing destination before opening SQLite. `os.MkdirAll` does **not**
-  tighten an existing directory; merely copying `identity.WriteTokenFile` does
-  not establish the claimed sidecar protection. Refuse an unsafe shared parent
-  rather than silently chmod an operator-owned directory. Windows permissions
+  create a private parent directory (`0700`), then pre-create a missing database
+  with `os.OpenFile` using `O_CREATE|O_EXCL|O_RDWR` and mode `0600`, closing that
+  handle before SQLite opens it. Do not delegate main-file creation to SQLite's
+  umask-dependent defaults or truncate an existing database. If another opener
+  wins creation, follow the existing-file validation path.
+  Validate existing main-file modes and the private parent before opening SQLite;
+  never follow an unexpected non-regular main-file destination. `os.MkdirAll`
+  does **not** tighten an existing directory. Refuse an unsafe shared parent
+  rather than silently chmod it; the private parent protects SQLite-created
+  sidecars independently of their mode. Windows permissions
   need the same explicit best-effort caveat as the GitHub OAuth token file;
   Unix modes are not a Windows ACL guarantee.
 - **The ~1s timer is a flush target, not a loss bound.** A hard process kill loses
@@ -571,13 +641,22 @@ using the existing shim-toggle convention:
 | Flag | Field | Default |
 | --- | --- | --- |
 | `--shim-usage-meter-enabled` | `ShimUsageMeterEnabled` | `false` |
-| `--usage-db-path` | `UsageDBPath` | `<os.UserConfigDir()>/copilotd/usage.db` |
+| `--usage-db-path` | `UsageDBPath` | OS-local path below |
 
-The default path follows `defaultOAuthTokenFile`, including the relative
-`copilotd/usage.db` fallback when `os.UserConfigDir()` fails. The defaults share
-a directory; overriding `--github-oauth-token-file` must not implicitly move the
-usage database. Directory safety is checked by store startup (§9), not assumed
-from the default path. Neither setting is secret; both log normally through the
+A new `defaultUsageDBPath` keeps the database in local application storage:
+
+- Unix: `<os.UserConfigDir()>/copilotd/usage.db`.
+- Windows: `%LOCALAPPDATA%\\copilotd\\usage.db`, deliberately **not** the roaming
+  `%AppData%` returned by `os.UserConfigDir()` there.
+- If the corresponding base directory cannot be resolved, use relative
+  `copilotd/usage.db` so flag registration remains usable; enabled store startup
+  still validates the destination.
+
+This no longer blindly mirrors `defaultOAuthTokenFile`. Overriding
+`--github-oauth-token-file` must not implicitly move the usage database. An operator
+whose default directory is network-mounted or synchronized must select a local
+`--usage-db-path` (§8.3); the default helper cannot prove filesystem locality.
+Directory safety is checked by store startup (§9), not assumed from the path. Neither setting is secret; both log normally through the
 descriptor's `logAttr`. Environment and TOML forms derive from the same rows;
 `login` gains neither setting.
 
@@ -650,9 +729,10 @@ non-JSON bodies. Parsing cannot opt out of the read that already happened.
 `upstream.Caller.ReadBounded` owns the limit from `MaxBufferedResponseBytes`.
 
 With no other buffered shim enabled, an over-cap response passes through with the
-meter off and returns **502** with it on. That classification already landed in
-[ADR-0013](../adr/0013-govern-authenticated-upstream-calls-in-internal-upstream.md);
-there is no remaining 413-versus-502 rollout dependency. Buffered read failure is
+meter off and returns **502** with it on. The authoritative over-cap branch is
+`internal/upstream.ReadBounded`; its ownership is governed by
+[ADR-0013](../adr/0013-govern-authenticated-upstream-calls-in-internal-upstream.md).
+There is no remaining 413-versus-502 rollout dependency. Buffered read failure is
 502, timeout is 504, and client cancellation produces no new error response.
 Buffering also delays response commitment until the read finishes and recomputes
 `Content-Length`, even though the meter leaves the payload unchanged. These costs
@@ -717,27 +797,38 @@ as a subset; the current DDL deliberately marks it provisional.
 
 - Migration ladder: empty → v1 sets `user_version`; reopen is a no-op;
   `user_version > len(migrations)` refuses to open and names both numbers.
+  Concurrent same-version fresh openers handle WAL-activation contention as well
+  as serializing the version check and migrations. Exercise native immediate
+  `SQLITE_BUSY`, sequential setup/acquisition stages sharing one shrinking budget,
+  budget exhaustion, and non-contention errors.
+  A failed migration rolls back all pending changes and the version bump.
 - Round-trip per table asserting **`NULL` survives as `NULL` and does not collapse
-  to `0`**; a reused request ID does not prevent a second legitimate row.
+  to `0`**; inbound correlation and upstream message/response IDs stay distinct;
+  reused request IDs and duplicate upstream IDs do not prevent another row.
 - `STRICT` rejects non-convertible text in an integer column; parser tests enforce
   the stronger native-number contract. `at_utc` renders a known `at_ms` correctly.
 - Batching flushes on timer, fill, and shutdown; write failures count loss without
-  killing the writer or growing an unbounded backlog.
+  killing the writer or growing an unbounded backlog. Contending writers wait
+  only up to the busy timeout; exhausted contention follows the phase-specific
+  failure policy, while a simultaneous external reader remains supported.
 - **A full channel drops rather than blocks**: hold the writer, exceed capacity,
   assert prompt `Record` return and counted drops without hook-side logging.
 - Concurrent producers, immutable optional values across meter reset, and
   `Record` racing with/following close are race-safe. Final flush obeys the chosen
   shutdown bound, including a slow/failing database.
-- Private new destinations and unsafe existing destinations follow §9; test the
-  Windows behavior separately rather than asserting Unix modes there.
+- Pre-creation is private even under a permissive Unix umask and never truncates
+  existing data; concurrent creation, unsafe existing destinations, and sidecars
+  follow §9. Test Windows behavior separately rather than asserting Unix modes
+  there. Test OS-specific defaults and the unresolved-base fallback.
 
 ### `internal/shim`
 
 Use dedicated usage fixtures (§11.3) and an in-memory sink:
 
 - Multiple Anthropic deltas use the **last reported value per field**, never a
-  sum; omitted fields preserve start values. Missing core counts differ from
-  reported zero. Missing start usage may be completed by later updates.
+  sum; omitted fields and explicit null updates preserve start values. Missing
+  core counts differ from reported zero. Missing start usage may be completed by
+  later updates.
 - No terminal, upstream error, malformed relevant payload, type disagreement, or
   conflicting Anthropic start → no submission. Validate stop payloads too.
 - SSE data extraction covers multiline data, CRLF, absent/empty fields, and
@@ -746,8 +837,9 @@ Use dedicated usage fixtures (§11.3) and an in-memory sink:
   counters; failed/incomplete/malformed responses do not affect a later valid
   completion. Repeated qualifying completions have the documented non-deduplicated
   behavior and successive submission ordinals.
-- WebSocket sessions use captured handshake correlation and bounded state; assert
-  Message kind/data identity as well as `emit=true`.
+- WebSocket sessions use captured handshake correlation and bounded state; a
+  missing construction request ID produces an empty correlation field, not a
+  fabricated one. Assert Message kind/data identity as well as `emit=true`.
 - Buffered bodies use the payload acceptance predicate (§4.3), skip error or
   incomplete shapes, return nil, and never mutate input bytes.
 - The registration stays last/innermost, scoped to the two inference Routes,
