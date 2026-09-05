@@ -1,6 +1,6 @@
 # Concentrate SSE data-payload interpretation and replacement
 
-Status: selected for implementation.
+Status: implemented.
 
 Implements Candidate 2 from the 2026-09-04 architecture review, narrowed to a
 small on-demand interface in `internal/sse`. The integration and review baseline
@@ -97,8 +97,8 @@ Keep the reader's multiline fallback and pump corpus tests, the stabilizer's
 framing-preservation and decline-by-passthrough tests, and transport-level gate,
 scope, and multi-turn regressions. Adapt the one shim test that uses its private
 payload parser to the public SSE interface; do not delete integration assertions
-merely because framing now has one owner. Supplement literal examples with
-bounded fuzz checks for no-op preservation and input immutability if useful.
+merely because framing now has one owner. A bounded fuzz target supplements the
+literal examples with no-op preservation and input-immutability checks.
 
 Verification uses the Nix development shell: focused tests and Go vet during
 implementation, the race-enabled full suite at completion, `nix fmt`, and

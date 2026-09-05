@@ -77,28 +77,8 @@ func eventType(raw []byte) string {
 }
 
 func dataType(raw []byte) string {
-	var payload []byte
-	found := false
-	for len(raw) > 0 {
-		end := bytes.IndexByte(raw, '\n')
-		if end < 0 {
-			end = len(raw)
-		}
-		line := bytes.TrimSuffix(raw[:end], []byte("\r"))
-		if value, ok := bytes.CutPrefix(line, []byte("data:")); ok {
-			value = bytes.TrimPrefix(value, []byte(" "))
-			if found {
-				payload = append(payload, '\n')
-			}
-			payload = append(payload, value...)
-			found = true
-		}
-		if end == len(raw) {
-			break
-		}
-		raw = raw[end+1:]
-	}
-	if !found {
+	payload, fields := parseData(raw)
+	if len(fields) == 0 {
 		return ""
 	}
 	var data struct {
