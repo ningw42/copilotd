@@ -1,19 +1,23 @@
 # Token usage meter — Design
 
-**Status:** proposed — not implemented
+**Status:** accepted architecture — implemented
 **Date:** 2026-07-26
-**Repository baseline:** reviewed against `81c2d0f` (2026-09-05)
+**Accepted:** 2026-09-05
+**Repository baseline:** reviewed against `91e635c` plus the #194–#195 evidence commits
 
-This proposal has not amended the [state-at-rest boundary](../../README.md#state-at-rest).
-Persistence and admitting an observer into the Shim definition still require
-approval (§13–14). ADR-0015 and ADR-0016 now govern logging and Hook overruns;
-this proposal reserves no ADR numbers.
+The state-at-rest and Shim-observer exceptions are explicitly accepted in
+[ADR-0017](../adr/0017-persist-usage-in-local-sqlite.md) and
+[ADR-0018](../adr/0018-store-per-surface-native-usage.md). This is the implemented
+architecture. Issues #197–#201 deliver the settings, private SQLite store,
+**buffered and SSE Anthropic Messages**, and buffered, SSE, and WebSocket OpenAI
+Responses observers end to end: all five supported Surface/transport paths.
 
 The Upstream call concentration, infallible post-commit hooks, structured logging,
 terminal request summary, Hook overrun monitoring, and shared SSE data-payload
 handling have landed. The design below uses those current contracts, not the
-rollout order or source line numbers from the original draft. Provider usage
-shapes still need fixture-backed verification before implementation (§11.3).
+rollout order or source line numbers from the original draft. The supported
+usage projection and driver evidence gates are closed with the explicit evidence
+limitations in §11.3 and §13.
 
 A shim-hosted, opt-in meter that submits one row per observed successful inference
 completion to a local SQLite database, capturing the two inference Surfaces'
@@ -28,12 +32,16 @@ so external tooling (`sqlite3`, Datasette, DuckDB) can read it.
 Answer "what did I actually consume, on which model, when" without leaving the
 proxy and without a second process.
 
-_Outcome:_ with `--shim-usage-meter-enabled`, an eligible completion on the
-Anthropic `/v1/messages` or OpenAI `/responses` Route submits one row to the
-configured local usage database (OS-specific default in §10). Both support
-buffered JSON and SSE;
-only OpenAI Responses supports WebSocket. The GitHub Copilot Surface and the
-Catalogs are not metered.
+_Final outcome:_ with `--shim-usage-meter-enabled`, an eligible completion on
+the Anthropic `/v1/messages` or OpenAI `/responses` Route submits one row to the
+configured local usage database (OS-specific default in §10). Both final Routes
+support buffered JSON and SSE; only OpenAI Responses supports WebSocket. The
+GitHub Copilot Surface and the Catalogs are not metered.
+
+_Current implementation (#201):_ qualifying buffered and SSE Anthropic Messages,
+buffered OpenAI Responses objects, self-contained OpenAI `response.completed`
+SSE events, and qualifying OpenAI WebSocket server Messages submit rows. The
+store carries the frozen two-table migration unchanged.
 
 An eligible completion contains the required usage fields, identity, and model
 reported upstream (§6). This is best-effort observation, not an exactly-once
@@ -51,10 +59,10 @@ Requested information:
 | (b) model id | `model`, as reported upstream |
 | (c) input token | `input_tokens` — **per-Surface semantics, see §7.1** |
 | (d) output token | `output_tokens` |
-| (e) cache create | `cache_creation_input_tokens` (+ TTL split) / tentative `cache_write_tokens` (§11.3) |
+| (e) cache create | `cache_creation_input_tokens` (+ TTL split) / `cache_write_tokens`, with native nesting (§5) |
 | (f) cache read | `cache_read_input_tokens` / `cached_tokens` |
 | (g) inference Surface | the **table name** — one table per metered Surface |
-| (h) anything else | `request_id`, upstream `message_id` / `response_id`, `transport`, `turn_index`, `reasoning_tokens`, cache TTL split |
+| (h) anything else | `request_id`, upstream `message_id` / `response_id`, `transport`, `turn_index`, `reasoning_tokens`, `thinking_tokens`, cache TTL split |
 
 ---
 
@@ -72,8 +80,9 @@ write `12` and `8012` into a naively-shared `input_tokens` column.
 **Streaming usage is cumulative and can be absent.** Anthropic usage spans
 `message_start` and cumulative `message_delta` updates; summing repeated updates
 double-counts. Missing usage must be tolerated rather than converted into zero.
-The parser tracks reported fields until completion, and the supported shapes need
-dedicated evidence rather than assumptions borrowed from unrelated fixtures.
+The parser tracks reported fields until completion. The accepted shape is grounded
+in the exact official Messages Create, streaming, and cache sources plus generated
+fixtures; live Copilot Anthropic compatibility remains unverified (§11.3).
 
 **Shim hooks may not do I/O.** `internal/shim`'s package contract binds SSE and
 WebSocket hooks to "prompt and non-blocking: CPU-bound transformation only, with
@@ -86,18 +95,21 @@ the SSE pump.
 
 ### Decisions
 
-1. **Persist to SQLite** via pure-Go `modernc.org/sqlite`. Would amend the
-   [state-at-rest boundary](../../README.md#state-at-rest) if this proposal is
-   accepted (see the proposed persistence ADR in §13).
+1. **Persist to SQLite** via the accepted pure-Go `modernc.org/sqlite v1.58.0`
+   exception in [ADR-0017](../adr/0017-persist-usage-in-local-sqlite.md). The
+   [state-at-rest boundary](../../README.md#state-at-rest) admits only this
+   opt-in usage database exception; unrelated state remains memory-only.
 2. **Only observed successful completions are eligible.** Anthropic SSE
    accumulates usage before `message_stop`; OpenAI uses `response.completed`.
    A hook runs before the downstream write, so this is not proof of client
    delivery or a clean transport outcome (§6).
 3. **One table per metered Surface, values verbatim.** No unified columns, no
    derived totals. Interpretation lives beside the Go types (§5).
-4. **Capture the verified token-count fields of the supported usage shapes**,
-   including subsets. New provider fields require a schema review; the initial
-   projection is not a promise to persist arbitrary future JSON fields (§11.3).
+4. **Capture the approved token-count fields of the supported usage shapes**,
+   including subsets. Every newly supported count requires a forward migration
+   and adjacent Go semantic documentation; historical absence stays `NULL`, not
+   fabricated zero. Beta Anthropic `usage.iterations[]` is excluded pending a
+   separate schema/cardinality review (§11.3).
 5. **The meter observes without rewriting payloads.** Every hook returns its
    input unchanged. This does not make enabling buffered hooks wire-neutral
    (§11.1).
@@ -136,15 +148,17 @@ Two alternatives were considered and rejected:
   re-parsing bytes that have already been written downstream.
 
 The shim seam already spans all three transports (buffered, SSE, WebSocket)
-through one registry. Typed inference transforms already live there; admitting
-read-only metering is the policy extension still to approve (§14).
+through one registry. Typed inference transforms already live there. ADR-0018
+admits read-only observers through that same mechanism without introducing a
+named observer subtype.
 
 ### 4.2 An observer, not a payload transform
 
 Existing hook interfaces permit unchanged returns, so observation does not require
-a new hook mechanism (`NopShim` itself implements no hooks). It does require
-resolving the parity-only Shim policy (§14). The meter returns the same buffered body, the same SSE frame, and
-the same WebSocket Message with `emit=true`; it neither holds nor drops output.
+a new hook mechanism (`NopShim` itself implements no hooks). The accepted Shim
+policy includes read-only observers. The meter returns the same buffered body,
+the same SSE frame, and the same WebSocket Message with `emit=true`; it neither
+holds nor drops output.
 `Frame.Raw` remains authoritative, and `sse.Pump` writes it verbatim.
 
 That proves payload identity through the hooks, not whole-response wire identity.
@@ -173,11 +187,11 @@ Eligibility is **payload-based**, not an HTTP status/content-type filter:
 must recognize the Messages response shape or a Responses object with completed
 status and valid usage; an error object or incomplete response is not eligible.
 A separate requirement to gate on HTTP status/headers would need an unchanged
-`PreludeTransformer` as a fourth hook. This proposal does not add that policy.
+`PreludeTransformer` as a fourth hook. This design does not add that policy.
 
 The current adapters are `Chain.StreamAdapter(logCtx, monitor)` and
-`Chain.WSServerAdapter(logCtx, monitor)`. Their transport-owned monitor observes
-the meter automatically under
+`Chain.WSServerAdapter(logCtx, monitor)`. Their transport-owned monitor will
+observe the meter automatically under
 [ADR-0016](../adr/0016-observe-shim-hook-overruns-without-controlling-execution.md).
 There is no meter-specific watchdog or new registry-monitor interface. Monitoring
 reports Hook overruns; it neither interrupts a hook nor makes a blocking sink
@@ -250,8 +264,10 @@ type Usage interface{ isUsage() }
 // InputTokens is the UNCACHED REMAINDER. Real input is
 // InputTokens + CacheCreationInputTokens + CacheReadInputTokens.
 // The Ephemeral* fields are the TTL split *inside* CacheCreationInputTokens.
-// A nil pointer means upstream did not report a numeric value; a pointer to
-// zero means upstream reported zero.
+// OutputTokens is the COMPLETE count; ThinkingTokens is a re-tokenized subset
+// already inside it, including delimiters, and subtraction only approximates
+// non-reasoning output. A nil pointer means upstream did not report a numeric
+// value; a pointer to zero means upstream reported zero.
 type AnthropicUsage struct {
 	InputTokens              int64
 	OutputTokens             int64
@@ -259,19 +275,21 @@ type AnthropicUsage struct {
 	CacheReadInputTokens     *int64
 	Ephemeral5mInputTokens   *int64 // usage.cache_creation.ephemeral_5m_input_tokens
 	Ephemeral1hInputTokens   *int64 // usage.cache_creation.ephemeral_1h_input_tokens
+	ThinkingTokens           *int64 // usage.output_tokens_details.thinking_tokens; <= OutputTokens
 }
 
 // OpenAIUsage mirrors Responses API usage verbatim.
 //
-// InputTokens is the COMPLETE count; CachedTokens is a subset already inside
-// it. OutputTokens is the COMPLETE count; ReasoningTokens is a subset already
-// inside it. CacheWriteTokens is an unverified extension: do not infer its
-// accounting semantics from the similarly named Chat Completions field.
+// InputTokens is the COMPLETE count; CachedTokens and CacheWriteTokens are
+// subsets already inside it. OutputTokens is the COMPLETE count;
+// ReasoningTokens is a subset already inside it. TotalTokens is stored only as
+// reported, never recalculated. A nil pointer means no numeric report; a
+// pointer to zero means upstream reported zero.
 type OpenAIUsage struct {
 	InputTokens      int64
 	OutputTokens     int64
 	CachedTokens     *int64 // input_tokens_details.cached_tokens
-	CacheWriteTokens *int64 // tentative input_tokens_details.cache_write_tokens; see §11.3
+	CacheWriteTokens *int64 // input_tokens_details.cache_write_tokens
 	ReasoningTokens  *int64 // output_tokens_details.reasoning_tokens
 	TotalTokens      *int64
 }
@@ -328,7 +346,7 @@ assuming that ID scope is global.
 ### 6.1 Surface-specific parsers
 
 `Registration.New` already receives the Surface, so it selects a parser rather
-than branching inside one. The proposed sink is captured by the registration:
+than branching inside one. The accepted sink is captured by the registration:
 
 ```go
 {
@@ -412,21 +430,24 @@ between completion envelopes. A malformed completion does not poison the next;
 no reset. Retained session state stays bounded independently of session length.
 
 This replaces the old draft's sequential-turn assumption and single-slot guard.
-It is a proposed parser contract awaiting dedicated usage fixtures (§11.3), not a
-claim that existing transport tests prove Copilot's terminal shape. If Copilot
-omits required fields, observation is skipped; silently reviving shared-slot
-accumulation is not the fallback.
+The contract is supported by three dedicated recorded Copilot fixtures, one for
+each OpenAI transport (§11.3); existing item-ID tests are not treated as usage
+evidence. If Copilot omits required fields, observation is skipped; silently
+reviving shared-slot accumulation is not the fallback.
 
 ---
 
 ## 7. Schema
 
 Two independent tables. **The table name is the Surface column** — there is no
-`surface` column, and no `route` column, because the proposal meters just one
+`surface` column, and no `route` column, because the design meters just one
 inference Route on each of these two Surfaces. This is a scope decision, not a
 claim that the repository has only two Surfaces or two Routes.
 
 ### 7.1 DDL (migration 1)
+
+This is the accepted exact initial schema. The only projection change from the
+reviewed draft is the approved nullable Anthropic `thinking_tokens` field.
 
 ```sql
 CREATE TABLE anthropic_turn (
@@ -445,7 +466,8 @@ CREATE TABLE anthropic_turn (
   cache_creation_input_tokens INTEGER,           -- additive to input_tokens
   cache_read_input_tokens     INTEGER,           -- additive to input_tokens
   ephemeral_5m_input_tokens   INTEGER,           -- subset of cache_creation_input_tokens
-  ephemeral_1h_input_tokens   INTEGER            -- subset of cache_creation_input_tokens
+  ephemeral_1h_input_tokens   INTEGER,           -- subset of cache_creation_input_tokens
+  thinking_tokens             INTEGER            -- subset of output_tokens; re-tokenized
 ) STRICT;
 CREATE INDEX anthropic_turn_at ON anthropic_turn(at_ms);
 
@@ -462,7 +484,7 @@ CREATE TABLE openai_turn (
   transport          TEXT    NOT NULL CHECK (transport IN ('buffered','sse','websocket')),
   input_tokens       INTEGER NOT NULL,  -- COMPLETE count
   cached_tokens      INTEGER,           -- subset of input_tokens
-  cache_write_tokens INTEGER,           -- tentative extension; semantics unverified
+  cache_write_tokens INTEGER,           -- subset of input_tokens
   output_tokens      INTEGER NOT NULL,  -- COMPLETE count
   reasoning_tokens   INTEGER,           -- subset of output_tokens
   total_tokens       INTEGER
@@ -505,8 +527,9 @@ CREATE INDEX openai_turn_at ON openai_turn(at_ms);
 
 Verified token-count subsets are retained rather than selected by pricing. Split
 tables remove the normalization ambiguity; they do not eliminate provider-schema
-drift. Adding a newly supported token field requires a migration and an update to
-the adjacent Go documentation, without inventing a zero for older rows.
+drift. Every newly supported token-count field requires a forward migration and
+an update to the adjacent Go semantic documentation. Historical rows without a
+reported value remain `NULL`; migrations never invent zero.
 
 ---
 
@@ -553,9 +576,12 @@ binding when a local prerequisite is missing"):
 Logs follow [ADR-0015](../adr/0015-govern-log-record-structure-with-ordinary-slog.md):
 the writer receives a required positional `*slog.Logger` derived for
 `internal/usage/sqlitestore`; new top-level keys live in `internal/logging`.
-Startup failure belongs to `cmd/copilotd`. Level follows consequence: a contained
-transient loss can be Warn; persistent inability to write requiring operator
-action is Error. No prompt bodies or credential values enter rows or logs.
+Startup failure belongs to `cmd/copilotd`. Level follows current consequence: a
+contained transient loss or queue pressure is Warn; consecutive current write
+failure that indicates persistent inability and requires operator action is
+Error; a confirmed later commit clears that live failure state. Cumulative loss
+counters remain cumulative but do not keep recovered runtime or final records at
+Error forever. No prompt bodies or credential values enter rows or logs.
 
 ### 8.3 Concurrent access
 
@@ -608,7 +634,7 @@ bounded counters. Failed batches must not grow an unbounded retry backlog.
 Costs and lifecycle obligations:
 
 - **WAL can leave three files at rest** — `usage.db`, `usage.db-wal`, and
-  `usage.db-shm`. The persistence ADR must account for all of them. On Unix,
+  `usage.db-shm`. ADR-0017 accounts for all of them. On Unix,
   create a private parent directory (`0700`), then pre-create a missing database
   with `os.OpenFile` using `O_CREATE|O_EXCL|O_RDWR` and mode `0600`, closing that
   handle before SQLite opens it. Do not delegate main-file creation to SQLite's
@@ -625,18 +651,57 @@ Costs and lifecycle obligations:
   whatever is still queued or uncommitted, which can exceed one second under
   backlog. WAL with `synchronous=NORMAL` also does not guarantee that recent
   committed transactions survive an OS crash or power loss.
-- **Shutdown must stop admission and tolerate late producers.** Drain HTTP and
+- **Shutdown stops admission and tolerates late producers.** Drain HTTP and
   WebSocket work before the final flush when possible, but forced shutdown may
-  leave a hook in flight. `Record` racing with or following `Close` must safely
-  drop/count, never send on a closed channel. Final flushing needs a bounded
-  shutdown policy (§14), not an unqualified blocking `defer store.Close()`.
+  leave a hook in flight. `Record` racing with or following the atomic cutoff
+  safely drops/counts and never sends on a closed channel. Finalization follows
+  the accepted bounded protocol below, never an unqualified `defer store.Close()`.
+
+### 9.1 Accepted shutdown and final-loss protocol
+
+1. `Server.Run` first completes its existing HTTP/WebSocket drain or force-close
+   sequence under `ShutdownTimeout`. Meter admission remains open throughout so
+   completing hooks can still submit Turns.
+2. Immediately after `Server.Run` returns, the composition root atomically cuts
+   off admission. A racing or later `Record` returns promptly, increments the
+   `late_after_cutoff` loss count, and cannot send to a closed channel.
+3. Finalization receives a **fresh**
+   `context.WithTimeout(context.Background(), cfg.ShutdownTimeout)`. The current
+   default therefore permits about twenty seconds of coordinator wait in total:
+   up to ten seconds for server drain plus up to ten seconds for finalization.
+4. The single writer owns final queue draining, bounded batches, and native
+   cleanup. Before every potentially blocking native stage—including transaction
+   acquisition, write, and commit—it recomputes the remaining monotonic budget
+   and caps native `busy_timeout` to that remainder in addition to passing the
+   context. `ExecContext` alone does not preempt the driver's busy wait.
+5. A deadline, storage failure, or ambiguous batch result is not replayed. Every
+   queued or not-confirmed row is conservatively counted as lost; only a batch
+   confirmed committed is excluded from loss.
+6. After the bounded native-cleanup wait, serialize one terminal logging
+   handoff: an earlier runtime record finishes before the final record, or is
+   suppressed if final publication seals logging first. Snapshot counters
+   immediately before emitting the final aggregate, while the logger remains
+   alive, including at least queue-full drops, runtime write losses,
+   late-after-cutoff drops, final-flush losses, and native-cleanup completion
+   status. Calls completed while waiting for native cleanup or the logging gate
+   are included; post-snapshot producers cannot be promised inclusion.
+7. The coordinator abandons its SQL/native-cleanup wait at the fresh bound.
+   Native cleanup may finish in the writer worker; report it unconfirmed if it
+   has not completed. Final `slog.Handler` publication is deliberately
+   synchronous and is not made deadline-aware by the SQLite context, so a stuck
+   configured log destination can extend finalizer return beyond that native
+   bound. Arbitrary stuck filesystem or log I/O and operating-system exit cannot
+   be guaranteed by a Go deadline. Apply this same finalizer on bind or serve
+   failure after opening the store.
 
 ---
 
 ## 10. Config surface and wiring
 
-Two serve-only settings, declared in `internal/config.serveSpecs` per ADR-0012,
-using the existing shim-toggle convention:
+Both serve-only settings are available as of #197 and are declared in
+`internal/config.serveSpecs` per ADR-0012, using the existing shim-toggle
+convention. They activate all five recording paths described in §1 through the
+same settings and store:
 
 | Flag | Field | Default |
 | --- | --- | --- |
@@ -665,13 +730,16 @@ a setting with no tuning story is a liability, and a later descriptor makes it
 cheap to add if a real need appears.
 
 Validation splits by phase (§8.2): the descriptor's `check` does syntactic path
-validation at resolution time; open/migrate happens at startup.
+validation at resolution time; open/migrate happens at startup. The store
+resolves that validated filesystem destination once to an absolute path and
+passes an escaped SQLite file URI with only store-owned driver parameters, so
+filename bytes such as `?`, `%`, or `file:` are never reinterpreted as a DSN.
 
 ### 10.1 Composition root
 
-`cmd/copilotd/main.go` currently calls `configuredShimRegistry(cfg)` in both
-`runServe` (for the chain log) and `runBoundServe` (for serving). A live sink must
-not be lost between those two constructions:
+`cmd/copilotd/main.go` now builds `configuredShimRegistry(cfg)` once in
+`runServe`, logs it, and passes that same registry into `runBoundServe`. Meter
+wiring preserves that single-construction boundary:
 
 1. In `runServe`, after configuration/logger and local credential resolution but
    **before `net.Listen`**, open/migrate the store only when enabled. Pass
@@ -681,10 +749,10 @@ not be lost between those two constructions:
 2. Build the configured registry once with that sink, log it, and pass that
    registry into `runBoundServe`. Both forwarders receive it; neither opens a
    store. Store initialization must not move into the post-bind startup work.
-3. Close the store on bind/serve failure as well as normal shutdown, keeping the
-   logger alive until loss reporting and the final bounded flush finish (§9).
+3. Run the §9.1 finalizer on bind/serve failure as well as normal shutdown,
+   keeping the logger alive through final aggregate publication.
 
-Proposed minimal shim interface:
+Accepted minimal shim interface target:
 
 ```go
 // A nil sink leaves the usage-meter registration disabled.
@@ -736,7 +804,7 @@ There is no remaining 413-versus-502 rollout dependency. Buffered read failure i
 502, timeout is 504, and client cancellation produces no new error response.
 Buffering also delays response commitment until the read finishes and recomputes
 `Content-Length`, even though the meter leaves the payload unchanged. These costs
-remain accepted by this proposal, not excused by assuming responses are small.
+are accepted by this design, not excused by assuming responses are small.
 
 The Upstream call explicitly requests `Accept-Encoding: identity`, and
 `forward.NewClient` disables automatic compression handling. If Copilot still
@@ -770,24 +838,35 @@ but **cannot recover missing token counts or identify every omitted WebSocket
 turn**. A handler that never returns has no terminal access record. Do not treat
 logs plus the database as a complete accounting system.
 
-### 11.3 Usage-schema evidence still needed
+### 11.3 Accepted usage-schema evidence and limitations
 
-The repository review verifies transport contracts, not today's provider billing
-or every native usage field. Before freezing migration 1, collect redacted usage
-fixtures for both inference Surfaces and every supported transport, alongside
-primary provider schema references. Record the evidence's date/version.
+The dated [native usage evidence](../research/2026-09-05-native-usage-shapes.md)
+contains three sanitized recorded Copilot fixtures: buffered, SSE, and WebSocket
+OpenAI Responses completions. Each completion carries its own ID, returned model,
+completed status, and usage. All six approved scalar counts occur on every path.
+Primary Responses sources establish that `cached_tokens` and
+`cache_write_tokens` are subsets of complete `input_tokens`; the recorded zero
+cache writes prove field presence on those requests, not non-zero Copilot cache
+accounting. The older item-ID stabilizer fixtures remain non-evidence for usage.
 
-Existing `responses_item_id_churn.sse` and WebSocket stabilizer tests use minimal
-completion projections; they do not establish that Copilot supplies response ID,
-model, status, and usage together. Verify the terminal-only OpenAI parser against
-dedicated fixtures rather than treating those tests as metering evidence.
+The 2026-09-05 account had no working Anthropic Messages model, so no live
+Copilot Anthropic fixture exists. The explicitly approved replacement evidence is
+the exact official [Messages Create](https://platform.claude.com/docs/en/api/messages/create)
+reference, related primary streaming/cache documentation, and clearly labeled
+generated fixtures. They support the seven scalar fields in §5 and the cumulative
+last-value parser contract. Anthropic documents `thinking_tokens` as a re-tokenized
+output subset, including delimiters, whose reported value is at most
+`output_tokens`; subtraction only approximates non-reasoning output. This states
+the field's native meaning, not an additional cross-field parser validation rule.
+Live Copilot Anthropic compatibility remains unverified.
 
-`cache_write_tokens` remains tentative. Evidence for a Chat Completions
-`prompt_tokens_details` field does not establish its presence or nesting semantics
-under Responses `input_tokens_details`. A nullable column preserves absence, but
-permanent `NULL` cannot distinguish unsupported upstream data from an incorrect
-parser path. Resolve that question before freezing the column or documenting it
-as a subset; the current DDL deliberately marks it provisional.
+Beta variable-cardinality `usage.iterations[]` is explicitly excluded from
+migration 1 pending a separate schema/cardinality review. Compaction iteration
+counts are not included in top-level usage, so this meter does not claim exhaustive
+consumption. An independent schema/accounting review found no blocking issue with
+the six-plus-seven projection. Subject to the recorded limitations, ADR-0018
+freezes migration 1; no provider billing behavior is inferred from these native
+counts.
 
 ---
 
@@ -814,7 +893,7 @@ as a subset; the current DDL deliberately marks it provisional.
 - **A full channel drops rather than blocks**: hold the writer, exceed capacity,
   assert prompt `Record` return and counted drops without hook-side logging.
 - Concurrent producers, immutable optional values across meter reset, and
-  `Record` racing with/following close are race-safe. Final flush obeys the chosen
+  `Record` racing with/following close are race-safe. Final flush obeys the §9.1
   shutdown bound, including a slow/failing database.
 - Pre-creation is private even under a permissive Unix umask and never truncates
   existing data; concurrent creation, unsafe existing destinations, and sidecars
@@ -876,67 +955,67 @@ all four cgo-free release targets with the chosen SQLite driver (§13).
 
 ## 13. Docs, ADRs, and dependency
 
-### ADRs
+### Accepted ADRs
 
-- **New ADR — Persist token usage in a local SQLite database.** Would amend the
-  [state-at-rest boundary](../../README.md#state-at-rest) if this proposal is
-  accepted. Records: SQLite over JSONL or in-memory; why a pure-Go SQLite driver
-  is required by `CGO_ENABLED=0`; release-target support,
-  file permissions, WAL sidecars, loss/durability policy, and opt-in default.
-  Linux is static; Darwin still links `libSystem`.
-- **New ADR — Per-Surface usage tables with verbatim fields.** The policy a
-  future contributor needs: capture supported native token-count values verbatim,
-  no unified or derived token columns, interpretation in Go. Motivated by the cache
-  nesting asymmetry, with both worked examples recorded so it is not re-litigated.
+- [ADR-0017](../adr/0017-persist-usage-in-local-sqlite.md) accepts the
+  usage-specific private SQLite exception, rejected alternatives, cgo-free
+  driver, platform evidence limits, file permissions, WAL sidecars,
+  best-effort durability, and bounded finalization.
+- [ADR-0018](../adr/0018-store-per-surface-native-usage.md) freezes the
+  per-Surface verbatim projection, both cache-nesting examples, schema evolution
+  rule, and read-only observer admission without a new Shim subtype.
 
-### Docs
+### Reconciled implementation docs
 
-- **`CONTEXT.md`** — add **Usage meter** and **Turn**; amend **Shim** (see §14).
-- **[README state-at-rest boundary](../../README.md#state-at-rest)** — currently
-  asserts "no database"; amend only if a persistence ADR for this proposal is
-  accepted.
-- **`CONFIGURATION.md`** — both serve settings, partial coverage and durability,
-  filesystem requirements, and the buffering consequences.
-- **`docs/divergence-ledger.md`** — review existing fabrication coverage for
-  meter-activated buffered failures; no usage-rewriting Alteration (§4.2).
+`CONTEXT.md` defines Shim, Usage meter, and Turn without embedding this
+implementation plan. As of #201, README and `CONFIGURATION.md` describe the
+available opt-in database and settings, all five implemented recording paths,
+and the durability, filesystem, buffering, retention, backup, external-query,
+and shutdown consequences. The existing
+`docs/divergence-ledger.md` copilotd-originated error row already covers the
+meter-activated bounded-read `BadGateway`/`GatewayTimeout` Fabrications;
+observation itself adds no usage-rewriting Alteration (§4.2).
 
 ### Dependency
 
-`modernc.org/sqlite` remains the proposed driver, not an already-validated choice.
-Pin an explicit version in `go.mod`/`go.sum` and update `flake.nix`'s `vendorHash`.
-Before accepting it, verify `CGO_ENABLED=0` builds for **all four current release
-targets**: `linux/amd64`, `windows/amd64`, `windows/arm64`, and `darwin/arm64`.
-Pure Go does not by itself guarantee that a driver's generated platform code
-supports every target; inability to support one is a design blocker, not a reason
-to silently narrow releases.
+ADR-0017 selects `modernc.org/sqlite v1.58.0`, embedding SQLite 3.53.4 with the
+required matching `modernc.org/libc v1.75.6`. The retained feasibility module
+builds a reachable driver path with `CGO_ENABLED=0` for `linux/amd64`,
+`windows/amd64`, `windows/arm64`, and `darwin/arm64`; only Linux has runtime,
+filesystem, contention, and race evidence. Windows/Darwin runtime behavior and
+Windows ACLs remain accepted limitations, not certification. Issue #197 pins the
+dependency in root `go.mod`/`go.sum` and updates the Nix vendor hash. Its
+completion gate builds the actual feature-bearing `copilotd` binary—not only the
+disposable probe—with `CGO_ENABLED=0` for all four
+current release targets, and `flake.nix`'s `vendorHash` must match the root module
+dependency graph. The preceding #196 architecture checkpoint added neither
+production code nor a root dependency; #197 does.
 
 ---
 
-## 14. Open decisions before implementation
+## 14. Approved architecture gates
 
-**`CONTEXT.md`'s `Shim` entry defines a shim as "a composable middleware layer
-that closes one specific parity gap."** The usage meter closes no parity gap — it
-observes. Two ways to resolve, and this is left for the reviewer:
+The four pre-implementation gates are explicitly closed:
 
-1. **Amend the `Shim` entry** with one sentence admitting read-only observers, and
-   add a `Usage meter` entry beneath it. Smallest change; keeps one mechanism with
-   one name.
-2. **Introduce `Observer shim`** as a named subtype in the glossary, defined as a
-   shim that implements hooks but returns every input unchanged. More precise, and
-   it gives future observers a term — at the cost of another glossary entry.
+1. **Persistence:** the narrow opt-in SQLite exception and its best-effort
+   durability, local-filesystem, sidecar, permission, and platform limitations
+   are accepted by ADR-0017.
+2. **Shim language:** the existing Shim definition admits read-only observers;
+   no observer subtype is introduced. README and package policy use the same
+   broader wording.
+3. **Projection:** migration 1 has six OpenAI and seven Anthropic scalar counts,
+   including inclusive `cache_write_tokens` and nullable `thinking_tokens`.
+   Native values, nil/zero, required core fields, schema evolution, and the
+   `usage.iterations[]` exclusion follow ADR-0018 and §11.3.
+4. **Shutdown:** one fresh `ShutdownTimeout` finalization extension follows the
+   existing drain/force-close sequence, with atomic cutoff, late-loss counting,
+   no ambiguous-batch replay, writer-owned cleanup, bounded coordinator wait,
+   and observed-through-publication final reporting (§9.1).
 
-Option 1 remains the lighter change; option 2 pays off only if more observers
-follow. Either choice also needs the README's parity-only wording reconciled.
-Neither the glossary nor that policy is changed by this proposal refresh.
-
-Other gates remain explicit:
-
-- **Persistence approval and driver support** (§13), including permissions on all
-  release platforms. The current no-database boundary remains in force.
-- **Verified usage schema** (§11.3). Resolve `cache_write_tokens` against Responses
-  evidence before freezing migration 1; do not claim its accounting semantics
-  from Chat Completions documentation.
-- **Bounded final flush** (§9). Decide how the meter shares or extends the existing
-  `ShutdownTimeout` budget and how final loss is reported. `server.Run` already
-  drains HTTP/WebSocket work with a deadline, but a deferred store close does not
-  automatically inherit it.
+These approvals authorized the staged implementation. Issue #197 supplies the
+shared contract, production SQLite dependency and writer, both settings, and the
+buffered OpenAI hook; issue #198 adds the buffered Anthropic hook without changing
+migration 1; issue #199 adds self-contained OpenAI SSE completion observation;
+issue #200 adds the same self-contained observation to OpenAI WebSocket server
+Messages; and issue #201 adds request-scoped Anthropic SSE accumulation. The
+five recording paths are now implemented without changing the frozen schema.

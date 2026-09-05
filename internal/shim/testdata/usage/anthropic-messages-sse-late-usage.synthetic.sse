@@ -1,0 +1,10 @@
+event: message_start
+data: {"type":"message_start","message":{"id":"msg_redacted_synthetic_late_usage","type":"message","model":"claude-synthetic","stop_reason":null}}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":0}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+: end of synthetic contract stream

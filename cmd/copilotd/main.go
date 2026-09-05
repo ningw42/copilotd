@@ -15,8 +15,10 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"reflect"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/ningw42/copilotd/internal/build"
 	"github.com/ningw42/copilotd/internal/cache"
@@ -29,6 +31,8 @@ import (
 	"github.com/ningw42/copilotd/internal/server"
 	"github.com/ningw42/copilotd/internal/shim"
 	"github.com/ningw42/copilotd/internal/upstream"
+	"github.com/ningw42/copilotd/internal/usage"
+	"github.com/ningw42/copilotd/internal/usage/sqlitestore"
 	"github.com/ningw42/copilotd/internal/wsforward"
 	"github.com/peterbourgon/ff/v4"
 	"github.com/peterbourgon/ff/v4/ffhelp"
@@ -292,8 +296,6 @@ func runServe(ctx context.Context, flags *config.ServeFlags, lookupEnv func(stri
 		slog.Any(logging.ConfigKey, cfg),
 	)
 	logCodexCatalogStaging(logger, cfg)
-	registry := configuredShimRegistry(cfg)
-	logShimChain(logger, registry)
 
 	// Credential-presence check + real credential Provider, assembled BEFORE the
 	// listener binds so a missing OAuth token fails fast (non-zero exit) without
@@ -309,6 +311,29 @@ func runServe(ctx context.Context, flags *config.ServeFlags, lookupEnv func(stri
 		return errServeFailed
 	}
 	codexModels := configuredCodexModels(cfg, productionCodexModelsEdge(), cacheRegistry, base)
+
+	var usageStore *sqlitestore.Store
+	var sink usage.Sink
+	if cfg.ShimUsageMeterEnabled {
+		var openErr error
+		usageStore, openErr = sqlitestore.Open(cfg.UsageDBPath, logging.ForComponent(base, "internal/usage/sqlitestore"))
+		if openErr != nil {
+			logger.Error("cannot start: opening usage database failed",
+				slog.String(logging.PathKey, cfg.UsageDBPath),
+				slog.Any(logging.ErrorKey, openErr))
+			return errServeFailed
+		}
+		sink = usageStore
+		// Registered after the logger closer so LIFO shutdown keeps logging alive
+		// through the final flush, cleanup status, and aggregate publication.
+		defer finalizeUsageStore(usageStore, cfg.ShutdownTimeout)
+	}
+	registry := configuredShimRegistry(cfg, sink)
+	if cfg.ShimUsageMeterEnabled && sink == nil {
+		logger.Error("cannot start: usage metering requested without a sink")
+		return errServeFailed
+	}
+	logShimChain(logger, registry)
 
 	ln, err := net.Listen("tcp", cfg.Addr)
 	if err != nil {
@@ -326,19 +351,21 @@ func runServe(ctx context.Context, flags *config.ServeFlags, lookupEnv func(stri
 		stop()
 	}()
 
-	if err := runBoundServe(serveCtx, cfg, base, mgr, imp, codexModels, cacheRegistry, ln); err != nil {
-		logger.Error("server error", slog.Any(logging.ErrorKey, err))
+	if err := runBoundServe(serveCtx, cfg, base, mgr, imp, codexModels, cacheRegistry, registry, ln, usageStore); err != nil {
 		return errServeFailed
 	}
 	return nil
 }
 
 // runBoundServe starts the background impersonation/mint lifecycle only after
-// its caller has supplied an already-bound listener. That ordering keeps
+// its caller has supplied an already-bound listener and the configured Shim
+// registry. That ordering keeps
 // /healthz and the locally-ready /readyz available while bounded startup
 // discovery is in progress. Neither discovery nor startup mint outcomes gate
-// readiness or request admission.
-func runBoundServe(ctx context.Context, cfg config.ServeConfig, base *slog.Logger, mgr *identity.Manager, imp *impersonation.Set, codexModels *cache.Value[[]byte], cacheRegistry *cache.Registry, ln net.Listener) error {
+// readiness or request admission. When usageStore is non-nil, admission remains
+// open through Server.Run and is cut off immediately on return, before a serve
+// error is synchronously logged.
+func runBoundServe(ctx context.Context, cfg config.ServeConfig, base *slog.Logger, mgr *identity.Manager, imp *impersonation.Set, codexModels *cache.Value[[]byte], cacheRegistry *cache.Registry, registry shim.Registry, ln net.Listener, usageStore *sqlitestore.Store) error {
 	go runServeStartup(ctx, cacheRegistry, mgr, logging.ForComponent(base, "cmd/copilotd"))
 	catalogs := catalog.RenderDescriptors{
 		Anthropic: catalog.AnthropicRenderConfig{
@@ -356,7 +383,6 @@ func runBoundServe(ctx context.Context, cfg config.ServeConfig, base *slog.Logge
 		},
 	}
 
-	registry := configuredShimRegistry(cfg)
 	forwardClient := forward.NewClient(cfg.ResponseHeaderTimeout)
 	caller := upstream.New(mgr, forwardClient, cfg.OutboundTimeout, cfg.MaxBufferedResponseBytes, logging.ForComponent(base, "internal/upstream"))
 	fwd := forward.New(caller, cfg.OutboundTimeout, cfg.WriteTimeout, cfg.StreamIdleTimeout, cfg.StreamKeepaliveInterval, cfg.MaxRequestBytes, registry,
@@ -371,10 +397,17 @@ func runBoundServe(ctx context.Context, cfg config.ServeConfig, base *slog.Logge
 		})
 	streamOutcomes := server.NewStreamOutcomeCounter()
 
-	return server.New(cfg, logging.ForComponent(base, "internal/server"), logging.ForComponent(base, "internal/catalog"), logging.DependencyErrorLog(base, slog.LevelWarn), mgr, server.ReadyObservers{
+	serveErr := server.New(cfg, logging.ForComponent(base, "internal/server"), logging.ForComponent(base, "internal/catalog"), logging.DependencyErrorLog(base, slog.LevelWarn), mgr, server.ReadyObservers{
 		Impersonation: imp,
 		Caches:        cacheRegistry,
 	}, fwd, caller, wsProxy, streamOutcomes, catalogs).Run(ctx, ln)
+	if usageStore != nil {
+		usageStore.StopAdmission()
+	}
+	if serveErr != nil {
+		logging.ForComponent(base, "cmd/copilotd").Error("server error", slog.Any(logging.ErrorKey, serveErr))
+	}
+	return serveErr
 }
 
 // runServeStartup performs the ordered background startup sequence. The cache
@@ -387,6 +420,13 @@ func runServeStartup(ctx context.Context, cacheRegistry *cache.Registry, mgr *id
 	logCachedValueStartupOutcomes(logger, cacheRegistry.Observe())
 	cacheRegistry.Start(ctx)
 	mgr.StartupMint(ctx)
+}
+
+func finalizeUsageStore(store *sqlitestore.Store, timeout time.Duration) sqlitestore.Report {
+	store.StopAdmission()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return store.Close(ctx)
 }
 
 func logCachedValueStartupOutcomes(logger *slog.Logger, observed []cache.Status) {
@@ -406,17 +446,35 @@ func logCodexCatalogStaging(logger *slog.Logger, cfg config.ServeConfig) {
 		slog.String(logging.ReviewerKey, cfg.CodexAutoReviewModel))
 }
 
-func configuredShimRegistry(cfg config.ServeConfig) shim.Registry {
-	registry := shim.CanonicalRegistry()
+func configuredShimRegistry(cfg config.ServeConfig, sink usage.Sink) shim.Registry {
+	if !usableUsageSink(sink) {
+		sink = nil
+	}
+	registry := shim.CanonicalRegistry(sink)
 	for i := range registry {
 		switch registry[i].Name {
 		case "nop":
 			registry[i].Enabled = cfg.ShimNopEnabled
 		case "responses-item-id-stabilizer":
 			registry[i].Enabled = cfg.ShimResponsesItemIDStabilizerEnabled
+		case "usage-meter":
+			registry[i].Enabled = cfg.ShimUsageMeterEnabled && sink != nil
 		}
 	}
 	return registry
+}
+
+func usableUsageSink(sink usage.Sink) bool {
+	if sink == nil {
+		return false
+	}
+	value := reflect.ValueOf(sink)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return !value.IsNil()
+	default:
+		return true
+	}
 }
 
 func logShimChain(logger *slog.Logger, registry shim.Registry) {

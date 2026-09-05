@@ -59,7 +59,7 @@ func startPhase4Server(t *testing.T, cfg config.ServeConfig, provider identity.P
 		cfg.MaxRequestBytes,
 		cfg.MaxBufferedResponseBytes,
 		logger,
-		configuredShimRegistry(cfg))
+		configuredShimRegistry(cfg, nil))
 
 	return startTestServer(t, server.New(cfg, logging.ForComponent(logger, "internal/server"), logging.ForComponent(logger, "internal/catalog"), newTestDependencyErrorLog(), provider, newTestReadyObservers(), forwarder, newTestCatalogSource(provider), newTestWSProxy(provider), server.NewStreamOutcomeCounter(), catalog.RenderDescriptors{}))
 }

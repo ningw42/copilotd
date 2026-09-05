@@ -1231,7 +1231,7 @@ func startSessionWithRegistryAndMetrics(t *testing.T, maxMessageBytes int64, wri
 }
 
 func responsesItemIDRegistry(enabled bool) shim.Registry {
-	registry := shim.CanonicalRegistry()
+	registry := shim.CanonicalRegistry(nil)
 	for index := range registry {
 		if registry[index].Name == "responses-item-id-stabilizer" {
 			registry[index].Enabled = enabled

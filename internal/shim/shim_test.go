@@ -833,7 +833,7 @@ func TestPostCommitAdaptersRetainExactRegistrationIdentity(t *testing.T) {
 
 func TestCanonicalRegistryNamesAreNonEmptyAndUnique(t *testing.T) {
 	seen := make(map[string]struct{})
-	for i, registration := range CanonicalRegistry() {
+	for i, registration := range CanonicalRegistry(nil) {
 		if registration.Name == "" {
 			t.Errorf("CanonicalRegistry()[%d] has an empty name", i)
 		}
@@ -845,7 +845,7 @@ func TestCanonicalRegistryNamesAreNonEmptyAndUnique(t *testing.T) {
 }
 
 func TestCanonicalRegistryShipsDisabledNop(t *testing.T) {
-	registry := CanonicalRegistry()
+	registry := CanonicalRegistry(nil)
 	if len(registry) < 1 || registry[0].Name != "nop" || registry[0].Enabled {
 		t.Fatalf("CanonicalRegistry()[0] = %+v, want disabled nop first", registry)
 	}
@@ -858,9 +858,9 @@ func TestCanonicalRegistryShipsDisabledNop(t *testing.T) {
 }
 
 func TestCanonicalRegistryShipsDisabledResponsesItemIDStabilizerScopedToOpenAIResponses(t *testing.T) {
-	registry := CanonicalRegistry()
-	if len(registry) != 2 {
-		t.Fatalf("len(CanonicalRegistry()) = %d, want nop and responses item-id stabilizer", len(registry))
+	registry := CanonicalRegistry(nil)
+	if len(registry) != 3 {
+		t.Fatalf("len(CanonicalRegistry(nil)) = %d, want nop, responses item-id stabilizer, and usage meter", len(registry))
 	}
 	registration := registry[1]
 	if registration.Name != "responses-item-id-stabilizer" || registration.Enabled {
@@ -892,7 +892,7 @@ func TestCanonicalRegistryShipsDisabledResponsesItemIDStabilizerScopedToOpenAIRe
 }
 
 func TestResponsesItemIDStabilizerRegistrationSelectsOnlyResponsesTransports(t *testing.T) {
-	registry := CanonicalRegistry()
+	registry := CanonicalRegistry(nil)
 	registry[1].Enabled = true
 	originalNew := registry[1].New
 	constructorCalls := 0

@@ -68,13 +68,18 @@
           # Non-vendored: go.mod/go.sum are the source of truth; a single
           # vendorHash covers the whole fetched dependency set. It changes only
           # when dependencies change.
-          vendorHash = "sha256-xYhRW3RTBuBWvfNMapdlG8RzDjNI4/L4nK5Zagi/Wgo=";
+          vendorHash = "sha256-RWaJwqJQTYuT9owTDLmgcuNdqhQhYUZU/GSeLZU9r1A=";
 
           # CGO off -> a truly static binary on Linux. On Darwin, Go always links
           # libSystem (Apple ships no fully-static binaries), so the aarch64-darwin
           # artifact is self-contained except for libSystem. The "single static
           # binary" claim is Linux-precise.
           env.CGO_ENABLED = "0";
+
+          # The retained SQLite driver probes are a standalone nested Go module,
+          # not root-module packages. Excluding only that boundary leaves every
+          # root package in buildGoModule's normal build and test discovery.
+          excludedPackages = [ "docs/research/sqlite-feasibility" ];
 
           ldflags = [
             "-s"

@@ -1,0 +1,40 @@
+{
+  "captured_at": "2026-09-05T14:49:47Z",
+  "runtime": "existing local copilotd daemon; exact build version unavailable",
+  "base": "http://127.0.0.1:8083",
+  "captures": [
+    {
+      "name": "openai-buffered",
+      "transport": "buffered",
+      "requested_model": "gpt-5.6-sol-fast",
+      "returned_model": "gpt-5.6-sol",
+      "attempts": 1,
+      "bytes": 2599,
+      "verified": true
+    },
+    {
+      "name": "openai-sse",
+      "transport": "sse",
+      "requested_model": "gpt-5.6-sol-fast",
+      "returned_model": "gpt-5.6-sol",
+      "attempts": 1,
+      "bytes": 27308,
+      "verified": true
+    },
+    {
+      "name": "openai-websocket",
+      "transport": "websocket",
+      "requested_model": "gpt-5.6-sol-fast",
+      "returned_model": "gpt-5.6-sol",
+      "attempts": 1,
+      "bytes": 33996,
+      "verified": true
+    }
+  ],
+  "redaction": {
+    "ids": "response IDs replaced with non-empty deterministic placeholders",
+    "omitted": "all generated content, output items, request bodies, headers, and non-usage response fields",
+    "usage": "usage objects and every nested usage field/value preserved exactly",
+    "framing": "SSE event/data lines and blank-frame separator retained; WebSocket message boundary retained as one JSONL record"
+  }
+}

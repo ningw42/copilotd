@@ -15,13 +15,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/coder/websocket"
 	"github.com/ningw42/copilotd/internal/cache"
 	"github.com/ningw42/copilotd/internal/catalog"
 	"github.com/ningw42/copilotd/internal/config"
+	"github.com/ningw42/copilotd/internal/endpoint"
 	"github.com/ningw42/copilotd/internal/forward"
 	"github.com/ningw42/copilotd/internal/impersonation"
 	"github.com/ningw42/copilotd/internal/logging"
 	"github.com/ningw42/copilotd/internal/server"
+	"github.com/ningw42/copilotd/internal/shim"
 )
 
 const testAPIKey = "test-api-key"
@@ -164,6 +167,122 @@ func newSequencedGitHubExchangeStub(t *testing.T, apiURL string, statuses ...int
 	}))
 	t.Cleanup(s.Close)
 	return s, &calls
+}
+
+type suppliedRegistryShim struct{}
+
+var (
+	_ shim.BufferedTransformer      = (*suppliedRegistryShim)(nil)
+	_ shim.ServerMessageTransformer = (*suppliedRegistryShim)(nil)
+)
+
+func (*suppliedRegistryShim) TransformBuffered(_ context.Context, body *shim.Body) error {
+	body.Bytes = []byte(`{"registry":"supplied-http"}`)
+	return nil
+}
+
+func (*suppliedRegistryShim) TransformServerMessage(_ context.Context, message *shim.Message) bool {
+	message.Data = []byte(`{"registry":"supplied-websocket"}`)
+	return true
+}
+
+func TestRunBoundServeUsesSuppliedShimRegistryForHTTPAndWebSocket(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
+			conn, err := websocket.Accept(w, r, nil)
+			if err != nil {
+				t.Errorf("accept upstream WebSocket: %v", err)
+				return
+			}
+			defer func() { _ = conn.CloseNow() }()
+			messageType, _, err := conn.Read(r.Context())
+			if err != nil {
+				t.Errorf("read upstream WebSocket message: %v", err)
+				return
+			}
+			if err := conn.Write(r.Context(), messageType, []byte(`{"registry":"upstream-websocket"}`)); err != nil {
+				t.Errorf("write upstream WebSocket message: %v", err)
+			}
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"registry":"upstream-http"}`)
+	}))
+	t.Cleanup(upstream.Close)
+
+	cfg := e2eConfig("gho-supplied-registry")
+	cfg.ImpersonationRefreshInterval = 0
+	cfg.WebSocketHandshakeTimeout = 5 * time.Second
+	logger := discardLogger(t)
+	var exchangeAuth, exchangeUA string
+	github := newGitHubExchangeStub(t, "copilot-supplied-registry", upstream.URL, &exchangeAuth, &exchangeUA)
+	cacheRegistry := cache.NewRegistry()
+	mgr, imp, err := buildServeProvider(cfg, logger, github.URL, github.Client(), productionDiscoveryEdge(), cacheRegistry)
+	if err != nil {
+		t.Fatalf("buildServeProvider: %v", err)
+	}
+	registry := shim.Registry{{
+		Name:    "supplied-registry-probe",
+		Enabled: true,
+		Scope: func(surface endpoint.Surface, route endpoint.Route) bool {
+			return surface == endpoint.OpenAI && route == endpoint.RouteOpenAIResponses
+		},
+		New: func(context.Context, endpoint.Surface, endpoint.Route) any {
+			return &suppliedRegistryShim{}
+		},
+	}}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- runBoundServe(ctx, cfg, logger, mgr, imp, nil, cacheRegistry, registry, ln, nil) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("runBoundServe after cancellation: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Error("bound serve did not stop within the grace period")
+		}
+	})
+
+	base := "http://" + ln.Addr().String()
+	assertHTTPStatusEventually(t, base+"/healthz", http.StatusOK)
+
+	resp, body := post(t, base+"/openai/v1/responses", `{"model":"gpt"}`)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || body != `{"registry":"supplied-http"}` {
+		t.Errorf("HTTP response = %d %q, want supplied registry transform", resp.StatusCode, body)
+	}
+
+	webSocketURL := "ws" + strings.TrimPrefix(base, "http") + "/openai/v1/responses"
+	conn, response, err := websocket.Dial(context.Background(), webSocketURL, &websocket.DialOptions{
+		HTTPHeader: http.Header{"Authorization": {"Bearer " + testAPIKey}},
+	})
+	if err != nil {
+		if response != nil {
+			_ = response.Body.Close()
+		}
+		t.Fatalf("dial WebSocket transport: %v", err)
+	}
+	wsCtx, wsCancel := context.WithTimeout(context.Background(), time.Second)
+	defer wsCancel()
+	if err := conn.Write(wsCtx, websocket.MessageText, []byte(`{"type":"response.create"}`)); err != nil {
+		t.Fatalf("write WebSocket message: %v", err)
+	}
+	_, message, err := conn.Read(wsCtx)
+	if err != nil {
+		t.Fatalf("read WebSocket message: %v", err)
+	}
+	if got := string(message); got != `{"registry":"supplied-websocket"}` {
+		t.Errorf("WebSocket message = %q, want supplied registry transform", got)
+	}
+	_ = conn.Close(websocket.StatusNormalClosure, "done")
 }
 
 func startManagerBackedE2EServer(t *testing.T, cfg config.ServeConfig, logger *slog.Logger, github *httptest.Server, runStartupMint bool) string {
@@ -329,7 +448,9 @@ func TestServeDiscoveredVersionsEndToEnd(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- runBoundServe(ctx, cfg, logger, mgr, imp, nil, cacheRegistry, ln) }()
+	go func() {
+		done <- runBoundServe(ctx, cfg, logger, mgr, imp, nil, cacheRegistry, configuredShimRegistry(cfg, nil), ln, nil)
+	}()
 	t.Cleanup(func() {
 		cancel()
 		select {
@@ -454,7 +575,9 @@ func TestServeFreshCodexCatalogAndReadinessEndToEnd(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- runBoundServe(ctx, cfg, logger, mgr, imp, codexModels, registry, ln) }()
+	go func() {
+		done <- runBoundServe(ctx, cfg, logger, mgr, imp, codexModels, registry, configuredShimRegistry(cfg, nil), ln, nil)
+	}()
 	t.Cleanup(func() {
 		cancel()
 		select {
