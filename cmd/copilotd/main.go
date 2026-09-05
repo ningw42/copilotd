@@ -326,7 +326,7 @@ func runServe(ctx context.Context, flags *config.ServeFlags, lookupEnv func(stri
 		stop()
 	}()
 
-	if err := runBoundServe(serveCtx, cfg, base, mgr, imp, codexModels, cacheRegistry, ln); err != nil {
+	if err := runBoundServe(serveCtx, cfg, base, mgr, imp, codexModels, cacheRegistry, registry, ln); err != nil {
 		logger.Error("server error", slog.Any(logging.ErrorKey, err))
 		return errServeFailed
 	}
@@ -334,11 +334,12 @@ func runServe(ctx context.Context, flags *config.ServeFlags, lookupEnv func(stri
 }
 
 // runBoundServe starts the background impersonation/mint lifecycle only after
-// its caller has supplied an already-bound listener. That ordering keeps
+// its caller has supplied an already-bound listener and the configured Shim
+// registry. That ordering keeps
 // /healthz and the locally-ready /readyz available while bounded startup
 // discovery is in progress. Neither discovery nor startup mint outcomes gate
 // readiness or request admission.
-func runBoundServe(ctx context.Context, cfg config.ServeConfig, base *slog.Logger, mgr *identity.Manager, imp *impersonation.Set, codexModels *cache.Value[[]byte], cacheRegistry *cache.Registry, ln net.Listener) error {
+func runBoundServe(ctx context.Context, cfg config.ServeConfig, base *slog.Logger, mgr *identity.Manager, imp *impersonation.Set, codexModels *cache.Value[[]byte], cacheRegistry *cache.Registry, registry shim.Registry, ln net.Listener) error {
 	go runServeStartup(ctx, cacheRegistry, mgr, logging.ForComponent(base, "cmd/copilotd"))
 	catalogs := catalog.RenderDescriptors{
 		Anthropic: catalog.AnthropicRenderConfig{
@@ -356,7 +357,6 @@ func runBoundServe(ctx context.Context, cfg config.ServeConfig, base *slog.Logge
 		},
 	}
 
-	registry := configuredShimRegistry(cfg)
 	forwardClient := forward.NewClient(cfg.ResponseHeaderTimeout)
 	caller := upstream.New(mgr, forwardClient, cfg.OutboundTimeout, cfg.MaxBufferedResponseBytes, logging.ForComponent(base, "internal/upstream"))
 	fwd := forward.New(caller, cfg.OutboundTimeout, cfg.WriteTimeout, cfg.StreamIdleTimeout, cfg.StreamKeepaliveInterval, cfg.MaxRequestBytes, registry,

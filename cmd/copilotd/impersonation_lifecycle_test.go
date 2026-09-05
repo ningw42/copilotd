@@ -80,7 +80,9 @@ func TestRunBoundServeIsReadyWhilePrimeWaits(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- runBoundServe(ctx, cfg, logger, mgr, imp, nil, cacheRegistry, ln) }()
+	go func() {
+		done <- runBoundServe(ctx, cfg, logger, mgr, imp, nil, cacheRegistry, configuredShimRegistry(cfg), ln)
+	}()
 
 	startedPaths := make(map[string]bool, 2)
 	for range 2 {
