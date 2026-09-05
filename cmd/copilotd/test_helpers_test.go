@@ -17,15 +17,17 @@ import (
 	"github.com/ningw42/copilotd/internal/wsforward"
 )
 
-const testReadyImpersonationJSON = `"caches":{},"impersonation":{"effective_headers":{"Editor-Version":"vscode/1.136.1","Editor-Plugin-Version":"copilot-chat/0.48.1","User-Agent":"GitHubCopilotChat/0.48.1","Copilot-Integration-Id":"vscode-chat","X-GitHub-Api-Version":"2025-04-01"}}`
+// testReadyImpersonationJSON is a literal oracle for deliberately synthetic
+// fixture headers; it is independent of shipped fallback defaults.
+const testReadyImpersonationJSON = `"caches":{},"impersonation":{"effective_headers":{"Editor-Version":"vscode/1.2.3","Editor-Plugin-Version":"copilot-chat/4.5.6","User-Agent":"GitHubCopilotChat/4.5.6","Copilot-Integration-Id":"vscode-chat","X-GitHub-Api-Version":"2099-01-01"}}`
 
 func newTestImpersonationObserver() *impersonation.Set {
 	registry := cache.NewRegistry()
 	return impersonation.New(impersonation.Config{
-		VSCodeVersionFallback: "1.136.1",
-		PluginVersionFallback: "0.48.1",
+		VSCodeVersionFallback: "1.2.3",
+		PluginVersionFallback: "4.5.6",
 		CopilotIntegrationID:  "vscode-chat",
-		GithubAPIVersion:      "2025-04-01",
+		GithubAPIVersion:      "2099-01-01",
 	}, impersonation.Edge{}, registry, slog.New(slog.NewTextHandler(io.Discard, nil)))
 }
 

@@ -16,12 +16,20 @@ import (
 	"github.com/ningw42/copilotd/internal/cache"
 )
 
-const testCodexReleaseCommit = "1234567890abcdef1234567890abcdef12345678"
+const (
+	testCodexReleaseCommit = "1234567890abcdef1234567890abcdef12345678"
+
+	// These valid, deliberately synthetic tags exercise version transitions
+	// without anticipating upstream releases or mirroring the embedded floor.
+	testCodexReleaseTagA = "rust-v1.2.3"
+	testCodexReleaseTagB = "rust-v1.2.4"
+	testCodexReleaseTagC = "rust-v1.2.5"
+)
 
 func TestModelsCacheServesLatestReleaseBytesWithoutCredentials(t *testing.T) {
 	t.Parallel()
 
-	const tag = "rust-v0.145.0"
+	const tag = testCodexReleaseTagA
 	fetched := validCodexModelsBytes(t, "gpt-5.4", "fresh")
 	var latestCalls atomic.Int32
 	var modelsCalls atomic.Int32
@@ -71,7 +79,7 @@ func TestModelsCacheServesLatestReleaseBytesWithoutCredentials(t *testing.T) {
 }
 
 func TestModelsCacheFetchesLatestReleaseAtResolvedCommit(t *testing.T) {
-	const tag = "rust-v0.154.0"
+	const tag = testCodexReleaseTagB
 	fetched := validCodexModelsBytes(t, "gpt-5.4", "commit pinned")
 	var commitCalls atomic.Int32
 	github := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -114,7 +122,7 @@ func TestModelsCacheFetchesLatestReleaseAtResolvedCommit(t *testing.T) {
 func TestModelsCacheAcceptsNullInstructionsVariables(t *testing.T) {
 	t.Parallel()
 
-	const tag = "rust-v0.150.0"
+	const tag = testCodexReleaseTagA
 	fetched := codexModelsBytesWithInstructionsVariables(t, nil)
 	github := newCodexModelsServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -159,7 +167,7 @@ func TestModelsCacheAcceptsCurrentInstructionSources(t *testing.T) {
 			github := newCodexModelsServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch r.URL.Path {
 				case latestCodexReleasePath:
-					_, _ = io.WriteString(w, `{"tag_name":"rust-v0.154.0"}`)
+					_, _ = io.WriteString(w, `{"tag_name":"`+testCodexReleaseTagB+`"}`)
 				case codexModelsContentPath:
 					_, _ = w.Write(tc.fetched)
 				default:
@@ -179,7 +187,7 @@ func TestModelsCacheAcceptsCurrentInstructionSources(t *testing.T) {
 			if !bytes.Equal(got, tc.fetched) {
 				t.Fatalf("Current returned %d bytes, want exact %d-byte fetched release", len(got), len(tc.fetched))
 			}
-			if status.Source != "fetched" || status.Version != "rust-v0.154.0" || status.LastSuccess == nil {
+			if status.Source != "fetched" || status.Version != testCodexReleaseTagB || status.LastSuccess == nil {
 				t.Fatalf("status = %#v, want fetched current instruction source", status)
 			}
 		})
@@ -193,10 +201,10 @@ func TestModelsEdgeRejectsUnstableLatestRelease(t *testing.T) {
 	}{
 		// GitHub's releases/latest endpoint excludes these states. Retain the
 		// checks as defense in depth for malformed or alternate API responses.
-		{name: "defense in depth: draft flag", body: `{"tag_name":"rust-v0.151.0","draft":true}`},
-		{name: "defense in depth: prerelease flag", body: `{"tag_name":"rust-v0.151.0","prerelease":true}`},
-		{name: "prerelease suffix", body: `{"tag_name":"rust-v0.152.0-alpha.1"}`},
-		{name: "wrong release lineage", body: `{"tag_name":"v0.151.0"}`},
+		{name: "defense in depth: draft flag", body: `{"tag_name":"rust-v1.2.3","draft":true}`},
+		{name: "defense in depth: prerelease flag", body: `{"tag_name":"rust-v1.2.3","prerelease":true}`},
+		{name: "prerelease suffix", body: `{"tag_name":"rust-v1.2.3-alpha.1"}`},
+		{name: "wrong release lineage", body: `{"tag_name":"v1.2.3"}`},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -255,7 +263,7 @@ func TestModelsCacheUnchangedReleaseSkipsModelsDownload(t *testing.T) {
 func TestModelsCacheNewReleaseWithFloorContentRekeysTheEmbeddedFloor(t *testing.T) {
 	t.Parallel()
 
-	const tag = "rust-v0.145.0"
+	const tag = testCodexReleaseTagA
 	github := newCodexModelsServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case latestCodexReleasePath:
@@ -289,7 +297,7 @@ func TestModelsCacheRekeysSameFetchedContentThenReleasesItForFloor(t *testing.T)
 	t.Parallel()
 
 	ahead := validCodexModelsBytes(t, "gpt-5.4", "ahead")
-	tags := []string{"rust-v0.145.0", "rust-v0.146.0", "rust-v0.147.0"}
+	tags := []string{testCodexReleaseTagA, testCodexReleaseTagB, testCodexReleaseTagC}
 	bodies := [][]byte{ahead, append([]byte(nil), ahead...), embeddedCodexModels}
 	var latestCalls atomic.Int32
 	var modelsCalls atomic.Int32
@@ -350,7 +358,7 @@ func TestModelsCacheRekeysSameFetchedContentThenReleasesItForFloor(t *testing.T)
 func TestModelsCacheRejectsMalformedReleaseAndKeepsFloor(t *testing.T) {
 	t.Parallel()
 
-	const tag = "rust-v0.145.0"
+	const tag = testCodexReleaseTagA
 	github := newCodexModelsServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case latestCodexReleasePath:
@@ -384,7 +392,7 @@ func TestModelsCacheMalformedReleaseAfterWarmSuccessHoldsLastGood(t *testing.T) 
 	t.Parallel()
 
 	good := validCodexModelsBytes(t, "gpt-5.4", "last good")
-	tags := []string{"rust-v0.145.0", "rust-v0.146.0"}
+	tags := []string{testCodexReleaseTagA, testCodexReleaseTagB}
 	bodies := [][]byte{good, codexModelsBytesWithInstructionsVariables(t, []string{})}
 	var latestCalls atomic.Int32
 	var modelsCalls atomic.Int32
@@ -467,7 +475,7 @@ func TestModelsCacheBoundsEachCredentialFreeEdgeCall(t *testing.T) {
 		} else if remaining := time.Until(deadline); remaining < 4*time.Second || remaining > modelsRequestTimeout {
 			t.Errorf("edge request deadline remaining = %v, want approximately 5s", remaining)
 		}
-		body := []byte(`{"tag_name":"rust-v0.145.0"}`)
+		body := []byte(`{"tag_name":"` + testCodexReleaseTagA + `"}`)
 		if strings.HasPrefix(req.URL.Path, codexReleaseCommitPath) {
 			body = []byte(testCodexReleaseCommit)
 		} else if req.URL.Path == codexModelsContentPath {
@@ -492,7 +500,7 @@ func TestModelsCacheBoundsEachCredentialFreeEdgeCall(t *testing.T) {
 	if calls.Load() != 4 {
 		t.Fatalf("edge calls = %d, want bounded peek, fetch peek, commit resolution, and models read", calls.Load())
 	}
-	if status.Source != "fetched" || status.Version != "rust-v0.145.0" || status.LastSuccess == nil {
+	if status.Source != "fetched" || status.Version != testCodexReleaseTagA || status.LastSuccess == nil {
 		t.Fatalf("status = %#v, want fetched release after three bounded calls", status)
 	}
 }
@@ -513,7 +521,7 @@ func TestModelsEdgeRejectsResponseOverCap(t *testing.T) {
 func TestModelsCacheHungRequestTimesOutAndHoldsLastGood(t *testing.T) {
 	t.Parallel()
 
-	const tag = "rust-v0.145.0"
+	const tag = testCodexReleaseTagA
 	fetched := validCodexModelsBytes(t, "gpt-5.4", "last good")
 	var calls atomic.Int32
 	timedOut := make(chan error, 1)

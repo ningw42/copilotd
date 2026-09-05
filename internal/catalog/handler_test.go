@@ -113,7 +113,7 @@ func TestRenderOneReturnsTheShapeThatMatchesItsRepresentation(t *testing.T) {
 		},
 		{
 			name:   "client-shaped Codex catalog",
-			target: "/openai/v1/models?client_version=0.153.4",
+			target: "/openai/v1/models?client_version=fixture",
 			rendering: Rendering{
 				Render: RenderOpenAI,
 				Codex: CodexDescriptor{
@@ -164,9 +164,9 @@ func TestHandlerNegotiatesCodexShapeOnlyWhenEveryGateIsOpen(t *testing.T) {
 		wantCodex     bool
 	}{
 		{name: "client key absent", enabled: true, reviewer: "gpt-5.4"},
-		{name: "catalog disabled", rawQuery: "client_version=0.144.5", reviewer: "gpt-5.4"},
-		{name: "nothing to inject", rawQuery: "client_version=0.144.5", enabled: true},
-		{name: "aliases are enough to inject", rawQuery: "client_version=0.144.5", enabled: true, aliases: map[string]string{"gpt-example-alias": "gpt-5.4"}, wantCodex: true},
+		{name: "catalog disabled", rawQuery: "client_version=fixture", reviewer: "gpt-5.4"},
+		{name: "nothing to inject", rawQuery: "client_version=fixture", enabled: true},
+		{name: "aliases are enough to inject", rawQuery: "client_version=fixture", enabled: true, aliases: map[string]string{"gpt-example-alias": "gpt-5.4"}, wantCodex: true},
 		{name: "empty client value is present with reviewer", rawQuery: "client_version=", enabled: true, reviewer: "gpt-5.4", wantCodex: true},
 		{name: "valueless client key is present with limits", rawQuery: "client_version", enabled: true, overrideLimit: true, wantCodex: true},
 	}
@@ -272,7 +272,7 @@ func TestHandlerLogsEverySkippedCodexReviewer(t *testing.T) {
 	}, source)
 	recorder := httptest.NewRecorder()
 	ctx := logging.WithRequestID(context.Background(), "catalog-request-id")
-	request := httptest.NewRequest(http.MethodGet, "/openai/v1/models?client_version=0.145.0", nil).WithContext(ctx)
+	request := httptest.NewRequest(http.MethodGet, "/openai/v1/models?client_version=fixture", nil).WithContext(ctx)
 
 	handler(recorder, request)
 
@@ -321,7 +321,7 @@ func TestHandlerLogsEveryUnappliedCodexAliasOnEveryRequest(t *testing.T) {
 
 	for requestNumber := 0; requestNumber < 2; requestNumber++ {
 		recorder := httptest.NewRecorder()
-		handler(recorder, httptest.NewRequest(http.MethodGet, "/openai/v1/models?client_version=0.151.0", nil))
+		handler(recorder, httptest.NewRequest(http.MethodGet, "/openai/v1/models?client_version=fixture", nil))
 		if recorder.Code != http.StatusOK {
 			t.Fatalf("request %d status = %d, want 200: %s", requestNumber+1, recorder.Code, recorder.Body.String())
 		}
@@ -376,7 +376,7 @@ func TestHandlerRendersCodexFromCurrentCachedBytes(t *testing.T) {
 		FallbackVersion: embeddedCodexModelsVersion,
 		TTL:             time.Hour,
 		Fetch: func(context.Context) ([]byte, string, error) {
-			return fresh, "rust-v0.145.0", nil
+			return fresh, "rust-v1.2.3", nil
 		},
 		Hash: hashModels,
 		Validate: func(currentBytes []byte) error {
@@ -400,7 +400,7 @@ func TestHandlerRendersCodexFromCurrentCachedBytes(t *testing.T) {
 	}, stubSource{status: http.StatusOK, body: upstreamBody})
 	recorder := httptest.NewRecorder()
 
-	handler(recorder, httptest.NewRequest(http.MethodGet, "/openai/v1/models?client_version=0.145.0", nil))
+	handler(recorder, httptest.NewRequest(http.MethodGet, "/openai/v1/models?client_version=fixture", nil))
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", recorder.Code, recorder.Body.String())
@@ -447,7 +447,7 @@ func TestHandlerRendersAliasFromCurrentAndFallbackCodexModels(t *testing.T) {
 				},
 			}, stubSource{status: http.StatusOK, body: upstreamBody})
 			recorder := httptest.NewRecorder()
-			handler(recorder, httptest.NewRequest(http.MethodGet, "/openai/v1/models?client_version=0.151.0", nil))
+			handler(recorder, httptest.NewRequest(http.MethodGet, "/openai/v1/models?client_version=fixture", nil))
 
 			if recorder.Code != http.StatusOK {
 				t.Fatalf("status = %d, want 200: %s", recorder.Code, recorder.Body.String())
@@ -503,7 +503,7 @@ func TestHandlerAliasFailuresRemainOpenAIBadGateway(t *testing.T) {
 				},
 			}, stubSource{status: http.StatusOK, body: tc.upstreamBody})
 			recorder := httptest.NewRecorder()
-			handler(recorder, httptest.NewRequest(http.MethodGet, "/openai/v1/models?client_version=0.151.0", nil))
+			handler(recorder, httptest.NewRequest(http.MethodGet, "/openai/v1/models?client_version=fixture", nil))
 
 			if recorder.Code != http.StatusBadGateway {
 				t.Fatalf("status = %d, want 502: %s", recorder.Code, recorder.Body.String())
@@ -522,7 +522,7 @@ func testCodexModelsValue(t *testing.T, current []byte, fetchErr error) *cache.V
 		FallbackVersion: embeddedCodexModelsVersion,
 		TTL:             time.Hour,
 		Fetch: func(context.Context) ([]byte, string, error) {
-			return current, "rust-v0.154.0", fetchErr
+			return current, "rust-v1.2.3", fetchErr
 		},
 		Hash: hashModels,
 		Validate: func(currentBytes []byte) error {
