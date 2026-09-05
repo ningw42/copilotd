@@ -207,8 +207,8 @@ func TestPhase3EnabledNopMatchesEmptyChainBufferedEndToEnd(t *testing.T) {
 	enabledCfg := emptyCfg
 	enabledCfg.ShimNopEnabled = true
 
-	empty := runPhase3Buffered(t, configuredShimRegistry(emptyCfg))
-	enabledNop := runPhase3Buffered(t, configuredShimRegistry(enabledCfg))
+	empty := runPhase3Buffered(t, configuredShimRegistry(emptyCfg, nil))
+	enabledNop := runPhase3Buffered(t, configuredShimRegistry(enabledCfg, nil))
 	if enabledNop != empty {
 		t.Fatalf("enabled canonical NopShim transcript = %#v, want empty-chain transcript %#v", enabledNop, empty)
 	}
@@ -230,8 +230,8 @@ func TestPhase3EnabledNopMatchesEmptyChainStreamingEndToEnd(t *testing.T) {
 	enabledCfg := emptyCfg
 	enabledCfg.ShimNopEnabled = true
 
-	empty := runPhase3Stream(t, configuredShimRegistry(emptyCfg))
-	enabledNop := runPhase3Stream(t, configuredShimRegistry(enabledCfg))
+	empty := runPhase3Stream(t, configuredShimRegistry(emptyCfg, nil))
+	enabledNop := runPhase3Stream(t, configuredShimRegistry(enabledCfg, nil))
 	if enabledNop != empty {
 		t.Fatalf("enabled canonical NopShim transcript = %#v, want empty-chain transcript %#v", enabledNop, empty)
 	}

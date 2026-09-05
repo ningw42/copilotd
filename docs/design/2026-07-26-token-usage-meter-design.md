@@ -7,9 +7,11 @@
 
 The state-at-rest and Shim-observer exceptions are explicitly accepted in
 [ADR-0017](../adr/0017-persist-usage-in-local-sqlite.md) and
-[ADR-0018](../adr/0018-store-per-surface-native-usage.md). This is the
-implementation target, not a claim that the meter, settings, persistence, or
-transport hooks are already available.
+[ADR-0018](../adr/0018-store-per-surface-native-usage.md). This remains the full
+implementation target. Issue #197 implements the settings, private SQLite store,
+and **buffered OpenAI Responses** observer end to end. Buffered Anthropic and
+both Surfaces' SSE plus OpenAI WebSocket observers remain staged; target language
+below does not advertise those hooks as currently active.
 
 The Upstream call concentration, infallible post-commit hooks, structured logging,
 terminal request summary, Hook overrun monitoring, and shared SSE data-payload
@@ -31,13 +33,16 @@ so external tooling (`sqlite3`, Datasette, DuckDB) can read it.
 Answer "what did I actually consume, on which model, when" without leaving the
 proxy and without a second process.
 
-_Outcome:_ once the staged implementation lands, with
-`--shim-usage-meter-enabled`, an eligible completion on the
-Anthropic `/v1/messages` or OpenAI `/responses` Route submits one row to the
-configured local usage database (OS-specific default in §10). Both support
-buffered JSON and SSE;
-only OpenAI Responses supports WebSocket. The GitHub Copilot Surface and the
-Catalogs are not metered.
+_Final outcome:_ with `--shim-usage-meter-enabled`, an eligible completion on
+the Anthropic `/v1/messages` or OpenAI `/responses` Route submits one row to the
+configured local usage database (OS-specific default in §10). Both final Routes
+support buffered JSON and SSE; only OpenAI Responses supports WebSocket. The
+GitHub Copilot Surface and the Catalogs are not metered.
+
+_Current checkpoint (#197):_ only qualifying buffered OpenAI Responses objects
+submit rows. The store already carries the frozen two-table migration so later
+recording slices add parsers/hooks without rewriting migration 1. No Anthropic,
+SSE, or WebSocket usage observer is active at this checkpoint.
 
 An eligible completion contains the required usage fields, identity, and model
 reported upstream (§6). This is best-effort observation, not an exactly-once
@@ -572,9 +577,12 @@ binding when a local prerequisite is missing"):
 Logs follow [ADR-0015](../adr/0015-govern-log-record-structure-with-ordinary-slog.md):
 the writer receives a required positional `*slog.Logger` derived for
 `internal/usage/sqlitestore`; new top-level keys live in `internal/logging`.
-Startup failure belongs to `cmd/copilotd`. Level follows consequence: a contained
-transient loss can be Warn; persistent inability to write requiring operator
-action is Error. No prompt bodies or credential values enter rows or logs.
+Startup failure belongs to `cmd/copilotd`. Level follows current consequence: a
+contained transient loss or queue pressure is Warn; consecutive current write
+failure that indicates persistent inability and requires operator action is
+Error; a confirmed later commit clears that live failure state. Cumulative loss
+counters remain cumulative but do not keep recovered runtime or final records at
+Error forever. No prompt bodies or credential values enter rows or logs.
 
 ### 8.3 Concurrent access
 
@@ -670,25 +678,32 @@ Costs and lifecycle obligations:
 5. A deadline, storage failure, or ambiguous batch result is not replayed. Every
    queued or not-confirmed row is conservatively counted as lost; only a batch
    confirmed committed is excluded from loss.
-6. While the logger remains alive, publish one final aggregate containing at
-   least queue-full drops, runtime write losses, late-after-cutoff drops,
-   final-flush losses, and native-cleanup completion status. The snapshot covers
-   losses observed through publication only; post-snapshot producers cannot be
-   promised inclusion in that final log.
-7. The coordinator abandons waiting at the fresh bound. Native cleanup may finish
-   in the writer worker; report it unconfirmed if it has not completed. Arbitrary
-   stuck filesystem I/O and operating-system exit cannot be guaranteed by a Go
-   deadline. Apply this same finalizer on bind or serve failure after opening the
-   store.
+6. After the bounded native-cleanup wait, serialize one terminal logging
+   handoff: an earlier runtime record finishes before the final record, or is
+   suppressed if final publication seals logging first. Snapshot counters
+   immediately before emitting the final aggregate, while the logger remains
+   alive, including at least queue-full drops, runtime write losses,
+   late-after-cutoff drops, final-flush losses, and native-cleanup completion
+   status. Calls completed while waiting for native cleanup or the logging gate
+   are included; post-snapshot producers cannot be promised inclusion.
+7. The coordinator abandons its SQL/native-cleanup wait at the fresh bound.
+   Native cleanup may finish in the writer worker; report it unconfirmed if it
+   has not completed. Final `slog.Handler` publication is deliberately
+   synchronous and is not made deadline-aware by the SQLite context, so a stuck
+   configured log destination can extend finalizer return beyond that native
+   bound. Arbitrary stuck filesystem or log I/O and operating-system exit cannot
+   be guaranteed by a Go deadline. Apply this same finalizer on bind or serve
+   failure after opening the store.
 
 ---
 
 ## 10. Config surface and wiring
 
-These are accepted target settings, not currently available configuration. They
-land with the staged implementation and must not appear in `CONFIGURATION.md`
-until then. Both are serve-only settings declared in `internal/config.serveSpecs`
-per ADR-0012, using the existing shim-toggle convention:
+Both serve-only settings are available as of #197 and are declared in
+`internal/config.serveSpecs` per ADR-0012, using the existing shim-toggle
+convention. Enabling them currently activates only the buffered OpenAI recording
+checkpoint described in §1; later transport slices reuse the same settings and
+store:
 
 | Flag | Field | Default |
 | --- | --- | --- |
@@ -717,7 +732,10 @@ a setting with no tuning story is a liability, and a later descriptor makes it
 cheap to add if a real need appears.
 
 Validation splits by phase (§8.2): the descriptor's `check` does syntactic path
-validation at resolution time; open/migrate happens at startup.
+validation at resolution time; open/migrate happens at startup. The store
+resolves that validated filesystem destination once to an absolute path and
+passes an escaped SQLite file URI with only store-owned driver parameters, so
+filename bytes such as `?`, `%`, or `file:` are never reinterpreted as a DSN.
 
 ### 10.1 Composition root
 
@@ -951,14 +969,14 @@ all four cgo-free release targets with the chosen SQLite driver (§13).
 
 ### Reconciled and staged docs
 
-`CONTEXT.md` now defines Shim, Usage meter, and Turn without embedding this
-implementation plan. The README's Shim and state-at-rest policies admit only the
-accepted observer and opt-in usage-database exceptions while stating that the
-meter remains staged. `CONFIGURATION.md` must add settings, implemented milestone
-coverage, durability, filesystem requirements, and buffering consequences only
-when the settings actually become available. The implementation must also review
-`docs/divergence-ledger.md` for meter-activated buffered failures; observation
-itself adds no usage-rewriting Alteration (§4.2).
+`CONTEXT.md` defines Shim, Usage meter, and Turn without embedding this
+implementation plan. As of #197, README and `CONFIGURATION.md` describe the
+available opt-in database and settings, explicitly limit implemented coverage to
+buffered OpenAI Responses, and state durability, filesystem, buffering,
+retention, backup, external-query, and shutdown consequences. The existing
+`docs/divergence-ledger.md` copilotd-originated error row already covers the
+meter-activated bounded-read `BadGateway`/`GatewayTimeout` Fabrications;
+observation itself adds no usage-rewriting Alteration (§4.2).
 
 ### Dependency
 
@@ -967,13 +985,13 @@ required matching `modernc.org/libc v1.75.6`. The retained feasibility module
 builds a reachable driver path with `CGO_ENABLED=0` for `linux/amd64`,
 `windows/amd64`, `windows/arm64`, and `darwin/arm64`; only Linux has runtime,
 filesystem, contention, and race evidence. Windows/Darwin runtime behavior and
-Windows ACLs remain accepted limitations, not certification. Production
-implementation will pin the dependency in root `go.mod`/`go.sum` and update the
-Nix vendor hash. Its completion gate must build the actual feature-bearing
-`copilotd` binary—not only the disposable probe—with `CGO_ENABLED=0` for all four
+Windows ACLs remain accepted limitations, not certification. Issue #197 pins the
+dependency in root `go.mod`/`go.sum` and updates the Nix vendor hash. Its
+completion gate builds the actual feature-bearing `copilotd` binary—not only the
+disposable probe—with `CGO_ENABLED=0` for all four
 current release targets, and `flake.nix`'s `vendorHash` must match the root module
-dependency graph. This architecture checkpoint does not add production code or a
-root dependency.
+dependency graph. The preceding #196 architecture checkpoint added neither
+production code nor a root dependency; #197 does.
 
 ---
 
@@ -996,5 +1014,7 @@ The four pre-implementation gates are explicitly closed:
    no ambiguous-batch replay, writer-owned cleanup, bounded coordinator wait,
    and observed-through-publication final reporting (§9.1).
 
-These approvals authorize staged implementation; they do not assert that any
-meter setting, parser, hook, writer, or production SQLite dependency exists yet.
+These approvals authorized staged implementation. Issue #197 now supplies the
+shared contract, production SQLite dependency and writer, both settings, and the
+buffered OpenAI hook. Buffered Anthropic, SSE, and WebSocket parsing remain later
+stages and must not be inferred from the frozen schema or final-target sections.

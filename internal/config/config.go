@@ -47,6 +47,7 @@ const (
 	defaultAnthropicCatalogModelIDNormalizationEnabled = false
 	defaultShimNopEnabled                              = false
 	defaultShimResponsesItemIDStabilizerEnabled        = false
+	defaultShimUsageMeterEnabled                       = false
 	defaultShimHookOverrunThreshold                    = time.Second
 	defaultCodexCatalogEnabled                         = false
 	defaultCodexAutoReviewModel                        = ""
@@ -126,7 +127,7 @@ type ServeConfig struct {
 	MaxRequestBytes int64
 
 	// MaxBufferedResponseBytes caps an upstream response only when a buffered
-	// response shim is active; an over-limit body yields 413 before commit.
+	// response shim is active; an over-limit body yields 502 before commit.
 	MaxBufferedResponseBytes int64
 
 	// AnthropicCatalogModelIDNormalizationEnabled controls the opt-in rewrite of
@@ -140,6 +141,11 @@ type ServeConfig struct {
 	// ShimResponsesItemIDStabilizerEnabled controls the opt-in OpenAI Responses
 	// item-id stabilizer shim. It is disabled by default.
 	ShimResponsesItemIDStabilizerEnabled bool
+
+	// ShimUsageMeterEnabled controls the opt-in Usage meter Shim. UsageDBPath is
+	// its private local SQLite destination. Both settings are serve-only.
+	ShimUsageMeterEnabled bool
+	UsageDBPath           string
 
 	// ShimHookOverrunThreshold is the global duration after which an executing
 	// post-commit shim hook is reported. Zero disables monitoring.
@@ -301,6 +307,8 @@ func serveSpecs() ([]spec[ServeConfig], *configPathField[ServeConfig]) {
 		boolField("anthropic-catalog-model-id-normalization-enabled", defaultAnthropicCatalogModelIDNormalizationEnabled, func(c *ServeConfig) *bool { return &c.AnthropicCatalogModelIDNormalizationEnabled }, "normalize Anthropic-vendored Claude model IDs to hyphenated slugs (opt-in)"),
 		boolField("shim-nop-enabled", defaultShimNopEnabled, func(c *ServeConfig) *bool { return &c.ShimNopEnabled }, "enable the canonical no-op shim"),
 		boolField("shim-responses-item-id-stabilizer-enabled", defaultShimResponsesItemIDStabilizerEnabled, func(c *ServeConfig) *bool { return &c.ShimResponsesItemIDStabilizerEnabled }, "stabilize churning OpenAI Responses item ids (opt-in)"),
+		boolField("shim-usage-meter-enabled", defaultShimUsageMeterEnabled, func(c *ServeConfig) *bool { return &c.ShimUsageMeterEnabled }, "persist observed native token usage to local SQLite (opt-in)"),
+		stringField("usage-db-path", defaultUsageDBPath(), func(c *ServeConfig) *string { return &c.UsageDBPath }, validUsageDBPath, "path to the private local usage SQLite database"),
 		durationField("shim-hook-overrun-threshold", defaultShimHookOverrunThreshold, inSeconds, func(c *ServeConfig) *time.Duration { return &c.ShimHookOverrunThreshold }, nonNegative, "warn when a post-commit shim hook remains in flight (0 disables monitoring)"),
 		boolField("codex-catalog-enabled", defaultCodexCatalogEnabled, func(c *ServeConfig) *bool { return &c.CodexCatalogEnabled }, "enable the Codex client-shaped catalog"),
 		stringMapField("codex-catalog-model-aliases", func(c *ServeConfig) *map[string]string { return &c.CodexCatalogModelAliases }, parseCodexCatalogModelAliases, "Codex catalog aliases (live-alias=metadata-source,...)"),
@@ -443,6 +451,20 @@ func defaultOAuthTokenFile() string {
 		return filepath.Join("copilotd", "github-oauth-token")
 	}
 	return filepath.Join(dir, "copilotd", "github-oauth-token")
+}
+
+func validUsageDBPath(key, value string) error {
+	if strings.TrimSpace(value) == "" {
+		return fmt.Errorf("%s is required", key)
+	}
+	if strings.IndexByte(value, 0) >= 0 {
+		return fmt.Errorf("invalid %s: path contains NUL", key)
+	}
+	clean := filepath.Clean(value)
+	if clean == "." || clean == string(filepath.Separator) || strings.HasSuffix(value, string(filepath.Separator)) {
+		return fmt.Errorf("invalid %s %q: path must name a database file", key, value)
+	}
+	return nil
 }
 
 // setFlags returns the set of long flag names that were explicitly set on the

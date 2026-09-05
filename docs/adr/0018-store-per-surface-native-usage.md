@@ -74,5 +74,6 @@ non-blocking sink.
 
 The [native usage evidence](../research/2026-09-05-native-usage-shapes.md) and
 [Usage meter design](../design/2026-07-26-token-usage-meter-design.md) record the
-provider semantics and evidence limitations behind this decision. Production
-parsing and persistence remain staged implementation work.
+provider semantics and evidence limitations behind this decision. Issue #197
+lands the frozen persistence shape and buffered OpenAI parser; Anthropic and
+streaming transport parsers remain staged implementation work.

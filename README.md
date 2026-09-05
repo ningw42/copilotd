@@ -89,12 +89,14 @@ Copilot is reachable.
 
 ### State at rest
 
-By default, there is no database or required companion service. The accepted
-Usage meter architecture adds one narrow exception: once its staged
-implementation lands, explicitly enabling it may create a private local SQLite
-main/WAL/SHM file set for best-effort Turn history
-([ADR-0017](docs/adr/0017-persist-usage-in-local-sqlite.md)). The meter and its
-settings are not available yet; the current binary creates no usage database.
+By default, there is no database or required companion service. The opt-in Usage
+meter is the one narrow exception: `--shim-usage-meter-enabled` creates a private
+local SQLite main/WAL/SHM file set for best-effort Turn history
+([ADR-0017](docs/adr/0017-persist-usage-in-local-sqlite.md)). The current
+implementation records qualifying **buffered OpenAI Responses** completions only;
+Anthropic and OpenAI SSE/WebSocket recording remain staged. With the flag off,
+`serve` creates no usage files or writer and installs no metering hook. See the
+[complete meter configuration and operating contract](CONFIGURATION.md#--shim-usage-meter-enabled).
 
 The owner-only GitHub OAuth token file remains the only other persisted
 application state; an injected GitHub OAuth token needs no file. Copilot tokens
@@ -120,7 +122,8 @@ handlers instead fetch support data and render their own representations.
 | Impersonation and cached values | `internal/impersonation`, `internal/cache` | Runtime version discovery and memory-only cached values with embedded fallbacks |
 | Upstream call | `internal/upstream` | Authenticated upstream request construction, headers, correlation, bounded reads, failure classification |
 | Forwarding and streaming | `internal/forward`, `internal/sse`, `internal/wsforward` | Raw HTTP/WebSocket forwarding, SSE framing and terminal handling, OpenAI SSE keepalives, cancellation |
-| Inference shims | `internal/shim` | Ordered hook contract for opt-in parity transforms and read-only observers, including the Responses item-id stabilizer |
+| Inference shims | `internal/shim` | Ordered hook contract for opt-in parity transforms and read-only observers, including the Responses item-id stabilizer and buffered OpenAI Usage meter |
+| Usage persistence | `internal/usage`, `internal/usage/sqlitestore` | Standard-library usage contract plus private local SQLite writer, migrations, bounded loss reporting, and finalization |
 | Catalogs | `internal/catalog` | Provider-shaped and Codex model catalogs |
 | Observability | `internal/logging`, `internal/requestsummary`, component-owned counters | Structured logs, request correlation, terminal summaries, metric scaffolding |
 | Build and distribution | `flake.nix`, `.github/workflows/` | Reproducible builds, verification, release archives and checksums |
@@ -143,8 +146,10 @@ The [release workflow](.github/workflows/release.yml) cross-compiles archives an
 publishes checksums. Nix provides development/build environments for Linux
 x86-64 and macOS arm64. Builds disable cgo; Linux is fully static, while Darwin
 still links the system `libSystem` library. No companion daemon is required; the
-accepted local usage database exception is opt-in and its implementation is
-still staged. Optional OS-service installation is not implemented
+local usage database is opt-in. SQLite runtime, locking, and permission evidence
+is native on Linux; Windows and Darwin have cgo-free build evidence only, and
+Windows ACL behavior remains best effort rather than certified. Optional
+OS-service installation is not implemented
 ([#191](https://github.com/ningw42/copilotd/issues/191)).
 
 ## Limitations and risks

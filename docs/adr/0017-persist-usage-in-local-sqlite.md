@@ -3,7 +3,7 @@
 **Status:** accepted
 
 The Usage meter is the sole usage-specific exception to copilotd's no-database
-state-at-rest policy. When explicitly enabled, it will persist best-effort Turn
+state-at-rest policy. When explicitly enabled, it persists best-effort Turn
 observations in a private local SQLite database using the cgo-free
 `modernc.org/sqlite v1.58.0` driver, which embeds SQLite 3.53.4 and requires the
 matching `modernc.org/libc v1.75.6`. The meter remains off by default, creates no
@@ -74,24 +74,35 @@ count, and can never send to a closed channel. With the current ten-second
 default, the coordinator therefore waits about twenty seconds in total: up to
 ten seconds for server drain and then up to ten seconds for meter finalization.
 
-The single writer owns final queue draining, writes, and native cleanup. Queue
-and write stages receive a fresh bounded context. Before every potentially
+The single writer owns final queue draining, writes, and native cleanup. The
+validated filesystem destination is resolved to an absolute path and encoded as
+an escaped SQLite file URI containing only store-owned parameters, so literal
+filename punctuation cannot become a driver DSN. Queue and write stages receive
+a fresh bounded context. Before every potentially
 blocking SQL stage, including lock acquisition, write, and commit, the writer
 recomputes the remaining monotonic budget and caps native `busy_timeout`;
 `ExecContext` alone does not preempt this driver's busy wait. Deadline, storage
 failure, and ambiguous completion conservatively count every not-confirmed row
 as lost, with no replay.
 
-While the logger is still alive, finalization publishes one aggregate covering
-queue-full drops, runtime write losses, late-after-cutoff drops, final-flush
-losses, and whether native cleanup completed. The snapshot covers losses observed
-through publication only; a post-snapshot producer cannot be promised inclusion.
-The coordinator abandons its wait at the bound, reports cleanup as unconfirmed
-when necessary, and may leave native cleanup finishing in the writer worker. No
-Go deadline can guarantee return from arbitrary stuck filesystem I/O or guarantee
-OS process exit. The same bounded finalizer applies after bind or serve failure
-once the store has opened.
+While the logger is still alive, finalization serializes a terminal aggregate
+after the bounded native-cleanup wait, covering queue-full drops, runtime write
+losses, late-after-cutoff drops, final-flush losses, and whether native cleanup
+completed. The counter snapshot is taken immediately before that publication;
+calls completed while waiting for native cleanup or an earlier runtime log are
+included, while a post-snapshot producer cannot be promised inclusion. No
+runtime store record can finish after the final record.
+
+The coordinator abandons its SQL/native-cleanup wait at the bound, reports
+cleanup as unconfirmed when necessary, and may leave native cleanup finishing in
+the writer worker. Final `slog.Handler` output remains synchronous and is not
+made deadline-aware by the SQLite context; a stuck configured log destination
+can therefore extend return beyond the native bound. No Go deadline can
+guarantee return from arbitrary stuck filesystem or log I/O, or guarantee OS
+process exit. The same finalizer applies after bind or serve failure once the
+store has opened.
 
 This decision accepts the trade-offs documented in the
-[Usage meter design](../design/2026-07-26-token-usage-meter-design.md);
-implementation remains staged after this architecture checkpoint.
+[Usage meter design](../design/2026-07-26-token-usage-meter-design.md). The
+private store and buffered OpenAI recording path land in #197; additional
+transport parsers remain staged without changing this persistence policy.

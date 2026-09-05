@@ -34,6 +34,8 @@ form is accepted as input, so `--stream-idle-timeout 5m` and
 | --- | --- | --- | --- |
 | [`--config <PATH>`](#--config) | `COPILOTD_CONFIG` | — | No file |
 | [`--shim-responses-item-id-stabilizer-enabled=<BOOL>`](#--shim-responses-item-id-stabilizer-enabled) | `COPILOTD_SHIM_RESPONSES_ITEM_ID_STABILIZER_ENABLED` | `shim-responses-item-id-stabilizer-enabled` | `false` |
+| [`--shim-usage-meter-enabled=<BOOL>`](#--shim-usage-meter-enabled) | `COPILOTD_SHIM_USAGE_METER_ENABLED` | `shim-usage-meter-enabled` | `false` |
+| [`--usage-db-path <PATH>`](#--usage-db-path) | `COPILOTD_USAGE_DB_PATH` | `usage-db-path` | Unix: `<user config dir>/copilotd/usage.db`; Windows: `%LOCALAPPDATA%\\copilotd\\usage.db` |
 | [`--shim-nop-enabled=<BOOL>`](#--shim-nop-enabled) | `COPILOTD_SHIM_NOP_ENABLED` | `shim-nop-enabled` | `false` |
 | [`--shim-hook-overrun-threshold <DURATION>`](#--shim-hook-overrun-threshold) | `COPILOTD_SHIM_HOOK_OVERRUN_THRESHOLD` | `shim-hook-overrun-threshold` | `1s` |
 | [`--anthropic-catalog-model-id-normalization-enabled=<BOOL>`](#--anthropic-catalog-model-id-normalization-enabled) | `COPILOTD_ANTHROPIC_CATALOG_MODEL_ID_NORMALIZATION_ENABLED` | `anthropic-catalog-model-id-normalization-enabled` | `false` |
@@ -96,7 +98,13 @@ port.
 
 ### `--shutdown-timeout`
 
-Sets the positive grace period for HTTP server shutdown before a forced close.
+Sets the positive grace period for HTTP/WebSocket drain before a forced close.
+When the Usage meter is enabled, the store receives one fresh timeout of the
+same length only after server drain returns. The default can therefore allow
+about `20s` of HTTP/WebSocket plus SQLite coordinator wait in total: up to `10s`
+for drain and then up to `10s` for final usage flush and native cleanup. The
+terminal structured log write is synchronous; a stuck configured log destination
+can extend return beyond this native-work bound.
 
 ### `--apikey`
 
@@ -137,7 +145,11 @@ values must be positive.
 ### `--max-buffered-response-bytes`
 
 Caps model-catalog response bodies and upstream response bodies processed by a
-buffered-response shim; values must be positive.
+buffered-response shim; values must be positive. Enabling the Usage meter adds a
+buffered hook to OpenAI Responses, so an over-cap qualifying or non-qualifying
+non-SSE identity-encoded response returns `502` before commitment. With no other
+buffered hook and the meter disabled, the same response remains on the
+unbuffered passthrough path.
 
 ### `--anthropic-catalog-model-id-normalization-enabled`
 
@@ -163,6 +175,119 @@ to it; no id is minted, and any payload it cannot confidently rewrite is
 forwarded verbatim. Scoped to the OpenAI `/responses` endpoint, so every other
 surface is untouched. Disabled by default, leaving both transports
 byte-for-byte verbatim.
+
+### `--shim-usage-meter-enabled`
+
+Enables best-effort recording of native token counts to the SQLite file selected
+by [`--usage-db-path`](#--usage-db-path). It is off by default: disabled `serve`
+and `login` do not open a database, create usage files, start a usage writer, or
+install a metering hook.
+
+**Implemented coverage is currently buffered OpenAI Responses only.** A row is
+submitted when a complete buffered response object has its own non-empty `id`
+and reported `model`, `status: "completed"`, and valid nonnegative integer
+`usage.input_tokens` and `usage.output_tokens`. Optional numeric reports remain
+nullable: omitted or `null` values become SQL `NULL`, while a reported zero stays
+zero. The meter also preserves these OpenAI-native fields when reported:
+
+- `input_tokens_details.cached_tokens` and
+  `input_tokens_details.cache_write_tokens`, both subsets already inside complete
+  `input_tokens`;
+- `output_tokens_details.reasoning_tokens`, a subset already inside complete
+  `output_tokens`; and
+- provider-reported `total_tokens`, without recalculation.
+
+Eligibility validates JSON types, required presence, nonnegative values, and the
+signed 64-bit range; it does not add cross-field arithmetic consistency checks.
+The reported response model is stored verbatim; requested model names, Catalog
+normalization, Codex aliases, and metadata sources are never used as fallback or
+mapping inputs. The row also records local completion-observation time as
+canonical `at_ms` plus generated millisecond UTC `at_utc`, inbound `request_id`
+(empty only when unavailable), upstream response-object `response_id`,
+`transport='buffered'`, and a zero-based submission-attempt `turn_index`. It does
+not store prompts, generated content, API keys, GitHub OAuth tokens, or Copilot
+tokens.
+
+Anthropic Messages and OpenAI SSE/WebSocket recording are later milestones and
+are **not** active yet. The GitHub Copilot Surface, raw `/models`, provider/Codex
+Catalogs, and `/v1/messages/count_tokens` are not metered. There is no query API,
+CLI query subcommand, aggregation, pricing or billing reconciliation, automatic
+pruning, per-key attribution, or non-token usage projection. Query the
+`openai_turn` table with external SQLite tooling, for example:
+
+```sh
+sqlite3 "$USAGE_DB" \
+  'SELECT at_utc, model, input_tokens, output_tokens FROM openai_turn ORDER BY at_ms DESC;'
+```
+
+The frozen migration also creates `anthropic_turn` for forward compatibility,
+but this milestone does not submit Anthropic rows.
+
+Enabling this setting changes non-SSE forwarding even when a body is an error or
+is not JSON: every non-SSE response with no `Content-Encoding`, or exactly one
+trimmed case-insensitive `identity` value, is read in full under
+`--max-buffered-response-bytes` before the parser can decline it. This delays
+response commitment and recomputes `Content-Length`. An ordinary buffered read
+failure returns `502`, timeout returns `504`, and client cancellation adds no new
+response. Unsupported, repeated, list-valued, or explicitly empty encodings
+bypass the buffered meter and remain opaque. Payload bytes are unchanged when a
+hook runs; whole-wire neutrality is not promised.
+
+Observation happens before downstream writing. A row can remain after a client
+write failure or an outer Shim rejection, and duplicate qualifying observations
+are not deduplicated. Conversely, failed, incomplete, cancelled, malformed, or
+unparseable responses and queue/storage loss can omit real consumption. The
+database and logs are not exhaustive or billing-grade accounting.
+
+### `--usage-db-path`
+
+Selects the Usage meter's private local SQLite main file. On Unix the default is
+`<os.UserConfigDir()>/copilotd/usage.db`; on Windows it is
+`%LOCALAPPDATA%\\copilotd\\usage.db`, deliberately not roaming AppData. If the
+OS base cannot be resolved, the default is relative `copilotd/usage.db`.
+Changing `--github-oauth-token-file` does not move the usage database. If the
+default is network-mounted or synchronized, override it with a genuinely local
+path: network shares and live roaming/synchronized copies are unsupported. The
+resolved path is treated as a literal filename, not a driver DSN; punctuation
+such as `?`, `%`, or `file:` cannot introduce SQLite query parameters.
+
+When metering is enabled, startup validates the destination and migrates before
+binding. Failure is fatal rather than silently disabling requested recording.
+On Unix, a missing final parent is created at `0700`, a missing main file is
+exclusively pre-created at `0600`, and existing shared parents, permissive main
+files, symlinks, and non-regular destinations are refused without chmod or
+truncation. The private parent protects SQLite-created `usage.db-wal` and
+`usage.db-shm` sidecars. Windows uses best-effort exclusive creation and regular
+file checks; Go mode bits do not establish or certify Windows ACLs, sidecar ACL
+inheritance, reparse-point handling, or native runtime behavior.
+
+The store uses one dedicated connection, WAL, and `synchronous=NORMAL`. External
+readers are supported while serving; stop every writer for upgrades, retention,
+or backup. Back up a consistent stopped database or use SQLite-aware backup
+tooling—never copy a live main file without its WAL state. No down migration or
+automatic retention exists; operators own growth, pruning, backups, and restore.
+Keep the main, WAL, and SHM artifacts together.
+
+A 1024-record in-memory queue, bounded transaction batches, and an approximately
+one-second timer keep SQLite work outside hooks. The timer is a flush target, not
+a one-second loss bound: backlog or an uncommitted transaction can exceed it,
+and WAL/NORMAL does not guarantee recent commits survive process kill, OS crash,
+or power loss. Full queues, runtime write failure, forced shutdown, and stuck
+storage can lose rows. Failed or ambiguously committed batches are counted and
+not replayed; the writer continues with later batches. Runtime levels describe
+live consequence rather than cumulative history: contained loss/queue pressure
+is `Warn`, consecutive current write failure is `Error`, and a later confirmed
+commit records recovery instead of leaving future reports at `Error`. Shutdown
+cuts off
+admission after server drain, attempts a bounded final flush under the fresh
+`--shutdown-timeout`, and publishes aggregate queue, write, late, final-flush,
+and cleanup status while logging remains alive. Runtime and final store records
+are serialized so the final aggregate is terminal. Its counters are snapped
+immediately before publication; calls completed while waiting for native cleanup
+or an earlier runtime log are included, while later calls are outside that
+snapshot. The SQLite/native wait is bounded, but synchronous `slog.Handler` I/O
+is not deadline-aware. There are no public queue-depth or flush-interval tuning
+settings.
 
 ### `--shim-hook-overrun-threshold`
 
