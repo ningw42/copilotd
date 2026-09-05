@@ -241,6 +241,27 @@ func TestProxyObservesOnePreUpgradeAcceptOutcome(t *testing.T) {
 			want:        AcceptDialFailed,
 		},
 		{
+			name: "expired rejected handshake preserves deadline after correlation",
+			provider: identity.NewStatic(identity.Credential{
+				BaseURL: "http://upstream.invalid",
+				Token:   "private-copilot-token",
+			}, true),
+			client: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+				<-request.Context().Done()
+				return &http.Response{
+					StatusCode: http.StatusForbidden,
+					Header:     http.Header{"X-Request-Id": {"upstream-expired-handshake"}},
+					Body:       http.NoBody,
+					Request:    request,
+				}, nil
+			})},
+			dialTimeout: 5 * time.Millisecond,
+			request:     validUpgradeRequest().WithContext(logging.WithRequestID(context.Background(), "copilotd-expired-handshake")),
+			wantStatus:  http.StatusGatewayTimeout,
+			wantBody:    `{"error":{"message":"the upstream request timed out","type":"api_error","code":null,"param":null}}`,
+			want:        AcceptDialFailed,
+		},
+		{
 			name: "ordinary upstream execution error is a dial failure",
 			provider: identity.NewStatic(identity.Credential{
 				BaseURL: "http://upstream.invalid",
