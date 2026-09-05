@@ -18,6 +18,7 @@ func TestEmbeddedCodexModelsLoadAtStartup(t *testing.T) {
 		"gpt-5.6-luna",
 		"gpt-5.6-sol",
 		"gpt-5.6-terra",
+		"gpt-6-astra",
 		"gpt-daybreak-blue-latest",
 		"gpt-daybreak-red-latest",
 	}
@@ -224,7 +225,7 @@ func TestValidateCodexModelsDoesNotRequireRemovedLegacyFields(t *testing.T) {
 
 func TestValidateCodexModelsRequiresCurrentSerdeFields(t *testing.T) {
 	// This literal list is independent of codexRequiredFields. It mirrors the
-	// non-Option ModelInfo members without Serde defaults at rust-v0.152.1.
+	// non-Option ModelInfo members without Serde defaults at rust-v0.153.4.
 	required := []string{
 		"slug",
 		"display_name",

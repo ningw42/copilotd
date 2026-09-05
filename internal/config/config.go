@@ -63,7 +63,7 @@ const (
 	// values from them. The discovery interval controls the runtime orchestration
 	// and zero disables discovery.
 	defaultCopilotIntegrationID         = "vscode-chat"
-	defaultVSCodeVersionFallback        = "1.135.0"
+	defaultVSCodeVersionFallback        = "1.136.1"
 	defaultPluginVersionFallback        = "0.48.1"
 	defaultGithubAPIVersion             = "2025-04-01"
 	defaultImpersonationRefreshInterval = 24 * time.Hour

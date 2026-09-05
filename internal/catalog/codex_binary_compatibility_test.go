@@ -32,8 +32,8 @@ func TestLatestCodexBinaryAcceptsUnknownRemoteCatalogModel(t *testing.T) {
 	if observed.modelsMethod != http.MethodGet {
 		t.Errorf("models method = %q, want GET", observed.modelsMethod)
 	}
-	if observed.clientVersion != "0.152.1" {
-		t.Errorf("client_version = %q, want 0.152.1", observed.clientVersion)
+	if observed.clientVersion != "0.153.4" {
+		t.Errorf("client_version = %q, want 0.153.4", observed.clientVersion)
 	}
 	if observed.authorization != "Bearer catalog-audit-token" {
 		t.Errorf("Authorization = %q, want command-auth bearer", observed.authorization)
@@ -76,11 +76,11 @@ func TestLatestCodexBinaryKeepsBundledSourceAheadOfMatchingAlias(t *testing.T) {
 	if observed.responsesCalls == 0 {
 		t.Fatalf("Codex did not make a Responses request after catalog merge:\n%s", observed.output)
 	}
-	if observed.selectedModel != "gpt-5.6-sol" {
-		t.Errorf("selected model = %q, want untouched bundled source gpt-5.6-sol ahead of metadata-matching alias", observed.selectedModel)
+	if observed.selectedModel != "gpt-6-astra" {
+		t.Errorf("selected model = %q, want untouched bundled source gpt-6-astra ahead of metadata-matching alias", observed.selectedModel)
 	}
 
-	const alias = "gpt-5.6-sol-audit-alias"
+	const alias = "gpt-6-astra-audit-alias"
 	withoutAlias := observeLatestCodexBinaryCatalogWithModel(t, []byte(`{"models":[]}`), alias)
 	if withoutAlias.responsesCalls == 0 || withoutAlias.selectedModel != alias {
 		t.Fatalf("negative control changed: Codex no longer forwards arbitrary explicit model %q without a catalog entry:\n%s", alias, withoutAlias.output)
@@ -308,7 +308,7 @@ func requireLatestCodexBinary(t *testing.T, binary string) {
 	if _, err := io.Copy(hasher, file); err != nil {
 		t.Fatalf("hash Codex binary: %v", err)
 	}
-	const wantSHA256 = "b82018241214a4a7c6b97b198585192d1dbc3aab1ddcdc640f04d8dee8c606f9"
+	const wantSHA256 = "56ef98ab4032d317ab26e9b5e5a175650717351edb16ed9cde0cb6d1734d62da"
 	if got := hex.EncodeToString(hasher.Sum(nil)); got != wantSHA256 {
 		t.Fatalf("Codex binary SHA-256 = %s, want pinned %s", got, wantSHA256)
 	}
@@ -317,8 +317,8 @@ func requireLatestCodexBinary(t *testing.T, binary string) {
 	if err != nil {
 		t.Fatalf("Codex version: %v: %s", err, output)
 	}
-	if got := strings.TrimSpace(string(output)); got != "codex-cli 0.152.1" {
-		t.Fatalf("Codex version = %q, want codex-cli 0.152.1", got)
+	if got := strings.TrimSpace(string(output)); got != "codex-cli 0.153.4" {
+		t.Fatalf("Codex version = %q, want codex-cli 0.153.4", got)
 	}
 }
 
@@ -332,12 +332,12 @@ func replacedBundledDefaultModel(t *testing.T) []byte {
 
 func matchingRemoteAliasAndSource(t *testing.T) []byte {
 	t.Helper()
-	source := vendoredCodexModel(t, "gpt-5.6-sol")
+	source := vendoredCodexModel(t, "gpt-6-astra")
 	alias := make(map[string]json.RawMessage, len(source))
 	for key, value := range source {
 		alias[key] = value
 	}
-	alias["slug"] = json.RawMessage(`"gpt-5.6-sol-audit-alias"`)
+	alias["slug"] = json.RawMessage(`"gpt-6-astra-audit-alias"`)
 	return marshalRemoteModels(t, alias)
 }
 

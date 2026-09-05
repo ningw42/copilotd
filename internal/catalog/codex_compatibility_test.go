@@ -21,10 +21,10 @@ import (
 )
 
 const (
-	vendoredCodexTag    = "rust-v0.152.1"
-	vendoredCodexCommit = "5adb68a49933ae446bf11935662c83dba55a0804"
-	vendoredCodexBlob   = "0c4137ad9560e1ac7b9baf1adc95dbc7051e2b6c"
-	vendoredCodexSHA256 = "eb0d7b9a5dcaf103895c5f8a14c16b269df46e039b375a55ba97f6238542d2ed"
+	vendoredCodexTag    = "rust-v0.153.4"
+	vendoredCodexCommit = "3d2ee51ca2d5db578f328aa75e20aa22c0197c9a"
+	vendoredCodexBlob   = "698da6fb7a825cd3ede1696e4ce8579ef5c42c02"
+	vendoredCodexSHA256 = "d7136a413cfac1b5b1686d9e0dcc5c80ca05bebed5e9fc3911376561d0ef6ee8"
 )
 
 func TestVendoredCodexCatalogRoundTripFidelity(t *testing.T) {
@@ -42,6 +42,23 @@ func TestVendoredCodexCatalogRoundTripFidelity(t *testing.T) {
 		t.Fatalf("embedded catalog version = %s, want audited %s", embeddedCodexModelsVersion, vendoredCodexTag)
 	}
 	vendoredModels := rawCodexModelsBySlug(t, embeddedCodexModels)
+	astra, present := vendoredModels["gpt-6-astra"]
+	if !present {
+		t.Fatal("vendored catalog has no gpt-6-astra entry")
+	}
+	if _, present := astra["base_instructions"]; present {
+		t.Error("gpt-6-astra unexpectedly has legacy base_instructions")
+	}
+	var astraMessages map[string]json.RawMessage
+	if err := json.Unmarshal(astra["model_messages"], &astraMessages); err != nil {
+		t.Fatalf("decode gpt-6-astra model_messages: %v", err)
+	}
+	if template := decodeStringField(t, astraMessages, "instructions_template"); template == "" {
+		t.Error("gpt-6-astra has empty canonical instructions_template")
+	}
+	if got := bytes.TrimSpace(astra["requires_sandboxed_review"]); !bytes.Equal(got, []byte("false")) {
+		t.Errorf("gpt-6-astra.requires_sandboxed_review = %s, want preserved false", got)
+	}
 
 	github := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -113,7 +130,7 @@ func TestVendoredCodexCatalogRoundTripFidelity(t *testing.T) {
 		},
 	}, stubSource{status: http.StatusOK, body: copilotBytes})
 	recorder := httptest.NewRecorder()
-	handler(recorder, httptest.NewRequest(http.MethodGet, "/openai/v1/models?client_version=0.152.1", nil))
+	handler(recorder, httptest.NewRequest(http.MethodGet, "/openai/v1/models?client_version=0.153.4", nil))
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("handler status = %d, want 200: %s", recorder.Code, recorder.Body.String())
