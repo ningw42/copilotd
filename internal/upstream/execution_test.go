@@ -3,6 +3,7 @@ package upstream
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -280,9 +281,9 @@ func TestCallerReadBoundedClassifiesTheBoundUpstreamCallContext(t *testing.T) {
 				t.Fatalf("build logger: %v", err)
 			}
 			upstreamBody := &executionCancelAwareBody{blockAfterChunks: true}
-			client := executionBodyClient(upstreamBody, make(http.Header))
+			client := executionBodyClient(upstreamBody, http.Header{RequestIDHeader: {"upstream-read-canceled"}})
 			caller := executionCaller(readyExecutionProvider("https://upstream.invalid"), client, time.Hour, 1<<20, logger)
-			ctx, cancel := context.WithCancelCause(context.Background())
+			ctx, cancel := context.WithCancelCause(logging.WithRequestID(context.Background(), "copilotd-read-canceled"))
 			response, _, failure := caller.Do(ctx, executionCall())
 			if failure != nil {
 				t.Fatalf("Do() failure = %#v, want response", failure)
@@ -608,17 +609,26 @@ func TestCallerBufferedClassifiesParentCancellationDuringReadAsClientGone(t *tes
 }
 
 func TestCallerBufferedClassifiesPlainReadFailureWithoutPartialBody(t *testing.T) {
+	var logs bytes.Buffer
+	base, err := logging.NewWithWriter(&logs, config.ServeConfig{LogLevel: "info", LogFormat: "json"})
+	if err != nil {
+		t.Fatalf("build logger: %v", err)
+	}
+	logger := logging.ForComponent(base, "internal/upstream")
+	ctx := logging.WithRequestID(context.Background(), "copilotd-read-failure")
 	readFailure := errors.New("response stream failed")
 	upstreamBody := &executionObservedReadCloser{reader: io.MultiReader(
 		strings.NewReader(`{"data":[`),
 		executionTerminalErrorReader{err: readFailure},
 	)}
 	client := &http.Client{Transport: executionRoundTripFunc(func(request *http.Request) (*http.Response, error) {
-		return executionResponse(request, http.StatusOK, upstreamBody), nil
+		response := executionResponse(request, http.StatusOK, upstreamBody)
+		response.Header.Set(RequestIDHeader, "upstream-read-failure")
+		return response, nil
 	})}
-	caller := executionCaller(readyExecutionProvider("https://upstream.invalid"), client, time.Second, 1<<20, slog.Default())
+	caller := New(readyExecutionProvider("https://upstream.invalid"), client, time.Second, 1<<20, logger)
 
-	status, body, _, failure := caller.Buffered(context.Background(), executionCall())
+	status, body, _, failure := caller.Buffered(ctx, executionCall())
 
 	if status != 0 || body != nil {
 		t.Errorf("failure result = (%d, %q), want zero status and nil body", status, body)
@@ -631,6 +641,20 @@ func TestCallerBufferedClassifiesPlainReadFailureWithoutPartialBody(t *testing.T
 	}
 	if !upstreamBody.closed {
 		t.Error("upstream response body remains open")
+	}
+	var record map[string]any
+	if err := json.Unmarshal(logs.Bytes(), &record); err != nil {
+		t.Fatalf("decode single failure warning: %v: %s", err, logs.String())
+	}
+	for key, want := range map[string]string{
+		"level":               "WARN",
+		"component":           "internal/upstream",
+		"request_id":          "copilotd-read-failure",
+		"upstream_request_id": "upstream-read-failure",
+	} {
+		if got := record[key]; got != want {
+			t.Errorf("failure warning %s = %v, want %q", key, got, want)
+		}
 	}
 }
 

@@ -49,13 +49,13 @@ func (c *Caller) Do(ctx context.Context, call Call) (*http.Response, context.Con
 	if err != nil {
 		return nil, ctx, c.Classify(ctx, err)
 	}
+	responseCtx := c.Correlate(ctx, response.Header)
 	if response.Body != nil {
 		response.Body = &contextBoundResponseBody{
 			ReadCloser: response.Body,
-			ctx:        request.Context(),
+			ctx:        responseCtx,
 		}
 	}
-	responseCtx := c.Correlate(ctx, response.Header)
 	return response, responseCtx, nil
 }
 
