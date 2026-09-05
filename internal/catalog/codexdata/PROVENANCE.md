@@ -255,6 +255,14 @@ temporary and is not stored in the repository.
    the exact recorded executable. Run the repository's complete verification at
    the final feature tip.
 
+Impersonation fallback bumps are a separate maintenance path. When intentionally
+advancing those defaults, update `defaultVSCodeVersionFallback` and
+`defaultPluginVersionFallback` in [`internal/config/config.go`](../../config/config.go),
+the independent literal `defaultConfig` expectations in
+[`internal/config/config_test.go`](../../config/config_test.go), and the matching
+default rows in [`CONFIGURATION.md`](../../../CONFIGURATION.md). Synthetic test
+fixture versions remain unchanged; a fallback bump alone does not retarget them.
+
 [audit-release]: https://api.github.com/repos/openai/codex/releases/383061770
 [audit-tag-object]: https://api.github.com/repos/openai/codex/git/tags/042fb41b7c813ac7999105e886b2b7aa715b5081
 [audit-commit]: https://github.com/openai/codex/commit/3d2ee51ca2d5db578f328aa75e20aa22c0197c9a
