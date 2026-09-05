@@ -50,8 +50,8 @@ live-limit mutations; it is selected by `?client_version=` when enabled and
 configured. See the [catalog configuration](CONFIGURATION.md#--codex-catalog-enabled).
 
 Responses management subpaths (retrieve, delete, cancel, and input items) are
-not currently served ([#190](https://github.com/ningw42/copilotd/issues/190)); HTTP
-`background:true` requests are rejected rather than creating responses that
+not served; see the [support-boundary decision](.out-of-scope/responses-management-operations.md).
+HTTP `background:true` requests are rejected rather than creating responses that
 clients cannot retrieve through copilotd.
 
 `GET /healthz` reports liveness; `GET /readyz` reports local serving prerequisites
