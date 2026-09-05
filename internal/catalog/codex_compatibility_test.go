@@ -22,6 +22,7 @@ import (
 
 func TestVendoredCodexCatalogRoundTripFidelity(t *testing.T) {
 	release := embeddedCodexRelease
+	assertCodexReleaseRecordComplete(t, release)
 	wantFallbackBytes := bytes.Clone(embeddedCodexModels)
 	if got := len(embeddedCodexModels); got != release.Models.Size {
 		t.Fatalf("%s vendored snapshot size = %d, want pinned %d", release.Release.Tag, got, release.Models.Size)
@@ -37,22 +38,30 @@ func TestVendoredCodexCatalogRoundTripFidelity(t *testing.T) {
 	}
 	vendoredModels := rawCodexModelsBySlug(t, embeddedCodexModels)
 	defaultSlug := release.Models.AuditedBundledDefault
-	defaultModel, present := vendoredModels[defaultSlug]
-	if !present {
+	if _, present := vendoredModels[defaultSlug]; !present {
 		t.Fatalf("vendored catalog has no audited bundled default %q", defaultSlug)
 	}
-	if _, present := defaultModel["base_instructions"]; present {
-		t.Errorf("audited bundled default %q unexpectedly has legacy base_instructions", defaultSlug)
+
+	// gpt-6-astra is the rust-v0.153.4 (2026-09-05) witness for Codex's
+	// canonical-only instruction shape and raw transport-field preservation.
+	// Keep this historical schema witness independent of the moving default.
+	const astraSlug = "gpt-6-astra"
+	astra, present := vendoredModels[astraSlug]
+	if !present {
+		t.Fatalf("vendored catalog has no historical shape witness %q", astraSlug)
 	}
-	var defaultMessages map[string]json.RawMessage
-	if err := json.Unmarshal(defaultModel["model_messages"], &defaultMessages); err != nil {
-		t.Fatalf("decode audited bundled default %q model_messages: %v", defaultSlug, err)
+	if _, present := astra["base_instructions"]; present {
+		t.Errorf("%s unexpectedly has legacy base_instructions", astraSlug)
 	}
-	if template := decodeStringField(t, defaultMessages, "instructions_template"); template == "" {
-		t.Errorf("audited bundled default %q has empty canonical instructions_template", defaultSlug)
+	var astraMessages map[string]json.RawMessage
+	if err := json.Unmarshal(astra["model_messages"], &astraMessages); err != nil {
+		t.Fatalf("decode %s model_messages: %v", astraSlug, err)
 	}
-	if got := bytes.TrimSpace(defaultModel["requires_sandboxed_review"]); !bytes.Equal(got, []byte("false")) {
-		t.Errorf("%s.requires_sandboxed_review = %s, want preserved false", defaultSlug, got)
+	if template := decodeStringField(t, astraMessages, "instructions_template"); template == "" {
+		t.Errorf("%s has empty canonical instructions_template", astraSlug)
+	}
+	if got := bytes.TrimSpace(astra["requires_sandboxed_review"]); !bytes.Equal(got, []byte("false")) {
+		t.Errorf("%s.requires_sandboxed_review = %s, want preserved false", astraSlug, got)
 	}
 
 	github := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -215,6 +224,50 @@ func BenchmarkParseVendoredCodexModels(b *testing.B) {
 		if _, err := parseCodexModels(embeddedCodexModels); err != nil {
 			b.Fatal(err)
 		}
+	}
+}
+
+func assertCodexReleaseRecordComplete(t *testing.T, record codexReleaseRecord) {
+	t.Helper()
+	requiredStrings := []struct {
+		name  string
+		value string
+	}{
+		{name: "release.repository", value: record.Release.Repository},
+		{name: "release.tag", value: record.Release.Tag},
+		{name: "release.peeled_commit", value: record.Release.PeeledCommit},
+		{name: "release.audit_date", value: record.Release.AuditDate},
+		{name: "release.published_at", value: record.Release.PublishedAt},
+		{name: "release.tag_object", value: record.Release.TagObject},
+		{name: "models.source_path", value: record.Models.SourcePath},
+		{name: "models.git_blob", value: record.Models.GitBlob},
+		{name: "models.sha256", value: record.Models.SHA256},
+		{name: "models.audited_bundled_default", value: record.Models.AuditedBundledDefault},
+		{name: "manifest.asset_name", value: record.Manifest.AssetName},
+		{name: "manifest.sha256", value: record.Manifest.SHA256},
+		{name: "executable_audit.asset_name", value: record.ExecutableAudit.AssetName},
+		{name: "executable_audit.archive_sha256", value: record.ExecutableAudit.ArchiveSHA256},
+		{name: "executable_audit.executable_sha256", value: record.ExecutableAudit.ExecutableSHA256},
+	}
+	for _, field := range requiredStrings {
+		if field.value == "" {
+			t.Errorf("embedded Codex release record field %s is empty", field.name)
+		}
+	}
+	if !isStableCodexReleaseTag(record.Release.Tag) {
+		t.Errorf("embedded Codex release tag %q is not stable", record.Release.Tag)
+	}
+	if !isGitCommitSHA(record.Release.PeeledCommit) {
+		t.Errorf("embedded Codex peeled commit %q is invalid", record.Release.PeeledCommit)
+	}
+	if record.Release.GitHubReleaseID <= 0 {
+		t.Error("embedded Codex release record has no positive GitHub release ID")
+	}
+	if record.Manifest.GitHubAssetID <= 0 {
+		t.Error("embedded Codex release record has no positive manifest asset ID")
+	}
+	if record.Models.Size <= 0 {
+		t.Error("embedded Codex release record has no positive models size")
 	}
 }
 

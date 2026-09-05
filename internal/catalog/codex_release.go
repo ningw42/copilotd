@@ -45,39 +45,10 @@ func mustDecodeCodexReleaseRecord(recordJSON []byte) codexReleaseRecord {
 	if err := json.Unmarshal(recordJSON, &record); err != nil {
 		panic(fmt.Sprintf("decode embedded Codex release record: %v", err))
 	}
-	requiredStrings := []struct {
-		name  string
-		value string
-	}{
-		{name: "release.repository", value: record.Release.Repository},
-		{name: "release.tag", value: record.Release.Tag},
-		{name: "release.peeled_commit", value: record.Release.PeeledCommit},
-		{name: "release.audit_date", value: record.Release.AuditDate},
-		{name: "release.published_at", value: record.Release.PublishedAt},
-		{name: "release.tag_object", value: record.Release.TagObject},
-		{name: "models.source_path", value: record.Models.SourcePath},
-		{name: "models.git_blob", value: record.Models.GitBlob},
-		{name: "models.sha256", value: record.Models.SHA256},
-		{name: "models.audited_bundled_default", value: record.Models.AuditedBundledDefault},
-		{name: "manifest.asset_name", value: record.Manifest.AssetName},
-		{name: "manifest.sha256", value: record.Manifest.SHA256},
-		{name: "executable_audit.asset_name", value: record.ExecutableAudit.AssetName},
-		{name: "executable_audit.archive_sha256", value: record.ExecutableAudit.ArchiveSHA256},
-		{name: "executable_audit.executable_sha256", value: record.ExecutableAudit.ExecutableSHA256},
-	}
-	for _, field := range requiredStrings {
-		if field.value == "" {
-			panic(fmt.Sprintf("decode embedded Codex release record: %s is empty", field.name))
-		}
-	}
+	// Only the stable tag is a runtime prerequisite. Documentary audit fields
+	// and artifact identities are checked at the vendored identity test seam.
 	if !isStableCodexReleaseTag(record.Release.Tag) {
 		panic(fmt.Sprintf("decode embedded Codex release record: release.tag %q is not stable", record.Release.Tag))
-	}
-	if !isGitCommitSHA(record.Release.PeeledCommit) {
-		panic(fmt.Sprintf("decode embedded Codex release record: release.peeled_commit %q is invalid", record.Release.PeeledCommit))
-	}
-	if record.Release.GitHubReleaseID <= 0 || record.Manifest.GitHubAssetID <= 0 || record.Models.Size <= 0 {
-		panic("decode embedded Codex release record: numeric identity is not positive")
 	}
 	return record
 }

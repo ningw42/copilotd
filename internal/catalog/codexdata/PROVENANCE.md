@@ -10,9 +10,7 @@ executable-audit asset, archive digest, and executable digest.
 
 `models.json` is vendored without modification from the source recorded there.
 `LICENSE` and `NOTICE` are copied from the repository root at the same audited
-commit. The legal files are byte-identical to their `rust-v0.152.1`
-counterparts; `models.json` adds the `gpt-6-astra` entry and updates existing
-model metadata.
+commit.
 
 The round-trip test computes SHA-256, byte size, and Git's
 `blob <length>\0<content>` object identity over the actual embedded production
@@ -25,11 +23,6 @@ The audit metadata in `release.json` was collected from GitHub's first-party
 release was published as stable (`draft: false`, `prerelease: false`), and the
 recorded tag object peels to the recorded commit; that commit, rather than the
 release's `target_commitish: "main"`, is the source pin.
-
-GitHub reported the release as `immutable: false`; the tag and commit were
-unsigned. The commit and individual Git blob IDs are therefore the durable
-identities; the release/tag names establish which stable release was current at
-the audit cutoff.
 
 The runtime cached value keeps the stable tag as its cheap version label, then
 resolves a changed tag through GitHub's commit endpoint and requests
@@ -49,6 +42,13 @@ below were audited against `rust-v0.153.4` on 2026-09-05. Their immutable source
 citations intentionally remain pinned to that reviewed commit as historical
 contract evidence; they are not a second current-release identity. The current
 artifact identity remains `release.json`.
+
+For that bump, `LICENSE` and `NOTICE` were byte-identical to their
+`rust-v0.152.1` counterparts; `models.json` added the `gpt-6-astra` entry and
+updated existing model metadata. GitHub reported the audited release as
+`immutable: false`, and its tag and commit were unsigned. The commit and
+individual Git blob IDs were therefore the durable identities; the release/tag
+names established which stable release was current at that audit cutoff.
 
 First-party evidence retained for that dated audit includes the GitHub
 [release response][audit-release], [tag object][audit-tag-object],
@@ -225,13 +225,19 @@ establishes that explicit `--model` forwards an arbitrary unknown slug even with
 an empty remote catalog, so explicit selection is not treated as merge evidence.
 The audit instead queries the pinned app-server's `model/list`: the empty-catalog
 control omits the alias while the alias-catalog run includes it, independently
-witnessing the merge before `/responses` forwarding is checked. The audit ran
-them against the exact official asset named in `release.json`, after verifying
-the archive digest recorded there; the contract test enforces the recorded
-executable digest and the CLI version derived from the stable release tag before
-exercising the client. It discovers the command-auth `printf` executable from
-`PATH` and skips with an explicit prerequisite message when unavailable. The
-downloaded Codex executable was temporary and is not stored in the repository.
+witnessing the merge before `/responses` forwarding is checked. The 2026-09-05
+audit ran them against the pinned [`rust-v0.153.4` executable
+asset][audit-codex-binary], after verifying archive SHA-256
+`c485e889611b73ff5c3cc11fb5cea7551ef504465ad8675163766b9b1a9ec84a`; the
+resulting executable had SHA-256
+`56ef98ab4032d317ab26e9b5e5a175650717351edb16ed9cde0cb6d1734d62da`.
+
+For current and future audits, the contract test reads the expected executable
+digest and stable release tag from `release.json`, derives the CLI version from
+that tag, and enforces both before exercising the client. It discovers the
+command-auth `printf` executable from `PATH` and skips with an explicit
+prerequisite message when unavailable. The downloaded Codex executable was
+temporary and is not stored in the repository.
 
 ## Manual release bump checklist
 
