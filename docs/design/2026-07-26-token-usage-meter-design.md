@@ -3,6 +3,11 @@
 **Status:** proposed
 **Date:** 2026-07-26
 
+This proposal has not amended the [state-at-rest boundary](../../README.md#state-at-rest).
+The proposed ADR-0015 and ADR-0016 numbers below are historical placeholders;
+those numbers were later used for logging and Hook overrun decisions. Any
+persistence exception would require a new accepted ADR.
+
 A shim-hosted, opt-in meter that records one row per completed inference turn to a
 local SQLite database, capturing each inbound Surface's **native** token-usage
 fields verbatim. Single-user instance; multi-user is out of scope. In-process
@@ -65,8 +70,9 @@ the SSE pump.
 
 ### Decisions
 
-1. **Persist to SQLite** via pure-Go `modernc.org/sqlite`. Amends ROADMAP
-   principle #4 (ADR-0015).
+1. **Persist to SQLite** via pure-Go `modernc.org/sqlite`. Would amend the
+   [state-at-rest boundary](../../README.md#state-at-rest) if this proposal is
+   accepted (see the proposed persistence ADR in §13).
 2. **Only completed turns are recorded.** A turn that never delivers a
    usage-bearing terminal event writes nothing.
 3. **One table per Surface, fields verbatim.** No unified columns, no derived
@@ -626,8 +632,9 @@ Table-driven over recorded frames in `testdata/`, mirroring
 
 ### ADRs
 
-- **ADR-0015 — Persist token usage in a local SQLite database.** Amends ROADMAP
-  principle #4. Records: SQLite over JSONL or in-memory; why pure-Go
+- **ADR-0015 — Persist token usage in a local SQLite database.** Would amend the
+  [state-at-rest boundary](../../README.md#state-at-rest) if this proposal is
+  accepted. Records: SQLite over JSONL or in-memory; why pure-Go
   `modernc.org/sqlite` is required (cgo breaks the single-static-binary,
   four-target story); WAL meaning three files at rest; opt-in and off by default.
 - **ADR-0016 — Per-Surface usage tables with verbatim fields.** The policy a
@@ -638,8 +645,9 @@ Table-driven over recorded frames in `testdata/`, mirroring
 ### Docs
 
 - **`CONTEXT.md`** — add **Usage meter** and **Turn**; amend **Shim** (see §14).
-- **`ROADMAP.md`** — principle #4 currently asserts "no database," which this makes
-  false; it gains a pointer to ADR-0015.
+- **[README state-at-rest boundary](../../README.md#state-at-rest)** — currently
+  asserts "no database"; amend only if a persistence ADR for this proposal is
+  accepted.
 - **`CONFIGURATION.md`** — both settings, per the `c8c373f` precedent.
 - **`docs/divergence-ledger.md`** — deliberately **unchanged** (§4.2).
 

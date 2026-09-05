@@ -16,7 +16,8 @@ verbatim.
   clean stream end, and would force Phase 3's middleware to retrofit framing.
 - **Full parse into typed events**: rejected — re-serializing through typed structs
   silently drops unknown fields and breaks on new event types, violating
-  raw-passthrough principle #1. Both APIs warn new event types will appear.
+  the [raw-passthrough principle](../../README.md#design-principles). Both APIs
+  warn new event types will appear.
 - **Frame-aware, payload-opaque** (chosen): parse frames and identify by the event
   line; forward the payload bytes verbatim. Pays for identification and nothing
   more, and yields terminal detection, keepalive injection, and the Phase 3

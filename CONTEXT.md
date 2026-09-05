@@ -149,10 +149,10 @@ sanctioned term for a **cached value**'s re-fetch cadence, e.g.
 `--impersonation-refresh-interval`.)
 
 **Shim**:
-A composable middleware layer that closes one specific parity gap (Phase 3+). Not
-present in Phase 1. A shim spans transports through one registry: it may hook the
-inbound request, the response Prelude, the buffered body, the SSE stream, and —
-opt-in and bidirectional — individual WebSocket **Messages** in each direction. The
+A composable middleware layer that closes one specific parity gap. A shim spans
+transports through one registry: it may hook the inbound request, the response
+Prelude, the buffered body, the SSE stream, and — opt-in and bidirectional —
+individual WebSocket **Messages** in each direction. The
 post-commit stream and message hooks are infallible; the WebSocket hooks hold nothing
 and never split, so one message maps to at most one message, or is dropped.
 _Avoid_: middleware as the *name* of the mechanism — call it a shim (nested via the
@@ -176,14 +176,14 @@ _Avoid_: fail open, ignore the error
 **Prelude**:
 The response envelope — status line plus headers — treated as a unit distinct from
 the body. Its shim transform runs once per response, before the body, on both the
-buffered and streaming paths (Phase 3+).
+buffered and streaming paths.
 
 **Message**:
 One reassembled WebSocket transport message — whole, not a wire frame — carrying a
 kind (Text or Binary) and payload bytes. It is the unit a WebSocket shim transform
 observes and may rewrite or drop. Distinct from an SSE **frame** (an event record on
 the streaming HTTP path) and from the Anthropic **Messages API** (an inbound
-Surface). Present only on the OpenAI Responses WebSocket path (Phase 3+).
+Surface). Present only on the OpenAI Responses WebSocket path.
 _Avoid_: frame (that is the SSE unit); packet.
 
 **Client / server message**:

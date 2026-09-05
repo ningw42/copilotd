@@ -23,10 +23,11 @@ observability, and readiness for one cached value, ports impersonation onto it
 with no behavior change, and adds the Codex `models.json` freshness (#53) as a
 second consumer.
 
-The component is memory-only: nothing is written to disk, so the ROADMAP §2
-state-at-rest principle (principle 4: "no services at rest … state at rest is a single owner-only
-credential file") is honored exactly as it is for the impersonation
-cache and the Copilot token. The Codex consumer tracks `openai/codex`'s **latest
+The component is memory-only: nothing is written to disk, so the
+[state-at-rest boundary](../../README.md#state-at-rest) is honored exactly as it
+is for the impersonation cache and the Copilot token. No application state is
+persisted beside the owner-only GitHub OAuth token file. The Codex consumer
+tracks `openai/codex`'s **latest
 release tag**, refreshes on a static TTL, and keeps the embedded snapshot as the
 guaranteed-parseable floor. A `--codex-catalog-refresh-interval=0` disables the
 outbound refresh for air-gapped or locked-egress deployments, mirroring
@@ -597,9 +598,10 @@ Test-first, matching the package layout:
 - **Fold the Copilot token into the component**: rejected — see §Scope; four of
   the six `Cacheable` properties do not apply, and unifying would degrade the token's
   hot-path minting.
-- **Persist the cache to a file**: rejected — durable state at rest violates
-  ROADMAP §2 (principle 4) and the token/impersonation in-memory model. The component is
-  memory-only.
+- **Persist the cache to a file**: rejected — adding durable runtime state violates
+  the [state-at-rest boundary](../../README.md#state-at-rest) and the
+  token/impersonation in-memory model. The component is memory-only; this choice
+  is recorded in [ADR-0009](../adr/0009-refresh-codex-models-from-latest-release-in-memory.md).
 - **`Run` on the `Registry` as a single shared loop**: rejected — TTLs are
   per-entity, so the loop is per-entity. The `Registry` only offers `Start`, a
   launcher that fans out to each entry's own ticker.
@@ -624,12 +626,12 @@ Test-first, matching the package layout:
   avoided. `--codex-catalog-enabled=false` (no registration) or
   `--codex-catalog-refresh-interval=0` (pinned to the floor) opts out entirely.
 - This introduces a **runtime cache of external content**. It is **consistent with**
-  the ROADMAP's state-at-rest principle (§2, principle 4 — "no services at rest … state at rest is a
-  single owner-only credential file"), not an exception to it: the cache is
+  the [state-at-rest boundary](../../README.md#state-at-rest), not an exception
+  to it: the cache is
   **memory-only** (nothing at rest) with an embedded floor, exactly as the impersonation
   cache and the Copilot token already are. The considered interpretation — that a
   memory-only, best-effort refresh with an embedded floor honors "no state at rest" — is
-  recorded as **ADR-0009** and noted in the ROADMAP.
+  recorded as **ADR-0009**.
 - `/readyz` gains a uniform `caches` block and relocates impersonation's per-fact
   freshness into it; `status` is unchanged and backward-compatible.
 
@@ -658,7 +660,8 @@ a port ticket so each fits a single implementation context. The native chain is
    package-level parsed global), the unauthenticated `openai/codex` fetch
    (5s per-call bound),
    `--codex-catalog-refresh-interval`, and the `codex_models` `/readyz` entry;
-   author **ADR-0009** and update `CONFIGURATION.md` and the ROADMAP. *Blocked by #94.*
+   author **ADR-0009** and update `CONFIGURATION.md` and the
+   [project overview](../../README.md#state-at-rest). *Blocked by #94.*
 
 Issue **#53** (the original "commit-based caching/refresh for the vendored Codex
 `models.json` snapshot") is superseded by this epic and closed as not-planned; its

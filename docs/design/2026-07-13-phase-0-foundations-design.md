@@ -2,7 +2,7 @@
 
 Status: approved design (refined via grilling session), pending implementation plan
 Date: 2026-07-13
-Roadmap reference: `ROADMAP.md` §7 "Phase 0 — Foundations / walking skeleton"
+Tracking issue: [#1](https://github.com/ningw42/copilotd/issues/1)
 
 ## 1. Goal & outcome
 
@@ -39,10 +39,11 @@ inbound auth, GitHub↔Copilot identity, the raw forwarder, the SSE streaming
 engine, the middleware/onion framework, per-request body bounding, cross-
 compilation, service install, and CI.
 
-### 2.1 Conscious deviation from the roadmap
+### 2.1 Conscious deviation from the initial phased plan
 
-The roadmap places **metrics scaffolding** in Phase 0 ("observability from day
-one"). This design **defers metrics** (Prometheus/OTel/traces) to a later phase
+The [initial phased plan](https://github.com/ningw42/copilotd/blob/b0dcf6c494673845dce5d40be1f48b91cfd21907/ROADMAP.md#6-cross-cutting-observability-from-day-one)
+places **metrics scaffolding** in Phase 0 ("observability from day one"). This
+design **defers metrics** (Prometheus/OTel/traces) to a later phase
 and ships **structured logging only**. This is a deliberate decision to keep the
 skeleton minimal, not an oversight.
 

@@ -2,13 +2,13 @@
 
 Status: approved design (refined via brainstorming + grilling sessions), pending implementation plan
 Date: 2026-07-14
-Roadmap reference: `ROADMAP.md` §7 "Phase 1 — Core forward path, both surfaces (non-streaming)"
+Tracking issue: [#7](https://github.com/ningw42/copilotd/issues/7)
 Builds on: `docs/design/2026-07-13-phase-0-foundations-design.md`
 
 ## 1. Goal & outcome
 
 Make the first real call. Phase 0 gave us an observable binary that serves
-`/healthz`. Phase 1 adds the three workstreams the roadmap bundles — inbound
+`/healthz`. Phase 1 adds the three workstreams — inbound
 auth, GitHub↔Copilot identity, and the raw forwarder — because none of them
 produces a real call alone.
 
@@ -82,7 +82,7 @@ passes straight back to the client, exactly like any other upstream status.
 
 | Decision | Choice | Rationale |
 | --- | --- | --- |
-| Forwarder implementation | Hand-rolled, not `httputil.ReverseProxy` | ~40 focused lines; total control over exactly which headers cross; deserializes nothing (raw passthrough, principle #1); avoids ReverseProxy's streaming machinery that Phase 2's *custom* SSE engine won't reuse. |
+| Forwarder implementation | Hand-rolled, not `httputil.ReverseProxy` | ~40 focused lines; total control over exactly which headers cross; deserializes nothing (the raw-passthrough principle); avoids ReverseProxy's streaming machinery that Phase 2's *custom* SSE engine won't reuse. |
 | Header policy | Denylist / passthrough | Forward every inbound header except an explicit strip-set. Faithful to raw passthrough and future-proof — a new protocol header (`anthropic-beta`, …) flows through without a code change; header *stripping* stays a Phase 4 shim. |
 | Body inspection | Full-buffer (bounded) + shallow `stream` peek + forward original bytes | Reads only the `stream` field to enforce the non-streaming boundary, then forwards the *original* bytes — no re-serialization (dodges the SDK-re-serialization `400`s observed upstream). |
 | Upstream errors | Pass through verbatim | Copilot's `/v1/messages` and `/responses` already return correctly Anthropic-/OpenAI-shaped errors. Only proxy-*originated* errors are synthesized. |
@@ -90,7 +90,7 @@ passes straight back to the client, exactly like any other upstream status.
 | API-key compare | SHA-256 both sides → `subtle.ConstantTimeCompare` | Fixed-length constant-time compare with no length leak. |
 | OAuth token persistence | Only the long-lived GitHub OAuth token, raw, in an owner-only file | Minimizes secrets at rest ("single owner-only credential file"). The short-lived Copilot token lives in memory only and is cheap to re-mint. |
 | Identity startup posture | Fail fast on missing local prerequisites; warm remotely | A missing GitHub OAuth token exits before bind. Once local prerequisites resolve, `/readyz` stays ready and authenticated traffic can mint on demand; the bounded startup mint only warms the cache. |
-| Copilot-token minting | On demand (traffic-driven) + one startup mint; **no** scheduled refresh loop | A fixed ~25-min exchange heartbeat is a bot signature (ROADMAP §8); tying mints to real traffic mimics an editor session and drops the timer. See ADR-0001. |
+| Copilot-token minting | On demand (traffic-driven) + one startup mint; **no** scheduled refresh loop | A fixed ~25-min exchange heartbeat is a bot signature (see [project risks](../../README.md#limitations-and-risks)); tying mints to real traffic mimics an editor session and drops the timer. See ADR-0001. |
 | Mint concurrency | One `singleflight` key across the startup mint *and* every on-demand mint | Guarantees **at most one exchange in flight globally**; a request burst that finds a stale cache collapses to a single exchange. |
 | CLI shape | Subcommand tree via `ff/v4` `ff.Command` + `ffhelp` | `serve`/`login` need genuinely different flags; a git-style tree with `help <sub>` is the modern, discoverable interface and reuses the dependency Phase 0 already pulls in. |
 | Outbound timeout | Per-request context deadline (default `600s`), no `http.Client.Timeout` | A blunt client timeout would kill a legitimately slow completion; the context deadline also gives client-cancel propagation for free. |
@@ -339,8 +339,7 @@ Structured logs for: each login step; each mint (`startup`|`on-demand`, outcome,
 and — for a startup retry — the attempt number). The OAuth and Copilot tokens are
 **never** logged, nor are raw exchange bodies or underlying error strings (Phase
 0's redaction discipline).
-Metric seam: mint events + outcomes by trigger (the roadmap's token-refresh
-signal).
+Metric seam: mint events + outcomes by trigger.
 
 ## 7. Forward path (`internal/forward`)
 
@@ -619,8 +618,9 @@ dependencies are injected.
      entitlement, not scope, gates Copilot access.
   5. Windows owner-only semantics for the GitHub OAuth token file (best-effort;
      documented caveat).
-- **Drift sensitivity (ROADMAP §8):** the impersonation headers, the token
-  exchange, and the upstream paths are the drift-exposed surfaces. Keeping the
+- **Drift sensitivity** (see [project risks](../../README.md#limitations-and-risks)):
+  the impersonation headers, the token exchange, and the upstream paths are the
+  drift-exposed surfaces. Keeping the
   headers configurable, deriving the origin from each exchange, and keeping the
   forwarder dumb limits blast radius; the identity layer is where upstream
   change will most likely bite.

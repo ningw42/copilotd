@@ -23,7 +23,7 @@
       ...
     }:
     let
-      # Nix dev/build hosts. The roadmap's Windows targets are Go cross-compile
+      # Nix dev/build hosts. The Windows release targets are Go cross-compile
       # outputs (GOOS/GOARCH), not Nix systems, so they don't belong here.
       supportedSystems = [
         "x86_64-linux"

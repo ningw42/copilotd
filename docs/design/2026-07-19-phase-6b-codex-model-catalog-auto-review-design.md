@@ -2,7 +2,7 @@
 
 Status: proposed design (polished via brainstorming + grilling), pending final written-spec review
 Date: 2026-07-19
-Roadmap reference: `ROADMAP.md` §4.2 and §7 "Phase 6 — Provider/client-shaped support endpoints"; the **client-shaped** half deferred by the Phase 6a design (§2.2, §12).
+Tracking issue: [#55](https://github.com/ningw42/copilotd/issues/55) — the **client-shaped** half deferred by the Phase 6a design (§2.2, §12).
 Builds on: `docs/design/2026-07-18-phase-6a-provider-shaped-model-catalogs-design.md`,
 `docs/design/2026-07-18-phase-4-github-copilot-support-endpoint-design.md`.
 Follow-on: snapshot freshness automation is split to `ningw42/copilotd#53` (§16);

@@ -14,8 +14,9 @@ scheduled/background refresh loop.
 - **Proactive scheduled refresh** (what most Copilot proxies do — litellm et al.):
   a timer re-mints every `refresh_in` (~25 min). Rejected: a perfectly regular
   exchange call every 25 min, 24/7, *even while completely idle*, is a textbook
-  automation signature — exactly the abuse-detection risk called out in
-  ROADMAP §8. It also requires a timer goroutine, jitter, and reschedule logic.
+  automation signature — exactly the abuse-detection risk called out in the
+  [project limitations](../../README.md#limitations-and-risks). It also requires
+  a timer goroutine, jitter, and reschedule logic.
 - **On-demand + startup warm-up** (chosen): exchange calls track real inference
   traffic, which looks like an actual editor session, and the timer disappears.
 - **Use the last mint outcome as readiness**: rejected. A failed on-demand mint

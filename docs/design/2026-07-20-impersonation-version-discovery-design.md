@@ -401,9 +401,11 @@ Test-first, matching the package layout:
 - **Discovery gates readiness** (`/readyz` = mint AND discovery): rejected — it
   would couple uptime to a cosmetic version string when the fallback already works.
 - **Persist the cache to a file**: rejected — it would add durable state at rest,
-  against ROADMAP §2 and the Copilot token's in-memory model. This is the exact
-  point where #53's original file-cache framing diverges from this project's
-  principles.
+  against the [state-at-rest boundary](../../README.md#state-at-rest) and the
+  Copilot token's in-memory model, subsequently reaffirmed by
+  [ADR-0009](../adr/0009-refresh-codex-models-from-latest-release-in-memory.md).
+  This is the exact point where #53's original file-cache framing diverges from
+  this project's principles.
 
 ## Consequences
 

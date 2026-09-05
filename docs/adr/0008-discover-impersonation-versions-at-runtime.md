@@ -46,8 +46,9 @@ the prior stance — recorded in `config.go` §6.7 — that these were operator-
   string when the fallback already works would make copilotd refuse traffic it could
   serve. Readiness reports local serving prerequisites; discovery is best-effort and only
   *observed* on `/readyz`.
-- **Persist the cache to a file**: rejected — durable state at rest violates
-  ROADMAP §2 and the Copilot token's in-memory model. The cache is memory-only.
+- **Persist the cache to a file**: rejected — adding durable runtime state violates
+  the [state-at-rest boundary](../../README.md#state-at-rest) and the Copilot token's
+  in-memory model. The cache is memory-only.
 - **Runtime discovery with an embedded fallback, memory-only** (chosen): the two
   facts self-update with zero operator action and the fallback guarantees a
   never-worse baseline. The first implementation used a concrete `versionFact`;

@@ -2,7 +2,7 @@
 
 Status: approved design (refined via brainstorming + grilling sessions), pending implementation plan
 Date: 2026-07-15
-Roadmap reference: `ROADMAP.md` §7 "Phase 2 — SSE streaming engine, both surfaces"
+Tracking issue: [#18](https://github.com/ningw42/copilotd/issues/18)
 Builds on: `docs/design/2026-07-14-phase-1-core-forward-path-design.md`
 
 ## 1. Goal & outcome
@@ -25,7 +25,7 @@ falling back to a minimal decode of only the `data` JSON `type` field when that
 line is absent — then re-emits the original frame bytes verbatim. It never
 deserializes the event payload on the hot path, so unknown fields and unknown
 event types (both APIs warn these will appear) survive untouched — faithful to
-raw-passthrough principle #1. That minimal identification is also the seam a
+raw-passthrough principle. That minimal identification is also the seam a
 later per-event middleware plugs into (Phase 3): the engine already knows *which*
 event each frame is, so a future transform pays the full
 unmarshal/mutate/re-marshal cost only for the specific events it touches, and
@@ -101,7 +101,7 @@ the loop and the framing, with no transformer yet.
 
 | Decision | Choice | Rationale |
 | --- | --- | --- |
-| Engine depth | Frame-aware, payload-opaque: parse SSE frames, classify by the `event:` line, re-emit original bytes | Pays for identification and nothing beyond it. Verbatim re-emit keeps unknown fields/new event types intact (principle #1). The identified `type` is exactly the discriminator terminal-detection needs now and a Phase 3 per-event transform will need later. (ADR-0002.) |
+| Engine depth | Frame-aware, payload-opaque: parse SSE frames, classify by the `event:` line, re-emit original bytes | Pays for identification and nothing beyond it. Verbatim re-emit keeps unknown fields/new event types intact (the raw-passthrough principle). The identified `type` is exactly the discriminator terminal-detection needs now and a Phase 3 per-event transform will need later. (ADR-0002.) |
 | Event identification | `event:`-line-first (zero JSON parse); minimal `data.type` decode only when the line is absent/empty; a fallback-fired metric | Grounded: Anthropic **normatively guarantees** the `event:` line and name==data.type; OpenAI Responses shows it in examples only; the SSE standard makes it optional (absent → default `message`). Reading the line avoids parsing multi-KB payloads just to learn the type. The fallback hedges the non-normative surfaces; the metric turns a Copilot regression that drops the line into a signal, not a silent misclassification. |
 | Stream vs. buffered branch | Branch on the upstream **response** `Content-Type`, not the request `stream` flag | The response is ground truth: an upstream error to a `stream:true` request comes back as JSON and correctly takes the buffered path, where it can still surface a real 502. |
 | Flush cadence | Flush after every frame, keepalive, and synthesized error, via `http.ResponseController` | SSE requires per-event delivery. `ResponseController` reaches the socket through the existing `statusWriter.Unwrap()`; HTTP/1.1 chunked framing is provided by the Go server once `Content-Length` is absent. |
@@ -410,7 +410,7 @@ request.
   synthesized | stall | client_cancel | upstream_error`); `forward` stashes it on a
   per-request context holder; the existing `accessLog` middleware reads it, adds an
   `outcome` attribute (and frame count) to its single per-request line, and emits
-  the **stream terminal-outcome metric** by surface (the roadmap's §6 signal). A
+  the **stream terminal-outcome metric** by surface. A
   `synthesized` / `stall` / `upstream_error` outcome bumps that line to `warn`,
   completing the off-band origin channel for synthesized terminals.
 - The access-log line continues to record total bytes and duration for the streamed
@@ -495,8 +495,9 @@ flushes on cue.
   7. `http.ResponseController` flush + `SetWriteDeadline` behavior through the
      middleware chain on this Go version (the `statusWriter.Unwrap()` seam is
      already present).
-- **Drift sensitivity (ROADMAP §8):** the Content-Type branch key, the `event:`-line
-  assumption on `/responses`, and the terminal event names are the drift-exposed
+- **Drift sensitivity** (see [project risks](../../README.md#limitations-and-risks)):
+  the Content-Type branch key, the `event:`-line assumption on `/responses`, and
+  the terminal event names are the drift-exposed
   surfaces added this phase. The payload-opaque design keeps blast radius small —
   unknown fields and new event types already pass through — the `data.type`
   fallback plus its fallback-fired metric make a dropped event line self-correcting

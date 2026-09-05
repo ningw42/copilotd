@@ -133,8 +133,8 @@ origin. ([credential](../../internal/identity/identity.go#L20-L38),
 
 1. **Reverse the explicit scope decision.** Two accepted design documents call
    Responses WebSocket a non-goal and deliberately exclude `ws:/responses`-only
-   models. Update the roadmap/design record as part of the feature so the new
-   transport, its shim boundary, and catalog semantics are intentional rather
+   models. Update the project overview and design record as part of the feature
+   so the new transport, its shim boundary, and catalog semantics are intentional rather
    than accidental scope drift. ([middleware design](../design/2026-07-16-phase-3-middleware-framework-design.md#L723),
    [catalog design](../design/2026-07-18-phase-6a-provider-shaped-model-catalogs-design.md#L116-L125))
 

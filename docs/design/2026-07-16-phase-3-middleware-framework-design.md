@@ -2,7 +2,7 @@
 
 Status: implemented; post-commit hook contract amended by [ADR-0014](../adr/0014-infallible-post-commit-shim-hooks.md)
 Date: 2026-07-16
-Roadmap reference: `ROADMAP.md` §7 "Phase 3 — Middleware framework"
+Tracking issue: [#32](https://github.com/ningw42/copilotd/issues/32)
 Builds on: `docs/design/2026-07-15-phase-2-sse-streaming-engine-design.md`,
 `docs/design/2026-07-16-forwarding-fidelity-and-sse-identity-design.md`
 
@@ -22,8 +22,8 @@ changes nothing.
 
 ### 1.1 Terminology decision — `shim`, not "middleware"
 
-`ROADMAP.md` §7 labels this phase "Middleware framework." We retire "middleware"
-as the *name* of the mechanism: it is a ratified HTTP term for the **request**
+The initial phased plan labeled this phase "Middleware framework." We retire
+"middleware" as the *name* of the mechanism: it is a ratified HTTP term for the **request**
 pipeline (`func(http.Handler) http.Handler`), and this mechanism reaches into the
 response envelope **and** individual stream events — it is broader than middleware
 in the received sense. `CONTEXT.md` already ratifies the right word: a **shim** is
@@ -32,16 +32,11 @@ in the received sense. `CONTEXT.md` already ratifies the right word: a **shim** 
 - The package is **`internal/shim`**. It defines what a shim *is* (the hook
   interfaces), how shims *compose* (the `Chain`), and the canonical no-op.
 - An individual parity layer is a **shim** (`CONTEXT.md`). The mechanism that
-  nests them is **the onion** (`ROADMAP.md` principle #2, "The onion is the only
-  extension mechanism").
+  nests them is **the onion**, the extension mechanism for forwarded inference
+  parity (see [design principles](../../README.md#design-principles)).
 - Every *payload-touching* hook is a **transform** (the four `…Transformer`
   interfaces). The fifth hook, `StreamFinalizer`, is **not** a transform: it flushes
   frames a `Transform` chose to hold, adding no new information.
-
-**ROADMAP follow-ups (not done here):** §7's phase label still reads "Middleware
-framework" (rename to "Shim framework" for consistency); and §5's seed catalog
-still lists "Self-heal retries" as a shim, but this design relocates it to core
-(§2, §14) — annotate or drop that catalog entry.
 
 ### 1.2 The two-level onion
 
@@ -99,7 +94,7 @@ client), `shim3` innermost (nearest the forwarder).
   `codex-auto-review`) — Phase 4. This phase proves the *hostable* seeds fit on
   paper (§14) but implements none.
 - **Self-heal retries.** The 401/403 re-mint is relocated to the `forward`/identity
-  **core** (a shim may not drive an upstream retry — principle #2); the
+  **core** (a shim may not drive an upstream retry); the
   thinking-block strip is treated as a client/parity judgment deferred with its
   shim. Neither is part of the shim framework.
 - **Any client→server / bidirectional stream handling.** Both surfaces are
@@ -126,7 +121,7 @@ client), `shim3` innermost (nearest the forwarder).
 | Buffered "whole-body" | A real hook, but it **introduces buffering** (read-all → transform → recompute `Content-Length`); opt-in, detected by presence of a `BufferedTransformer` | Today's buffered path is a verbatim `io.Copy`, never assembled in memory. Whole-body transform forces buffering — a real latency/memory cost made explicit and paid only when a buffered shim is active. |
 | Control-point placement | Stall **armed** on input (upstream silence); **terminal + keepalive on output** (post-transform); pre-terminal teardowns **run `Finalize`, flush held frames, then re-evaluate the output-side terminal before synthesizing** | Stall means *Copilot* went quiet. But a shim may lawfully be **holding** a stream upstream already completed, so a pre-terminal teardown must flush held frames and re-check the client-facing terminal — a held-but-complete stream ends `clean`, not discarded as `stall`. Terminal detection sees what the client sees; keepalive tracks client-facing idle. See §8.2/§8.4 for exact ordering, the no-double-up invariant, and what the framework does *not* enforce. |
 | No fabrication | A shim **alters / drops / holds / coalesces**; it never invents information with no upstream basis | ADR-0003 extended from the core to shims: copilotd invents nothing on the wire except the core's off-band-marked synthesized terminals. Enforced as a contract invariant, not a type boundary. |
-| No upstream access | No hook talks to Copilot or drives a retry | `ROADMAP.md` principle #2. A retry re-invokes the forwarder, which is a core concern; the 401-remint is relocated to `forward`/identity. |
+| No upstream access | No hook talks to Copilot or drives a retry | See [design principles](../../README.md#design-principles). A retry re-invokes the forwarder, which is a core concern; the 401-remint is relocated to `forward`/identity. |
 | `sse` independence | `internal/sse` owns a minimal `FrameTransformer` interface; `shim` implements it; `forward` wires it via a new `Pump` parameter. No `sse → shim` dependency | Keeps the engine Copilot-agnostic and payload-opaque (its Phase 2 charter). Dependency inversion: the low-level engine defines the seam, the higher layer supplies the behavior. |
 | Package name | `internal/shim`; interfaces keep `…Transformer` names | "Middleware" undersells a mechanism that also transforms events; `shim` is `CONTEXT.md`'s ratified word and yields stutter-free exports (`shim.EventTransformer`, `shim.Chain`, `shim.Registration`). |
 
@@ -278,7 +273,7 @@ type NopShim struct{}                 // zero hook methods
 `NopShim` implements *nothing*, so every type-assert against it fails and every
 hook skips it — yet it still flows through registration, per-request
 instantiation, ordered iteration, reverse-order response, and toggle. A struct
-with no methods exercises the entire machinery; that is the roadmap's "no-op
+with no methods exercises the entire machinery; that is the "no-op
 passthrough" proof. It is the canonical example and a test fixture, and ships
 **disabled by default** (an empty enabled chain in production has zero overhead).
 
@@ -317,7 +312,7 @@ passthrough" proof. It is the canonical example and a test fixture, and ships
 5. Send to Copilot (unchanged), then branch on the response `Content-Type`.
 
 A shim that rewrites the body parses→mutates→re-serializes JSON — the deliberate,
-per-shim break from raw passthrough that principle #1 reserves for these cases.
+per-shim break from raw passthrough reserved for these specific transforms.
 
 ## 7. Response-path integration — buffered (`internal/forward`)
 
@@ -684,15 +679,22 @@ on **both** of its arms:
 
 ## 14. Seed-shim paper-fit (policy-A validation)
 
-The contract is a "framework" only if the *hostable* seed catalog (`ROADMAP.md` §5)
+The contract is a "framework" only if the *hostable* initial seed catalog
 fits without breaking changes.
+
+The analysis below records design-time fit, not current implementation status.
+Codex auto-review subsequently shipped as
+[catalog behavior](2026-07-19-phase-6b-codex-model-catalog-auto-review-design.md).
+The remaining model-name mapping and unsupported-param ideas are triage
+candidates in [#188](https://github.com/ningw42/copilotd/issues/188) and
+[#189](https://github.com/ningw42/copilotd/issues/189), not approved commitments.
 
 | Seed shim | Hooks | State | Fit |
 | --- | --- | --- | --- |
 | Stable Responses item-IDs | `EventTransformer` (pin first-seen id) | `map[output_index]string` for item events **plus** a scalar response-`id` (the top-level `resp_…` on `response.created/…/completed` has no `output_index`; item events dual-key by `item_id` and `output_index`) | **Fits** — alters existing fields |
 | Model-name mapping | `RequestTransformer` (save+rewrite) + `BufferedTransformer`/`EventTransformer` (restore) | `clientModel string`; reads `route` to know `count_tokens` bodies carry no top-level `model` | **Fits** — alters existing fields |
 | Unsupported-param handling | `RequestTransformer` (strip) or pre-commit `apierror.Reject(InvalidRequest,…)`; reads `route` (the `/messages` vs `count_tokens` param whitelist differs) | none | **Fits** |
-| `codex-auto-review` availability | **Fit-unknown; possibly not a shim.** ROADMAP defines it only as "make the behavior the Codex auto-review flow expects available." If it needs a second model call it is core (like self-heal, principle #2); if it needs a response field Copilot omits it is a fabrication ledger decision (§10.2); if it needs an unforwarded endpoint it is Phase-5 support-endpoint territory. Only a model/param map is a clean `RequestTransformer`. | — | **Deferred to Phase 4 after behavior capture** — do not assume "additive hook" |
+| `codex-auto-review` availability | **Fit-unknown; possibly not a shim.** The initial seed catalog defined it only as "make the behavior the Codex auto-review flow expects available." If it needs a second model call it is core (like self-heal); if it needs a response field Copilot omits it is a fabrication ledger decision (§10.2); if it needs an unforwarded endpoint it is Phase-5 support-endpoint territory. Only a model/param map is a clean `RequestTransformer`. | — | **Deferred to Phase 4 after behavior capture** — do not assume "additive hook" |
 | Self-heal retries | **Not a shim.** 401/403 re-mint → `forward`/identity core; thinking-block strip → client/parity judgment | — | **Out of the framework** |
 
 **Three seeds fit cleanly; `codex-auto-review` is fit-unknown (a *research* gap,
@@ -749,7 +751,7 @@ the unmarshal/mutate/re-marshal cost only for events it rewrites.
 
 Follows `CONTEXT.md`. A synthesized terminal — including `shim_error` — is a
 copilotd-originated signal, never conflated with an upstream one. Package/term
-decision in §1.1; ROADMAP follow-ups noted there.
+decision in §1.1.
 
 ### 16.4 Applied critique
 

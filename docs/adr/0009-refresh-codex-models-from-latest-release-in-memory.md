@@ -47,8 +47,8 @@ the embedded fallback while retaining its non-secret `/readyz` observation.
   and human-readable; resolving it before content retrieval gives the fetched
   artifact an immutable commit identity.
 - **Persist fetched bytes** — rejected. The embedded fallback makes disk state
-  unnecessary, and persistence would violate the ROADMAP's single-file
-  state-at-rest boundary.
+  unnecessary, and persistence would violate the
+  [single-file state-at-rest boundary](../../README.md#state-at-rest).
 - **Reuse the GitHub OAuth client or token** — rejected. The public release and
   content reads need no identity; isolation prevents accidental credential
   disclosure and keeps this best-effort dependency outside the identity
@@ -63,5 +63,6 @@ periodic failures do not affect readiness. `/readyz` reports `codex_models`
 through the cache registry only when the catalog is enabled.
 
 The process now holds externally fetched content in memory. This is consistent
-with ROADMAP principle 4: memory-only cached values are not state at rest;
-nothing new is written beside the single owner-only GitHub OAuth token file.
+with the [state-at-rest boundary](../../README.md#state-at-rest): memory-only
+cached values are not state at rest; nothing new is written beside the single
+owner-only GitHub OAuth token file.

@@ -2,7 +2,7 @@
 
 Status: proposed design (polished via brainstorming and grilling), pending final written-spec review
 Date: 2026-07-18
-Roadmap reference: `ROADMAP.md` §7 "Phase 4 — GitHub Copilot support endpoint"
+Tracking issue: [#40](https://github.com/ningw42/copilotd/issues/40)
 Builds on: `docs/design/2026-07-14-phase-1-core-forward-path-design.md`,
 `docs/design/2026-07-16-forwarding-fidelity-and-sse-identity-design.md`
 

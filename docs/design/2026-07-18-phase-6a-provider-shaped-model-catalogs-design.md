@@ -2,7 +2,7 @@
 
 Status: proposed design (polished via brainstorming), pending final written-spec review
 Date: 2026-07-18
-Roadmap reference: `ROADMAP.md` §4.2 and §7 "Phase 6 — Provider/client-shaped support endpoints"
+Tracking issue: [#47](https://github.com/ningw42/copilotd/issues/47)
 Builds on: `docs/design/2026-07-18-phase-4-github-copilot-support-endpoint-design.md`,
 `docs/design/2026-07-16-phase-3-middleware-framework-design.md`,
 `docs/design/2026-07-16-forwarding-fidelity-and-sse-identity-design.md`
@@ -23,7 +23,7 @@ built entirely from real Copilot data, with best-effort sanitization. Unlike the
 Phase 4 raw `/models` passthrough, these endpoints **parse and reconstruct** the
 response, so they own their wire shape and their own failure modes.
 
-This is the **provider-shaped** half of ROADMAP Phase 6. The **client-shaped**
+This is the **provider-shaped** half of Phase 6. The **client-shaped**
 half — the Codex catalog (`/v1/models?client_version=…`) and its
 `auto_review_model_override` reviewer routing — is a larger, externally-dependent
 effort split out to a separate follow-on spec (**Phase 6b**, §12).
@@ -66,7 +66,7 @@ genuine provider is enumerated in §5.5 and recorded in ADR 0004.
 
 - **The Codex catalog** (`/v1/models?client_version=…`), the Codex `ModelInfo`
   shape, and `auto_review_model_override` reviewer routing — all Phase 6b.
-- **Retrieve-by-id** (`GET /{surface}/models/{id}`). The ROADMAP scopes a
+- **Retrieve-by-id** (`GET /{surface}/models/{id}`). This design scopes a
   "catalog" (list); a single-model lookup is a trivial later addition and is not
   needed to populate a model picker.
 - **Caching, refresh jobs, conditional-response synthesis, or state at rest.**
@@ -420,9 +420,10 @@ The reusable plumbing a shim would provide (credential, impersonation, transport
 buffering) is reused just as well by the standalone handler via the
 `PassthroughHandler` pattern, and the pure transform (`internal/catalog`) is
 identical either way. The shim buys nothing and costs a contract amendment plus
-core changes. This is not a violation of ROADMAP principle #2 ("the onion is the
-only extension mechanism"): that principle governs *parity on forwarded inference
-routes*; support endpoints are their own architecture component.
+core changes. This does not violate the
+[shim extension principle](../../README.md#design-principles): it governs
+*parity on forwarded inference routes*; support endpoints are their own
+architecture component.
 
 ## 7. End-to-end flow
 
