@@ -39,8 +39,8 @@ var (
 // TransformEvent adapts the shared JSON rewrite to SSE while retaining the
 // upstream frame whenever no confident rewrite is available.
 func (s *responsesItemIDStabilizer) TransformEvent(_ context.Context, frame sse.Frame) []sse.Frame {
-	payload, fields := sseDataPayload(frame.Raw)
-	if len(fields) == 0 {
+	payload, present := frame.Data()
+	if !present {
 		return []sse.Frame{frame}
 	}
 
@@ -48,12 +48,11 @@ func (s *responsesItemIDStabilizer) TransformEvent(_ context.Context, frame sse.
 	if bytes.Equal(rewritten, payload) {
 		return []sse.Frame{frame}
 	}
-	reframed, ok := replaceSSEDataPayload(frame.Raw, fields, rewritten)
+	reframed, ok := frame.WithData(rewritten)
 	if !ok {
 		return []sse.Frame{frame}
 	}
-	frame.Raw = reframed
-	return []sse.Frame{frame}
+	return []sse.Frame{reframed}
 }
 
 // TransformServerMessage adapts the shared JSON rewrite to an upstream-to-
@@ -62,92 +61,6 @@ func (s *responsesItemIDStabilizer) TransformEvent(_ context.Context, frame sse.
 func (s *responsesItemIDStabilizer) TransformServerMessage(_ context.Context, message *Message) bool {
 	message.Data = s.rewrite(message.Data)
 	return true
-}
-
-type sseDataField struct {
-	lineStart  int
-	valueStart int
-	valueEnd   int
-	lineEnd    int
-}
-
-// sseDataPayload mirrors sse.Reader's data-field semantics: one optional space
-// after "data:" is ignored and repeated fields are joined with a newline.
-func sseDataPayload(raw []byte) ([]byte, []sseDataField) {
-	var payload []byte
-	var fields []sseDataField
-	for lineStart := 0; lineStart < len(raw); {
-		lineEnd := bytes.IndexByte(raw[lineStart:], '\n')
-		if lineEnd < 0 {
-			lineEnd = len(raw)
-		} else {
-			lineEnd += lineStart + 1
-		}
-		contentEnd := lineEnd
-		if contentEnd > lineStart && raw[contentEnd-1] == '\n' {
-			contentEnd--
-		}
-		if contentEnd > lineStart && raw[contentEnd-1] == '\r' {
-			contentEnd--
-		}
-
-		line := raw[lineStart:contentEnd]
-		if bytes.HasPrefix(line, []byte("data:")) {
-			valueStart := lineStart + len("data:")
-			if valueStart < contentEnd && raw[valueStart] == ' ' {
-				valueStart++
-			}
-			if len(fields) > 0 {
-				payload = append(payload, '\n')
-			}
-			payload = append(payload, raw[valueStart:contentEnd]...)
-			fields = append(fields, sseDataField{
-				lineStart:  lineStart,
-				valueStart: valueStart,
-				valueEnd:   contentEnd,
-				lineEnd:    lineEnd,
-			})
-		}
-		if lineEnd == len(raw) {
-			break
-		}
-		lineStart = lineEnd
-	}
-	return payload, fields
-}
-
-func replaceSSEDataPayload(raw []byte, fields []sseDataField, payload []byte) ([]byte, bool) {
-	logicalLines := bytes.Split(payload, []byte("\n"))
-	replacements := make([][]byte, len(fields))
-	for i := 0; i < len(logicalLines) && i < len(fields); i++ {
-		replacements[i] = logicalLines[i]
-	}
-	if len(logicalLines) > len(fields) {
-		last := fields[len(fields)-1]
-		lineEnding := raw[last.valueEnd:last.lineEnd]
-		if len(lineEnding) == 0 {
-			return nil, false
-		}
-		prefix := raw[last.lineStart:last.valueStart]
-		var expanded bytes.Buffer
-		expanded.Write(replacements[len(replacements)-1])
-		for _, logicalLine := range logicalLines[len(fields):] {
-			expanded.Write(lineEnding)
-			expanded.Write(prefix)
-			expanded.Write(logicalLine)
-		}
-		replacements[len(replacements)-1] = expanded.Bytes()
-	}
-
-	var reframed bytes.Buffer
-	previous := 0
-	for i, field := range fields {
-		reframed.Write(raw[previous:field.valueStart])
-		reframed.Write(replacements[i])
-		previous = field.valueEnd
-	}
-	reframed.Write(raw[previous:])
-	return reframed.Bytes(), true
 }
 
 // rewrite returns payload with item ids stabilized per output_index. Payloads

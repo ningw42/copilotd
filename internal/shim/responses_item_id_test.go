@@ -36,7 +36,7 @@ func TestResponsesItemIDStabilizerTransformsSSEFrameWithoutDisturbingFraming(t *
 	if string(got.Raw) != wantRaw {
 		t.Errorf("changed frame Raw = %q, want framing-preserving %q", got.Raw, wantRaw)
 	}
-	payload, _ := sseDataPayload(got.Raw)
+	payload, _ := got.Data()
 	item := rawObject(t, rawObject(t, payload)["item"])
 	if id := rawString(t, item["id"]); id != "pinned-id" {
 		t.Errorf("rewritten item.id = %q, want pinned-id", id)
