@@ -13,8 +13,11 @@ The embedded floor may advance independently when a newer stable snapshot passes
 that contract; it was advanced to `rust-v0.153.4` on 2026-09-05.
 
 The Codex catalog serves `models.json` from a memory-only **cached value**. Its
-embedded `rust-v0.153.4` vendored snapshot is the guaranteed-parseable
-**fallback**. When the Codex catalog is enabled, copilotd checks
+embedded [vendored snapshot](../../internal/catalog/codexdata/models.json), with
+current identity in [release.json](../../internal/catalog/codexdata/release.json)
+and audit evidence in [PROVENANCE.md](../../internal/catalog/codexdata/PROVENANCE.md),
+is the guaranteed-parseable **fallback**. When the Codex catalog is enabled,
+copilotd checks
 `openai/codex`'s latest GitHub release tag at startup and on a 24-hour-by-default
 cadence, resolves that stable tag to its commit, then fetches
 `codex-rs/models-manager/models.json` at the immutable commit SHA. The tag stays

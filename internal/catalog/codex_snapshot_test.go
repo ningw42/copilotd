@@ -225,7 +225,8 @@ func TestValidateCodexModelsDoesNotRequireRemovedLegacyFields(t *testing.T) {
 
 func TestValidateCodexModelsRequiresCurrentSerdeFields(t *testing.T) {
 	// This literal list is independent of codexRequiredFields. It mirrors the
-	// non-Option ModelInfo members without Serde defaults at rust-v0.153.4.
+	// non-Option ModelInfo members without Serde defaults in the audited contract
+	// recorded in codexdata/PROVENANCE.md.
 	required := []string{
 		"slug",
 		"display_name",

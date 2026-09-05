@@ -1314,27 +1314,13 @@ func TestStreamKeepaliveIntervalConfigPrecedence(t *testing.T) {
 }
 
 func TestLoadPrecedence(t *testing.T) {
-	tokenFile := defaultOAuthTokenFile()
-
-	// impersonationDefaults folds the new §6.7 knob defaults (plus the startup-mint
-	// retry default) into a precedence want, since Resolve now populates them; the
-	// precedence cases only exercise addr/log/file fields.
-	withDefaults := func(c ServeConfig) ServeConfig {
-		c.StreamIdleTimeout = 600 * time.Second
-		c.StreamKeepaliveInterval = 15 * time.Second
-		c.WriteTimeout = 90 * time.Second
-		c.ResponseHeaderTimeout = 600 * time.Second
-		c.WebSocketHandshakeTimeout = 10 * time.Second
-		c.ShimHookOverrunThreshold = time.Second
-		c.MaxBufferedResponseBytes = 33554432
-		c.CodexCatalogRefreshInterval = 24 * time.Hour
-		c.StartupMintRetries = 3
-		c.VSCodeVersionFallback = "1.136.1"
-		c.PluginVersionFallback = "0.48.1"
-		c.CopilotIntegrationID = "vscode-chat"
-		c.GithubAPIVersion = "2025-04-01"
-		c.ImpersonationRefreshInterval = 24 * time.Hour
-		return c
+	// Precedence cases name only the fields they exercise. Unrelated expected
+	// values come from the independent literal default oracle above, so a default
+	// change needs review in one place rather than being mirrored here.
+	withOverrides := func(overrides func(*ServeConfig)) ServeConfig {
+		want := defaultConfig()
+		overrides(&want)
+		return want
 	}
 
 	// A TOML file setting every key; env and flags will override subsets of it
@@ -1358,13 +1344,19 @@ func TestLoadPrecedence(t *testing.T) {
 		{
 			name: "env overrides default",
 			env:  map[string]string{"COPILOTD_ADDR": "0.0.0.0:9090", "COPILOTD_LOG_LEVEL": "debug"},
-			want: withDefaults(ServeConfig{Addr: "0.0.0.0:9090", LogLevel: "debug", LogFormat: "text", ShutdownTimeout: 10 * time.Second, GithubOAuthTokenFile: tokenFile, APIKey: testAPIKey, OutboundTimeout: 600 * time.Second, MaxRequestBytes: 33554432}),
+			want: withOverrides(func(want *ServeConfig) {
+				want.Addr = "0.0.0.0:9090"
+				want.LogLevel = "debug"
+			}),
 		},
 		{
 			name: "flag overrides env",
 			args: []string{"--addr", "127.0.0.1:7000", "--log-level=error"},
 			env:  map[string]string{"COPILOTD_ADDR": "0.0.0.0:9090", "COPILOTD_LOG_LEVEL": "debug"},
-			want: withDefaults(ServeConfig{Addr: "127.0.0.1:7000", LogLevel: "error", LogFormat: "text", ShutdownTimeout: 10 * time.Second, GithubOAuthTokenFile: tokenFile, APIKey: testAPIKey, OutboundTimeout: 600 * time.Second, MaxRequestBytes: 33554432}),
+			want: withOverrides(func(want *ServeConfig) {
+				want.Addr = "127.0.0.1:7000"
+				want.LogLevel = "error"
+			}),
 		},
 		{
 			name:      "file under env under flag; file-only keys still apply",
@@ -1373,16 +1365,12 @@ func TestLoadPrecedence(t *testing.T) {
 			// env overrides log-level, the rest come from the file.
 			args: []string{"--addr", "127.0.0.1:7000"},
 			env:  map[string]string{"COPILOTD_LOG_LEVEL": "error"},
-			want: withDefaults(ServeConfig{
-				Addr:                 "127.0.0.1:7000",     // flag wins
-				LogLevel:             "error",              // env wins over file "warn"
-				LogFormat:            "json",               // from file
-				LogFile:              "/tmp/from-file.log", // from file
-				ShutdownTimeout:      30 * time.Second,     // from file
-				GithubOAuthTokenFile: tokenFile,
-				APIKey:               testAPIKey,
-				OutboundTimeout:      600 * time.Second,
-				MaxRequestBytes:      33554432,
+			want: withOverrides(func(want *ServeConfig) {
+				want.Addr = "127.0.0.1:7000"            // flag wins
+				want.LogLevel = "error"                 // env wins over file "warn"
+				want.LogFormat = "json"                 // from file
+				want.LogFile = "/tmp/from-file.log"     // from file
+				want.ShutdownTimeout = 30 * time.Second // from file
 			}),
 		},
 		{
@@ -1390,16 +1378,12 @@ func TestLoadPrecedence(t *testing.T) {
 			writeFile:  true,
 			fileViaEnv: true,
 			env:        map[string]string{},
-			want: withDefaults(ServeConfig{
-				Addr:                 "10.0.0.1:1111",
-				LogLevel:             "warn",
-				LogFormat:            "json",
-				LogFile:              "/tmp/from-file.log",
-				ShutdownTimeout:      30 * time.Second,
-				GithubOAuthTokenFile: tokenFile,
-				APIKey:               testAPIKey,
-				OutboundTimeout:      600 * time.Second,
-				MaxRequestBytes:      33554432,
+			want: withOverrides(func(want *ServeConfig) {
+				want.Addr = "10.0.0.1:1111"
+				want.LogLevel = "warn"
+				want.LogFormat = "json"
+				want.LogFile = "/tmp/from-file.log"
+				want.ShutdownTimeout = 30 * time.Second
 			}),
 		},
 	}
@@ -1545,10 +1529,10 @@ func TestConfigLogValueEmitsOnlyNonSecretFields(t *testing.T) {
 		CodexOverrideLimits:          true,
 		CodexCatalogRefreshInterval:  6 * time.Hour,
 		StartupMintRetries:           3,
-		VSCodeVersionFallback:        "1.136.1",
-		PluginVersionFallback:        "0.48.1",
+		VSCodeVersionFallback:        "1.2.3",
+		PluginVersionFallback:        "4.5.6",
 		CopilotIntegrationID:         "vscode-chat",
-		GithubAPIVersion:             "2025-04-01",
+		GithubAPIVersion:             "2099-01-01",
 		ImpersonationRefreshInterval: 24 * time.Hour,
 	}
 
@@ -1577,10 +1561,10 @@ func TestConfigLogValueEmitsOnlyNonSecretFields(t *testing.T) {
 		"config.shim-responses-item-id-stabilizer-enabled=true",
 		"config.shim-hook-overrun-threshold=750ms",
 		"config.startup-mint-retries=3",
-		"config.vscode-version=1.136.1",
-		"config.plugin-version=0.48.1",
+		"config.vscode-version=1.2.3",
+		"config.plugin-version=4.5.6",
 		"config.copilot-integration-id=vscode-chat",
-		"config.github-api-version=2025-04-01",
+		"config.github-api-version=2099-01-01",
 		"config.impersonation-refresh-interval=24h0m0s",
 		"config.codex-catalog-enabled=true",
 		`config.codex-catalog-model-aliases="gpt-example-alias=gpt-example"`,
@@ -1649,40 +1633,9 @@ func TestConfigLogValueEmitsOnlyNonSecretFields(t *testing.T) {
 	})
 }
 
-// TestLoadServeIdentityFields covers the new serve-only identity/impersonation
-// settings: defaults, the inline github-oauth-token secret's precedence, and the
-// startup-mint-retries + impersonation-knob overrides across flag/env/file.
+// TestLoadServeIdentityFields covers the inline GitHub OAuth token's precedence
+// and non-default startup-mint and identity settings.
 func TestLoadServeIdentityFields(t *testing.T) {
-	t.Run("defaults", func(t *testing.T) {
-		got, err := loadServe([]string{"--apikey", testAPIKey}, noEnv())
-		if err != nil {
-			t.Fatalf("loadServe() error = %v", err)
-		}
-		if got.GithubOAuthToken != "" {
-			t.Errorf("GithubOAuthToken = %q, want empty by default", got.GithubOAuthToken)
-		}
-		if got.StartupMintRetries != 3 {
-			t.Errorf("StartupMintRetries = %d, want 3", got.StartupMintRetries)
-		}
-		want := map[string]string{
-			"VSCodeVersionFallback": "1.136.1",
-			"PluginVersionFallback": "0.48.1",
-			"CopilotIntegrationID":  "vscode-chat",
-			"GithubAPIVersion":      "2025-04-01",
-		}
-		gotm := map[string]string{
-			"VSCodeVersionFallback": got.VSCodeVersionFallback,
-			"PluginVersionFallback": got.PluginVersionFallback,
-			"CopilotIntegrationID":  got.CopilotIntegrationID,
-			"GithubAPIVersion":      got.GithubAPIVersion,
-		}
-		for k, v := range want {
-			if gotm[k] != v {
-				t.Errorf("%s = %q, want %q", k, gotm[k], v)
-			}
-		}
-	})
-
 	t.Run("github-oauth-token flag over env", func(t *testing.T) {
 		got, err := loadServe(
 			[]string{"--apikey", testAPIKey, "--github-oauth-token", "gho-from-flag"},
@@ -1700,7 +1653,7 @@ func TestLoadServeIdentityFields(t *testing.T) {
 		got, err := loadServe([]string{"--apikey", testAPIKey}, envFunc(map[string]string{
 			"COPILOTD_STARTUP_MINT_RETRIES":   "5",
 			"COPILOTD_COPILOT_INTEGRATION_ID": "vscode",
-			"COPILOTD_VSCODE_VERSION":         "9.9.9",
+			"COPILOTD_VSCODE_VERSION":         "1.2.3",
 			"COPILOTD_GITHUB_API_VERSION":     "2099-01-01",
 		}))
 		if err != nil {
@@ -1709,7 +1662,7 @@ func TestLoadServeIdentityFields(t *testing.T) {
 		if got.StartupMintRetries != 5 {
 			t.Errorf("StartupMintRetries = %d, want 5", got.StartupMintRetries)
 		}
-		if got.CopilotIntegrationID != "vscode" || got.VSCodeVersionFallback != "9.9.9" || got.GithubAPIVersion != "2099-01-01" {
+		if got.CopilotIntegrationID != "vscode" || got.VSCodeVersionFallback != "1.2.3" || got.GithubAPIVersion != "2099-01-01" {
 			t.Errorf("knob overrides not applied: %+v", got)
 		}
 	})
@@ -1726,51 +1679,35 @@ func TestLoadServeIdentityFields(t *testing.T) {
 }
 
 func TestLoadServeImpersonationConfig(t *testing.T) {
-	t.Run("defaults", func(t *testing.T) {
-		got, err := loadServe([]string{"--apikey", testAPIKey}, noEnv())
-		if err != nil {
-			t.Fatalf("loadServe() error = %v", err)
-		}
-		if got.VSCodeVersionFallback != "1.136.1" {
-			t.Errorf("VSCodeVersionFallback = %q, want 1.136.1", got.VSCodeVersionFallback)
-		}
-		if got.PluginVersionFallback != "0.48.1" {
-			t.Errorf("PluginVersionFallback = %q, want 0.48.1", got.PluginVersionFallback)
-		}
-		if got.ImpersonationRefreshInterval != 24*time.Hour {
-			t.Errorf("ImpersonationRefreshInterval = %v, want 24h", got.ImpersonationRefreshInterval)
-		}
-	})
-
 	t.Run("flags override env", func(t *testing.T) {
 		got, err := loadServe([]string{
 			"--apikey", testAPIKey,
-			"--vscode-version", "1.130.0",
-			"--plugin-version", "0.50.0",
+			"--vscode-version", "1.2.3",
+			"--plugin-version", "4.5.6",
 			"--impersonation-refresh-interval", "6h",
 		}, envFunc(map[string]string{
-			"COPILOTD_VSCODE_VERSION":                 "1.129.0",
-			"COPILOTD_PLUGIN_VERSION":                 "0.49.0",
+			"COPILOTD_VSCODE_VERSION":                 "7.8.9",
+			"COPILOTD_PLUGIN_VERSION":                 "6.5.4",
 			"COPILOTD_IMPERSONATION_REFRESH_INTERVAL": "12h",
 		}))
 		if err != nil {
 			t.Fatalf("loadServe() error = %v", err)
 		}
-		if got.VSCodeVersionFallback != "1.130.0" || got.PluginVersionFallback != "0.50.0" || got.ImpersonationRefreshInterval != 6*time.Hour {
+		if got.VSCodeVersionFallback != "1.2.3" || got.PluginVersionFallback != "4.5.6" || got.ImpersonationRefreshInterval != 6*time.Hour {
 			t.Errorf("impersonation config = %+v, want flag values", got)
 		}
 	})
 
 	t.Run("env overrides defaults", func(t *testing.T) {
 		got, err := loadServe([]string{"--apikey", testAPIKey}, envFunc(map[string]string{
-			"COPILOTD_VSCODE_VERSION":                 "1.129.0",
-			"COPILOTD_PLUGIN_VERSION":                 "0.49.0",
+			"COPILOTD_VSCODE_VERSION":                 "7.8.9",
+			"COPILOTD_PLUGIN_VERSION":                 "6.5.4",
 			"COPILOTD_IMPERSONATION_REFRESH_INTERVAL": "0s",
 		}))
 		if err != nil {
 			t.Fatalf("loadServe() error = %v", err)
 		}
-		if got.VSCodeVersionFallback != "1.129.0" || got.PluginVersionFallback != "0.49.0" || got.ImpersonationRefreshInterval != 0 {
+		if got.VSCodeVersionFallback != "7.8.9" || got.PluginVersionFallback != "6.5.4" || got.ImpersonationRefreshInterval != 0 {
 			t.Errorf("impersonation config = %+v, want env values", got)
 		}
 	})
@@ -1807,13 +1744,13 @@ func TestLoadServeImpersonationConfig(t *testing.T) {
 	t.Run("version suffixes remain accepted", func(t *testing.T) {
 		got, err := loadServe([]string{
 			"--apikey", testAPIKey,
-			"--vscode-version", "1.130.0-insider",
-			"--plugin-version", "0.50.0+build.1",
+			"--vscode-version", "1.2.3-insider",
+			"--plugin-version", "4.5.6+build.1",
 		}, noEnv())
 		if err != nil {
 			t.Fatalf("loadServe() error = %v", err)
 		}
-		if got.VSCodeVersionFallback != "1.130.0-insider" || got.PluginVersionFallback != "0.50.0+build.1" {
+		if got.VSCodeVersionFallback != "1.2.3-insider" || got.PluginVersionFallback != "4.5.6+build.1" {
 			t.Errorf("version fallbacks = (%q, %q), want accepted suffixes", got.VSCodeVersionFallback, got.PluginVersionFallback)
 		}
 	})

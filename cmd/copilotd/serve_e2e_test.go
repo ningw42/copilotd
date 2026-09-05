@@ -26,9 +26,9 @@ import (
 
 const testAPIKey = "test-api-key"
 
-// e2eConfig is a resolved ServeConfig with the impersonation defaults, a set API
-// key, and the given inline OAuth token — the shape runServe would hand
-// buildServeProvider, minus the flag/env/file plumbing.
+// e2eConfig is a resolved ServeConfig with stable synthetic impersonation
+// fixtures, a set API key, and the given inline OAuth token — the shape runServe
+// would hand buildServeProvider, minus the flag/env/file plumbing.
 func e2eConfig(oauthToken string) config.ServeConfig {
 	return config.ServeConfig{
 		Addr:                         "127.0.0.1:0",
@@ -45,8 +45,8 @@ func e2eConfig(oauthToken string) config.ServeConfig {
 		MaxRequestBytes:              1 << 20,
 		MaxBufferedResponseBytes:     1 << 20,
 		StartupMintRetries:           0, // deterministic against stubs; no retries needed
-		VSCodeVersionFallback:        "1.136.1",
-		PluginVersionFallback:        "0.48.1",
+		VSCodeVersionFallback:        "1.2.3",
+		PluginVersionFallback:        "4.5.6",
 		CopilotIntegrationID:         "vscode-chat",
 		GithubAPIVersion:             "2025-04-01",
 		ImpersonationRefreshInterval: 24 * time.Hour,
@@ -225,8 +225,8 @@ func TestServeFirstRealCallEndToEnd(t *testing.T) {
 			t.Errorf("inbound API key leaked upstream (auth=%q)", copilot.auth)
 		}
 		if copilot.hdr.Get("Copilot-Integration-Id") != "vscode-chat" ||
-			copilot.hdr.Get("Editor-Version") != "vscode/1.136.1" ||
-			copilot.hdr.Get("User-Agent") != "GitHubCopilotChat/0.48.1" ||
+			copilot.hdr.Get("Editor-Version") != "vscode/1.2.3" ||
+			copilot.hdr.Get("User-Agent") != "GitHubCopilotChat/4.5.6" ||
 			copilot.hdr.Get("X-Github-Api-Version") != "2025-04-01" {
 			t.Errorf("impersonation headers missing upstream: %v", copilot.hdr)
 		}
@@ -276,8 +276,8 @@ func TestServeFirstRealCallEndToEnd(t *testing.T) {
 	if exchangeAuth != "token "+oauth {
 		t.Errorf("exchange Authorization = %q, want %q", exchangeAuth, "token "+oauth)
 	}
-	if exchangeUA != "GitHubCopilotChat/"+cfg.PluginVersionFallback {
-		t.Errorf("exchange User-Agent = %q, want %q", exchangeUA, "GitHubCopilotChat/"+cfg.PluginVersionFallback)
+	if exchangeUA != "GitHubCopilotChat/4.5.6" {
+		t.Errorf("exchange User-Agent = %q, want %q", exchangeUA, "GitHubCopilotChat/4.5.6")
 	}
 }
 
@@ -287,8 +287,8 @@ func TestServeFirstRealCallEndToEnd(t *testing.T) {
 // /readyz. Every outbound edge is stubbed; no Microsoft or GitHub host is used.
 func TestServeDiscoveredVersionsEndToEnd(t *testing.T) {
 	const (
-		discoveredVSCode = "1.140.2"
-		discoveredPlugin = "0.61.3"
+		discoveredVSCode = "7.8.9"
+		discoveredPlugin = "6.5.4"
 	)
 	discovery := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -309,8 +309,8 @@ func TestServeDiscoveredVersionsEndToEnd(t *testing.T) {
 	cfg := e2eConfig("gho-discovery-e2e")
 	// Make fallback values observably different so every assertion below proves
 	// that startup discovery, rather than static configuration, supplied them.
-	cfg.VSCodeVersionFallback = "9.8.7"
-	cfg.PluginVersionFallback = "6.5.4"
+	cfg.VSCodeVersionFallback = "1.2.3"
+	cfg.PluginVersionFallback = "4.5.6"
 	cfg.ImpersonationRefreshInterval = time.Hour
 	logger := discardLogger(t)
 	cacheRegistry := cache.NewRegistry()
@@ -347,7 +347,7 @@ func TestServeDiscoveredVersionsEndToEnd(t *testing.T) {
 
 	select {
 	case exchange := <-exchangeHeaders:
-		if got, want := exchange.Get("Editor-Version"), "vscode/"+discoveredVSCode; got != want {
+		if got, want := exchange.Get("Editor-Version"), "vscode/7.8.9"; got != want {
 			t.Errorf("exchange Editor-Version = %q, want discovered %q", got, want)
 		}
 	case <-time.After(time.Second):
@@ -359,10 +359,10 @@ func TestServeDiscoveredVersionsEndToEnd(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("forward status = %d, want 200", resp.StatusCode)
 	}
-	if got, want := upstream.hdr.Get("Editor-Plugin-Version"), "copilot-chat/"+discoveredPlugin; got != want {
+	if got, want := upstream.hdr.Get("Editor-Plugin-Version"), "copilot-chat/6.5.4"; got != want {
 		t.Errorf("forwarded Editor-Plugin-Version = %q, want discovered %q", got, want)
 	}
-	if got, want := upstream.hdr.Get("User-Agent"), "GitHubCopilotChat/"+discoveredPlugin; got != want {
+	if got, want := upstream.hdr.Get("User-Agent"), "GitHubCopilotChat/6.5.4"; got != want {
 		t.Errorf("forwarded User-Agent = %q, want discovered %q", got, want)
 	}
 
@@ -371,7 +371,7 @@ func TestServeDiscoveredVersionsEndToEnd(t *testing.T) {
 
 func TestServeFreshCodexCatalogAndReadinessEndToEnd(t *testing.T) {
 	const (
-		tag    = "rust-v0.145.0"
+		tag    = "rust-v1.2.3"
 		commit = "1234567890abcdef1234567890abcdef12345678"
 		oauth  = "gho-codex-freshness"
 	)
@@ -420,9 +420,9 @@ func TestServeFreshCodexCatalogAndReadinessEndToEnd(t *testing.T) {
 	discovery := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/releases/stable":
-			_, _ = io.WriteString(w, `["1.140.2"]`)
+			_, _ = io.WriteString(w, `["7.8.9"]`)
 		case "/_apis/public/gallery/extensionquery":
-			_, _ = io.WriteString(w, `{"results":[{"extensions":[{"versions":[{"version":"0.61.3","properties":[]}]}]}]}`)
+			_, _ = io.WriteString(w, `{"results":[{"extensions":[{"versions":[{"version":"6.5.4","properties":[]}]}]}]}`)
 		default:
 			http.NotFound(w, r)
 		}
@@ -496,7 +496,7 @@ func TestServeFreshCodexCatalogAndReadinessEndToEnd(t *testing.T) {
 		t.Errorf("codex_models version = %q, want %q", got, tag)
 	}
 
-	req, _ := http.NewRequest(http.MethodGet, base+"/openai/v1/models?client_version=0.145.0", nil)
+	req, _ := http.NewRequest(http.MethodGet, base+"/openai/v1/models?client_version=fixture", nil)
 	req.Header.Set("Authorization", "Bearer "+testAPIKey)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -537,7 +537,7 @@ func TestServeRequestDrivenMintRecoveryEndToEnd(t *testing.T) {
 		// allowed to perform the on-demand mint itself.
 		base := startManagerBackedE2EServer(t, cfg, logger, github, false)
 
-		assertReadyzImpersonation(t, base, cfg.VSCodeVersionFallback, cfg.PluginVersionFallback, "fallback", false)
+		assertReadyzImpersonation(t, base, "1.2.3", "4.5.6", "fallback", false)
 		resp, _ := post(t, base+"/anthropic/v1/messages", `{"model":"x"}`)
 		_ = resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
@@ -555,7 +555,7 @@ func TestServeRequestDrivenMintRecoveryEndToEnd(t *testing.T) {
 		logger := discardLogger(t)
 		base := startManagerBackedE2EServer(t, cfg, logger, github, true)
 
-		assertReadyzImpersonation(t, base, cfg.VSCodeVersionFallback, cfg.PluginVersionFallback, "fallback", false)
+		assertReadyzImpersonation(t, base, "1.2.3", "4.5.6", "fallback", false)
 		resp, _ := post(t, base+"/anthropic/v1/messages", `{"model":"x"}`)
 		_ = resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
@@ -606,7 +606,7 @@ func TestServeRequestDrivenMintRecoveryEndToEnd(t *testing.T) {
 			if got := exchanges.Load(); got != 1 {
 				t.Fatalf("exchange calls after failed request = %d, want 1", got)
 			}
-			assertReadyzImpersonation(t, base, cfg.VSCodeVersionFallback, cfg.PluginVersionFallback, "fallback", false)
+			assertReadyzImpersonation(t, base, "1.2.3", "4.5.6", "fallback", false)
 
 			recovered, _ := post(t, base+"/anthropic/v1/messages", `{"model":"x"}`)
 			_ = recovered.Body.Close()

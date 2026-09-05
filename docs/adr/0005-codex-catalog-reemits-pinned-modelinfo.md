@@ -6,7 +6,7 @@
 from the sole served source into the embedded fallback of a memory-only cached
 value that follows the latest stable Codex release and fetches content at its
 resolved commit. The embedded floor was advanced to `rust-v0.153.4` on
-2026-09-05 after its current contract was audited. This ADR's fidelity
+2026-09-05 after that release's contract was audited. This ADR's fidelity
 contract remains in force: every accepted entry must be a complete Codex
 `ModelInfo`, re-emitted field-for-field except for the enumerated explicit-alias
 slug substitution, reviewer routing, and live-limit overlay.
@@ -15,13 +15,15 @@ slug substitution, reviewer routing, and live-limit overlay.
 as API-key auth and defaults that provider mode's Guardian reviewer to
 `gpt-5.6-luna`; `codex-auto-review` remains the ChatGPT-auth default. Configured
 `auto_review_model_override` values still take precedence, so this ADR's
-explicit routing mechanism remains valid but is no longer the only way current
+explicit routing mechanism remains valid but is no longer the only way those
 command-auth clients can avoid `codex-auto-review`.
 
 The Codex client-shaped catalog (Phase 6b), served on
 `GET /openai/v1/models?client_version=…`, re-emits an accepted release of Codex's
 own `models.json` (latest stable release, commit-addressed, with the vendored
-`rust-v0.153.4` floor) **field-for-field per source entry**, applying only this
+[snapshot](../../internal/catalog/codexdata/models.json) floor whose current
+identity is recorded in [release.json](../../internal/catalog/codexdata/release.json))
+**field-for-field per source entry**, applying only this
 enumerated sequence of mutations: an explicitly configured Codex catalog alias
 replaces `slug` with its real live Copilot model ID;
 `auto_review_model_override` is removed and then optionally injected from a
@@ -61,8 +63,9 @@ unstable and copilotd must never silently change a user's model behavior.
 
 The deliberate divergences (design §13, amended by ADR-0009): each served value
 is release-tag-pinned; a future required-field addition fails the accept-gate and
-holds the last-good release or `rust-v0.153.4` floor, so Codex retains complete
-entries. Prompt/behavior values come from that accepted release; limits are
+holds the last-good release or the [vendored snapshot](../../internal/catalog/codexdata/models.json)
+floor, so Codex retains complete entries. Prompt/behavior values come from that
+accepted release; limits are
 Codex's numbers unless the operator opts into the overlay; coverage is exact
 Copilot-forwardable/accepted Codex intersections plus explicitly configured live
 aliases with accepted metadata sources; and auto-review requires operator
