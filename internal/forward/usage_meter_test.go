@@ -35,6 +35,12 @@ func (s *forwardUsageSink) count() int {
 	return len(s.turns)
 }
 
+func (s *forwardUsageSink) snapshot() []usage.Turn {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]usage.Turn(nil), s.turns...)
+}
+
 func enabledUsageRegistry(sink usage.Sink) shim.Registry {
 	registry := shim.CanonicalRegistry(sink)
 	registry[len(registry)-1].Enabled = true
@@ -54,6 +60,65 @@ var bufferedUsageSurfaces = []struct {
 }{
 	{name: "OpenAI Responses", endpoint: endpoint.OpenAIResponsesHTTP(), path: "/openai/v1/responses", response: qualifyingBufferedOpenAIResponse},
 	{name: "Anthropic Messages", endpoint: endpoint.AnthropicMessages(), path: "/anthropic/v1/messages", response: qualifyingBufferedAnthropicResponse},
+}
+
+func TestForwardOpenAIUsageMeterSelectsTransportByEndpointAndUpstreamContentType(t *testing.T) {
+	const completedEvent = "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-sse\",\"model\":\"reported-model\",\"status\":\"completed\",\"usage\":{\"input_tokens\":12,\"output_tokens\":6}}}\n\n"
+	tests := []struct {
+		name        string
+		requestBody string
+		contentType string
+		response    string
+		want        usage.Transport
+	}{
+		{name: "SSE without inbound stream flag", requestBody: `{"stream":false}`, contentType: "text/event-stream", response: completedEvent, want: usage.TransportSSE},
+		{name: "buffered despite inbound stream flag", requestBody: `{"stream":true}`, contentType: "application/json", response: qualifyingBufferedOpenAIResponse, want: usage.TransportBuffered},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {test.contentType}}, Body: io.NopCloser(strings.NewReader(test.response)), Request: r}, nil
+			})}
+			sink := &forwardUsageSink{}
+			forwarder := newTestForwarder(readyStub("https://upstream.invalid"), client, time.Second, time.Second, time.Second, time.Second, 1<<20, 1<<20, enabledUsageRegistry(sink))
+			recorder := newDeadlineRecorder()
+
+			forwarder.Handler(endpoint.OpenAIResponsesHTTP())(recorder, httptest.NewRequest(http.MethodPost, "/openai/v1/responses", strings.NewReader(test.requestBody)))
+
+			if recorder.Code != http.StatusOK || recorder.Body.String() != test.response {
+				t.Errorf("response = %d %q, want unchanged %d %q", recorder.Code, recorder.Body.String(), http.StatusOK, test.response)
+			}
+			turns := sink.snapshot()
+			if len(turns) != 1 || turns[0].Transport != test.want {
+				t.Errorf("usage Turns = %+v, want one %q observation", turns, test.want)
+			}
+		})
+	}
+}
+
+func TestForwardOpenAIUsageMeterRejectsUnsupportedSSEEncodingBeforeObservation(t *testing.T) {
+	const completedEvent = "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-sse\",\"model\":\"reported-model\",\"status\":\"completed\",\"usage\":{\"input_tokens\":12,\"output_tokens\":6}}}\n\n"
+	upstreamBody := &observedReadCloser{reader: strings.NewReader(completedEvent)}
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": {"text/event-stream"}, "Content-Encoding": {"gzip"}},
+			Body:       upstreamBody,
+			Request:    r,
+		}, nil
+	})}
+	sink := &forwardUsageSink{}
+	forwarder := newTestForwarder(readyStub("https://upstream.invalid"), client, time.Second, time.Second, time.Second, time.Second, 1<<20, 1<<20, enabledUsageRegistry(sink))
+	recorder := newDeadlineRecorder()
+
+	forwarder.Handler(endpoint.OpenAIResponsesHTTP())(recorder, httptest.NewRequest(http.MethodPost, "/openai/v1/responses", strings.NewReader(`{"stream":true}`)))
+
+	if recorder.Code != http.StatusBadGateway || !strings.Contains(recorder.Body.String(), "unsupported Content-Encoding") {
+		t.Errorf("response = %d %q, want pre-hook 502", recorder.Code, recorder.Body.String())
+	}
+	if upstreamBody.reads != 0 || sink.count() != 0 {
+		t.Errorf("upstream reads/usage observations = %d/%d, want 0/0", upstreamBody.reads, sink.count())
+	}
 }
 
 func TestForwardUsageMeterBuffersEveryNonSSEIdentityResponseByPayload(t *testing.T) {

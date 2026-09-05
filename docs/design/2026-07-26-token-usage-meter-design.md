@@ -8,9 +8,9 @@
 The state-at-rest and Shim-observer exceptions are explicitly accepted in
 [ADR-0017](../adr/0017-persist-usage-in-local-sqlite.md) and
 [ADR-0018](../adr/0018-store-per-surface-native-usage.md). This remains the full
-implementation target. Issues #197 and #198 implement the settings, private
-SQLite store, and **buffered OpenAI Responses plus buffered Anthropic Messages**
-observers end to end. Both Surfaces' SSE plus OpenAI WebSocket observers remain
+implementation target. Issues #197–#199 implement the settings, private SQLite
+store, **buffered OpenAI Responses plus buffered Anthropic Messages**, and OpenAI
+SSE observers end to end. Anthropic SSE and OpenAI WebSocket observers remain
 staged; target language below does not advertise those hooks as currently active.
 
 The Upstream call concentration, infallible post-commit hooks, structured logging,
@@ -39,9 +39,10 @@ configured local usage database (OS-specific default in §10). Both final Routes
 support buffered JSON and SSE; only OpenAI Responses supports WebSocket. The
 GitHub Copilot Surface and the Catalogs are not metered.
 
-_Current checkpoint (#198):_ qualifying buffered Anthropic Messages and buffered
-OpenAI Responses objects submit rows. The store carries the frozen two-table
-migration unchanged. No SSE or WebSocket usage observer is active at this
+_Current checkpoint (#199):_ qualifying buffered Anthropic Messages, buffered
+OpenAI Responses objects, and self-contained OpenAI `response.completed` SSE
+events submit rows. The store carries the frozen two-table migration unchanged.
+Anthropic SSE and OpenAI WebSocket usage observers are not active at this
 checkpoint.
 
 An eligible completion contains the required usage fields, identity, and model
@@ -701,9 +702,9 @@ Costs and lifecycle obligations:
 
 Both serve-only settings are available as of #197 and are declared in
 `internal/config.serveSpecs` per ADR-0012, using the existing shim-toggle
-convention. At the #198 checkpoint they activate the buffered recording paths
-for both inference Surfaces described in §1; later transport slices reuse the same settings
-and store:
+convention. At the #199 checkpoint they activate buffered recording for both
+inference Surfaces and OpenAI SSE recording described in §1; later transport
+slices reuse the same settings and store:
 
 | Flag | Field | Default |
 | --- | --- | --- |
@@ -970,11 +971,11 @@ all four cgo-free release targets with the chosen SQLite driver (§13).
 ### Reconciled and staged docs
 
 `CONTEXT.md` defines Shim, Usage meter, and Turn without embedding this
-implementation plan. As of #198, README and `CONFIGURATION.md` describe the
+implementation plan. As of #199, README and `CONFIGURATION.md` describe the
 available opt-in database and settings, explicitly limit implemented coverage to
-the buffered Anthropic Messages and OpenAI Responses paths, and state durability,
-filesystem, buffering, retention, backup, external-query, and shutdown
-consequences. The existing
+buffered Anthropic Messages plus buffered and SSE OpenAI Responses, and state
+durability, filesystem, buffering, retention, backup, external-query, and
+shutdown consequences. The existing
 `docs/divergence-ledger.md` copilotd-originated error row already covers the
 meter-activated bounded-read `BadGateway`/`GatewayTimeout` Fabrications;
 observation itself adds no usage-rewriting Alteration (§4.2).
@@ -1018,5 +1019,6 @@ The four pre-implementation gates are explicitly closed:
 These approvals authorized staged implementation. Issue #197 supplies the shared
 contract, production SQLite dependency and writer, both settings, and the
 buffered OpenAI hook; issue #198 adds the buffered Anthropic hook without changing
-migration 1. SSE and WebSocket parsing remain later stages and must not be
+migration 1; and issue #199 adds self-contained OpenAI SSE completion observation.
+Anthropic SSE and OpenAI WebSocket parsing remain later stages and must not be
 inferred from the frozen schema or final-target sections.

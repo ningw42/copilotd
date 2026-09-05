@@ -183,9 +183,9 @@ by [`--usage-db-path`](#--usage-db-path). It is off by default: disabled `serve`
 and `login` do not open a database, create usage files, start a usage writer, or
 install a metering hook.
 
-**Implemented coverage is currently the two buffered inference paths:
-Anthropic Messages and OpenAI Responses.** Both Surfaces' SSE paths and the
-OpenAI Responses WebSocket path remain staged and do not install usage hooks yet.
+**Implemented coverage is buffered Anthropic Messages plus buffered and SSE
+OpenAI Responses.** Anthropic Messages SSE and OpenAI Responses WebSocket
+metering remain staged and do not install usage hooks yet.
 
 A buffered Anthropic row requires one self-contained object whose `type` is
 `"message"`, with its own non-empty `id` and reported `model`, a non-empty string
@@ -210,10 +210,14 @@ fixtures are not recorded Copilot responses. Beta variable-cardinality
 `usage.iterations[]` remains excluded pending a separate schema/cardinality
 review.
 
-A buffered OpenAI row requires a self-contained response object with its own
-non-empty `id` and reported `model`, `status: "completed"`, and valid nonnegative
-integer `usage.input_tokens` and `usage.output_tokens`. The meter also preserves
-these OpenAI-native fields when reported:
+An OpenAI row requires a self-contained response object with its own non-empty
+`id` and reported `model`, `status: "completed"`, and valid nonnegative integer
+`usage.input_tokens` and `usage.output_tokens`. Buffered JSON validates that
+object directly. SSE observes only `response.completed` frames, extracts their
+joined `data:` payload (including repeated fields and CRLF framing), requires the
+decoded event type to agree, and validates the nested `response` with the same
+predicate. It never fills fields from an earlier event or the client request.
+The meter also preserves these OpenAI-native fields when reported:
 
 - `input_tokens_details.cached_tokens` and
   `input_tokens_details.cache_write_tokens`, both subsets already inside complete
@@ -226,16 +230,16 @@ For both Surfaces, optional numeric reports remain nullable: omitted or `null`
 values become SQL `NULL`, while a reported zero stays zero. Eligibility validates
 JSON types, required presence, nonnegative values, and the signed 64-bit range;
 it does not add cross-field arithmetic consistency checks. Malformed, incomplete,
-error, or irrelevant bodies simply produce no row. The reported response model
+error, or irrelevant payloads simply produce no row. The reported response model
 is stored verbatim; requested model names, Catalog normalization, Codex aliases,
 and metadata sources are never used as fallback or mapping inputs.
 
 Each row also records local completion-observation time as canonical `at_ms` plus
 generated millisecond UTC `at_utc`, inbound `request_id` (empty only when
-unavailable), upstream object identity as `message_id` or `response_id`,
-`transport='buffered'`, and a zero-based submission-attempt `turn_index`. It does
-not store prompts, generated content, API keys, GitHub OAuth tokens, or Copilot
-tokens.
+unavailable), upstream object identity as `message_id` or `response_id`, the
+applicable `transport` (`buffered`, or `sse` for OpenAI), and a zero-based
+submission-attempt `turn_index`. It does not store prompts, generated content,
+API keys, GitHub OAuth tokens, or Copilot tokens.
 
 The GitHub Copilot Surface, raw `/models`, provider/Codex Catalogs, and
 `/v1/messages/count_tokens` are not metered. There is no query API, CLI query
@@ -259,11 +263,20 @@ response. Unsupported, repeated, list-valued, or explicitly empty encodings
 bypass the buffered meter and remain opaque. Payload bytes are unchanged when a
 hook runs; whole-wire neutrality is not promised.
 
+For OpenAI SSE, transport selection follows the typed Endpoint and upstream
+`Content-Type`, not the inbound `stream` field. An unsupported SSE
+`Content-Encoding` still returns the existing pre-hook `502`. The observer returns
+every frame with its exact original `Raw` bytes and structure; it does not hold,
+drop, coalesce, rewrite, or finalize frames.
+
 Observation happens before downstream writing. A row can remain after a client
-write failure or an outer Shim rejection, and duplicate qualifying observations
-are not deduplicated. Conversely, failed, incomplete, cancelled, malformed, or
-unparseable responses and queue/storage loss can omit real consumption. The
-database and logs are not exhaustive or billing-grade accounting.
+write failure or an outer Shim failure, and duplicate qualifying observations
+are not deduplicated. A clean SSE terminal may instead be `response.failed`,
+`response.incomplete`, or `error` and produce no row. Conversely, failed,
+incomplete, cancelled, malformed, or unparseable responses and queue/storage
+loss can omit real consumption. Application completion, usage availability, and
+downstream delivery are independent; the database and logs are not exhaustive or
+billing-grade accounting.
 
 ### `--usage-db-path`
 

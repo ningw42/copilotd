@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/ningw42/copilotd/internal/logging"
+	"github.com/ningw42/copilotd/internal/sse"
 	"github.com/ningw42/copilotd/internal/usage"
 )
 
@@ -15,23 +16,58 @@ type openAIUsageMeter struct {
 	sink      usage.Sink
 	requestID string
 	turnIndex int
-	transport usage.Transport
 }
 
-var _ BufferedTransformer = (*openAIUsageMeter)(nil)
+var (
+	_ BufferedTransformer = (*openAIUsageMeter)(nil)
+	_ EventTransformer    = (*openAIUsageMeter)(nil)
+)
 
-func newOpenAIUsageMeter(ctx context.Context, sink usage.Sink, transport usage.Transport) *openAIUsageMeter {
+func newOpenAIUsageMeter(ctx context.Context, sink usage.Sink) *openAIUsageMeter {
 	requestID, _ := logging.RequestIDFrom(ctx)
-	return &openAIUsageMeter{sink: sink, requestID: requestID, transport: transport}
+	return &openAIUsageMeter{sink: sink, requestID: requestID}
 }
 
 // TransformBuffered observes only self-contained completed Responses objects.
 // Every path leaves Body.Bytes untouched and returns nil so malformed,
 // incomplete, irrelevant, or future payloads remain Copilot-authoritative.
 func (m *openAIUsageMeter) TransformBuffered(_ context.Context, body *Body) error {
-	responseID, model, native, ok := parseOpenAIResponse(body.Bytes)
+	m.observeResponse(body.Bytes, usage.TransportBuffered)
+	return nil
+}
+
+// TransformEvent routes on the advisory frame type, then validates the decoded
+// event type and its self-contained response. Every path returns the exact
+// original frame; Raw is SSE framing and is never decoded as JSON or rewritten.
+func (m *openAIUsageMeter) TransformEvent(_ context.Context, f sse.Frame) []sse.Frame {
+	if f.Type == "response.completed" {
+		if payload, present := f.Data(); present {
+			m.observeResponseCompletedEvent(payload, usage.TransportSSE)
+		}
+	}
+	return []sse.Frame{f}
+}
+
+func (m *openAIUsageMeter) observeResponseCompletedEvent(raw []byte, transport usage.Transport) {
+	object, ok := decodeJSONObject(raw)
 	if !ok {
-		return nil
+		return
+	}
+	eventType, ok := requiredNonemptyString(object, "type")
+	if !ok || eventType != "response.completed" {
+		return
+	}
+	response, exists := object["response"]
+	if !exists || isJSONNull(response) {
+		return
+	}
+	m.observeResponse(response, transport)
+}
+
+func (m *openAIUsageMeter) observeResponse(raw []byte, transport usage.Transport) {
+	responseID, model, native, ok := parseOpenAIResponse(raw)
+	if !ok {
+		return
 	}
 	turnIndex := m.turnIndex
 	m.turnIndex++
@@ -40,11 +76,10 @@ func (m *openAIUsageMeter) TransformBuffered(_ context.Context, body *Body) erro
 		RequestID:  m.requestID,
 		ResponseID: responseID,
 		Model:      model,
-		Transport:  m.transport,
+		Transport:  transport,
 		TurnIndex:  turnIndex,
 		Usage:      native,
 	})
-	return nil
 }
 
 func parseOpenAIResponse(raw []byte) (string, string, usage.OpenAIUsage, bool) {
