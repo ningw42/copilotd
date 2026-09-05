@@ -50,12 +50,6 @@ func (c *Caller) Do(ctx context.Context, call Call) (*http.Response, context.Con
 		return nil, ctx, c.Classify(ctx, err)
 	}
 	responseCtx := c.Correlate(ctx, response.Header)
-	if response.Body != nil {
-		response.Body = &contextBoundResponseBody{
-			ReadCloser: response.Body,
-			ctx:        responseCtx,
-		}
-	}
 	return response, responseCtx, nil
 }
 
@@ -78,7 +72,7 @@ func (c *Caller) Buffered(ctx context.Context, call Call) (int, []byte, context.
 	timer := time.AfterFunc(c.outboundTimeout, func() { cancel(context.DeadlineExceeded) })
 	defer timer.Stop()
 
-	body, readFailure := c.ReadBounded(response.Body)
+	body, readFailure := c.ReadBounded(responseCtx, response.Body)
 	if readFailure == nil {
 		return response.StatusCode, body, responseCtx, nil
 	}

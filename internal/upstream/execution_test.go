@@ -234,9 +234,18 @@ func TestReadBoundedAndCallerFormAgree(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			caller := executionCaller(nil, nil, 0, tc.max, slog.Default())
+			client := &http.Client{Transport: executionRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+				return executionResponse(request, http.StatusOK, io.NopCloser(tc.reader())), nil
+			})}
+			caller := New(readyExecutionProvider("https://upstream.invalid"), client, time.Hour, tc.max, slog.Default())
+			response, responseCtx, failure := caller.Do(context.Background(), executionCall())
+			if failure != nil {
+				t.Fatalf("Do() failure = %#v, want response", failure)
+			}
+			defer response.Body.Close()
+
 			freeBody, freeFailure := ReadBounded(tc.reader(), tc.max)
-			callerBody, callerFailure := caller.ReadBounded(tc.reader())
+			callerBody, callerFailure := caller.ReadBounded(responseCtx, response.Body)
 
 			assertBoundedResult(t, "free ReadBounded", freeBody, freeFailure, tc.wantBody, tc.wantKind, tc.wantMessage, tc.wantErr)
 			assertBoundedResult(t, "Caller.ReadBounded", callerBody, callerFailure, tc.wantBody, tc.wantKind, tc.wantMessage, tc.wantErr)
@@ -250,7 +259,7 @@ func TestReadBoundedAndCallerFormAgree(t *testing.T) {
 	}
 }
 
-func TestCallerReadBoundedClassifiesTheBoundUpstreamCallContext(t *testing.T) {
+func TestCallerReadBoundedClassifiesCallCancellationAcrossReaders(t *testing.T) {
 	tests := []struct {
 		name           string
 		cause          error
@@ -274,56 +283,142 @@ func TestCallerReadBoundedClassifiesTheBoundUpstreamCallContext(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			var logs bytes.Buffer
-			logger, err := logging.NewWithWriter(&logs, config.ServeConfig{LogLevel: "info", LogFormat: "text"})
-			if err != nil {
-				t.Fatalf("build logger: %v", err)
-			}
-			upstreamBody := &executionCancelAwareBody{blockAfterChunks: true}
-			client := executionBodyClient(upstreamBody, http.Header{RequestIDHeader: {"upstream-read-canceled"}})
-			caller := executionCaller(readyExecutionProvider("https://upstream.invalid"), client, time.Hour, 1<<20, logger)
-			ctx, cancel := context.WithCancelCause(logging.WithRequestID(context.Background(), "copilotd-read-canceled"))
-			response, _, failure := caller.Do(ctx, executionCall())
-			if failure != nil {
-				t.Fatalf("Do() failure = %#v, want response", failure)
-			}
-			cancel(tc.cause)
-
-			body, failure := caller.ReadBounded(response.Body)
-			_ = response.Body.Close()
-
-			if body != nil {
-				t.Errorf("ReadBounded() body = %q, want nil", body)
-			}
-			if failure == nil {
-				t.Fatal("ReadBounded() failure = nil, want classified failure")
-			}
-			if failure.Kind != tc.wantKind || failure.Message != tc.wantMessage || failure.ClientGone != tc.wantClientGone {
-				t.Errorf("ReadBounded() failure = (%v, %q, ClientGone=%v), want (%v, %q, ClientGone=%v)", failure.Kind, failure.Message, failure.ClientGone, tc.wantKind, tc.wantMessage, tc.wantClientGone)
-			}
-			if !errors.Is(failure.Err, context.Canceled) {
-				t.Errorf("failure.Err = %v, want interrupted-read context cancellation", failure.Err)
-			}
-			if got := strings.Count(logs.String(), "upstream call failed"); got != 1 {
-				t.Errorf("failure log records = %d, want 1: %q", got, logs.String())
-			}
-
-			recorder := httptest.NewRecorder()
-			recorder.Code = 0
-			wrote := failure.RespondTo(recorder, endpoint.OpenAI)
-			if tc.wantClientGone {
-				if wrote || recorder.Code != 0 || recorder.Body.Len() != 0 || len(recorder.Header()) != 0 {
-					t.Errorf("ClientGone response = wrote %v status %d headers %v body %q, want no write", wrote, recorder.Code, recorder.Header(), recorder.Body.String())
+		for _, readerName := range []string{"direct", "tee"} {
+			t.Run(tc.name+"/"+readerName, func(t *testing.T) {
+				var logs bytes.Buffer
+				base, err := logging.NewWithWriter(&logs, config.ServeConfig{LogLevel: "info", LogFormat: "json"})
+				if err != nil {
+					t.Fatalf("build logger: %v", err)
 				}
-			} else if !wrote || recorder.Code != tc.wantStatus {
-				t.Errorf("timeout response = wrote %v status %d, want wrote true status %d", wrote, recorder.Code, tc.wantStatus)
-			}
-		})
+				logger := logging.ForComponent(base, "internal/upstream")
+				upstreamBody := &executionCancelAwareBody{blockAfterChunks: true}
+				client := executionBodyClient(upstreamBody, http.Header{RequestIDHeader: {"upstream-read-canceled"}})
+				caller := New(readyExecutionProvider("https://upstream.invalid"), client, time.Hour, 1<<20, logger)
+				ctx, cancel := context.WithCancelCause(logging.WithRequestID(context.Background(), "copilotd-read-canceled"))
+				defer cancel(context.Canceled)
+				response, responseCtx, failure := caller.Do(ctx, executionCall())
+				if failure != nil {
+					t.Fatalf("Do() failure = %#v, want response", failure)
+				}
+				cancel(tc.cause)
+				reader := io.Reader(response.Body)
+				if readerName == "tee" {
+					reader = io.TeeReader(reader, io.Discard)
+				}
+
+				body, failure := caller.ReadBounded(responseCtx, reader)
+				_ = response.Body.Close()
+
+				if body != nil {
+					t.Errorf("ReadBounded() body = %q, want nil", body)
+				}
+				if failure == nil {
+					t.Fatal("ReadBounded() failure = nil, want classified failure")
+				}
+				if failure.Kind != tc.wantKind || failure.Message != tc.wantMessage || failure.ClientGone != tc.wantClientGone {
+					t.Errorf("ReadBounded() failure = (%v, %q, ClientGone=%v), want (%v, %q, ClientGone=%v)", failure.Kind, failure.Message, failure.ClientGone, tc.wantKind, tc.wantMessage, tc.wantClientGone)
+				}
+				if !errors.Is(failure.Err, context.Canceled) {
+					t.Errorf("failure.Err = %v, want interrupted-read context cancellation", failure.Err)
+				}
+				assertExecutionFailureWarning(t, logs.Bytes(), "copilotd-read-canceled", "upstream-read-canceled")
+
+				recorder := httptest.NewRecorder()
+				recorder.Code = 0
+				wrote := failure.RespondTo(recorder, endpoint.OpenAI)
+				if tc.wantClientGone {
+					if wrote || recorder.Code != 0 || recorder.Body.Len() != 0 || len(recorder.Header()) != 0 {
+						t.Errorf("ClientGone response = wrote %v status %d headers %v body %q, want no write", wrote, recorder.Code, recorder.Header(), recorder.Body.String())
+					}
+				} else if !wrote || recorder.Code != tc.wantStatus {
+					t.Errorf("timeout response = wrote %v status %d, want wrote true status %d", wrote, recorder.Code, tc.wantStatus)
+				}
+			})
+		}
 	}
 }
 
-func TestCallerReadBoundedKeepsOverCapClassificationAcrossBoundContextCauses(t *testing.T) {
+func TestCallerReadBoundedCorrelatesFailuresAcrossReaders(t *testing.T) {
+	readError := errors.New("private upstream read detail")
+	failures := []struct {
+		name        string
+		reader      func() io.Reader
+		wantMessage string
+		wantErr     error
+	}{
+		{
+			name: "read error",
+			reader: func() io.Reader {
+				return io.MultiReader(strings.NewReader("partial"), executionTerminalErrorReader{err: readError})
+			},
+			wantMessage: "could not read the upstream response",
+			wantErr:     readError,
+		},
+		{
+			name:        "over cap",
+			reader:      func() io.Reader { return strings.NewReader("123456789") },
+			wantMessage: "upstream response body exceeds the maximum allowed size",
+		},
+	}
+	correlations := []struct {
+		name                  string
+		requestID             string
+		upstreamRequestID     string
+		wantUpstreamRequestID string
+	}{
+		{name: "different", requestID: "copilotd-read-failure", upstreamRequestID: "upstream-read-failure", wantUpstreamRequestID: "upstream-read-failure"},
+		{name: "identical", requestID: "copilotd-read-failure", upstreamRequestID: "copilotd-read-failure"},
+		{name: "absent upstream id", requestID: "copilotd-read-failure"},
+		{name: "absent resolved id", upstreamRequestID: "upstream-read-failure"},
+	}
+
+	for _, tc := range failures {
+		for _, correlation := range correlations {
+			for _, readerName := range []string{"direct", "tee"} {
+				t.Run(tc.name+"/"+correlation.name+"/"+readerName, func(t *testing.T) {
+					var logs bytes.Buffer
+					base, err := logging.NewWithWriter(&logs, config.ServeConfig{LogLevel: "info", LogFormat: "json"})
+					if err != nil {
+						t.Fatalf("build logger: %v", err)
+					}
+					client := &http.Client{Transport: executionRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+						response := executionResponse(request, http.StatusOK, io.NopCloser(tc.reader()))
+						if correlation.upstreamRequestID != "" {
+							response.Header.Set(RequestIDHeader, correlation.upstreamRequestID)
+						}
+						return response, nil
+					})}
+					caller := New(readyExecutionProvider("https://upstream.invalid"), client, time.Hour, 8, logging.ForComponent(base, "internal/upstream"))
+					ctx := context.Background()
+					if correlation.requestID != "" {
+						ctx = logging.WithRequestID(ctx, correlation.requestID)
+					}
+					response, responseCtx, failure := caller.Do(ctx, executionCall())
+					if failure != nil {
+						t.Fatalf("Do() failure = %#v, want response", failure)
+					}
+					defer response.Body.Close()
+					reader := io.Reader(response.Body)
+					if readerName == "tee" {
+						reader = io.TeeReader(reader, io.Discard)
+					}
+
+					body, failure := caller.ReadBounded(responseCtx, reader)
+
+					assertBoundedResult(t, "Caller.ReadBounded", body, failure, "", apierror.BadGateway, tc.wantMessage, tc.wantErr)
+					assertExecutionFailureWarning(t, logs.Bytes(), correlation.requestID, correlation.wantUpstreamRequestID)
+					for _, payload := range []string{"partial", "123456789"} {
+						if strings.Contains(logs.String(), payload) {
+							t.Errorf("failure warning leaked response payload %q", payload)
+						}
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestCallerReadBoundedKeepsOverCapClassificationAcrossCallContextCauses(t *testing.T) {
 	tests := []struct {
 		name  string
 		cause error
@@ -333,32 +428,44 @@ func TestCallerReadBoundedKeepsOverCapClassificationAcrossBoundContextCauses(t *
 	}
 
 	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			ctx, cancel := context.WithCancelCause(context.Background())
-			cancel(tc.cause)
-			body := &contextBoundResponseBody{
-				ReadCloser: io.NopCloser(strings.NewReader("123456789")),
-				ctx:        ctx,
-			}
-			caller := executionCaller(nil, nil, 0, 8, slog.Default())
+		for _, readerName := range []string{"direct", "tee"} {
+			t.Run(tc.name+"/"+readerName, func(t *testing.T) {
+				ctx, cancel := context.WithCancelCause(context.Background())
+				defer cancel(context.Canceled)
+				// The transport has bytes ready even though the call is canceled
+				// before reading. Observing the cap must take precedence.
+				upstreamBody := &executionCancelAwareBody{chunks: [][]byte{[]byte("123456789")}}
+				client := executionBodyClient(upstreamBody, make(http.Header))
+				caller := New(readyExecutionProvider("https://upstream.invalid"), client, time.Hour, 8, slog.Default())
+				response, responseCtx, failure := caller.Do(ctx, executionCall())
+				if failure != nil {
+					t.Fatalf("Do() failure = %#v, want response", failure)
+				}
+				cancel(tc.cause)
+				reader := io.Reader(response.Body)
+				if readerName == "tee" {
+					reader = io.TeeReader(reader, io.Discard)
+				}
 
-			contents, failure := caller.ReadBounded(body)
+				contents, failure := caller.ReadBounded(responseCtx, reader)
+				_ = response.Body.Close()
 
-			if contents != nil {
-				t.Errorf("ReadBounded() body = %q, want nil", contents)
-			}
-			if failure == nil {
-				t.Fatal("ReadBounded() failure = nil, want over-cap failure")
-			}
-			if failure.Kind != apierror.BadGateway || failure.Message != "upstream response body exceeds the maximum allowed size" || failure.ClientGone {
-				t.Errorf("ReadBounded() failure = (%v, %q, ClientGone=%v), want (BadGateway, over-cap message, false)", failure.Kind, failure.Message, failure.ClientGone)
-			}
+				if contents != nil {
+					t.Errorf("ReadBounded() body = %q, want nil", contents)
+				}
+				if failure == nil {
+					t.Fatal("ReadBounded() failure = nil, want over-cap failure")
+				}
+				if failure.Kind != apierror.BadGateway || failure.Message != "upstream response body exceeds the maximum allowed size" || failure.ClientGone {
+					t.Errorf("ReadBounded() failure = (%v, %q, ClientGone=%v), want (BadGateway, over-cap message, false)", failure.Kind, failure.Message, failure.ClientGone)
+				}
 
-			recorder := httptest.NewRecorder()
-			if wrote := failure.RespondTo(recorder, endpoint.OpenAI); !wrote || recorder.Code != http.StatusBadGateway {
-				t.Errorf("RespondTo() = wrote %v status %d, want wrote true status 502", wrote, recorder.Code)
-			}
-		})
+				recorder := httptest.NewRecorder()
+				if wrote := failure.RespondTo(recorder, endpoint.OpenAI); !wrote || recorder.Code != http.StatusBadGateway {
+					t.Errorf("RespondTo() = wrote %v status %d, want wrote true status 502", wrote, recorder.Code)
+				}
+			})
+		}
 	}
 }
 
@@ -642,20 +749,7 @@ func TestCallerBufferedClassifiesPlainReadFailureWithoutPartialBody(t *testing.T
 	if !upstreamBody.closed {
 		t.Error("upstream response body remains open")
 	}
-	var record map[string]any
-	if err := json.Unmarshal(logs.Bytes(), &record); err != nil {
-		t.Fatalf("decode single failure warning: %v: %s", err, logs.String())
-	}
-	for key, want := range map[string]string{
-		"level":               "WARN",
-		"component":           "internal/upstream",
-		"request_id":          "copilotd-read-failure",
-		"upstream_request_id": "upstream-read-failure",
-	} {
-		if got := record[key]; got != want {
-			t.Errorf("failure warning %s = %v, want %q", key, got, want)
-		}
-	}
+	assertExecutionFailureWarning(t, logs.Bytes(), "copilotd-read-failure", "upstream-read-failure")
 }
 
 func TestCallerBufferedRejectsOversizedResponseWithoutReturningTruncatedBody(t *testing.T) {
@@ -834,6 +928,29 @@ func TestCallerBufferedReturnsOnlyDifferentUpstreamRequestID(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func assertExecutionFailureWarning(t *testing.T, logs []byte, requestID, upstreamRequestID string) {
+	t.Helper()
+	var record map[string]any
+	if err := json.Unmarshal(logs, &record); err != nil {
+		t.Fatalf("decode single failure warning: %v: %s", err, logs)
+	}
+	for key, want := range map[string]string{
+		"level":               "WARN",
+		"component":           "internal/upstream",
+		"request_id":          requestID,
+		"upstream_request_id": upstreamRequestID,
+	} {
+		got, present := record[key]
+		if want == "" {
+			if present {
+				t.Errorf("failure warning %s = %v, want absent", key, got)
+			}
+		} else if got != want {
+			t.Errorf("failure warning %s = %v, want %q", key, got, want)
+		}
 	}
 }
 

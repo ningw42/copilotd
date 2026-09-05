@@ -11,11 +11,6 @@ import (
 
 var errResponseBodyTooLarge = errors.New("upstream response body exceeds the maximum allowed size")
 
-type contextBoundResponseBody struct {
-	io.ReadCloser
-	ctx context.Context
-}
-
 // ReadBounded reads body under max. It is context-free so the owner of the
 // request context can classify a read interrupted by its own cancellation.
 func ReadBounded(body io.Reader, max int64) ([]byte, *Failure) {
@@ -41,18 +36,15 @@ func ReadBounded(body io.Reader, max int64) ([]byte, *Failure) {
 	return contents, nil
 }
 
-// ReadBounded reads body under the Caller's configured buffered cap. When body
-// came from Do, it also classifies cancellation from that call's bound context.
-func (c *Caller) ReadBounded(body io.Reader) ([]byte, *Failure) {
+// ReadBounded reads body under the Caller's configured buffered cap. Pass the
+// response-path ctx returned by Do so cancellation classification and failure
+// logs retain the call's context even when body is decorated.
+func (c *Caller) ReadBounded(ctx context.Context, body io.Reader) ([]byte, *Failure) {
 	contents, failure := ReadBounded(body, c.maxBufferedBytes)
 	if failure == nil {
 		return contents, nil
 	}
 
-	ctx := context.Background()
-	if bound, ok := body.(*contextBoundResponseBody); ok {
-		ctx = bound.ctx
-	}
 	// An over-cap read completed successfully far enough to establish its own
 	// failure. A cancellation racing after that observation must not replace the
 	// specified BadGateway classification with ClientGone or GatewayTimeout.

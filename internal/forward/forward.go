@@ -305,7 +305,7 @@ func (f *Forwarder) forward(w http.ResponseWriter, r *http.Request, header http.
 		_, _ = io.Copy(sse.NewWriter(w, f.writeTimeout, time.Now), resp.Body)
 		return
 	}
-	buffered, failure := f.caller.ReadBounded(resp.Body)
+	buffered, failure := f.caller.ReadBounded(responseCtx, resp.Body)
 	if failure != nil {
 		failure.RespondTo(w, surface)
 		return
