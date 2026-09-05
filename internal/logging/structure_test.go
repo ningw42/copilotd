@@ -104,6 +104,7 @@ var expectedLogKeys = map[string]string{
 var expectedComponentSinks = map[componentSink]struct{}{
 	{function: "runServe", consumer: "local", component: "cmd/copilotd"}:                                 {},
 	{function: "runServe", consumer: "sqlitestore.Open", component: "internal/usage/sqlitestore"}:        {},
+	{function: "runBoundServe", consumer: "local", component: "cmd/copilotd"}:                            {},
 	{function: "runBoundServe", consumer: "runServeStartup", component: "cmd/copilotd"}:                  {},
 	{function: "runBoundServe", consumer: "upstream.New", component: "internal/upstream"}:                {},
 	{function: "runBoundServe", consumer: "forward.New arg 7", component: "internal/sse"}:                {},

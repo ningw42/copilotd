@@ -312,9 +312,11 @@ func runServe(ctx context.Context, flags *config.ServeFlags, lookupEnv func(stri
 	}
 	codexModels := configuredCodexModels(cfg, productionCodexModelsEdge(), cacheRegistry, base)
 
+	var usageStore *sqlitestore.Store
 	var sink usage.Sink
 	if cfg.ShimUsageMeterEnabled {
-		usageStore, openErr := sqlitestore.Open(cfg.UsageDBPath, logging.ForComponent(base, "internal/usage/sqlitestore"))
+		var openErr error
+		usageStore, openErr = sqlitestore.Open(cfg.UsageDBPath, logging.ForComponent(base, "internal/usage/sqlitestore"))
 		if openErr != nil {
 			logger.Error("cannot start: opening usage database failed",
 				slog.String(logging.PathKey, cfg.UsageDBPath),
@@ -349,8 +351,7 @@ func runServe(ctx context.Context, flags *config.ServeFlags, lookupEnv func(stri
 		stop()
 	}()
 
-	if err := runBoundServe(serveCtx, cfg, base, mgr, imp, codexModels, cacheRegistry, registry, ln); err != nil {
-		logger.Error("server error", slog.Any(logging.ErrorKey, err))
+	if err := runBoundServe(serveCtx, cfg, base, mgr, imp, codexModels, cacheRegistry, registry, ln, usageStore); err != nil {
 		return errServeFailed
 	}
 	return nil
@@ -361,8 +362,10 @@ func runServe(ctx context.Context, flags *config.ServeFlags, lookupEnv func(stri
 // registry. That ordering keeps
 // /healthz and the locally-ready /readyz available while bounded startup
 // discovery is in progress. Neither discovery nor startup mint outcomes gate
-// readiness or request admission.
-func runBoundServe(ctx context.Context, cfg config.ServeConfig, base *slog.Logger, mgr *identity.Manager, imp *impersonation.Set, codexModels *cache.Value[[]byte], cacheRegistry *cache.Registry, registry shim.Registry, ln net.Listener) error {
+// readiness or request admission. When usageStore is non-nil, admission remains
+// open through Server.Run and is cut off immediately on return, before a serve
+// error is synchronously logged.
+func runBoundServe(ctx context.Context, cfg config.ServeConfig, base *slog.Logger, mgr *identity.Manager, imp *impersonation.Set, codexModels *cache.Value[[]byte], cacheRegistry *cache.Registry, registry shim.Registry, ln net.Listener, usageStore *sqlitestore.Store) error {
 	go runServeStartup(ctx, cacheRegistry, mgr, logging.ForComponent(base, "cmd/copilotd"))
 	catalogs := catalog.RenderDescriptors{
 		Anthropic: catalog.AnthropicRenderConfig{
@@ -394,10 +397,17 @@ func runBoundServe(ctx context.Context, cfg config.ServeConfig, base *slog.Logge
 		})
 	streamOutcomes := server.NewStreamOutcomeCounter()
 
-	return server.New(cfg, logging.ForComponent(base, "internal/server"), logging.ForComponent(base, "internal/catalog"), logging.DependencyErrorLog(base, slog.LevelWarn), mgr, server.ReadyObservers{
+	serveErr := server.New(cfg, logging.ForComponent(base, "internal/server"), logging.ForComponent(base, "internal/catalog"), logging.DependencyErrorLog(base, slog.LevelWarn), mgr, server.ReadyObservers{
 		Impersonation: imp,
 		Caches:        cacheRegistry,
 	}, fwd, caller, wsProxy, streamOutcomes, catalogs).Run(ctx, ln)
+	if usageStore != nil {
+		usageStore.StopAdmission()
+	}
+	if serveErr != nil {
+		logging.ForComponent(base, "cmd/copilotd").Error("server error", slog.Any(logging.ErrorKey, serveErr))
+	}
+	return serveErr
 }
 
 // runServeStartup performs the ordered background startup sequence. The cache

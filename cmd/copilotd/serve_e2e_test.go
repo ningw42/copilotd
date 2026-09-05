@@ -238,7 +238,7 @@ func TestRunBoundServeUsesSuppliedShimRegistryForHTTPAndWebSocket(t *testing.T) 
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- runBoundServe(ctx, cfg, logger, mgr, imp, nil, cacheRegistry, registry, ln) }()
+	go func() { done <- runBoundServe(ctx, cfg, logger, mgr, imp, nil, cacheRegistry, registry, ln, nil) }()
 	t.Cleanup(func() {
 		cancel()
 		select {
@@ -449,7 +449,7 @@ func TestServeDiscoveredVersionsEndToEnd(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- runBoundServe(ctx, cfg, logger, mgr, imp, nil, cacheRegistry, configuredShimRegistry(cfg, nil), ln)
+		done <- runBoundServe(ctx, cfg, logger, mgr, imp, nil, cacheRegistry, configuredShimRegistry(cfg, nil), ln, nil)
 	}()
 	t.Cleanup(func() {
 		cancel()
@@ -576,7 +576,7 @@ func TestServeFreshCodexCatalogAndReadinessEndToEnd(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- runBoundServe(ctx, cfg, logger, mgr, imp, codexModels, registry, configuredShimRegistry(cfg, nil), ln)
+		done <- runBoundServe(ctx, cfg, logger, mgr, imp, codexModels, registry, configuredShimRegistry(cfg, nil), ln, nil)
 	}()
 	t.Cleanup(func() {
 		cancel()

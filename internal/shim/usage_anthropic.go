@@ -3,17 +3,13 @@ package shim
 import (
 	"context"
 	"encoding/json"
-	"time"
 
-	"github.com/ningw42/copilotd/internal/logging"
 	"github.com/ningw42/copilotd/internal/sse"
 	"github.com/ningw42/copilotd/internal/usage"
 )
 
 type anthropicUsageMeter struct {
-	sink        usage.Sink
-	requestID   string
-	turnIndex   int
+	recorder    turnRecorder
 	accumulator anthropicUsageAccumulator
 }
 
@@ -46,8 +42,7 @@ var (
 )
 
 func newAnthropicUsageMeter(ctx context.Context, sink usage.Sink) *anthropicUsageMeter {
-	requestID, _ := logging.RequestIDFrom(ctx)
-	return &anthropicUsageMeter{sink: sink, requestID: requestID}
+	return &anthropicUsageMeter{recorder: newTurnRecorder(ctx, sink)}
 }
 
 // TransformBuffered observes only self-contained completed Messages objects.
@@ -56,7 +51,7 @@ func newAnthropicUsageMeter(ctx context.Context, sink usage.Sink) *anthropicUsag
 func (m *anthropicUsageMeter) TransformBuffered(_ context.Context, body *Body) error {
 	messageID, model, native, ok := parseAnthropicMessage(body.Bytes)
 	if ok {
-		m.record(messageID, model, native, usage.TransportBuffered)
+		m.recorder.record(messageID, model, usage.TransportBuffered, native)
 	}
 	return nil
 }
@@ -148,23 +143,9 @@ func (m *anthropicUsageMeter) observeDelta(event map[string]json.RawMessage) {
 
 func (m *anthropicUsageMeter) observeStop() {
 	if m.accumulator.active && m.accumulator.usage.inputTokens.reported && m.accumulator.usage.outputTokens.reported {
-		m.record(m.accumulator.messageID, m.accumulator.model, m.accumulator.usage.native(), usage.TransportSSE)
+		m.recorder.record(m.accumulator.messageID, m.accumulator.model, usage.TransportSSE, m.accumulator.usage.native())
 	}
 	m.accumulator.clearCandidate()
-}
-
-func (m *anthropicUsageMeter) record(messageID, model string, native usage.AnthropicUsage, transport usage.Transport) {
-	turnIndex := m.turnIndex
-	m.turnIndex++
-	m.sink.Record(usage.Turn{
-		At:         time.Now(),
-		RequestID:  m.requestID,
-		ResponseID: messageID,
-		Model:      model,
-		Transport:  transport,
-		TurnIndex:  turnIndex,
-		Usage:      native,
-	})
 }
 
 func (a *anthropicUsageAccumulator) clearCandidate() {

@@ -5,17 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"strconv"
-	"time"
 
-	"github.com/ningw42/copilotd/internal/logging"
 	"github.com/ningw42/copilotd/internal/sse"
 	"github.com/ningw42/copilotd/internal/usage"
 )
 
 type openAIUsageMeter struct {
-	sink      usage.Sink
-	requestID string
-	turnIndex int
+	recorder turnRecorder
 }
 
 var (
@@ -25,8 +21,7 @@ var (
 )
 
 func newOpenAIUsageMeter(ctx context.Context, sink usage.Sink) *openAIUsageMeter {
-	requestID, _ := logging.RequestIDFrom(ctx)
-	return &openAIUsageMeter{sink: sink, requestID: requestID}
+	return &openAIUsageMeter{recorder: newTurnRecorder(ctx, sink)}
 }
 
 // TransformBuffered observes only self-contained completed Responses objects.
@@ -78,17 +73,7 @@ func (m *openAIUsageMeter) observeResponse(raw []byte, transport usage.Transport
 	if !ok {
 		return
 	}
-	turnIndex := m.turnIndex
-	m.turnIndex++
-	m.sink.Record(usage.Turn{
-		At:         time.Now(),
-		RequestID:  m.requestID,
-		ResponseID: responseID,
-		Model:      model,
-		Transport:  transport,
-		TurnIndex:  turnIndex,
-		Usage:      native,
-	})
+	m.recorder.record(responseID, model, transport, native)
 }
 
 func parseOpenAIResponse(raw []byte) (string, string, usage.OpenAIUsage, bool) {

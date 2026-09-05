@@ -48,7 +48,7 @@ func (panicOnAnthropicStop) TransformEvent(_ context.Context, frame sse.Frame) [
 	return []sse.Frame{frame}
 }
 
-type usageMeterWebSocketHarness struct {
+type usageMeterServeHarness struct {
 	cfg     config.ServeConfig
 	baseURL string
 	store   *sqlitestore.Store
@@ -61,9 +61,9 @@ type usageMeterWebSocketHarness struct {
 	closeReport sqlitestore.Report
 }
 
-func startUsageMeterWebSocketHarness(t *testing.T, upstreamURL string, base *slog.Logger, configure func(*config.ServeConfig), decorate func(shim.Registry) shim.Registry) *usageMeterWebSocketHarness {
+func startUsageMeterServeHarness(t *testing.T, upstreamURL string, base *slog.Logger, configure func(*config.ServeConfig), decorate func(shim.Registry) shim.Registry) *usageMeterServeHarness {
 	t.Helper()
-	cfg := e2eConfig("gho-usage-meter-websocket-harness")
+	cfg := e2eConfig("gho-usage-meter-serve-harness")
 	cfg.ImpersonationRefreshInterval = 0
 	cfg.WebSocketHandshakeTimeout = 5 * time.Second
 	cfg.ShimUsageMeterEnabled = true
@@ -75,8 +75,11 @@ func startUsageMeterWebSocketHarness(t *testing.T, upstreamURL string, base *slo
 	if err != nil {
 		t.Fatalf("open usage store: %v", err)
 	}
+	harness := &usageMeterServeHarness{cfg: cfg, store: store}
+	t.Cleanup(func() { _ = harness.closeStore() })
+
 	var exchangeAuth, exchangeUA string
-	github := newGitHubExchangeStub(t, "copilot-usage-meter-websocket-harness", upstreamURL, &exchangeAuth, &exchangeUA)
+	github := newGitHubExchangeStub(t, "copilot-usage-meter-serve-harness", upstreamURL, &exchangeAuth, &exchangeUA)
 	cacheRegistry := cache.NewRegistry()
 	mgr, imp, err := buildServeProvider(cfg, base, github.URL, github.Client(), productionDiscoveryEdge(), cacheRegistry)
 	if err != nil {
@@ -93,25 +96,27 @@ func startUsageMeterWebSocketHarness(t *testing.T, upstreamURL string, base *slo
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
+	t.Cleanup(func() { _ = ln.Close() })
+	harness.baseURL = "http://" + ln.Addr().String()
+
 	ctx, cancel := context.WithCancel(context.Background())
+	harness.cancel = cancel
+	t.Cleanup(cancel)
 	done := make(chan error, 1)
+	harness.done = done
 	go func() {
-		done <- runBoundServe(ctx, cfg, base, mgr, imp, nil, cacheRegistry, registry, ln)
+		done <- runBoundServe(ctx, cfg, base, mgr, imp, nil, cacheRegistry, registry, ln, store)
 	}()
-	harness := &usageMeterWebSocketHarness{
-		cfg: cfg, baseURL: "http://" + ln.Addr().String(), store: store,
-		cancel: cancel, done: done,
-	}
+	t.Cleanup(func() { _ = harness.stop() })
 	assertHTTPStatusEventually(t, harness.baseURL+"/healthz", http.StatusOK)
-	t.Cleanup(func() {
-		_ = harness.stop()
-		_ = harness.closeStore()
-	})
 	return harness
 }
 
-func (h *usageMeterWebSocketHarness) stop() error {
+func (h *usageMeterServeHarness) stop() error {
 	h.stopOnce.Do(func() {
+		if h.cancel == nil || h.done == nil {
+			return
+		}
 		h.cancel()
 		select {
 		case h.stopErr = <-h.done:
@@ -122,8 +127,11 @@ func (h *usageMeterWebSocketHarness) stop() error {
 	return h.stopErr
 }
 
-func (h *usageMeterWebSocketHarness) closeStore() sqlitestore.Report {
+func (h *usageMeterServeHarness) closeStore() sqlitestore.Report {
 	h.closeOnce.Do(func() {
+		if h.store == nil {
+			return
+		}
 		h.store.StopAdmission()
 		ctx, cancel := context.WithTimeout(context.Background(), h.cfg.ShutdownTimeout)
 		defer cancel()
@@ -154,7 +162,7 @@ func TestRunServeUsageStoreFailurePrecedesBindAndDisabledServeCreatesNothing(t *
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer held.Close()
+	t.Cleanup(func() { _ = held.Close() })
 
 	t.Run("requested unsafe store fails before bind", func(t *testing.T) {
 		root := t.TempDir()
@@ -218,7 +226,7 @@ func TestRunServeFinalizesOpenedUsageStoreOnBindFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer held.Close()
+	t.Cleanup(func() { _ = held.Close() })
 	root := t.TempDir()
 	dbPath := filepath.Join(root, "private", "usage.db")
 	logPath := filepath.Join(root, "serve.log")
@@ -254,40 +262,10 @@ func TestRunBoundServeMetersBufferedOpenAIResponseWithoutChangingPayload(t *test
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write(fixture)
 	}))
-	defer upstream.Close()
+	t.Cleanup(upstream.Close)
+	harness := startUsageMeterServeHarness(t, upstream.URL, discardLogger(t), nil, nil)
 
-	dbPath := filepath.Join(t.TempDir(), "usage", "usage.db")
-	cfg := e2eConfig("gho-usage-meter")
-	cfg.ImpersonationRefreshInterval = 0
-	cfg.ShimUsageMeterEnabled = true
-	cfg.UsageDBPath = dbPath
-	base := discardLogger(t)
-	store, err := sqlitestore.Open(dbPath, logging.ForComponent(base, "internal/usage/sqlitestore"))
-	if err != nil {
-		t.Fatalf("open usage store: %v", err)
-	}
-
-	var exchangeAuth, exchangeUA string
-	github := newGitHubExchangeStub(t, "copilot-usage-meter", upstream.URL, &exchangeAuth, &exchangeUA)
-	cacheRegistry := cache.NewRegistry()
-	mgr, imp, err := buildServeProvider(cfg, base, github.URL, github.Client(), productionDiscoveryEdge(), cacheRegistry)
-	if err != nil {
-		t.Fatalf("build serve provider: %v", err)
-	}
-	registry := configuredShimRegistry(cfg, store)
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() {
-		done <- runBoundServe(ctx, cfg, base, mgr, imp, nil, cacheRegistry, registry, ln)
-	}()
-	baseURL := "http://" + ln.Addr().String()
-	assertHTTPStatusEventually(t, baseURL+"/healthz", http.StatusOK)
-
-	req, err := http.NewRequest(http.MethodPost, baseURL+"/openai/v1/responses", strings.NewReader(`{"model":"requested-model"}`))
+	req, err := http.NewRequest(http.MethodPost, harness.baseURL+"/openai/v1/responses", strings.NewReader(`{"model":"requested-model"}`))
 	if err != nil {
 		t.Fatalf("build request: %v", err)
 	}
@@ -306,23 +284,8 @@ func TestRunBoundServeMetersBufferedOpenAIResponseWithoutChangingPayload(t *test
 		t.Fatalf("forwarded body changed:\n got: %q\nwant: %q", body, fixture)
 	}
 
-	cancel()
-	if err := <-done; err != nil {
-		t.Fatalf("runBoundServe after cancellation: %v", err)
-	}
-	store.StopAdmission()
-	closeCtx, closeCancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
-	report := store.Close(closeCtx)
-	closeCancel()
-	if report.QueueFullDrops != 0 || report.RuntimeWriteLosses != 0 || report.LateAfterCutoffDrops != 0 || report.FinalFlushLosses != 0 || !report.DriverCleanupCompleted {
-		t.Fatalf("clean usage shutdown report = %+v", report)
-	}
-
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatalf("open usage database for external query: %v", err)
-	}
-	defer db.Close()
+	db, report := externalUsageDB(t, harness)
+	assertCleanUsageReport(t, report)
 	var (
 		atMS, inputTokens, cachedTokens, cacheWriteTokens int64
 		outputTokens, reasoningTokens, totalTokens        int64
@@ -360,40 +323,10 @@ func TestRunBoundServeMetersOpenAISSECompletionWithoutChangingFrames(t *testing.
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write(fixture)
 	}))
-	defer upstream.Close()
+	t.Cleanup(upstream.Close)
+	harness := startUsageMeterServeHarness(t, upstream.URL, discardLogger(t), nil, nil)
 
-	dbPath := filepath.Join(t.TempDir(), "usage", "usage.db")
-	cfg := e2eConfig("gho-usage-meter-sse")
-	cfg.ImpersonationRefreshInterval = 0
-	cfg.ShimUsageMeterEnabled = true
-	cfg.UsageDBPath = dbPath
-	base := discardLogger(t)
-	store, err := sqlitestore.Open(dbPath, logging.ForComponent(base, "internal/usage/sqlitestore"))
-	if err != nil {
-		t.Fatalf("open usage store: %v", err)
-	}
-
-	var exchangeAuth, exchangeUA string
-	github := newGitHubExchangeStub(t, "copilot-usage-meter-sse", upstream.URL, &exchangeAuth, &exchangeUA)
-	cacheRegistry := cache.NewRegistry()
-	mgr, imp, err := buildServeProvider(cfg, base, github.URL, github.Client(), productionDiscoveryEdge(), cacheRegistry)
-	if err != nil {
-		t.Fatalf("build serve provider: %v", err)
-	}
-	registry := configuredShimRegistry(cfg, store)
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() {
-		done <- runBoundServe(ctx, cfg, base, mgr, imp, nil, cacheRegistry, registry, ln)
-	}()
-	baseURL := "http://" + ln.Addr().String()
-	assertHTTPStatusEventually(t, baseURL+"/healthz", http.StatusOK)
-
-	req, err := http.NewRequest(http.MethodPost, baseURL+"/openai/v1/responses", strings.NewReader(`{"model":"requested-model"}`))
+	req, err := http.NewRequest(http.MethodPost, harness.baseURL+"/openai/v1/responses", strings.NewReader(`{"model":"requested-model"}`))
 	if err != nil {
 		t.Fatalf("build request: %v", err)
 	}
@@ -412,23 +345,8 @@ func TestRunBoundServeMetersOpenAISSECompletionWithoutChangingFrames(t *testing.
 		t.Fatalf("forwarded SSE frames changed:\n got: %q\nwant: %q", body, fixture)
 	}
 
-	cancel()
-	if err := <-done; err != nil {
-		t.Fatalf("runBoundServe after cancellation: %v", err)
-	}
-	store.StopAdmission()
-	closeCtx, closeCancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
-	report := store.Close(closeCtx)
-	closeCancel()
-	if report.QueueFullDrops != 0 || report.RuntimeWriteLosses != 0 || report.LateAfterCutoffDrops != 0 || report.FinalFlushLosses != 0 || !report.DriverCleanupCompleted {
-		t.Fatalf("clean usage shutdown report = %+v", report)
-	}
-
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatalf("open usage database for external query: %v", err)
-	}
-	defer db.Close()
+	db, report := externalUsageDB(t, harness)
+	assertCleanUsageReport(t, report)
 	var (
 		atMS, inputTokens, cachedTokens, cacheWriteTokens int64
 		outputTokens, reasoningTokens, totalTokens        int64
@@ -505,39 +423,9 @@ func TestRunBoundServeMetersOpenAIWebSocketCompletionsWithoutChangingMessages(t 
 		}
 		_ = conn.Close(websocket.StatusNormalClosure, "completed")
 	}))
-	defer upstream.Close()
-
-	dbPath := filepath.Join(t.TempDir(), "usage", "usage.db")
-	cfg := e2eConfig("gho-usage-meter-websocket")
-	cfg.ImpersonationRefreshInterval = 0
-	cfg.WebSocketHandshakeTimeout = 5 * time.Second
-	cfg.ShimUsageMeterEnabled = true
-	cfg.UsageDBPath = dbPath
-	base := discardLogger(t)
-	store, err := sqlitestore.Open(dbPath, logging.ForComponent(base, "internal/usage/sqlitestore"))
-	if err != nil {
-		t.Fatalf("open usage store: %v", err)
-	}
-
-	var exchangeAuth, exchangeUA string
-	github := newGitHubExchangeStub(t, "copilot-usage-meter-websocket", upstream.URL, &exchangeAuth, &exchangeUA)
-	cacheRegistry := cache.NewRegistry()
-	mgr, imp, err := buildServeProvider(cfg, base, github.URL, github.Client(), productionDiscoveryEdge(), cacheRegistry)
-	if err != nil {
-		t.Fatalf("build serve provider: %v", err)
-	}
-	registry := configuredShimRegistry(cfg, store)
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() {
-		done <- runBoundServe(ctx, cfg, base, mgr, imp, nil, cacheRegistry, registry, ln)
-	}()
-	baseURL := "http://" + ln.Addr().String()
-	assertHTTPStatusEventually(t, baseURL+"/healthz", http.StatusOK)
+	t.Cleanup(upstream.Close)
+	harness := startUsageMeterServeHarness(t, upstream.URL, discardLogger(t), nil, nil)
+	baseURL := harness.baseURL
 
 	httpRequest, err := http.NewRequest(http.MethodPost, baseURL+"/openai/v1/responses", strings.NewReader(`{"model":"requested-http-model"}`))
 	if err != nil {
@@ -597,23 +485,8 @@ func TestRunBoundServeMetersOpenAIWebSocketCompletionsWithoutChangingMessages(t 
 	}
 	_ = conn.CloseNow()
 
-	cancel()
-	if err := <-done; err != nil {
-		t.Fatalf("runBoundServe after cancellation: %v", err)
-	}
-	store.StopAdmission()
-	closeCtx, closeCancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
-	report := store.Close(closeCtx)
-	closeCancel()
-	if report.QueueFullDrops != 0 || report.RuntimeWriteLosses != 0 || report.LateAfterCutoffDrops != 0 || report.FinalFlushLosses != 0 || !report.DriverCleanupCompleted {
-		t.Fatalf("clean usage shutdown report = %+v", report)
-	}
-
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatalf("open usage database for external query: %v", err)
-	}
-	defer db.Close()
+	db, report := externalUsageDB(t, harness)
+	assertCleanUsageReport(t, report)
 	var httpRequestID, httpResponseID, httpModel, httpTransport string
 	var httpTurnIndex int
 	if err := db.QueryRow(`SELECT request_id, response_id, turn_index, model, transport FROM openai_turn WHERE transport = 'buffered'`).Scan(
@@ -703,7 +576,7 @@ func TestRunBoundServeRetainsOpenAIWebSocketUsageWhenSessionLaterFails(t *testin
 
 	var logs bytes.Buffer
 	base := newPhase4Logger(t, &logs)
-	harness := startUsageMeterWebSocketHarness(t, upstream.URL, base, nil, nil)
+	harness := startUsageMeterServeHarness(t, upstream.URL, base, nil, nil)
 	conn := dialUsageMeterWebSocket(t, harness.baseURL, "websocket-later-session-error")
 	wsCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -812,10 +685,10 @@ func TestRunBoundServeRetainsOpenAIWebSocketUsageObservedBeforeDownstreamWriteFa
 	t.Cleanup(upstream.Close)
 
 	held := newHeldServerMessageShim()
-	defer held.Release()
+	t.Cleanup(held.Release)
 	var logs bytes.Buffer
 	base := newPhase4Logger(t, &logs)
-	harness := startUsageMeterWebSocketHarness(t, upstream.URL, base, nil, withHeldServerMessageShim(held))
+	harness := startUsageMeterServeHarness(t, upstream.URL, base, nil, withHeldServerMessageShim(held))
 	conn := dialUsageMeterWebSocket(t, harness.baseURL, "websocket-downstream-write-failure")
 	if err := conn.Write(context.Background(), websocket.MessageText, []byte(`{"type":"response.create"}`)); err != nil {
 		t.Fatalf("write client Message: %v", err)
@@ -894,7 +767,7 @@ func TestRunBoundServeOpenAIWebSocketStaysResponsiveWhileRealStoreIsFullAndFaili
 	t.Cleanup(releaseRecovery)
 
 	base := discardLogger(t)
-	harness := startUsageMeterWebSocketHarness(t, upstream.URL, base, nil, nil)
+	harness := startUsageMeterServeHarness(t, upstream.URL, base, nil, nil)
 	locker, err := sql.Open("sqlite", harness.cfg.UsageDBPath)
 	if err != nil {
 		t.Fatalf("open external SQLite locker: %v", err)
@@ -1005,9 +878,9 @@ func TestRunBoundServeForcedWebSocketDrainAndFreshUsageFinalizationAreBounded(t 
 	t.Cleanup(upstream.Close)
 
 	held := newHeldServerMessageShim()
-	defer held.Release()
+	t.Cleanup(held.Release)
 	base := discardLogger(t)
-	harness := startUsageMeterWebSocketHarness(t, upstream.URL, base, func(cfg *config.ServeConfig) {
+	harness := startUsageMeterServeHarness(t, upstream.URL, base, func(cfg *config.ServeConfig) {
 		cfg.ShutdownTimeout = 75 * time.Millisecond
 	}, withHeldServerMessageShim(held))
 	locker, err := sql.Open("sqlite", harness.cfg.UsageDBPath)
@@ -1027,7 +900,7 @@ func TestRunBoundServeForcedWebSocketDrainAndFreshUsageFinalizationAreBounded(t 
 	}()
 
 	conn := dialUsageMeterWebSocket(t, harness.baseURL, "websocket-forced-drain")
-	defer func() { _ = conn.CloseNow() }()
+	t.Cleanup(func() { _ = conn.CloseNow() })
 	if err := conn.Write(context.Background(), websocket.MessageText, []byte(`{"type":"response.create"}`)); err != nil {
 		t.Fatal(err)
 	}
@@ -1066,6 +939,130 @@ func TestRunBoundServeForcedWebSocketDrainAndFreshUsageFinalizationAreBounded(t 
 	held.Release()
 }
 
+type blockingServerErrorLogState struct {
+	entered     chan struct{}
+	release     chan struct{}
+	enteredOnce sync.Once
+	releaseOnce sync.Once
+}
+
+func (s *blockingServerErrorLogState) Release() {
+	s.releaseOnce.Do(func() { close(s.release) })
+}
+
+type blockingServerErrorLogHandler struct {
+	inner slog.Handler
+	state *blockingServerErrorLogState
+}
+
+func (h blockingServerErrorLogHandler) Enabled(ctx context.Context, level slog.Level) bool {
+	return h.inner.Enabled(ctx, level)
+}
+
+func (h blockingServerErrorLogHandler) Handle(ctx context.Context, record slog.Record) error {
+	if record.Message == "server error" {
+		h.state.enteredOnce.Do(func() { close(h.state.entered) })
+		<-h.state.release
+	}
+	return h.inner.Handle(ctx, record)
+}
+
+func (h blockingServerErrorLogHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return blockingServerErrorLogHandler{inner: h.inner.WithAttrs(attrs), state: h.state}
+}
+
+func (h blockingServerErrorLogHandler) WithGroup(name string) slog.Handler {
+	return blockingServerErrorLogHandler{inner: h.inner.WithGroup(name), state: h.state}
+}
+
+func TestRunBoundServeStopsUsageAdmissionBeforeReportingForcedDrainError(t *testing.T) {
+	completion := []byte(`{"type":"response.completed","response":{"id":"resp-before-forced-drain-log","model":"reported-before-forced-drain-log","status":"completed","usage":{"input_tokens":1,"output_tokens":2}}}`)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Errorf("accept upstream WebSocket: %v", err)
+			return
+		}
+		defer func() { _ = conn.CloseNow() }()
+		if _, _, err := conn.Read(context.Background()); err != nil {
+			return
+		}
+		_ = conn.Write(context.Background(), websocket.MessageText, completion)
+	}))
+	t.Cleanup(upstream.Close)
+
+	held := newHeldServerMessageShim()
+	t.Cleanup(held.Release)
+	logState := &blockingServerErrorLogState{entered: make(chan struct{}), release: make(chan struct{})}
+	t.Cleanup(logState.Release)
+	base := slog.New(blockingServerErrorLogHandler{
+		inner: slog.NewTextHandler(io.Discard, nil),
+		state: logState,
+	})
+	harness := startUsageMeterServeHarness(t, upstream.URL, base, func(cfg *config.ServeConfig) {
+		cfg.ShutdownTimeout = 75 * time.Millisecond
+	}, withHeldServerMessageShim(held))
+	conn := dialUsageMeterWebSocket(t, harness.baseURL, "forced-drain-error-log-order")
+	t.Cleanup(func() { _ = conn.CloseNow() })
+	if err := conn.Write(context.Background(), websocket.MessageText, []byte(`{"type":"response.create"}`)); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-held.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("outer Shim did not hold the observed completion")
+	}
+
+	stopDone := make(chan error, 1)
+	go func() { stopDone <- harness.stop() }()
+	select {
+	case <-logState.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("forced drain did not reach synchronous server-error logging")
+	}
+
+	// Model a producer that was already in flight when the forced drain returned.
+	// The production serve lifecycle, not the harness, must already have cut off
+	// admission before entering the synchronous logger.
+	harness.store.Record(usage.Turn{
+		At:         time.UnixMilli(1_750_000_000_000),
+		RequestID:  "forced-drain-error-log-order",
+		ResponseID: "must-be-late-after-cutoff",
+		Model:      "reported-too-late",
+		Transport:  usage.TransportWebSocket,
+		Usage:      usage.OpenAIUsage{InputTokens: 3, OutputTokens: 5},
+	})
+	logState.Release()
+	if err := <-stopDone; !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("forced drain error = %v, want deadline exceeded", err)
+	}
+	held.Release()
+
+	report := harness.closeStore()
+	wantReport := sqlitestore.Report{LateAfterCutoffDrops: 1, DriverCleanupCompleted: true}
+	if report != wantReport {
+		t.Fatalf("usage shutdown report = %+v, want one producer rejected before server-error logging and otherwise clean %+v", report, wantReport)
+	}
+	db, err := sql.Open("sqlite", harness.cfg.UsageDBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	var observedRows, lateRows int
+	if err := db.QueryRow(`SELECT
+		count(*) FILTER (WHERE response_id = 'resp-before-forced-drain-log'),
+		count(*) FILTER (WHERE response_id = 'must-be-late-after-cutoff')
+		FROM openai_turn`).Scan(&observedRows, &lateRows); err != nil {
+		t.Fatal(err)
+	}
+	if observedRows != 1 {
+		t.Errorf("completion observed before forced drain persisted %d rows, want one", observedRows)
+	}
+	if lateRows != 0 {
+		t.Errorf("late producer persisted %d rows while server-error logging was blocked, want none", lateRows)
+	}
+}
+
 func TestRunBoundServeDeliversCleanOpenAINoncompletionTerminalsWithoutUsageRows(t *testing.T) {
 	terminals := []string{
 		"event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"id\":\"failed\",\"model\":\"reported\",\"status\":\"failed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":2}}}\n\n",
@@ -1082,42 +1079,13 @@ func TestRunBoundServeDeliversCleanOpenAINoncompletionTerminalsWithoutUsageRows(
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = io.WriteString(w, terminals[index])
 	}))
-	defer upstream.Close()
-
-	dbPath := filepath.Join(t.TempDir(), "usage", "usage.db")
-	cfg := e2eConfig("gho-usage-meter-noncompletion")
-	cfg.ImpersonationRefreshInterval = 0
-	cfg.ShimUsageMeterEnabled = true
-	cfg.UsageDBPath = dbPath
+	t.Cleanup(upstream.Close)
 	var logs bytes.Buffer
 	base := newPhase4Logger(t, &logs)
-	store, err := sqlitestore.Open(dbPath, logging.ForComponent(base, "internal/usage/sqlitestore"))
-	if err != nil {
-		t.Fatalf("open usage store: %v", err)
-	}
-
-	var exchangeAuth, exchangeUA string
-	github := newGitHubExchangeStub(t, "copilot-usage-meter-noncompletion", upstream.URL, &exchangeAuth, &exchangeUA)
-	cacheRegistry := cache.NewRegistry()
-	mgr, imp, err := buildServeProvider(cfg, base, github.URL, github.Client(), productionDiscoveryEdge(), cacheRegistry)
-	if err != nil {
-		t.Fatalf("build serve provider: %v", err)
-	}
-	registry := configuredShimRegistry(cfg, store)
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() {
-		done <- runBoundServe(ctx, cfg, base, mgr, imp, nil, cacheRegistry, registry, ln)
-	}()
-	baseURL := "http://" + ln.Addr().String()
-	assertHTTPStatusEventually(t, baseURL+"/healthz", http.StatusOK)
+	harness := startUsageMeterServeHarness(t, upstream.URL, base, nil, nil)
 
 	for i, want := range terminals {
-		req, err := http.NewRequest(http.MethodPost, baseURL+"/openai/v1/responses", strings.NewReader(`{"stream":true}`))
+		req, err := http.NewRequest(http.MethodPost, harness.baseURL+"/openai/v1/responses", strings.NewReader(`{"stream":true}`))
 		if err != nil {
 			t.Fatalf("build request %d: %v", i, err)
 		}
@@ -1137,23 +1105,8 @@ func TestRunBoundServeDeliversCleanOpenAINoncompletionTerminalsWithoutUsageRows(
 		}
 	}
 
-	cancel()
-	if err := <-done; err != nil {
-		t.Fatalf("runBoundServe after cancellation: %v", err)
-	}
-	store.StopAdmission()
-	closeCtx, closeCancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
-	report := store.Close(closeCtx)
-	closeCancel()
-	if report.QueueFullDrops != 0 || report.RuntimeWriteLosses != 0 || report.LateAfterCutoffDrops != 0 || report.FinalFlushLosses != 0 || !report.DriverCleanupCompleted {
-		t.Fatalf("clean usage shutdown report = %+v", report)
-	}
-
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatalf("open usage database for external query: %v", err)
-	}
-	defer db.Close()
+	db, report := externalUsageDB(t, harness)
+	assertCleanUsageReport(t, report)
 	var rows int
 	if err := db.QueryRow("SELECT count(*) FROM openai_turn").Scan(&rows); err != nil {
 		t.Fatalf("query OpenAI usage row count: %v", err)
@@ -1186,41 +1139,12 @@ func TestRunBoundServeDisconnectBeforeOpenAICompletionProducesNoUsageRow(t *test
 		<-r.Context().Done()
 		close(upstreamCanceled)
 	}))
-	defer upstream.Close()
-
-	dbPath := filepath.Join(t.TempDir(), "usage", "usage.db")
-	cfg := e2eConfig("gho-usage-meter-disconnect")
-	cfg.ImpersonationRefreshInterval = 0
-	cfg.ShimUsageMeterEnabled = true
-	cfg.UsageDBPath = dbPath
+	t.Cleanup(upstream.Close)
 	var logs bytes.Buffer
 	base := newPhase4Logger(t, &logs)
-	store, err := sqlitestore.Open(dbPath, logging.ForComponent(base, "internal/usage/sqlitestore"))
-	if err != nil {
-		t.Fatalf("open usage store: %v", err)
-	}
+	harness := startUsageMeterServeHarness(t, upstream.URL, base, nil, nil)
 
-	var exchangeAuth, exchangeUA string
-	github := newGitHubExchangeStub(t, "copilot-usage-meter-disconnect", upstream.URL, &exchangeAuth, &exchangeUA)
-	cacheRegistry := cache.NewRegistry()
-	mgr, imp, err := buildServeProvider(cfg, base, github.URL, github.Client(), productionDiscoveryEdge(), cacheRegistry)
-	if err != nil {
-		t.Fatalf("build serve provider: %v", err)
-	}
-	registry := configuredShimRegistry(cfg, store)
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() {
-		done <- runBoundServe(ctx, cfg, base, mgr, imp, nil, cacheRegistry, registry, ln)
-	}()
-	baseURL := "http://" + ln.Addr().String()
-	assertHTTPStatusEventually(t, baseURL+"/healthz", http.StatusOK)
-
-	req, err := http.NewRequest(http.MethodPost, baseURL+"/openai/v1/responses", strings.NewReader(`{"stream":true}`))
+	req, err := http.NewRequest(http.MethodPost, harness.baseURL+"/openai/v1/responses", strings.NewReader(`{"stream":true}`))
 	if err != nil {
 		t.Fatalf("build request: %v", err)
 	}
@@ -1246,23 +1170,8 @@ func TestRunBoundServeDisconnectBeforeOpenAICompletionProducesNoUsageRow(t *test
 		t.Fatal("downstream disconnect did not cancel the upstream stream")
 	}
 
-	cancel()
-	if err := <-done; err != nil {
-		t.Fatalf("runBoundServe after cancellation: %v", err)
-	}
-	store.StopAdmission()
-	closeCtx, closeCancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
-	report := store.Close(closeCtx)
-	closeCancel()
-	if report.QueueFullDrops != 0 || report.RuntimeWriteLosses != 0 || report.LateAfterCutoffDrops != 0 || report.FinalFlushLosses != 0 || !report.DriverCleanupCompleted {
-		t.Fatalf("clean usage shutdown report = %+v", report)
-	}
-
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatalf("open usage database for external query: %v", err)
-	}
-	defer db.Close()
+	db, report := externalUsageDB(t, harness)
+	assertCleanUsageReport(t, report)
 	var rows int
 	if err := db.QueryRow("SELECT count(*) FROM openai_turn").Scan(&rows); err != nil {
 		t.Fatalf("query OpenAI usage row count: %v", err)
@@ -1283,51 +1192,20 @@ func TestRunBoundServeRetainsOpenAIUsageObservedBeforeOuterShimPanic(t *testing.
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = io.WriteString(w, completion)
 	}))
-	defer upstream.Close()
-
-	dbPath := filepath.Join(t.TempDir(), "usage", "usage.db")
-	cfg := e2eConfig("gho-usage-meter-outer-panic")
-	cfg.ImpersonationRefreshInterval = 0
-	cfg.ShimUsageMeterEnabled = true
-	cfg.UsageDBPath = dbPath
+	t.Cleanup(upstream.Close)
 	var logs bytes.Buffer
 	base := newPhase4Logger(t, &logs)
-	store, err := sqlitestore.Open(dbPath, logging.ForComponent(base, "internal/usage/sqlitestore"))
-	if err != nil {
-		t.Fatalf("open usage store: %v", err)
-	}
+	harness := startUsageMeterServeHarness(t, upstream.URL, base, nil, func(registry shim.Registry) shim.Registry {
+		return append(shim.Registry{{
+			Name:    "outer-panic-after-usage",
+			Enabled: true,
+			New: func(context.Context, endpoint.Surface, endpoint.Route) any {
+				return panicOnOpenAICompletion{}
+			},
+		}}, registry...)
+	})
 
-	var exchangeAuth, exchangeUA string
-	github := newGitHubExchangeStub(t, "copilot-usage-meter-outer-panic", upstream.URL, &exchangeAuth, &exchangeUA)
-	cacheRegistry := cache.NewRegistry()
-	mgr, imp, err := buildServeProvider(cfg, base, github.URL, github.Client(), productionDiscoveryEdge(), cacheRegistry)
-	if err != nil {
-		t.Fatalf("build serve provider: %v", err)
-	}
-	registry := configuredShimRegistry(cfg, store)
-	registry = append(shim.Registry{{
-		Name:    "outer-panic-after-usage",
-		Enabled: true,
-		New: func(context.Context, endpoint.Surface, endpoint.Route) any {
-			return panicOnOpenAICompletion{}
-		},
-	}}, registry...)
-	if registry[len(registry)-1].Name != "usage-meter" {
-		t.Fatalf("last registration = %q, want usage-meter innermost", registry[len(registry)-1].Name)
-	}
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() {
-		done <- runBoundServe(ctx, cfg, base, mgr, imp, nil, cacheRegistry, registry, ln)
-	}()
-	baseURL := "http://" + ln.Addr().String()
-	assertHTTPStatusEventually(t, baseURL+"/healthz", http.StatusOK)
-
-	req, err := http.NewRequest(http.MethodPost, baseURL+"/openai/v1/responses", strings.NewReader(`{"stream":true}`))
+	req, err := http.NewRequest(http.MethodPost, harness.baseURL+"/openai/v1/responses", strings.NewReader(`{"stream":true}`))
 	if err != nil {
 		t.Fatalf("build request: %v", err)
 	}
@@ -1346,23 +1224,8 @@ func TestRunBoundServeRetainsOpenAIUsageObservedBeforeOuterShimPanic(t *testing.
 		t.Errorf("post-panic body = %q, want only the existing native shim-failure terminal", body)
 	}
 
-	cancel()
-	if err := <-done; err != nil {
-		t.Fatalf("runBoundServe after cancellation: %v", err)
-	}
-	store.StopAdmission()
-	closeCtx, closeCancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
-	report := store.Close(closeCtx)
-	closeCancel()
-	if report.QueueFullDrops != 0 || report.RuntimeWriteLosses != 0 || report.LateAfterCutoffDrops != 0 || report.FinalFlushLosses != 0 || !report.DriverCleanupCompleted {
-		t.Fatalf("clean usage shutdown report = %+v", report)
-	}
-
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatalf("open usage database for external query: %v", err)
-	}
-	defer db.Close()
+	db, report := externalUsageDB(t, harness)
+	assertCleanUsageReport(t, report)
 	var requestID, responseID, model, transport string
 	var inputTokens, outputTokens int64
 	if err := db.QueryRow(`SELECT request_id, response_id, model, transport, input_tokens, output_tokens FROM openai_turn`).Scan(
@@ -1392,20 +1255,11 @@ func TestRunBoundServeOpenAISSEStaysResponsiveWhileSQLiteLockFillsQueue(t *testi
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = io.WriteString(w, stream)
 	}))
-	defer upstream.Close()
-
-	dbPath := filepath.Join(t.TempDir(), "usage", "usage.db")
-	cfg := e2eConfig("gho-usage-meter-locked-store")
-	cfg.ImpersonationRefreshInterval = 0
-	cfg.ShimUsageMeterEnabled = true
-	cfg.UsageDBPath = dbPath
+	t.Cleanup(upstream.Close)
 	var logs bytes.Buffer
 	base := newPhase4Logger(t, &logs)
-	store, err := sqlitestore.Open(dbPath, logging.ForComponent(base, "internal/usage/sqlitestore"))
-	if err != nil {
-		t.Fatalf("open usage store: %v", err)
-	}
-	locker, err := sql.Open("sqlite", dbPath)
+	harness := startUsageMeterServeHarness(t, upstream.URL, base, nil, nil)
+	locker, err := sql.Open("sqlite", harness.cfg.UsageDBPath)
 	if err != nil {
 		t.Fatalf("open external SQLite locker: %v", err)
 	}
@@ -1415,33 +1269,13 @@ func TestRunBoundServeOpenAISSEStaysResponsiveWhileSQLiteLockFillsQueue(t *testi
 		t.Fatalf("lock usage database: %v", err)
 	}
 	locked := true
-	defer func() {
+	t.Cleanup(func() {
 		if locked {
 			_, _ = locker.Exec("ROLLBACK")
 		}
-	}()
+	})
 
-	var exchangeAuth, exchangeUA string
-	github := newGitHubExchangeStub(t, "copilot-usage-meter-locked-store", upstream.URL, &exchangeAuth, &exchangeUA)
-	cacheRegistry := cache.NewRegistry()
-	mgr, imp, err := buildServeProvider(cfg, base, github.URL, github.Client(), productionDiscoveryEdge(), cacheRegistry)
-	if err != nil {
-		t.Fatalf("build serve provider: %v", err)
-	}
-	registry := configuredShimRegistry(cfg, store)
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() {
-		done <- runBoundServe(ctx, cfg, base, mgr, imp, nil, cacheRegistry, registry, ln)
-	}()
-	baseURL := "http://" + ln.Addr().String()
-	assertHTTPStatusEventually(t, baseURL+"/healthz", http.StatusOK)
-
-	req, err := http.NewRequest(http.MethodPost, baseURL+"/openai/v1/responses", strings.NewReader(`{"stream":true}`))
+	req, err := http.NewRequest(http.MethodPost, harness.baseURL+"/openai/v1/responses", strings.NewReader(`{"stream":true}`))
 	if err != nil {
 		t.Fatalf("build request: %v", err)
 	}
@@ -1470,14 +1304,7 @@ func TestRunBoundServeOpenAISSEStaysResponsiveWhileSQLiteLockFillsQueue(t *testi
 		t.Fatalf("release usage database lock: %v", err)
 	}
 	locked = false
-	cancel()
-	if err := <-done; err != nil {
-		t.Fatalf("runBoundServe after cancellation: %v", err)
-	}
-	store.StopAdmission()
-	closeCtx, closeCancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
-	report := store.Close(closeCtx)
-	closeCancel()
+	db, report := externalUsageDB(t, harness)
 	if report.QueueFullDrops == 0 {
 		t.Fatalf("locked writer queue_full_drops = 0, want bounded queue pressure from %d submissions", submissions)
 	}
@@ -1485,11 +1312,6 @@ func TestRunBoundServeOpenAISSEStaysResponsiveWhileSQLiteLockFillsQueue(t *testi
 		t.Fatalf("locked-store shutdown report = %+v", report)
 	}
 
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatalf("open usage database for external query: %v", err)
-	}
-	defer db.Close()
 	var rows, distinctOrdinals int
 	if err := db.QueryRow("SELECT count(*), count(DISTINCT turn_index) FROM openai_turn").Scan(&rows, &distinctOrdinals); err != nil {
 		t.Fatalf("query locked-store OpenAI usage: %v", err)
@@ -1528,10 +1350,10 @@ func TestRunBoundServeAnthropicMalformedErrorAndPrematureStreamsProduceNoUsageRo
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = io.WriteString(w, responses[index])
 	}))
-	defer upstream.Close()
+	t.Cleanup(upstream.Close)
 	var logs bytes.Buffer
 	base := newPhase4Logger(t, &logs)
-	harness := startUsageMeterWebSocketHarness(t, upstream.URL, base, nil, nil)
+	harness := startUsageMeterServeHarness(t, upstream.URL, base, nil, nil)
 	for index, upstreamBody := range responses {
 		req, err := http.NewRequest(http.MethodPost, harness.baseURL+"/anthropic/v1/messages", strings.NewReader(`{"stream":true}`))
 		if err != nil {
@@ -1601,10 +1423,10 @@ func TestRunBoundServeDisconnectBeforeAnthropicStopProducesNoUsageRow(t *testing
 		<-r.Context().Done()
 		close(upstreamCanceled)
 	}))
-	defer upstream.Close()
+	t.Cleanup(upstream.Close)
 	var logs bytes.Buffer
 	base := newPhase4Logger(t, &logs)
-	harness := startUsageMeterWebSocketHarness(t, upstream.URL, base, nil, nil)
+	harness := startUsageMeterServeHarness(t, upstream.URL, base, nil, nil)
 	req, err := http.NewRequest(http.MethodPost, harness.baseURL+"/anthropic/v1/messages", strings.NewReader(`{"stream":true}`))
 	if err != nil {
 		t.Fatal(err)
@@ -1663,10 +1485,10 @@ func TestRunBoundServeRetainsAnthropicSSEUsageObservedBeforeOuterShimPanic(t *te
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = io.WriteString(w, stream)
 	}))
-	defer upstream.Close()
+	t.Cleanup(upstream.Close)
 	var logs bytes.Buffer
 	base := newPhase4Logger(t, &logs)
-	harness := startUsageMeterWebSocketHarness(t, upstream.URL, base, nil, func(registry shim.Registry) shim.Registry {
+	harness := startUsageMeterServeHarness(t, upstream.URL, base, nil, func(registry shim.Registry) shim.Registry {
 		return append(shim.Registry{{
 			Name:    "outer-panic-after-anthropic-usage",
 			Enabled: true,
@@ -1744,10 +1566,10 @@ func TestRunBoundServeAnthropicSSEStaysResponsiveThroughFullFailingStoreAndRecov
 		}
 		_, _ = io.WriteString(w, recovery)
 	}))
-	defer upstream.Close()
+	t.Cleanup(upstream.Close)
 
 	base := discardLogger(t)
-	harness := startUsageMeterWebSocketHarness(t, upstream.URL, base, nil, nil)
+	harness := startUsageMeterServeHarness(t, upstream.URL, base, nil, nil)
 	locker, err := sql.Open("sqlite", harness.cfg.UsageDBPath)
 	if err != nil {
 		t.Fatalf("open external SQLite locker: %v", err)
@@ -1765,7 +1587,7 @@ func TestRunBoundServeAnthropicSSEStaysResponsiveThroughFullFailingStoreAndRecov
 	}()
 
 	client := &http.Client{Transport: &http.Transport{MaxIdleConns: workers, MaxIdleConnsPerHost: workers}}
-	defer client.CloseIdleConnections()
+	t.Cleanup(client.CloseIdleConnections)
 	jobs := make(chan int)
 	errs := make(chan error, submissions)
 	var group sync.WaitGroup
@@ -1882,10 +1704,10 @@ func TestRunBoundServeMetersAnthropicSSECompletionWithoutChangingFrames(t *testi
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write(fixture)
 	}))
-	defer upstream.Close()
+	t.Cleanup(upstream.Close)
 
 	base := discardLogger(t)
-	harness := startUsageMeterWebSocketHarness(t, upstream.URL, base, nil, nil)
+	harness := startUsageMeterServeHarness(t, upstream.URL, base, nil, nil)
 	req, err := http.NewRequest(http.MethodPost, harness.baseURL+"/anthropic/v1/messages", strings.NewReader(`{"model":"requested-model","stream":true}`))
 	if err != nil {
 		t.Fatalf("build request: %v", err)
@@ -1905,17 +1727,8 @@ func TestRunBoundServeMetersAnthropicSSECompletionWithoutChangingFrames(t *testi
 		t.Fatalf("forwarded Anthropic SSE frames changed:\n got: %q\nwant: %q", body, fixture)
 	}
 
-	if err := harness.stop(); err != nil {
-		t.Fatalf("runBoundServe after cancellation: %v", err)
-	}
-	if report := harness.closeStore(); report != (sqlitestore.Report{DriverCleanupCompleted: true}) {
-		t.Fatalf("clean usage shutdown report = %+v", report)
-	}
-	db, err := sql.Open("sqlite", harness.cfg.UsageDBPath)
-	if err != nil {
-		t.Fatalf("open usage database for external query: %v", err)
-	}
-	defer db.Close()
+	db, report := externalUsageDB(t, harness)
+	assertCleanUsageReport(t, report)
 	var (
 		atMS, inputTokens, outputTokens                              int64
 		cacheCreation, cacheRead, ephemeral5m, ephemeral1h, thinking int64
@@ -1962,42 +1775,13 @@ func TestRunBoundServeMetersBufferedAnthropicMessageWithoutChangingPayload(t *te
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write(responses[index])
 	}))
-	defer upstream.Close()
-
-	dbPath := filepath.Join(t.TempDir(), "usage", "usage.db")
-	cfg := e2eConfig("gho-usage-meter-anthropic")
-	cfg.ImpersonationRefreshInterval = 0
-	cfg.ShimUsageMeterEnabled = true
-	cfg.UsageDBPath = dbPath
+	t.Cleanup(upstream.Close)
 	var logs bytes.Buffer
 	base := newPhase4Logger(t, &logs)
-	store, err := sqlitestore.Open(dbPath, logging.ForComponent(base, "internal/usage/sqlitestore"))
-	if err != nil {
-		t.Fatalf("open usage store: %v", err)
-	}
-
-	var exchangeAuth, exchangeUA string
-	github := newGitHubExchangeStub(t, "copilot-usage-meter-anthropic", upstream.URL, &exchangeAuth, &exchangeUA)
-	cacheRegistry := cache.NewRegistry()
-	mgr, imp, err := buildServeProvider(cfg, base, github.URL, github.Client(), productionDiscoveryEdge(), cacheRegistry)
-	if err != nil {
-		t.Fatalf("build serve provider: %v", err)
-	}
-	registry := configuredShimRegistry(cfg, store)
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() {
-		done <- runBoundServe(ctx, cfg, base, mgr, imp, nil, cacheRegistry, registry, ln)
-	}()
-	baseURL := "http://" + ln.Addr().String()
-	assertHTTPStatusEventually(t, baseURL+"/healthz", http.StatusOK)
+	harness := startUsageMeterServeHarness(t, upstream.URL, base, nil, nil)
 
 	for i, wantBody := range responses {
-		req, err := http.NewRequest(http.MethodPost, baseURL+"/anthropic/v1/messages", strings.NewReader(`{"model":"requested-model"}`))
+		req, err := http.NewRequest(http.MethodPost, harness.baseURL+"/anthropic/v1/messages", strings.NewReader(`{"model":"requested-model"}`))
 		if err != nil {
 			t.Fatalf("build request %d: %v", i, err)
 		}
@@ -2016,34 +1800,20 @@ func TestRunBoundServeMetersBufferedAnthropicMessageWithoutChangingPayload(t *te
 			t.Fatalf("forwarded body %d changed:\n got: %q\nwant: %q", i, body, wantBody)
 		}
 	}
+	db, report := externalUsageDB(t, harness)
+	assertCleanUsageReport(t, report)
+	logText := logs.String()
 	for i := range responses {
 		requestID := fmt.Sprintf("anthropic-meter-request-%d", i)
-		accessLines := phase4LogLinesContaining(logs.String(), "msg=access", "request_id="+requestID)
+		accessLines := phase4LogLinesContaining(logText, "msg=access", "request_id="+requestID)
 		if len(accessLines) != 1 {
-			t.Errorf("terminal access records for %q = %d, want one:\n%s", requestID, len(accessLines), logs.String())
+			t.Errorf("terminal access records for %q = %d, want one:\n%s", requestID, len(accessLines), logText)
 		}
 	}
-	if accessLines := phase4LogLinesContaining(logs.String(), "msg=access"); len(accessLines) != len(responses) {
-		t.Errorf("total terminal access records = %d, want %d:\n%s", len(accessLines), len(responses), logs.String())
+	if accessLines := phase4LogLinesContaining(logText, "msg=access"); len(accessLines) != len(responses) {
+		t.Errorf("total terminal access records = %d, want %d:\n%s", len(accessLines), len(responses), logText)
 	}
 
-	cancel()
-	if err := <-done; err != nil {
-		t.Fatalf("runBoundServe after cancellation: %v", err)
-	}
-	store.StopAdmission()
-	closeCtx, closeCancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
-	report := store.Close(closeCtx)
-	closeCancel()
-	if report.QueueFullDrops != 0 || report.RuntimeWriteLosses != 0 || report.LateAfterCutoffDrops != 0 || report.FinalFlushLosses != 0 || !report.DriverCleanupCompleted {
-		t.Fatalf("clean usage shutdown report = %+v", report)
-	}
-
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatalf("open usage database for external query: %v", err)
-	}
-	defer db.Close()
 	rows, err := db.Query(`SELECT at_ms, request_id, message_id, turn_index, model, transport,
 		input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens,
 		ephemeral_5m_input_tokens, ephemeral_1h_input_tokens, thinking_tokens
