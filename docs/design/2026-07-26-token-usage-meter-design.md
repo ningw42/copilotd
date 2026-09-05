@@ -1,18 +1,25 @@
 # Token usage meter — Design
 
-**Status:** proposed
+**Status:** proposed — not implemented
 **Date:** 2026-07-26
+**Repository baseline:** reviewed against `81c2d0f` (2026-09-05)
 
 This proposal has not amended the [state-at-rest boundary](../../README.md#state-at-rest).
-The proposed ADR-0015 and ADR-0016 numbers below are historical placeholders;
-those numbers were later used for logging and Hook overrun decisions. Any
-persistence exception would require a new accepted ADR.
+Persistence and admitting an observer into the Shim definition still require
+approval (§13–14). ADR-0015 and ADR-0016 now govern logging and Hook overruns;
+this proposal reserves no ADR numbers.
 
-A shim-hosted, opt-in meter that records one row per completed inference turn to a
-local SQLite database, capturing each inbound Surface's **native** token-usage
-fields verbatim. Single-user instance; multi-user is out of scope. In-process
-query is out of scope — the database exists so external tooling (`sqlite3`,
-Datasette, DuckDB) can read it.
+The Upstream call concentration, infallible post-commit hooks, structured logging,
+terminal request summary, Hook overrun monitoring, and shared SSE data-payload
+handling have landed. The design below uses those current contracts, not the
+rollout order or source line numbers from the original draft. Provider usage
+shapes still need fixture-backed verification before implementation (§11.3).
+
+A shim-hosted, opt-in meter that submits one row per observed successful inference
+completion to a local SQLite database, capturing the two inference Surfaces'
+**native** token-count values without normalization. Single-user instance;
+multi-user is out of scope. In-process query is out of scope — the database exists
+so external tooling (`sqlite3`, Datasette, DuckDB) can read it.
 
 ---
 
@@ -21,23 +28,31 @@ Datasette, DuckDB) can read it.
 Answer "what did I actually consume, on which model, when" without leaving the
 proxy and without a second process.
 
-_Outcome:_ with `--shim-usage-meter-enabled`, every completed turn on
-`(Anthropic, /v1/messages)` and `(OpenAI, /responses)` — across all three
-transports — lands as one row in `<os.UserConfigDir()>/copilotd/usage.db`. With
-the flag off (the default) nothing is created, nothing is written, and the wire
-is untouched.
+_Outcome:_ with `--shim-usage-meter-enabled`, an eligible completion on the
+Anthropic `/v1/messages` or OpenAI `/responses` Route submits one row to
+`<os.UserConfigDir()>/copilotd/usage.db`. Both support buffered JSON and SSE;
+only OpenAI Responses supports WebSocket. The GitHub Copilot Surface and the
+Catalogs are not metered.
 
-Required fields, from the request:
+An eligible completion contains the required usage fields, identity, and model
+reported upstream (§6). This is best-effort observation, not an exactly-once
+delivery or durability guarantee: parsing, queue, and storage failures can lose
+rows (§8–9).
+With the flag off (the default), the meter creates nothing, writes nothing, and
+adds no hooks. With it on, hook payloads stay unchanged, but buffered forwarding
+has observable costs (§11.1).
+
+Requested information:
 
 | Asked for | Delivered as |
 | --- | --- |
-| (a) turn/session time | `at_ms` + generated `at_utc`; `turn_index` orders turns within a WebSocket session |
+| (a) completion observation time | `at_ms` + generated `at_utc`; not request start time or duration; `turn_index` orders submissions within a WebSocket session |
 | (b) model id | `model`, as reported upstream |
 | (c) input token | `input_tokens` — **per-Surface semantics, see §7.1** |
 | (d) output token | `output_tokens` |
-| (e) cache create | `cache_creation_input_tokens` (+ TTL split) / `cache_write_tokens` |
+| (e) cache create | `cache_creation_input_tokens` (+ TTL split) / tentative `cache_write_tokens` (§11.3) |
 | (f) cache read | `cache_read_input_tokens` / `cached_tokens` |
-| (g) provider by endpoint | the **table name** — one table per Surface |
+| (g) inference Surface | the **table name** — one table per metered Surface |
 | (h) anything else | `request_id`, `transport`, `turn_index`, `reasoning_tokens`, cache TTL split |
 
 ---
@@ -53,11 +68,11 @@ Three facts make this harder than "add a counter."
 a subset already inside it. Two turns with identical real consumption therefore
 write `12` and `8012` into a naively-shared `input_tokens` column.
 
-**Streaming usage is cumulative and optional.** The Messages API spec states the
-`usage` on `message_delta` is *cumulative*, and that there may be **one or more**
-`message_delta` events. Summing them double-counts. Separately, `usage` can be
-absent entirely — the spec's thinking example shows a `message_start` with no
-`usage` object at all — so absence must be tolerated, not assumed impossible.
+**Streaming usage is cumulative and can be absent.** Anthropic usage spans
+`message_start` and cumulative `message_delta` updates; summing repeated updates
+double-counts. Missing usage must be tolerated rather than converted into zero.
+The parser tracks reported fields until completion, and the supported shapes need
+dedicated evidence rather than assumptions borrowed from unrelated fixtures.
 
 **Shim hooks may not do I/O.** `internal/shim`'s package contract binds SSE and
 WebSocket hooks to "prompt and non-blocking: CPU-bound transformation only, with
@@ -73,31 +88,38 @@ the SSE pump.
 1. **Persist to SQLite** via pure-Go `modernc.org/sqlite`. Would amend the
    [state-at-rest boundary](../../README.md#state-at-rest) if this proposal is
    accepted (see the proposed persistence ADR in §13).
-2. **Only completed turns are recorded.** A turn that never delivers a
-   usage-bearing terminal event writes nothing.
-3. **One table per Surface, fields verbatim.** No unified columns, no derived
-   totals. Interpretation lives in Go source (ADR-0016).
-4. **Capture every token-count field the Surface's spec defines**, including
-   subsets. Dropping a spec field is itself an interpretation.
-5. **The meter is a pure observer.** Every hook returns its input unchanged;
-   wire output is byte-identical.
+2. **Only observed successful completions are eligible.** Anthropic SSE
+   accumulates usage before `message_stop`; OpenAI uses `response.completed`.
+   A hook runs before the downstream write, so this is not proof of client
+   delivery or a clean transport outcome (§6).
+3. **One table per metered Surface, values verbatim.** No unified columns, no
+   derived totals. Interpretation lives beside the Go types (§5).
+4. **Capture the verified token-count fields of the supported usage shapes**,
+   including subsets. New provider fields require a schema review; the initial
+   projection is not a promise to persist arbitrary future JSON fields (§11.3).
+5. **The meter observes without rewriting payloads.** Every hook returns its
+   input unchanged. This does not make enabling buffered hooks wire-neutral
+   (§11.1).
 6. **Opt-in, off by default**, like every other shim.
 7. **Versioned schema** via `PRAGMA user_version`, forward-only migrations.
 
 ### Non-goals
 
 - **Query.** No API, no CLI subcommand, no aggregation. External tools read the file.
-- **Cost/pricing.** No rates, no currency. Copilot bills in *premium requests*,
-  not tokens; a per-model row count (`SELECT model, COUNT(*) …`) is the closer
-  proxy for billing and falls out of the schema for free.
-- **Retention.** No pruning. A single user generates thousands of rows a year.
+- **Cost/pricing.** No rates, currency, or billing reconciliation. Neither native
+  token counts nor per-model row counts establish Copilot charges; do not bake a
+  subscription's billing model into this design.
+- **Retention.** No automatic pruning. Growth depends on client activity, including
+  automated turns; operators own retention and backups.
 - **Multi-user / per-key attribution.** Explicitly out of scope.
 - **Metering `count_tokens`.** `(Anthropic, /v1/messages/count_tokens)` reports an
   estimate, not consumption. Out of scope.
-- **Non-token usage fields.** `service_tier` (a billing-tier label) and
-  `server_tool_use.web_search_requests` (a request count) are in the Messages
-  API `usage` object but are not token counts. Excluded by decision 4's wording.
-  A migration adds them cheaply if Copilot turns out to emit them.
+- **Non-token usage fields.** Labels such as `service_tier` and request counts
+  such as `server_tool_use.web_search_requests` are not token counts. Persisting
+  them would be a scope change, not merely a parser update.
+- **Model-name mapping.** Store the model reported by the inference response,
+  not a Catalog's display ID or metadata source. Catalog normalization and Codex
+  catalog aliases do not rewrite inference responses.
 
 ---
 
@@ -113,32 +135,52 @@ Two alternatives were considered and rejected:
   re-parsing bytes that have already been written downstream.
 
 The shim seam already spans all three transports (buffered, SSE, WebSocket)
-through one registry, and is already the sanctioned home for typed payload logic.
+through one registry. Typed inference transforms already live there; admitting
+read-only metering is the policy extension still to approve (§14).
 
-### 4.2 It is an observer, and that is new
+### 4.2 An observer, not a payload transform
 
-Every existing shim exists to change something. The meter changes nothing: each
-hook returns its input unchanged and `emit=true`. This is safe by construction on
-the SSE path because `sse.Pump` writes `frame.Raw` verbatim (`pump.go:136`) and
-`Frame.Raw` is documented as authoritative — a transformer that returns the frame
-it was given produces byte-identical output.
+The existing `nop` shim already returns inputs unchanged, so observation does not
+require a new hook mechanism. It does require resolving the parity-only Shim
+policy (§14). The meter returns the same buffered body, the same SSE frame, and
+the same WebSocket Message with `emit=true`; it neither holds nor drops output.
+`Frame.Raw` remains authoritative, and `sse.Pump` writes it verbatim.
 
-Consequently the meter earns **no divergence-ledger entry**. This was checked
-deliberately: `docs/divergence-ledger.md` enumerates departures from verbatim
-forwarding, and there is none here. The ledger is left unchanged.
+That proves payload identity through the hooks, not whole-response wire identity.
+Enabling a `BufferedTransformer` activates bounded reading and header handling
+(§11.1). There is no new usage-rewriting Alteration to list, but implementation
+must review the existing copilotd-originated error entry in
+`docs/divergence-ledger.md` for the meter-triggered buffering failure path.
+Those failures reuse already-governed Fabrications rather than requiring a new
+Alteration row. The old rationale that there is no wire departure does not hold.
 
 ### 4.3 Hooks
 
-Three, not four. `StreamFinalizer` is unnecessary: `Chain.StreamAdapter()`
-includes an instance that implements `EventTransformer` *or*
-`StreamFinalizer`, and the meter holds no frames and records only completed
-turns, so the terminal event itself is the completeness signal.
+Three hooks. `StreamFinalizer` is unnecessary: `Chain.StreamAdapter` includes
+an instance that implements `EventTransformer` *or* `StreamFinalizer`, and the
+meter holds no frames. Finalization must not turn an interrupted response or a
+synthesized terminal into a successful usage row.
 
 | Transport | Hook | Record fires |
 | --- | --- | --- |
-| Buffered JSON | `BufferedTransformer` | once, on the single call |
+| Buffered JSON | `BufferedTransformer` | once, if the body is a successful inference response with valid usage |
 | SSE | `EventTransformer` | on `message_stop` / `response.completed` |
-| WebSocket | `ServerMessageTransformer` | on each `response.completed` |
+| WebSocket | `ServerMessageTransformer` | on each qualifying `response.completed` |
+
+Eligibility is **payload-based**, not an HTTP status/content-type filter:
+`BufferedTransformer` receives only `Body.Bytes`, not the response Prelude. It
+must recognize the Messages response shape or a Responses object with completed
+status and valid usage; an error object or incomplete response is not eligible.
+A separate requirement to gate on HTTP status/headers would need an unchanged
+`PreludeTransformer` as a fourth hook. This proposal does not add that policy.
+
+The current adapters are `Chain.StreamAdapter(logCtx, monitor)` and
+`Chain.WSServerAdapter(logCtx, monitor)`. Their transport-owned monitor observes
+the meter automatically under
+[ADR-0016](../adr/0016-observe-shim-hook-overruns-without-controlling-execution.md).
+There is no meter-specific watchdog or new registry-monitor interface. Monitoring
+reports Hook overruns; it neither interrupts a hook nor makes a blocking sink
+safe. Buffered hooks remain unmonitored.
 
 ### 4.4 Onion position: registered last
 
@@ -157,21 +199,25 @@ Two packages, following the precedent CONTEXT.md sets for `endpoint` ("the
 `Surface` type lives in `internal/endpoint`; consumers depend on it, not the
 reverse"):
 
-- **`internal/usage`** — types only, **zero dependencies**.
+- **`internal/usage`** — types and sink contract only; standard-library imports
+  (`time`), no repository or third-party dependencies.
 - **`internal/usage/sqlitestore`** — writer goroutine, schema, migrations.
   Imports `usage` and `modernc.org/sqlite`.
 
-So `shim` → `usage` only. **The SQLite dependency never enters the shim package
-or its test binary.**
+The new dependency from `shim` is `usage`, not `usage/sqlitestore`. **The SQLite
+dependency never enters the shim package or its test binary.**
 
 ```go
-// internal/usage — no dependencies.
+// internal/usage — standard-library dependencies only.
 package usage
 
-// Sink receives one completed turn. Record must not block: it is called from
-// shim hooks, including those running inside the SSE pump and the WebSocket
-// server pump, which the shim contract binds to a prompt, non-blocking
-// obligation.
+import "time"
+
+// Sink receives one observed successful completion. Record must be safe for
+// concurrent callers and must not block, do I/O, or emit synchronous logs: it
+// is called from hooks inside the SSE pump and WebSocket server pump. A call
+// attempts enqueueing; it does not acknowledge persistence. The supplied Turn,
+// including pointed-to optional values, is an immutable snapshot.
 type Sink interface{ Record(Turn) }
 
 // Transport names the path that served a turn.
@@ -190,7 +236,7 @@ type Turn struct {
 	RequestID string
 	Model     string    // as reported upstream, never the client's requested name
 	Transport Transport
-	TurnIndex int       // flush ordinal within the shim instance
+	TurnIndex int       // submission ordinal within the shim instance
 	Usage     Usage
 }
 
@@ -202,8 +248,8 @@ type Usage interface{ isUsage() }
 // InputTokens is the UNCACHED REMAINDER. Real input is
 // InputTokens + CacheCreationInputTokens + CacheReadInputTokens.
 // The Ephemeral* fields are the TTL split *inside* CacheCreationInputTokens.
-// A nil pointer means upstream did not report the field; a zero value means
-// upstream reported zero.
+// A nil pointer means upstream did not report a numeric value; a pointer to
+// zero means upstream reported zero.
 type AnthropicUsage struct {
 	InputTokens              int64
 	OutputTokens             int64
@@ -215,52 +261,61 @@ type AnthropicUsage struct {
 
 // OpenAIUsage mirrors Responses API usage verbatim.
 //
-// InputTokens is the COMPLETE count; CachedTokens and CacheWriteTokens are
-// subsets already inside it. OutputTokens is the COMPLETE count;
-// ReasoningTokens is a subset already inside it. Real input is InputTokens.
+// InputTokens is the COMPLETE count; CachedTokens is a subset already inside
+// it. OutputTokens is the COMPLETE count; ReasoningTokens is a subset already
+// inside it. CacheWriteTokens is an unverified extension: do not infer its
+// accounting semantics from the similarly named Chat Completions field.
 type OpenAIUsage struct {
 	InputTokens      int64
 	OutputTokens     int64
 	CachedTokens     *int64 // input_tokens_details.cached_tokens
-	CacheWriteTokens *int64 // input_tokens_details.cache_write_tokens (newer models)
+	CacheWriteTokens *int64 // tentative input_tokens_details.cache_write_tokens; see §11.3
 	ReasoningTokens  *int64 // output_tokens_details.reasoning_tokens
 	TotalTokens      *int64
 }
+
+func (AnthropicUsage) isUsage() {}
+func (OpenAIUsage) isUsage()    {}
 ```
 
-Those two doc comments are where the nesting asymmetry is recorded — stated once,
-in Go, adjacent to the fields they govern. That is the whole of "interpretation
-lives in Go source."
+Those doc comments carry the nesting asymmetry alongside the fields it governs.
+Parsers must track presence separately from zero for core fields too: absent,
+null, negative, out-of-range, or wrong-typed required counts suppress a row;
+a genuinely reported zero does not. Optional absence/null maps to nil; a reported
+but invalid optional count suppresses the row rather than being silently erased.
+Resetting a meter must not mutate values already submitted to the writer.
 
 ---
 
 ## 6. Record boundary and instance lifecycle
 
-**Row cadence is uniform: one row per completed turn, on every transport.**
-Instance lifetime is not, and that difference is a framework fact:
+**One submission per qualifying observed completion, not per successful write to
+the client.** `internal/forward` builds a Chain per HTTP request;
+`internal/wsforward` builds one per WebSocket session. An HTTP request normally
+has one completion, but the SSE engine does not enforce that event cardinality.
+A WebSocket session can contain many inference turns.
 
-- `forward.go:137` builds a chain **per request** — an HTTP instance sees one turn.
-- `wsforward/proxy.go:204` builds one **per session** — a WS instance sees many.
-- `shim.go:21` states it: "per-request on the HTTP path but per-session on the
-  long-lived, multi-turn WebSocket path."
+Hooks run before downstream writes. A valid row can therefore be submitted before
+a client disconnect, write failure, or outer-shim failure. No finalizer or access
+summary retroactively acknowledges or withdraws it. `At` is the local time the
+meter observes completion, not upstream creation time or downstream receipt time.
 
-**Flush-then-reset is the adapter between those lifetimes.** Without it a session
-would produce one bloated row with summed counters instead of one row per turn.
-It also satisfies `shim.go:23`'s obligation on any shim spanning both transports
-("must not assume a request-scoped lifetime and must bound any per-turn
-accumulation") — meter state is fixed-size (a few `int64`s and two strings) and
-zeroed at every flush, so memory is flat regardless of session length.
+`TurnIndex` is the zero-based **submission-attempt ordinal** within an instance,
+advanced when calling `Sink.Record`, even if the sink drops that record. It is
+not a count of all attempted inference turns. Duplicate completion events are
+not deduplicated; this is an observation ledger, not an exactly-once logical-turn
+store. Each duplicate qualifying event can make another submission.
 
-`TurnIndex` is simply the flush ordinal within the instance: normally `0` on
-HTTP, counting up on WebSocket.
+**`RequestID` is captured once at construction** via `logging.RequestIDFrom(ctx)`.
+Every WebSocket row shares the handshake's ID; message hooks execute under a
+session cancellation context, which is not a substitute for that correlated
+construction context. `(request_id, turn_index)` is a correlation aid, not a
+globally unique key (§7.2).
 
-**`RequestID` is captured once at construction**, so on WebSocket every turn in a
-session shares one id. `(request_id, turn_index)` is what identifies a WS turn.
+### 6.1 Surface-specific parsers
 
-### 6.1 Two meters, not one
-
-`Registration.New` already receives the Surface, so it selects a type rather than
-branching inside one:
+`Registration.New` already receives the Surface, so it selects a parser rather
+than branching inside one. The proposed sink is captured by the registration:
 
 ```go
 {
@@ -271,73 +326,84 @@ branching inside one:
 	},
 	New: func(ctx context.Context, s endpoint.Surface, _ endpoint.Route) any {
 		if s == endpoint.Anthropic {
-			return newAnthropicUsageMeter(ctx, deps)
+			return newAnthropicUsageMeter(ctx, sink)
 		}
-		return newOpenAIUsageMeter(ctx, deps)
+		return newOpenAIUsageMeter(ctx, sink)
 	},
 },
 ```
 
-Each owns one spec's parser and nothing else. The Anthropic SSE half is the whole
-shape:
+Each parser owns only its Surface's usage shape. Buffered hooks leave `Body.Bytes`
+unchanged and return nil, including on malformed or irrelevant input. WebSocket
+hooks leave Message kind/data unchanged and return `emit=true`. Malformed SSE
+input also **declines by passthrough**; skipping a usage observation is not a drop
+of forwarded content.
+
+### 6.2 Anthropic SSE: request-scoped accumulation
+
+Anthropic reports input/cache usage at `message_start` and cumulative updates at
+`message_delta`; the completion marker is `message_stop`. Keep one request-scoped
+accumulator, including presence flags, message identity, model, and a poison flag.
+Update **only fields actually reported**: the last reported value per field wins,
+never a sum, and an omitted later field does not erase an earlier value.
+
+Schematic hook using the shared SSE data-payload interface:
 
 ```go
 func (m *anthropicUsageMeter) TransformEvent(_ context.Context, f sse.Frame) []sse.Frame {
 	switch f.Type {
-	case "message_start": m.absorbStart(f.Raw)  // input + cache fields, and the message id
-	case "message_delta": m.absorbDelta(f.Raw)  // CUMULATIVE: last writer wins, never summed
-	case "message_stop":  m.flush()             // Record, then reset
+	case "message_start", "message_delta", "message_stop", "error":
+		payload, present := f.Data()
+		m.observe(f.Type, payload, present) // validate, accumulate, or submit
 	}
 	return []sse.Frame{f} // unchanged on every path
 }
 ```
 
-`absorb*` are the only places that unmarshal and both are gated on `f.Type`, so a
-text-delta-heavy stream costs one string compare per frame. A parse failure sets a
-poison flag that suppresses the flush: a malformed turn is dropped, never
-half-recorded, and no error reaches the wire.
+`Frame.Raw` contains SSE framing, not JSON. `Frame.Data()` handles repeated data
+fields and line endings; an observer never needs `WithData`. `Frame.Type` is
+advisory routing information, not validation: require the decoded event's type to
+agree before absorbing it. Malformed relevant events, conflicting starts, or an
+upstream `error` poison this HTTP instance, suppressing subsequent submission.
+A valid stop submits only if identity, model, and required counts are present,
+then clears the accumulator. A duplicate stop without a new valid start submits
+nothing. No terminal means no row.
 
-### 6.2 Sequential-turn assumption, and its guard
+An absent usage object is not itself malformed. If later updates provide all
+required counts, completion may qualify; otherwise it does not. This distinction
+must be fixture-tested. Text deltas do not need JSON decoding by the meter;
+framework Hook overrun monitoring still has its own fixed per-invocation cost.
 
-The single-slot state assumes turns are strictly sequential within an instance.
-That is **guaranteed** on HTTP (one request, one turn) and **assumed** on
-WebSocket, where Copilot's behavior for a second `response.create` issued before
-the first completes is unverified.
+### 6.3 OpenAI: self-contained completion, no in-flight slot
 
-The assumption is guarded rather than trusted. The slot holds the turn's upstream
-id (`message.id` / `response.id`); before absorbing any id-bearing event:
+For both SSE and WebSocket, parse each `response.completed.response` independently
+and require that same response to contain its ID, model, completed status, and
+valid required usage. SSE uses `Frame.Data()` after routing on `Frame.Type`, and
+validates the decoded event type too; WebSocket decodes Message data directly.
+A buffered Responses body uses the same response-object validator. Do not fill
+missing values from an earlier event or the client request.
 
-```go
-if m.open && id != m.id {
-	m.warnOnce(ctx, "usage meter: overlapping turns on one instance",
-		slog.String("slot_id", m.id), slog.String("event_id", id))
-	m.poisoned = true
-	return
-}
-```
+Keep only immutable instance metadata and the submission ordinal. There is no
+OpenAI per-turn accumulator, overlap warning, `response.id` map, or client-message
+hook. Interleaved responses cannot mix counters because no counters are shared
+between completion envelopes. A malformed completion does not poison the next;
+`response.failed`, `response.incomplete`, and `error` make no submission and need
+no reset. Retained session state stays bounded independently of session length.
 
-- **Drop, don't guess.** A poisoned slot records nothing, preserving the invariant
-  that every stored row is trustworthy. A missing row is recoverable through the
-  access log; a row silently merging two responses is not.
-- **Ids only, never payload.** Bodies carry prompt content; CONTEXT.md's rule is
-  that logs never echo secrets.
-- **`WarnContext`, once per instance.** `Warn` matches `accessLog`'s treatment of
-  non-clean outcomes; `WarnContext` lets the logging handler attach `request_id`
-  automatically. Once-per-instance keeps a pathological session from flooding —
-  this is a discovery signal, not a measurement.
-- **Covers HTTP for free.** Overlap is structurally impossible on a per-request
-  instance, so a fire there means Copilot emitted something genuinely unexpected.
-
-Because `turn_index` is the flush ordinal, an anomalous second HTTP flush still
-produces a unique `(request_id, turn_index)` rather than a duplicate.
+This replaces the old draft's sequential-turn assumption and single-slot guard.
+It is a proposed parser contract awaiting dedicated usage fixtures (§11.3), not a
+claim that existing transport tests prove Copilot's terminal shape. If Copilot
+omits required fields, observation is skipped; silently reviving shared-slot
+accumulation is not the fallback.
 
 ---
 
 ## 7. Schema
 
 Two independent tables. **The table name is the Surface column** — there is no
-`surface` column, and no `route` column, since each Surface has exactly one
-usage-bearing Route.
+`surface` column, and no `route` column, because the proposal meters just one
+inference Route on each of these two Surfaces. This is a scope decision, not a
+claim that the repository has only two Surfaces or two Routes.
 
 ### 7.1 DDL (migration 1)
 
@@ -373,7 +439,7 @@ CREATE TABLE openai_turn (
   transport          TEXT    NOT NULL CHECK (transport IN ('buffered','sse','websocket')),
   input_tokens       INTEGER NOT NULL,  -- COMPLETE count
   cached_tokens      INTEGER,           -- subset of input_tokens
-  cache_write_tokens INTEGER,           -- subset of input_tokens; newer models only
+  cache_write_tokens INTEGER,           -- tentative extension; semantics unverified
   output_tokens      INTEGER NOT NULL,  -- COMPLETE count
   reasoning_tokens   INTEGER,           -- subset of output_tokens
   total_tokens       INTEGER
@@ -383,44 +449,41 @@ CREATE INDEX openai_turn_at ON openai_turn(at_ms);
 
 ### 7.2 Why each choice
 
-- **`STRICT`.** SQLite enforces declared column types instead of coercing. For a
-  verbatim ledger that is exactly right: a bug writing a string into a token
-  column fails loudly.
+- **`STRICT`.** SQLite rejects values that cannot be losslessly converted to the
+  declared type; it still accepts some coercions, such as numeric text to an
+  integer. Parser validation and typed inserts, not `STRICT` alone, preserve the
+  upstream value contract.
 - **Divergent `transport` CHECKs.** WebSocket is OpenAI `/responses`-only
   (ADR-0006), so the Anthropic table forbids it structurally, not by convention.
 - **Nullable detail columns, NOT NULL core columns.** `NULL` means *upstream did
-  not report the field*; `0` means *upstream reported zero*. That distinction
+  not report a numeric value*; `0` means *upstream reported zero*. That distinction
   answers a live question — does Copilot's Anthropic passthrough report cache
   fields at all? `DEFAULT 0` would destroy the answer permanently. Core token
-  columns stay NOT NULL because a turn missing them is malformed and dropped.
-- **`at_ms` integer + `at_utc` virtual.** Integer is canonical, 8 bytes, needs no
+  columns stay NOT NULL because a completion missing them is not eligible.
+- **`at_ms` integer + `at_utc` virtual.** A 64-bit integer is canonical, needs no
   format discipline, and supports direct arithmetic. Its one footgun is that
-  `datetime(x,'unixepoch')` assumes *seconds*, so a millisecond column silently
-  renders as year 55000; the unit in the column name removes the ambiguity, and
+  `datetime(x,'unixepoch')` assumes *seconds*, so passing milliseconds gives an
+  incorrect or out-of-range result; the unit in the column name helps avoid it, and
   the `VIRTUAL` generated column costs zero bytes at rest while making
   `SELECT at_utc, model FROM openai_turn` readable with no conversion to
   remember. Millisecond precision because WebSocket turns can share a second.
 
-  _To verify during implementation:_ the exact `strftime` formulation above
-  passes a REAL to the `unixepoch` modifier to keep sub-second precision, and
-  support for fractional `unixepoch` values varies by SQLite version. Pin it
-  against the chosen `modernc.org/sqlite` release. If fractional values are not
-  supported there, render at second precision
-  (`datetime(at_ms/1000, 'unixepoch')`); `at_ms` retains full precision either
-  way, since `at_utc` is a convenience projection and never the stored truth.
+  Pin the expression with a known millisecond timestamp against the SQLite
+  version bundled by the chosen driver. `at_utc` is a convenience projection;
+  `at_ms` is always the stored truth.
 - **No `UNIQUE(request_id, turn_index)`, despite appearances.**
   `logging.ResolveRequestID` **honors a well-formed inbound `X-Request-Id`**
-  (`middleware.go:23`), so request-ids are client-influenceable and are not a key.
-  A unique constraint would silently drop legitimate rows whenever a client reused
-  an id. Index, not constraint.
+  in `internal/server.requestID`, so request IDs are client-influenceable and are
+  not a key. A unique constraint would reject legitimate rows whenever a client
+  reused an ID. The integer `id` is the row key; add a non-unique correlation
+  index only if external query use justifies it.
 
 ### 7.3 The subset rule
 
-Every token-count field a Surface's spec defines is captured, subsets included,
-because omitting one is an interpretation and interpretation belongs in Go. This
-supersedes an earlier draft rule ("track a subset only when priced differently")
-that was a workaround for a unified schema — split tables removed the ambiguity
-that rule existed to manage.
+Verified token-count subsets are retained rather than selected by pricing. Split
+tables remove the normalization ambiguity; they do not eliminate provider-schema
+drift. Adding a newly supported token field requires a migration and an update to
+the adjacent Go documentation, without inventing a zero for older rows.
 
 ---
 
@@ -453,45 +516,70 @@ binding when a local prerequisite is missing"):
 - **Startup** — meter enabled but the database cannot be opened or migrated →
   **fail before binding**, stating the reason. Metering was explicitly requested;
   silently not metering is worse than not starting.
-- **Runtime** — write failure (disk full, I/O error) → **log and keep serving**.
-  The meter must never take down the proxy.
+- **Runtime** — write failure (disk full, I/O error) → **count the loss, report
+  it off the hook path, and keep serving**. The meter must never take down the
+  proxy. Loss reporting is bounded, not one synchronous log per rejected row.
+
+Logs follow [ADR-0015](../adr/0015-govern-log-record-structure-with-ordinary-slog.md):
+the writer receives a required positional `*slog.Logger` derived for
+`internal/usage/sqlitestore`; new top-level keys live in `internal/logging`.
+Startup failure belongs to `cmd/copilotd`. Level follows consequence: a contained
+transient loss can be Warn; persistent inability to write requiring operator
+action is Error. No prompt bodies or credential values enter rows or logs.
 
 ---
 
 ## 9. Writer and durability
 
-Buffered channel (1024) → one writer goroutine → batched insert in a single
+Buffered channel (1024) → one writer goroutine → bounded batches inserted in one
 transaction, flushed on a ~1s timer, on batch fill, and on shutdown.
-`journal_mode=WAL`, `synchronous=NORMAL`.
+`journal_mode=WAL`, `synchronous=NORMAL`; keep database connection use and PRAGMA
+application explicit so a pooled connection cannot bypass connection-local setup.
 
-**Channel full → drop the record and count the drop. Never block.** The SSE pump
-stalling on a slow disk would be a far worse defect than a missing meter row.
+**Channel full → drop the record and count the drop. Never block.** `Record` also
+must not synchronously log a drop. The writer can report aggregated losses from
+bounded counters. Failed batches must not grow an unbounded retry backlog.
 
-Two honest costs:
+Costs and lifecycle obligations:
 
-- **WAL means three files at rest, not one** — `usage.db`, `-wal`, `-shm`. ADR-0015
-  states this. Mitigation follows `identity/tokenfile.go`: the parent directory is
-  `0700`, so sidecars SQLite creates under the process umask are protected by the
-  directory regardless of their own mode.
-- **Up to ~1s of records lost on hard kill.** The correct trade for a meter; the
-  alternative is an fsync in the path of every turn.
+- **WAL can leave three files at rest** — `usage.db`, `usage.db-wal`, and
+  `usage.db-shm`. The persistence ADR must account for all of them. On Unix,
+  create a private parent directory (`0700`) and database (`0600`), and validate
+  an existing destination before opening SQLite. `os.MkdirAll` does **not**
+  tighten an existing directory; merely copying `identity.WriteTokenFile` does
+  not establish the claimed sidecar protection. Refuse an unsafe shared parent
+  rather than silently chmod an operator-owned directory. Windows permissions
+  need the same explicit best-effort caveat as the GitHub OAuth token file;
+  Unix modes are not a Windows ACL guarantee.
+- **The ~1s timer is a flush target, not a loss bound.** A hard process kill loses
+  whatever is still queued or uncommitted, which can exceed one second under
+  backlog. WAL with `synchronous=NORMAL` also does not guarantee that recent
+  committed transactions survive an OS crash or power loss.
+- **Shutdown must stop admission and tolerate late producers.** Drain HTTP and
+  WebSocket work before the final flush when possible, but forced shutdown may
+  leave a hook in flight. `Record` racing with or following `Close` must safely
+  drop/count, never send on a closed channel. Final flushing needs a bounded
+  shutdown policy (§14), not an unqualified blocking `defer store.Close()`.
 
 ---
 
 ## 10. Config surface and wiring
 
-Two settings, declared as typed descriptors in the `config.go` table per ADR-0012,
-named to match the existing shim toggle:
+Two serve-only settings, declared in `internal/config.serveSpecs` per ADR-0012,
+using the existing shim-toggle convention:
 
 | Flag | Field | Default |
 | --- | --- | --- |
 | `--shim-usage-meter-enabled` | `ShimUsageMeterEnabled` | `false` |
 | `--usage-db-path` | `UsageDBPath` | `<os.UserConfigDir()>/copilotd/usage.db` |
 
-The default path mirrors `defaultGitHubOAuthTokenFile` (`config.go:377`),
-including its fallback when `os.UserConfigDir()` fails, so the database lands
-beside the token file in the same owner-only directory. Neither value is secret;
-both log normally through the descriptor's `logAttr`.
+The default path follows `defaultOAuthTokenFile`, including the relative
+`copilotd/usage.db` fallback when `os.UserConfigDir()` fails. The defaults share
+a directory; overriding `--github-oauth-token-file` must not implicitly move the
+usage database. Directory safety is checked by store startup (§9), not assumed
+from the default path. Neither setting is secret; both log normally through the
+descriptor's `logAttr`. Environment and TOML forms derive from the same rows;
+`login` gains neither setting.
 
 **No knobs for flush interval or channel depth.** They stay unexported constants —
 a setting with no tuning story is a liability, and a later descriptor makes it
@@ -500,38 +588,55 @@ cheap to add if a real need appears.
 Validation splits by phase (§8.2): the descriptor's `check` does syntactic path
 validation at resolution time; open/migrate happens at startup.
 
-### 10.1 `main.go`
+### 10.1 Composition root
 
-Currently `:397–403`. Becomes:
+`cmd/copilotd/main.go` currently calls `configuredShimRegistry(cfg)` in both
+`runServe` (for the chain log) and `runBoundServe` (for serving). A live sink must
+not be lost between those two constructions:
+
+1. In `runServe`, after configuration/logger and local credential resolution but
+   **before `net.Listen`**, open/migrate the store only when enabled. Pass
+   `logging.ForComponent(base, "internal/usage/sqlitestore")` as the required
+   positional logger to `sqlitestore.Open`; report startup failure through the
+   existing `cmd/copilotd` logger and return `errServeFailed`.
+2. Build the configured registry once with that sink, log it, and pass that
+   registry into `runBoundServe`. Both forwarders receive it; neither opens a
+   store. Store initialization must not move into the post-bind startup work.
+3. Close the store on bind/serve failure as well as normal shutdown, keeping the
+   logger alive until loss reporting and the final bounded flush finish (§9).
+
+Proposed minimal shim interface:
 
 ```go
-store, err := sqlitestore.Open(cfg.UsageDBPath)   // only when enabled; fails before bind
-registry := shim.CanonicalRegistry(shim.Deps{Usage: store, Logger: logger})
-// the existing name-based Enabled loop gains a "usage-meter" case
-defer store.Close()                                // drains the channel, final flush
+// A nil sink leaves the usage-meter registration disabled.
+func CanonicalRegistry(sink usage.Sink) Registry
 ```
 
-```go
-// internal/shim
-type Deps struct {
-	Usage  usage.Sink   // nil leaves the meter permanently disabled
-	Logger *slog.Logger
-}
-func CanonicalRegistry(deps Deps) Registry
-```
+`configuredShimRegistry` gains a sink argument and a `usage-meter` enable case;
+that case requires both the flag and a non-nil sink. Production must fail rather
+than silently supply nil when metering was requested. No new logger-bearing
+`Deps` struct is needed: parsers do no logging and the store owns loss reporting.
+An added logger-bearing seam would need a positional logger under ADR-0015,
+not the old draft's optional `Deps.Logger`.
 
-A `nil` sink leaves the registration present but disabled, so `login` and every
-test construct nothing and never link a database.
+Use a nil **interface**, not an interface holding a typed-nil store, when disabled.
+Unit tests can inject an in-memory sink without importing SQLite. `login` and
+meter-off `serve` do not open a database, but the single `copilotd` binary (and
+composition-root test binary) still links the driver's dependency graph. Runtime
+flags cannot remove linked code.
 
-### 10.2 Call sites this breaks
+### 10.2 Wiring and test gates
 
-Fixed as part of the change, not discovered later:
-
-- `internal/config/config_test.go` hardens descriptor invariants (commit
-  `8591114`) — two new descriptors need entries.
-- Every `CanonicalRegistry()` caller takes the new signature, including
-  `wsforward/session_test.go:1092`, plus any test asserting registry contents or
-  ordering.
+- `internal/config/config_test.go`: default oracle, exact non-secret log-key
+  set, flag/env/TOML precedence, validation, and serve/login separation.
+- Every `CanonicalRegistry()` and `configuredShimRegistry()` caller, including
+  `internal/shim`, `internal/forward`, `internal/wsforward`, and the command
+  capstone tests; assertions on registration names, scope, and innermost order.
+- `runBoundServe` callers in `serve_e2e_test.go` and
+  `impersonation_lifecycle_test.go`: supply the already-configured registry.
+- `internal/logging/structure_test.go`: closed inventories for new log keys,
+  Component sinks, and any changed base-logger propagation. The writer's logger
+  belongs to `internal/usage/sqlitestore`, not `cmd/copilotd` or `internal/shim`.
 
 ---
 
@@ -539,47 +644,70 @@ Fixed as part of the change, not discovered later:
 
 ### 11.1 Enabling the meter changes non-streaming buffering
 
-Implementing `BufferedTransformer` opts the response into whole-body buffering:
-`forward.go:406` streams the body with `io.Copy` unless a buffered hook exists,
-and otherwise reads it under `maxBufferedResponseBytes`. So a non-streaming
-response **above the cap passes through with the meter off and is rejected with it
-on**. Messages and Responses non-stream bodies are small and the meter is opt-in,
-so this is accepted — but it is a real, user-visible consequence, and it gets a
-regression test (§12).
+In `internal/forward`, a `BufferedTransformer` opts **every non-SSE,
+identity-encoded response** into whole-body buffering, including errors and
+non-JSON bodies. Parsing cannot opt out of the read that already happened.
+`upstream.Caller.ReadBounded` owns the limit from `MaxBufferedResponseBytes`.
 
-The rejection status depends on which design lands first. Today `forward`'s
-buffered branch returns 413; the
-[upstream call concentration](2026-07-26-upstream-call-concentration-design.md)
-changes it to 502 (its behaviour change 3, on the grounds that 413 describes the
-inbound request entity, not an upstream response), and that design is ordered
-**before** this one. So the expected status here is **502**.
+With no other buffered shim enabled, an over-cap response passes through with the
+meter off and returns **502** with it on. That classification already landed in
+[ADR-0013](../adr/0013-govern-authenticated-upstream-calls-in-internal-upstream.md);
+there is no remaining 413-versus-502 rollout dependency. Buffered read failure is
+502, timeout is 504, and client cancellation produces no new error response.
+Buffering also delays response commitment until the read finishes and recomputes
+`Content-Length`, even though the meter leaves the payload unchanged. These costs
+remain accepted by this proposal, not excused by assuming responses are small.
 
-The same line also skips the buffered hook when the response is not
-identity-encoded, so a compressed non-stream response is not metered. The outbound
-client sets `DisableCompression: true` (`forward.go:115`), making this rare rather
-than impossible.
+The Upstream call explicitly requests `Accept-Encoding: identity`, and
+`forward.NewClient` disables automatic compression handling. If Copilot still
+returns unsupported encoding, a non-SSE body bypasses the buffered hooks and is
+not metered; an SSE response is rejected with 502 before any event hook. The
+current identity predicate accepts an absent encoding header or one trimmed,
+case-insensitive `identity` value, not arbitrary lists/repetitions.
 
-### 11.2 The table under-reports real consumption
+HTTP streaming is selected by the Endpoint's SSE capability and the upstream
+response Content-Type, not merely the inbound `stream` field. A JSON error in
+answer to a streaming request therefore takes the non-SSE path.
 
-By decision, only completed turns are stored, so cancelled, stalled, and
-upstream-errored turns burn tokens upstream and appear nowhere in the database.
-This is acceptable because copilotd already records those off-band: `accessLog`
-emits outcome and frame counts per request, and `StreamOutcomeCounter` counts them
-by surface. The meter is the **clean-turn ledger**; dropped turns stay recoverable
-by `request_id`. Both halves are needed for a complete picture, and the design doc
-says so rather than letting a reader assume the table is exhaustive.
+### 11.2 Neither exhaustive consumption nor a clean-transport ledger
 
-### 11.3 Sequential turns per WebSocket session
+Failed, incomplete, cancelled, or unparseable responses may consume tokens without
+a qualifying completion. Queue/storage failure can also lose a valid observation.
+Conversely, a completion can be recorded before downstream delivery fails, and
+duplicate qualifying events can produce duplicate observations (§6).
 
-Stated and guarded in §6.2. If the warning ever fires, the fix is to key in-flight
-state by `response.id` instead of a single slot.
+A clean SSE transport outcome means a recognized terminal was delivered; that
+terminal can be `response.failed`, `response.incomplete`, or `error`, not just
+`response.completed`. A WebSocket session can fail after many earlier successful
+completions. Application success, usage availability, and transport outcome are
+three different facts.
 
-### 11.4 `cache_write_tokens` may not exist on the Responses shape
+`internal/requestsummary` now collects terminal facts, and
+`internal/server.accessLog` emits the sole terminal request summary after the
+handler returns. SSE outcomes also feed `StreamOutcomeCounter`; WebSocket facts
+summarize the session, not each inference turn. These observations aid diagnosis
+but **cannot recover missing token counts or identify every omitted WebSocket
+turn**. A handler that never returns has no terminal access record. Do not treat
+logs plus the database as a complete accounting system.
 
-The field is documented in OpenAI's prompt-caching guide under the Chat
-Completions `prompt_tokens_details` for newer models; its presence in the
-Responses `input_tokens_details` is unverified against Copilot. The column is
-nullable, so a permanent `NULL` is a valid and informative answer.
+### 11.3 Usage-schema evidence still needed
+
+The repository review verifies transport contracts, not today's provider billing
+or every native usage field. Before freezing migration 1, collect redacted usage
+fixtures for both inference Surfaces and every supported transport, alongside
+primary provider schema references. Record the evidence's date/version.
+
+Existing `responses_item_id_churn.sse` and WebSocket stabilizer tests use minimal
+completion projections; they do not establish that Copilot supplies response ID,
+model, status, and usage together. Verify the terminal-only OpenAI parser against
+dedicated fixtures rather than treating those tests as metering evidence.
+
+`cache_write_tokens` remains tentative. Evidence for a Chat Completions
+`prompt_tokens_details` field does not establish its presence or nesting semantics
+under Responses `input_tokens_details`. A nullable column preserves absence, but
+permanent `NULL` cannot distinguish unsupported upstream data from an incorrect
+parser path. Resolve that question before freezing the column or documenting it
+as a subset; the current DDL deliberately marks it provisional.
 
 ---
 
@@ -590,41 +718,67 @@ nullable, so a permanent `NULL` is a valid and informative answer.
 - Migration ladder: empty → v1 sets `user_version`; reopen is a no-op;
   `user_version > len(migrations)` refuses to open and names both numbers.
 - Round-trip per table asserting **`NULL` survives as `NULL` and does not collapse
-  to `0`**.
-- `STRICT` rejects a wrong-typed write.
-- `at_utc` renders a known `at_ms` correctly.
-- Batching flushes on timer, on fill, and on `Close`.
-- **A full channel drops rather than blocks** — wedge the writer, push past
-  capacity, assert `Record` returns promptly and the drop is counted. A meter that
-  can stall the SSE pump is worse than no meter.
+  to `0`**; a reused request ID does not prevent a second legitimate row.
+- `STRICT` rejects non-convertible text in an integer column; parser tests enforce
+  the stronger native-number contract. `at_utc` renders a known `at_ms` correctly.
+- Batching flushes on timer, fill, and shutdown; write failures count loss without
+  killing the writer or growing an unbounded backlog.
+- **A full channel drops rather than blocks**: hold the writer, exceed capacity,
+  assert prompt `Record` return and counted drops without hook-side logging.
+- Concurrent producers, immutable optional values across meter reset, and
+  `Record` racing with/following close are race-safe. Final flush obeys the chosen
+  shutdown bound, including a slow/failing database.
+- Private new destinations and unsafe existing destinations follow §9; test the
+  Windows behavior separately rather than asserting Unix modes there.
 
 ### `internal/shim`
 
-Table-driven over recorded frames in `testdata/`, mirroring
-`responses_item_id_test.go`:
+Use dedicated usage fixtures (§11.3) and an in-memory sink:
 
-- **Multiple `message_delta` events → last wins, never summed.**
-- `message_start` carrying no `usage` at all → no record, no error.
-- Stream dies before its terminal → no record.
-- WebSocket multi-turn session → N records, `turn_index` 0..N-1, state
-  verifiably reset between turns.
-- Overlap guard: conflicting id → warn **once**, no record; a second conflict
-  logs nothing.
-- Malformed JSON in a usage event → poisoned, no record, nothing on the wire.
-- **Byte identity**: every hook returns its input unchanged; assert emitted `Raw`
-  bytes are identical. The no-divergence claim rests on this, so it is asserted
-  rather than assumed.
+- Multiple Anthropic deltas use the **last reported value per field**, never a
+  sum; omitted fields preserve start values. Missing core counts differ from
+  reported zero. Missing start usage may be completed by later updates.
+- No terminal, upstream error, malformed relevant payload, type disagreement, or
+  conflicting Anthropic start → no submission. Validate stop payloads too.
+- SSE data extraction covers multiline data, CRLF, absent/empty fields, and
+  advisory event names. Every emitted `Raw` is byte-identical to its input.
+- OpenAI completions are self-contained: interleaved event sequences cannot mix
+  counters; failed/incomplete/malformed responses do not affect a later valid
+  completion. Repeated qualifying completions have the documented non-deduplicated
+  behavior and successive submission ordinals.
+- WebSocket sessions use captured handshake correlation and bounded state; assert
+  Message kind/data identity as well as `emit=true`.
+- Buffered bodies use the payload acceptance predicate (§4.3), skip error or
+  incomplete shapes, return nil, and never mutate input bytes.
+- The registration stays last/innermost, scoped to the two inference Routes,
+  disabled without a sink, and covered by the existing post-commit monitor.
 
-### Integration
+### Integration and composition root
 
-`server_integration_test.go` shape, against a fake Copilot upstream:
+Use the existing server integration and `cmd/copilotd` serve-test seams with a
+fake Copilot upstream and a temporary database:
 
-- Meter off (default) creates no file and changes no behavior.
-- Meter on lands exactly one row per turn on both Surfaces, all three transports.
-- Client disconnect mid-stream produces **no row but a normal access-log
-  outcome**, proving §11.2's recoverability claim rather than asserting it.
-- **Regression:** a non-stream response above `maxBufferedResponseBytes` passes
-  through with the meter off and 502s with it on (§11.1).
+- Meter off creates no files or writer and adds no behavior. Meter on persists one
+  row per valid fixture completion across buffered/SSE on both inference Surfaces
+  and WebSocket on OpenAI only. Catalogs and `count_tokens` remain excluded.
+- Startup open/migration failure happens before bind; the same injected sink
+  reaches both forwarders. Clean shutdown flushes accepted rows.
+- Disconnect **before** completion reaches the meter → no row. Completion observed
+  before a downstream write failure or outer-shim rejection → a row may remain.
+  Assert the returning handler's single access summary without claiming recovery
+  of absent token counts.
+- Failed/incomplete SSE terminals can produce a clean transport outcome with no
+  usage row. A WebSocket session error preserves earlier completion rows.
+- With other buffered hooks disabled, an over-cap response passes through with
+  the meter off and 502s with it on. Cover delayed commit, recomputed length,
+  non-SSE error bodies, classified read failures/timeouts, and cancellation.
+- Non-identity buffered responses bypass metering; unsupported-encoding SSE is
+  rejected before hooks. Exercise metering with the item-id stabilizer enabled
+  to prove innermost observation and unchanged payload behavior compose.
+
+Run Go checks through `nix develop` per `AGENTS.md`, including the race suite;
+`nix flake check` verifies the complete local build/check set. Separately verify
+all four cgo-free release targets with the chosen SQLite driver (§13).
 
 ---
 
@@ -632,14 +786,15 @@ Table-driven over recorded frames in `testdata/`, mirroring
 
 ### ADRs
 
-- **ADR-0015 — Persist token usage in a local SQLite database.** Would amend the
+- **New ADR — Persist token usage in a local SQLite database.** Would amend the
   [state-at-rest boundary](../../README.md#state-at-rest) if this proposal is
-  accepted. Records: SQLite over JSONL or in-memory; why pure-Go
-  `modernc.org/sqlite` is required (cgo breaks the single-static-binary,
-  four-target story); WAL meaning three files at rest; opt-in and off by default.
-- **ADR-0016 — Per-Surface usage tables with verbatim fields.** The policy a
-  future contributor needs: capture each Surface's native token fields verbatim,
-  no unified or derived columns, interpretation in Go. Motivated by the cache
+  accepted. Records: SQLite over JSONL or in-memory; why a pure-Go SQLite driver
+  is required by `CGO_ENABLED=0`; release-target support,
+  file permissions, WAL sidecars, loss/durability policy, and opt-in default.
+  Linux is static; Darwin still links `libSystem`.
+- **New ADR — Per-Surface usage tables with verbatim fields.** The policy a
+  future contributor needs: capture supported native token-count values verbatim,
+  no unified or derived token columns, interpretation in Go. Motivated by the cache
   nesting asymmetry, with both worked examples recorded so it is not re-litigated.
 
 ### Docs
@@ -648,17 +803,24 @@ Table-driven over recorded frames in `testdata/`, mirroring
 - **[README state-at-rest boundary](../../README.md#state-at-rest)** — currently
   asserts "no database"; amend only if a persistence ADR for this proposal is
   accepted.
-- **`CONFIGURATION.md`** — both settings, per the `c8c373f` precedent.
-- **`docs/divergence-ledger.md`** — deliberately **unchanged** (§4.2).
+- **`CONFIGURATION.md`** — both serve settings, partial coverage and durability,
+  filesystem requirements, and the buffering consequences.
+- **`docs/divergence-ledger.md`** — review existing fabrication coverage for
+  meter-activated buffered failures; no usage-rewriting Alteration (§4.2).
 
 ### Dependency
 
-`modernc.org/sqlite` pinned to an explicit version per project practice; the Nix
-build's vendor hash updates with it.
+`modernc.org/sqlite` remains the proposed driver, not an already-validated choice.
+Pin an explicit version in `go.mod`/`go.sum` and update `flake.nix`'s `vendorHash`.
+Before accepting it, verify `CGO_ENABLED=0` builds for **all four current release
+targets**: `linux/amd64`, `windows/amd64`, `windows/arm64`, and `darwin/arm64`.
+Pure Go does not by itself guarantee that a driver's generated platform code
+supports every target; inability to support one is a design blocker, not a reason
+to silently narrow releases.
 
 ---
 
-## 14. Open question
+## 14. Open decisions before implementation
 
 **`CONTEXT.md`'s `Shim` entry defines a shim as "a composable middleware layer
 that closes one specific parity gap."** The usage meter closes no parity gap — it
@@ -671,4 +833,18 @@ observes. Two ways to resolve, and this is left for the reviewer:
    shim that implements hooks but returns every input unchanged. More precise, and
    it gives future observers a term — at the cost of another glossary entry.
 
-Option 1 is the lighter change; option 2 pays off only if more observers follow.
+Option 1 remains the lighter change; option 2 pays off only if more observers
+follow. Either choice also needs the README's parity-only wording reconciled.
+Neither the glossary nor that policy is changed by this proposal refresh.
+
+Other gates remain explicit:
+
+- **Persistence approval and driver support** (§13), including permissions on all
+  release platforms. The current no-database boundary remains in force.
+- **Verified usage schema** (§11.3). Resolve `cache_write_tokens` against Responses
+  evidence before freezing migration 1; do not claim its accounting semantics
+  from Chat Completions documentation.
+- **Bounded final flush** (§9). Decide how the meter shares or extends the existing
+  `ShutdownTimeout` budget and how final loss is reported. `server.Run` already
+  drains HTTP/WebSocket work with a deadline, but a deferred store close does not
+  automatically inherit it.
