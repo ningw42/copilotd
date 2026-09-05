@@ -76,6 +76,11 @@
           # binary" claim is Linux-precise.
           env.CGO_ENABLED = "0";
 
+          # The retained SQLite driver probes are a standalone nested Go module,
+          # not root-module packages. Excluding only that boundary leaves every
+          # root package in buildGoModule's normal build and test discovery.
+          excludedPackages = [ "docs/research/sqlite-feasibility" ];
+
           ldflags = [
             "-s"
             "-w"
