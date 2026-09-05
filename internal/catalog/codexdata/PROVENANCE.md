@@ -3,35 +3,34 @@
 ## Vendored snapshot identity
 
 - Source repository: <https://github.com/openai/codex>
-- Tag: `rust-v0.152.1`
-- Commit: [`5adb68a49933ae446bf11935662c83dba55a0804`][commit]
+- Tag: `rust-v0.153.4`
+- Commit: [`3d2ee51ca2d5db578f328aa75e20aa22c0197c9a`][commit]
 - Source path:
   [`codex-rs/models-manager/models.json`][catalog]
-- Git blob: [`0c4137ad9560e1ac7b9baf1adc95dbc7051e2b6c`][catalog-object]
-- Size: `424117` bytes
-- SHA-256: `eb0d7b9a5dcaf103895c5f8a14c16b269df46e039b375a55ba97f6238542d2ed`
+- Git blob: [`698da6fb7a825cd3ede1696e4ce8579ef5c42c02`][catalog-object]
+- Size: `515145` bytes
+- SHA-256: `d7136a413cfac1b5b1686d9e0dcc5c80ca05bebed5e9fc3911376561d0ef6ee8`
 - Immutable raw source: [raw `models.json`][catalog-raw]
 
 `models.json` is vendored without modification from the source above. `LICENSE`
-and `NOTICE` are copied from the repository root at the same commit. All three
-files are byte-identical to their `rust-v0.151.0` counterparts; this bump
-advances the release identity and accepted schema contract without changing
-the embedded bytes.
+and `NOTICE` are copied from the repository root at the same commit. The legal
+files are byte-identical to their `rust-v0.152.1` counterparts; `models.json`
+adds the `gpt-6-astra` entry and updates existing model metadata.
 
 The round-trip test computes Git's `blob <length>\0<content>` object identity
 locally and requires the blob ID above, in addition to the SHA-256 check.
 
 ## Stable release audit
 
-The identity above was audited on 2026-09-02. GitHub's first-party
-`/repos/openai/codex/releases/latest` endpoint returned release ID `380862087`,
-published `2026-09-01T22:33:02Z`, with `draft: false` and `prerelease: false`,
+The identity above was audited on 2026-09-05. GitHub's first-party
+`/repos/openai/codex/releases/latest` endpoint returned release ID `383061770`,
+published `2026-09-04T23:25:48Z`, with `draft: false` and `prerelease: false`,
 and named the pinned tag. The annotated [tag object][tag-object]
-`3c6cfbab81e44218c729dc8c6b304cb760d1b8a1` peels to the pinned commit; that
+`042fb41b7c813ac7999105e886b2b7aa715b5081` peels to the pinned commit; that
 commit, rather than the release's `target_commitish: "main"`, is the source pin.
 [Release][release]
 
-GitHub reports the release as `immutable: false`, and the tag is unsigned.
+GitHub reports the release as `immutable: false`; the tag and commit are unsigned.
 The commit and individual Git blob IDs are therefore the durable identities;
 the release/tag names establish which stable release was current at the audit
 cutoff. [Release][release] [tag object][tag-object]
@@ -45,7 +44,7 @@ type, and every response on this credential-free edge is capped at 8 MiB.
 
 The release also publishes `codex-package_SHA256SUMS`; GitHub records the
 manifest asset itself as
-`sha256:6c287edb8ec9b153febd7e385d00fd1cc5ccf0cce6cc6405d7263dad4a1595ef`.
+`sha256:645fb8d4a1f821357a7160f04a6d15bf54ff97ab6946a79239c551ebed734d23`.
 GitHub's generated [commit tarball][source-tar] and [commit ZIP][source-zip]
 have no API-provided digest, so they are not used as the vendored snapshot
 identity. [Manifest metadata][checksums]
@@ -54,16 +53,17 @@ identity. [Manifest metadata][checksums]
 
 `TestVendoredCodexCatalogRoundTripFidelity` proves that the exact vendored
 snapshot passes validation, cache acceptance, handler rendering, reviewer
-resolution, a derived limits overlay, and field-for-field preservation. The
-unchanged blob is not a regression witness for the nested message fields added
-in `rust-v0.152.1`, because none of those fields is populated. Synthetic
-contract tests exercise their optional/default forms and malformed values.
+resolution, a derived limits overlay, and field-for-field preservation. Codex's
+`ModelInfo` and `ModelMessages` schema is unchanged from `rust-v0.152.1`; the
+new snapshot positively exercises several optional paths that previously had
+only synthetic witnesses. Synthetic contract tests retain coverage of absent,
+nullable, defaulted, and malformed forms.
 
 `ModelsResponse` requires a non-null `models` array. Each element is decoded
 as `ModelInfo`; unknown object members are accepted because the type does not
-deny unknown fields. The current bundled file has ten entries and contains
-legacy/transport members not present in `ModelInfo` (including
-`available_in_plans`, `minimal_client_version`, `prefer_websockets`,
+deny unknown fields. The current bundled file has eleven entries and contains
+legacy/transport members not present in `ModelInfo` (including `available_in_plans`,
+`minimal_client_version`, `prefer_websockets`, `requires_sandboxed_review`,
 `supports_parallel_tool_calls`, and `supports_reasoning_summaries`). They are
 ignored by Rust deserialization but remain upstream bytes that copilotd's raw
 fidelity contract must preserve. [Types][model-types] [catalog][catalog]
@@ -131,24 +131,25 @@ requires the representation Codex will select to be non-empty. Empty slugs,
 empty display names, and duplicate slugs are likewise rejected as local
 semantic-safety constraints rather than Rust presence constraints.
 
-The pinned catalog supplies both instruction forms for all ten entries. Six
-entries explicitly set `instructions_variables` to `null`; the other four use
-an object. Newer sibling sections (`auto_review`, `collaboration_modes`,
-`guardian_v2`, `multi_agent`, `permissions`, and `token_budget`) are present as
-objects or explicit `null` and must survive copilotd rendering unchanged unless
-an ADR-governed overlay names the field. The `rust-v0.152.1` additions under
-`tools`, `auto_review`, `multi_agent`, and `token_budget` are absent from the
-unchanged catalog blob. [Catalog][catalog]
+The ten legacy catalog entries supply both instruction forms. The new
+`gpt-6-astra` entry has no `base_instructions` and uses only a non-empty
+canonical `model_messages.instructions_template`, directly witnessing Codex's
+promotion contract. Seven entries explicitly set `instructions_variables` to
+`null`; the other four use an object. Sibling sections (`auto_review`,
+`collaboration_modes`, `guardian_v2`, `multi_agent`, `permissions`, and
+`token_budget`) are present as objects or explicit `null` and must survive
+copilotd rendering unchanged unless an ADR-governed overlay names the field. [Catalog][catalog]
 
-The vendored snapshot does not positively exercise every mirrored
-optional/default field: `effective_context_window_percent` and
-`multi_agent_reasoning_effort` are absent from all ten entries;
-`availability_nux` is null throughout; `persistent_instructions`,
-`confirmation_policies`, and `tools` are absent; and the new
-`auto_review.node_repl_policy`, `multi_agent.mode.proactive`,
-`token_budget.enabled`, and `token_budget.use_history_notes_extension` fields
-are absent. Synthetic positive and malformed-shape tests cover the corresponding
-validator paths.
+The vendored snapshot still does not positively exercise every mirrored
+optional/default field: `effective_context_window_percent` is absent from all
+eleven entries; `availability_nux` is null throughout; and `tools` is null on
+`gpt-6-astra` and absent elsewhere, so no catalog entry exercises
+`tools.send_user_message_async`. Astra now positively exercises
+`multi_agent_reasoning_effort`, `persistent_instructions`,
+`confirmation_policies`, `multi_agent.mode.proactive`, and both defaulted token
+budget flags. Astra, Luna, and `codex-auto-review` also populate current
+`auto_review` leaves, including `node_repl_policy`. Synthetic positive and
+malformed-shape tests cover the remaining validator paths.
 
 Reasoning levels are an array of `{effort, description}` objects: both members
 are required, descriptions are strings, and effort is any non-empty string
@@ -181,7 +182,8 @@ catalog. Otherwise
 matching slug wholesale, and appends new slugs; an empty response retains the
 bundle. Picker candidates are sorted by ascending numeric priority, API-key
 mode filters out `supported_in_api: false`, `visibility: "list"` controls picker
-display, and the first picker-visible result becomes the default. An explicitly
+display, and the first picker-visible result becomes the default. At the pinned
+release, visible priority-1 `gpt-6-astra` is the bundled default. An explicitly
 configured model is preserved by the dynamic manager. If no model is
 picker-visible, the first model is the default fallback. [Manager][manager]
 [manager tests][manager-tests] [model conversion][model-types]
@@ -219,37 +221,37 @@ witnessing the merge before `/responses` forwarding is checked. The audit ran
 them against the official
 [`codex-x86_64-unknown-linux-musl.zst`][codex-binary] asset after verifying
 SHA-256
-`343c79bd7f979d1650cb41d3756bd5524bddf7edcc2f6796594c50ae5db994c2`;
+`c485e889611b73ff5c3cc11fb5cea7551ef504465ad8675163766b9b1a9ec84a`;
 the resulting executable has SHA-256
-`b82018241214a4a7c6b97b198585192d1dbc3aab1ddcdc640f04d8dee8c606f9`.
-The contract test enforces that executable digest and `codex-cli 0.152.1`
+`56ef98ab4032d317ab26e9b5e5a175650717351edb16ed9cde0cb6d1734d62da`.
+The contract test enforces that executable digest and `codex-cli 0.153.4`
 before exercising the client. It discovers the command-auth `printf` executable
 from `PATH` and skips with an explicit prerequisite message when unavailable.
 The downloaded Codex executable was temporary and is not stored in the
 repository.
 
-[release]: https://api.github.com/repos/openai/codex/releases/380862087
-[tag-object]: https://api.github.com/repos/openai/codex/git/tags/3c6cfbab81e44218c729dc8c6b304cb760d1b8a1
-[commit]: https://github.com/openai/codex/commit/5adb68a49933ae446bf11935662c83dba55a0804
-[catalog]: https://github.com/openai/codex/blob/5adb68a49933ae446bf11935662c83dba55a0804/codex-rs/models-manager/models.json
-[catalog-object]: https://api.github.com/repos/openai/codex/git/blobs/0c4137ad9560e1ac7b9baf1adc95dbc7051e2b6c
-[catalog-raw]: https://raw.githubusercontent.com/openai/codex/5adb68a49933ae446bf11935662c83dba55a0804/codex-rs/models-manager/models.json
-[checksums]: https://api.github.com/repos/openai/codex/releases/assets/540234309
-[source-tar]: https://api.github.com/repos/openai/codex/tarball/5adb68a49933ae446bf11935662c83dba55a0804
-[source-zip]: https://api.github.com/repos/openai/codex/zipball/5adb68a49933ae446bf11935662c83dba55a0804
-[model-types]: https://github.com/openai/codex/blob/5adb68a49933ae446bf11935662c83dba55a0804/codex-rs/protocol/src/openai_models.rs#L1-L941
-[model-messages]: https://github.com/openai/codex/blob/5adb68a49933ae446bf11935662c83dba55a0804/codex-rs/protocol/src/openai_models.rs#L544-L682
-[guardian-v2]: https://github.com/openai/codex/blob/5adb68a49933ae446bf11935662c83dba55a0804/codex-rs/protocol/src/openai_models/guardian_v2.rs
-[instruction-promotion]: https://github.com/openai/codex/blob/5adb68a49933ae446bf11935662c83dba55a0804/codex-rs/protocol/src/openai_models.rs#L750-L850
-[model-tests]: https://github.com/openai/codex/blob/5adb68a49933ae446bf11935662c83dba55a0804/codex-rs/protocol/src/openai_models.rs#L942-L2089
-[model-runtime]: https://github.com/openai/codex/blob/5adb68a49933ae446bf11935662c83dba55a0804/codex-rs/models-manager/src/model_info.rs
-[models-client]: https://github.com/openai/codex/blob/5adb68a49933ae446bf11935662c83dba55a0804/codex-rs/codex-api/src/endpoint/models.rs
-[models-endpoint]: https://github.com/openai/codex/blob/5adb68a49933ae446bf11935662c83dba55a0804/codex-rs/model-provider/src/models_endpoint.rs
-[default-headers]: https://github.com/openai/codex/blob/5adb68a49933ae446bf11935662c83dba55a0804/codex-rs/login/src/auth/default_client.rs#L278-L350
-[command-auth]: https://github.com/openai/codex/blob/5adb68a49933ae446bf11935662c83dba55a0804/codex-rs/login/src/auth/external_bearer.rs
-[models-lib]: https://github.com/openai/codex/blob/5adb68a49933ae446bf11935662c83dba55a0804/codex-rs/models-manager/src/lib.rs
-[manager]: https://github.com/openai/codex/blob/5adb68a49933ae446bf11935662c83dba55a0804/codex-rs/models-manager/src/manager.rs#L120-L680
-[manager-tests]: https://github.com/openai/codex/blob/5adb68a49933ae446bf11935662c83dba55a0804/codex-rs/models-manager/src/manager_tests.rs#L831-L1045
-[provider]: https://github.com/openai/codex/blob/5adb68a49933ae446bf11935662c83dba55a0804/codex-rs/model-provider/src/provider.rs#L120-L380
-[guardian]: https://github.com/openai/codex/blob/5adb68a49933ae446bf11935662c83dba55a0804/codex-rs/core/src/guardian/review.rs#L831-L940
-[codex-binary]: https://github.com/openai/codex/releases/download/rust-v0.152.1/codex-x86_64-unknown-linux-musl.zst
+[release]: https://api.github.com/repos/openai/codex/releases/383061770
+[tag-object]: https://api.github.com/repos/openai/codex/git/tags/042fb41b7c813ac7999105e886b2b7aa715b5081
+[commit]: https://github.com/openai/codex/commit/3d2ee51ca2d5db578f328aa75e20aa22c0197c9a
+[catalog]: https://github.com/openai/codex/blob/3d2ee51ca2d5db578f328aa75e20aa22c0197c9a/codex-rs/models-manager/models.json
+[catalog-object]: https://api.github.com/repos/openai/codex/git/blobs/698da6fb7a825cd3ede1696e4ce8579ef5c42c02
+[catalog-raw]: https://raw.githubusercontent.com/openai/codex/3d2ee51ca2d5db578f328aa75e20aa22c0197c9a/codex-rs/models-manager/models.json
+[checksums]: https://api.github.com/repos/openai/codex/releases/assets/545043391
+[source-tar]: https://api.github.com/repos/openai/codex/tarball/3d2ee51ca2d5db578f328aa75e20aa22c0197c9a
+[source-zip]: https://api.github.com/repos/openai/codex/zipball/3d2ee51ca2d5db578f328aa75e20aa22c0197c9a
+[model-types]: https://github.com/openai/codex/blob/3d2ee51ca2d5db578f328aa75e20aa22c0197c9a/codex-rs/protocol/src/openai_models.rs#L1-L941
+[model-messages]: https://github.com/openai/codex/blob/3d2ee51ca2d5db578f328aa75e20aa22c0197c9a/codex-rs/protocol/src/openai_models.rs#L539-L682
+[guardian-v2]: https://github.com/openai/codex/blob/3d2ee51ca2d5db578f328aa75e20aa22c0197c9a/codex-rs/protocol/src/openai_models/guardian_v2.rs
+[instruction-promotion]: https://github.com/openai/codex/blob/3d2ee51ca2d5db578f328aa75e20aa22c0197c9a/codex-rs/protocol/src/openai_models.rs#L750-L850
+[model-tests]: https://github.com/openai/codex/blob/3d2ee51ca2d5db578f328aa75e20aa22c0197c9a/codex-rs/protocol/src/openai_models.rs#L942-L2074
+[model-runtime]: https://github.com/openai/codex/blob/3d2ee51ca2d5db578f328aa75e20aa22c0197c9a/codex-rs/models-manager/src/model_info.rs
+[models-client]: https://github.com/openai/codex/blob/3d2ee51ca2d5db578f328aa75e20aa22c0197c9a/codex-rs/codex-api/src/endpoint/models.rs
+[models-endpoint]: https://github.com/openai/codex/blob/3d2ee51ca2d5db578f328aa75e20aa22c0197c9a/codex-rs/model-provider/src/models_endpoint.rs
+[default-headers]: https://github.com/openai/codex/blob/3d2ee51ca2d5db578f328aa75e20aa22c0197c9a/codex-rs/login/src/auth/default_client.rs#L278-L350
+[command-auth]: https://github.com/openai/codex/blob/3d2ee51ca2d5db578f328aa75e20aa22c0197c9a/codex-rs/login/src/auth/external_bearer.rs
+[models-lib]: https://github.com/openai/codex/blob/3d2ee51ca2d5db578f328aa75e20aa22c0197c9a/codex-rs/models-manager/src/lib.rs
+[manager]: https://github.com/openai/codex/blob/3d2ee51ca2d5db578f328aa75e20aa22c0197c9a/codex-rs/models-manager/src/manager.rs#L120-L677
+[manager-tests]: https://github.com/openai/codex/blob/3d2ee51ca2d5db578f328aa75e20aa22c0197c9a/codex-rs/models-manager/src/manager_tests.rs#L831-L1045
+[provider]: https://github.com/openai/codex/blob/3d2ee51ca2d5db578f328aa75e20aa22c0197c9a/codex-rs/model-provider/src/provider.rs#L120-L380
+[guardian]: https://github.com/openai/codex/blob/3d2ee51ca2d5db578f328aa75e20aa22c0197c9a/codex-rs/core/src/guardian/review.rs#L861-L975
+[codex-binary]: https://github.com/openai/codex/releases/download/rust-v0.153.4/codex-x86_64-unknown-linux-musl.zst

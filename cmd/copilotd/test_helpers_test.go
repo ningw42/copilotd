@@ -17,12 +17,12 @@ import (
 	"github.com/ningw42/copilotd/internal/wsforward"
 )
 
-const testReadyImpersonationJSON = `"caches":{},"impersonation":{"effective_headers":{"Editor-Version":"vscode/1.135.0","Editor-Plugin-Version":"copilot-chat/0.48.1","User-Agent":"GitHubCopilotChat/0.48.1","Copilot-Integration-Id":"vscode-chat","X-GitHub-Api-Version":"2025-04-01"}}`
+const testReadyImpersonationJSON = `"caches":{},"impersonation":{"effective_headers":{"Editor-Version":"vscode/1.136.1","Editor-Plugin-Version":"copilot-chat/0.48.1","User-Agent":"GitHubCopilotChat/0.48.1","Copilot-Integration-Id":"vscode-chat","X-GitHub-Api-Version":"2025-04-01"}}`
 
 func newTestImpersonationObserver() *impersonation.Set {
 	registry := cache.NewRegistry()
 	return impersonation.New(impersonation.Config{
-		VSCodeVersionFallback: "1.135.0",
+		VSCodeVersionFallback: "1.136.1",
 		PluginVersionFallback: "0.48.1",
 		CopilotIntegrationID:  "vscode-chat",
 		GithubAPIVersion:      "2025-04-01",

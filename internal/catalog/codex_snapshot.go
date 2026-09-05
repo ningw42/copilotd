@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-// embeddedCodexModels is Codex's bundled model catalog at rust-v0.152.1.
+// embeddedCodexModels is Codex's bundled model catalog at rust-v0.153.4.
 // Its exact origin and license are recorded alongside the vendored file.
 //
 //go:embed codexdata/models.json

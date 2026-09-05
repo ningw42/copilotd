@@ -113,7 +113,7 @@ func TestRenderOneReturnsTheShapeThatMatchesItsRepresentation(t *testing.T) {
 		},
 		{
 			name:   "client-shaped Codex catalog",
-			target: "/openai/v1/models?client_version=0.152.1",
+			target: "/openai/v1/models?client_version=0.153.4",
 			rendering: Rendering{
 				Render: RenderOpenAI,
 				Codex: CodexDescriptor{
@@ -522,7 +522,7 @@ func testCodexModelsValue(t *testing.T, current []byte, fetchErr error) *cache.V
 		FallbackVersion: embeddedCodexModelsVersion,
 		TTL:             time.Hour,
 		Fetch: func(context.Context) ([]byte, string, error) {
-			return current, "rust-v0.153.0", fetchErr
+			return current, "rust-v0.154.0", fetchErr
 		},
 		Hash: hashModels,
 		Validate: func(currentBytes []byte) error {

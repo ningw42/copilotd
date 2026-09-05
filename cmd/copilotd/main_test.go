@@ -184,7 +184,7 @@ func TestLogCachedValueStartupOutcomesIncludesCodexModelsWhenRegistered(t *testi
 	logCachedValueStartupOutcomes(logger, []cache.Status{
 		{Name: "vscode", Source: "fetched"},
 		{Name: "copilot_chat", Source: "fallback"},
-		{Name: "codex_models", Source: "fallback", Version: "rust-v0.152.1"},
+		{Name: "codex_models", Source: "fallback", Version: "rust-v0.153.4"},
 	})
 
 	out := buf.String()
@@ -193,7 +193,7 @@ func TestLogCachedValueStartupOutcomesIncludesCodexModelsWhenRegistered(t *testi
 		"component=cmd/copilotd",
 		"cached_value=vscode cached_value_source=fetched",
 		"cached_value=copilot_chat cached_value_source=fallback",
-		"cached_value=codex_models cached_value_source=fallback cached_value_version=rust-v0.152.1",
+		"cached_value=codex_models cached_value_source=fallback cached_value_version=rust-v0.153.4",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("startup log missing %q: %s", want, out)
