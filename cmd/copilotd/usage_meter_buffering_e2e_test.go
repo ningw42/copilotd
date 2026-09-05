@@ -301,6 +301,7 @@ func TestRunBoundServeUsageMeterClassifiesBufferedReadFailures(t *testing.T) {
 		})
 
 		t.Run(surface.name+"/client-cancellation", func(t *testing.T) {
+			const requestID = "buffered-client-cancel"
 			upstreamStarted := make(chan struct{})
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
@@ -310,7 +311,8 @@ func TestRunBoundServeUsageMeterClassifiesBufferedReadFailures(t *testing.T) {
 				<-r.Context().Done()
 			}))
 			t.Cleanup(upstream.Close)
-			harness := startUsageMeterServeHarness(t, upstream.URL, discardLogger(t), nil, nil)
+			var logs bytes.Buffer
+			harness := startUsageMeterServeHarness(t, upstream.URL, newPhase4Logger(t, &logs), nil, nil)
 			requestCtx, cancel := context.WithCancel(context.Background())
 			t.Cleanup(cancel)
 			req, err := http.NewRequestWithContext(requestCtx, http.MethodPost, harness.baseURL+surface.path, strings.NewReader(`{}`))
@@ -318,7 +320,7 @@ func TestRunBoundServeUsageMeterClassifiesBufferedReadFailures(t *testing.T) {
 				t.Fatal(err)
 			}
 			req.Header.Set("Authorization", "Bearer "+testAPIKey)
-			req.Header.Set("X-Request-Id", "buffered-client-cancel")
+			req.Header.Set("X-Request-Id", requestID)
 			result := make(chan error, 1)
 			go func() {
 				resp, err := http.DefaultClient.Do(req)
@@ -346,69 +348,141 @@ func TestRunBoundServeUsageMeterClassifiesBufferedReadFailures(t *testing.T) {
 			if got := queryUsageCount(t, db, surface.table, ""); got != 0 {
 				t.Errorf("client-cancellation rows = %d, want none", got)
 			}
+			accessLines := phase4LogLinesContaining(logs.String(), "msg=access", "request_id="+requestID)
+			if len(accessLines) != 1 {
+				t.Fatalf("canceled request terminal access records = %d, want one:\n%s", len(accessLines), logs.String())
+			}
+			for _, want := range []string{"status=200", "bytes=0"} {
+				if !strings.Contains(accessLines[0], want) {
+					t.Errorf("canceled request access record missing no-output fact %q: %s", want, accessLines[0])
+				}
+			}
 		})
 	}
 }
 
 func TestRunBoundServeUsageMeterDelaysCommitAndRecomputesChunkedLength(t *testing.T) {
 	for _, surface := range bufferedUsageSurfaceCases {
-		t.Run(surface.name, func(t *testing.T) {
-			firstChunkWritten := make(chan struct{})
-			releaseRemainder := make(chan struct{})
-			var releaseOnce sync.Once
-			release := func() { releaseOnce.Do(func() { close(releaseRemainder) }) }
-			t.Cleanup(release)
-			midpoint := len(surface.completion) / 2
-			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusCreated)
-				w.(http.Flusher).Flush()
-				_, _ = io.WriteString(w, surface.completion[:midpoint])
-				w.(http.Flusher).Flush()
-				close(firstChunkWritten)
-				<-releaseRemainder
-				_, _ = io.WriteString(w, surface.completion[midpoint:])
-			}))
-			t.Cleanup(upstream.Close)
-			harness := startUsageMeterServeHarness(t, upstream.URL, discardLogger(t), nil, nil)
+		for _, meterEnabled := range []bool{false, true} {
+			mode := "meter-off-control"
+			if meterEnabled {
+				mode = "meter-on"
+			}
+			t.Run(surface.name+"/"+mode, func(t *testing.T) {
+				completion := strings.TrimSuffix(surface.completion, "}") + `,"padding":"` + strings.Repeat("x", 16<<10) + `"}`
+				firstChunkWritten := make(chan struct{})
+				releaseRemainder := make(chan struct{})
+				var releaseOnce sync.Once
+				release := func() { releaseOnce.Do(func() { close(releaseRemainder) }) }
+				midpoint := len(completion) / 2
+				upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusCreated)
+					w.(http.Flusher).Flush()
+					_, _ = io.WriteString(w, completion[:midpoint])
+					w.(http.Flusher).Flush()
+					close(firstChunkWritten)
+					<-releaseRemainder
+					_, _ = io.WriteString(w, completion[midpoint:])
+				}))
+				t.Cleanup(upstream.Close)
+				harness := startUsageMeterServeHarness(t, upstream.URL, discardLogger(t), func(cfg *config.ServeConfig) {
+					cfg.ShimUsageMeterEnabled = meterEnabled
+				}, nil)
+				// This cleanup is acquired after the harness so it runs first: a fatal
+				// assertion must release the upstream before either server is joined.
+				t.Cleanup(release)
 
-			type responseResult struct {
-				resp *http.Response
-				body []byte
-				err  error
-			}
-			result := make(chan responseResult, 1)
-			go func() {
-				resp, body, err := performUsagePOST(context.Background(), harness.baseURL, surface.path, "delayed-buffered-commit", `{}`)
-				result <- responseResult{resp: resp, body: body, err: err}
-			}()
-			select {
-			case <-firstChunkWritten:
-			case <-time.After(2 * time.Second):
-				t.Fatal("fake upstream did not flush its first chunk")
-			}
-			select {
-			case <-result:
-				t.Fatal("downstream response committed before the metered body was read in full")
-			case <-time.After(75 * time.Millisecond):
-			}
-			release()
-			got := <-result
-			if got.err != nil {
-				t.Fatalf("read delayed buffered response: %v", got.err)
-			}
-			if got.resp.StatusCode != http.StatusCreated || !bytes.Equal(got.body, []byte(surface.completion)) {
-				t.Errorf("downstream response = %d %q, want unchanged chunked upstream body", got.resp.StatusCode, got.body)
-			}
-			if got.resp.ContentLength != int64(len(surface.completion)) || got.resp.Header.Get("Content-Length") != strconv.Itoa(len(surface.completion)) || len(got.resp.TransferEncoding) != 0 {
-				t.Errorf("downstream length = parsed:%d header:%q transfer:%v, want recomputed %d", got.resp.ContentLength, got.resp.Header.Get("Content-Length"), got.resp.TransferEncoding, len(surface.completion))
-			}
-			db, report := externalUsageDB(t, harness)
-			assertCleanUsageReport(t, report)
-			if got := queryUsageCount(t, db, surface.table, "request_id = ?", "delayed-buffered-commit"); got != 1 {
-				t.Errorf("persisted rows = %d, want one", got)
-			}
-		})
+				type responseResult struct {
+					resp *http.Response
+					body []byte
+					err  error
+				}
+				requestID := "delayed-buffered-commit-" + mode
+				req, err := http.NewRequest(http.MethodPost, harness.baseURL+surface.path, strings.NewReader(`{}`))
+				if err != nil {
+					t.Fatal(err)
+				}
+				req.Header.Set("Authorization", "Bearer "+testAPIKey)
+				req.Header.Set("X-Request-Id", requestID)
+				req.Header.Set("Accept-Encoding", "identity")
+				headers := make(chan responseResult, 1)
+				result := make(chan responseResult, 1)
+				go func() {
+					resp, err := http.DefaultClient.Do(req)
+					headers <- responseResult{resp: resp, err: err}
+					if err != nil {
+						result <- responseResult{resp: resp, err: err}
+						return
+					}
+					body, readErr := io.ReadAll(resp.Body)
+					_ = resp.Body.Close()
+					result <- responseResult{resp: resp, body: body, err: readErr}
+				}()
+				select {
+				case <-firstChunkWritten:
+				case <-time.After(2 * time.Second):
+					t.Fatal("fake upstream did not flush its first chunk")
+				}
+
+				var headerResult responseResult
+				if meterEnabled {
+					select {
+					case <-headers:
+						t.Fatal("downstream response headers arrived before the metered body was read in full")
+					case <-time.After(75 * time.Millisecond):
+					}
+					release()
+					select {
+					case headerResult = <-headers:
+					case <-time.After(2 * time.Second):
+						t.Fatal("downstream response headers did not arrive after the metered body completed")
+					}
+				} else {
+					select {
+					case headerResult = <-headers:
+					case <-time.After(2 * time.Second):
+						t.Fatal("unbuffered control did not observe response headers while the body remained open")
+					}
+					select {
+					case <-result:
+						t.Fatal("unbuffered control unexpectedly read the open upstream body to EOF")
+					case <-time.After(75 * time.Millisecond):
+					}
+					release()
+				}
+				if headerResult.err != nil {
+					t.Fatalf("receive delayed response headers: %v", headerResult.err)
+				}
+				var got responseResult
+				select {
+				case got = <-result:
+				case <-time.After(2 * time.Second):
+					t.Fatal("downstream response body did not complete after upstream release")
+				}
+				if got.err != nil {
+					t.Fatalf("read delayed buffered response: %v", got.err)
+				}
+				if got.resp != headerResult.resp {
+					t.Error("header and body observations did not describe the same downstream response")
+				}
+				if got.resp.StatusCode != http.StatusCreated || !bytes.Equal(got.body, []byte(completion)) {
+					t.Errorf("downstream response = status %d length %d, want unchanged %d-byte chunked upstream body", got.resp.StatusCode, len(got.body), len(completion))
+				}
+				db, report := externalUsageDB(t, harness)
+				assertCleanUsageReport(t, report)
+				wantRows := 0
+				if meterEnabled {
+					wantRows = 1
+					if got.resp.ContentLength != int64(len(completion)) || got.resp.Header.Get("Content-Length") != strconv.Itoa(len(completion)) || len(got.resp.TransferEncoding) != 0 {
+						t.Errorf("downstream length = parsed:%d header:%q transfer:%v, want recomputed %d", got.resp.ContentLength, got.resp.Header.Get("Content-Length"), got.resp.TransferEncoding, len(completion))
+					}
+				}
+				if got := queryUsageCount(t, db, surface.table, "request_id = ?", requestID); got != wantRows {
+					t.Errorf("persisted rows = %d, want %d", got, wantRows)
+				}
+			})
+		}
 	}
 }
 
@@ -419,20 +493,32 @@ func (rejectingComposedBufferedShim) TransformBuffered(context.Context, *shim.Bo
 }
 
 type heldComposedBufferedShim struct {
-	entered     chan struct{}
-	release     chan struct{}
-	returned    chan struct{}
-	enteredOnce sync.Once
-	releaseOnce sync.Once
-	returnOnce  sync.Once
+	entered         chan struct{}
+	requestCanceled chan struct{}
+	release         chan struct{}
+	returned        chan struct{}
+	enteredOnce     sync.Once
+	cancelOnce      sync.Once
+	releaseOnce     sync.Once
+	returnOnce      sync.Once
 }
 
 func newHeldComposedBufferedShim() *heldComposedBufferedShim {
-	return &heldComposedBufferedShim{entered: make(chan struct{}), release: make(chan struct{}), returned: make(chan struct{})}
+	return &heldComposedBufferedShim{
+		entered:         make(chan struct{}),
+		requestCanceled: make(chan struct{}),
+		release:         make(chan struct{}),
+		returned:        make(chan struct{}),
+	}
 }
 
-func (s *heldComposedBufferedShim) TransformBuffered(context.Context, *shim.Body) error {
+func (s *heldComposedBufferedShim) TransformBuffered(ctx context.Context, _ *shim.Body) error {
 	s.enteredOnce.Do(func() { close(s.entered) })
+	select {
+	case <-ctx.Done():
+		s.cancelOnce.Do(func() { close(s.requestCanceled) })
+	case <-s.release:
+	}
 	<-s.release
 	s.returnOnce.Do(func() { close(s.returned) })
 	return nil
@@ -478,33 +564,58 @@ func TestRunBoundServeRetainsBufferedUsageAfterDownstreamOrOuterFailure(t *testi
 		})
 
 		t.Run(surface.name+"/downstream-disconnect", func(t *testing.T) {
+			const (
+				requestID   = "buffered-downstream-disconnect"
+				paddingSize = 768 << 10
+			)
+			completion := strings.TrimSuffix(surface.completion, "}") + `,"padding":"` + strings.Repeat("x", paddingSize) + `"}`
+			if len(completion) >= 1<<20 {
+				t.Fatalf("large completion fixture = %d bytes, want below configured 1 MiB buffer cap", len(completion))
+			}
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
-				_, _ = io.WriteString(w, surface.completion)
+				_, _ = io.WriteString(w, completion)
 			}))
 			t.Cleanup(upstream.Close)
 			held := newHeldComposedBufferedShim()
-			t.Cleanup(held.Release)
-			harness := startUsageMeterServeHarness(t, upstream.URL, discardLogger(t), nil,
+			var logs bytes.Buffer
+			harness := startUsageMeterServeHarness(t, upstream.URL, newPhase4Logger(t, &logs), nil,
 				composedOuterBufferedRegistration("hold-buffered-after-usage", held))
+			// Acquire the unblocker after the harness so fatal assertions release the
+			// held request before runBoundServe and its upstream are joined.
+			t.Cleanup(held.Release)
 
 			conn, err := net.Dial("tcp", strings.TrimPrefix(harness.baseURL, "http://"))
 			if err != nil {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { _ = conn.Close() })
-			request := fmt.Sprintf("POST %s HTTP/1.1\r\nHost: usage.test\r\nAuthorization: Bearer %s\r\nX-Request-Id: buffered-downstream-disconnect\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}", surface.path, testAPIKey)
-			if _, err := io.WriteString(conn, request); err != nil {
-				_ = conn.Close()
+			tcpConn, ok := conn.(*net.TCPConn)
+			if !ok {
+				t.Fatalf("downstream connection type = %T, want *net.TCPConn", conn)
+			}
+			if err := tcpConn.SetLinger(0); err != nil {
+				t.Fatalf("configure downstream RST close: %v", err)
+			}
+			request := fmt.Sprintf("POST %s HTTP/1.1\r\nHost: usage.test\r\nAuthorization: Bearer %s\r\nX-Request-Id: %s\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}", surface.path, testAPIKey, requestID)
+			if _, err := io.WriteString(tcpConn, request); err != nil {
+				_ = tcpConn.Close()
 				t.Fatal(err)
 			}
 			select {
 			case <-held.entered:
 			case <-time.After(2 * time.Second):
-				_ = conn.Close()
+				_ = tcpConn.Close()
 				t.Fatal("outer buffered Shim did not hold after usage observation")
 			}
-			_ = conn.Close()
+			if err := tcpConn.Close(); err != nil {
+				t.Fatalf("RST-close downstream connection: %v", err)
+			}
+			select {
+			case <-held.requestCanceled:
+			case <-time.After(2 * time.Second):
+				t.Fatal("held outer Shim did not observe downstream cancellation before release")
+			}
 			held.Release()
 			select {
 			case <-held.returned:
@@ -514,8 +625,41 @@ func TestRunBoundServeRetainsBufferedUsageAfterDownstreamOrOuterFailure(t *testi
 
 			db, report := externalUsageDB(t, harness)
 			assertCleanUsageReport(t, report)
-			if got := queryUsageCount(t, db, surface.table, "request_id = ?", "buffered-downstream-disconnect"); got != 1 {
-				t.Errorf("retained rows = %d, want completion observed before downstream write failure", got)
+			accessLines := phase4LogLinesContaining(logs.String(), "msg=access", "request_id="+requestID)
+			if len(accessLines) != 1 {
+				t.Fatalf("downstream-failure terminal access records = %d, want one:\n%s", len(accessLines), logs.String())
+			}
+			writtenBytes := int64(-1)
+			for _, field := range strings.Fields(accessLines[0]) {
+				if value, ok := strings.CutPrefix(field, "bytes="); ok {
+					writtenBytes, err = strconv.ParseInt(value, 10, 64)
+					if err != nil {
+						t.Fatalf("parse access byte count %q: %v", value, err)
+					}
+					break
+				}
+			}
+			if writtenBytes < 0 || writtenBytes >= int64(len(completion)) {
+				t.Fatalf("downstream access bytes = %d, want fewer than full %d-byte completion after confirmed cancellation: %s", writtenBytes, len(completion), accessLines[0])
+			}
+
+			if got := queryUsageCount(t, db, surface.table, "request_id = ?", requestID); got != 1 {
+				t.Errorf("retained rows = %d, want one completion observed before confirmed downstream write failure", got)
+			}
+			idColumn := "response_id"
+			wantID := "resp-composed-buffered"
+			if surface.table == "anthropic_turn" {
+				idColumn = "message_id"
+				wantID = "msg-composed-buffered"
+			}
+			var id, model string
+			var inputTokens, outputTokens int64
+			query := fmt.Sprintf("SELECT %s, model, input_tokens, output_tokens FROM %s WHERE request_id = ?", idColumn, surface.table)
+			if err := db.QueryRow(query, requestID).Scan(&id, &model, &inputTokens, &outputTokens); err != nil {
+				t.Fatalf("query retained completion: %v", err)
+			}
+			if id != wantID || model != "reported-model" || inputTokens != 12 || outputTokens != 6 {
+				t.Errorf("retained completion = id:%q model:%q usage:[%d %d], want %q reported-model [12 6]", id, model, inputTokens, outputTokens, wantID)
 			}
 		})
 	}
