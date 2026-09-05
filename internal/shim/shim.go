@@ -1,9 +1,11 @@
-// Package shim defines copilotd's composable parity-extension contract.
+// Package shim defines copilotd's composable inference-extension contract.
 //
-// Shims may alter, drop, hold, or coalesce information derived from a request or
-// upstream response, but must not fabricate information without an upstream
-// basis. A hook must not access Copilot or drive an upstream retry. Both rules
-// are policy invariants enforced by review rather than by the type system.
+// A Shim may close a parity gap by transforming inference data or observe it
+// read-only by returning every input unchanged. Shims may alter, drop, hold, or
+// coalesce information derived from a request or upstream response, but must not
+// fabricate information without an upstream basis. A hook must not access
+// Copilot or drive an upstream retry. These rules are policy invariants enforced
+// by review rather than by the type system.
 //
 // SSE stream hooks run synchronously in the SSE pump and therefore must be
 // prompt and non-blocking: CPU-bound transformation only, with no I/O or

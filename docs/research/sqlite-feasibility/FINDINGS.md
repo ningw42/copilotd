@@ -20,10 +20,11 @@ The Linux artifact also passes the real-driver filesystem, WAL, contention,
 migration, reader/writer, cancellation, and race probes described below. No
 build or Linux-runtime design blocker was found.
 
-This is **feasibility evidence, not production persistence approval**. The
-Windows and Darwin results are compile/link evidence, not runtime certification.
-Windows ACL behavior is unverified. Persistence, observer, projection, and
-shutdown policy still require explicit approval in #196. Nothing in this nested
+These probes are feasibility evidence and did not themselves grant production
+persistence approval. That later explicit approval is recorded in
+[ADR-0017](../../adr/0017-persist-usage-in-local-sqlite.md), which retains the
+evidence limits: Windows and Darwin have compile/link evidence, not runtime
+certification, and Windows ACL behavior is unverified. Nothing in this nested
 module is imported by the root module or a production package.
 
 ## Disposable evidence boundary
@@ -295,13 +296,17 @@ On Windows, the retained build uses best-effort exclusive creation and
 regular-file validation only. Go's Unix-like `FileMode` values neither set nor
 prove a Windows ACL. Neither Windows target was executed, so ACL inheritance,
 sidecar ACLs, concurrent creation, WAL locking, and final-path reparse-point
-handling remain unresolved runtime evidence. Production acceptance must preserve
-this caveat and decide whether inherited ACLs are sufficient or a Windows ACL
-implementation is required; a Unix mode assertion cannot close that gate.
+handling remain unresolved runtime evidence. ADR-0017 accepts this as an explicit
+best-effort limitation rather than certification; inherited ACLs and sidecar
+protection remain unverified, and a
+Unix mode assertion cannot establish Windows behavior.
 
-## Proposed bounded final-flush contract for explicit #196 approval
+## Historical bounded final-flush proposal, later accepted
 
-**This section is a proposal, not an approved production contract.**
+This section preserves the proposal reviewed for #196. Its policy was later
+explicitly accepted in
+[ADR-0017](../../adr/0017-persist-usage-in-local-sqlite.md) and reconciled into
+the authoritative [Usage meter design](../../design/2026-07-26-token-usage-meter-design.md).
 
 ### Current coordinator behavior
 
@@ -327,9 +332,9 @@ would instead require an early admission cutoff and could lose rows from handler
 that shutdown is specifically allowing to finish. A deferred context-free
 `store.Close()` would avoid both choices only by becoming unbounded.
 
-### Recommended policy: one explicit bounded extension
+### Accepted policy: one explicit bounded extension
 
-Request explicit approval for this simplest policy:
+The later architecture decision accepts this policy:
 
 1. Let `Server.Run` complete its existing drain or force-close sequence under
    the first `ShutdownTimeout` deadline. Admission remains open during this
@@ -455,7 +460,7 @@ four-target cross-build exited zero. The root repository's full `go test ./...`,
 this evidence slice; the coordination contract reserves the complete suite for
 final integration verification.
 
-## Remaining evidence and decisions
+## Remaining evidence and accepted limitations
 
 - Run the retained real-driver tests natively on Windows amd64, Windows arm64,
   and Darwin arm64 before calling those runtime combinations certified.
@@ -463,8 +468,8 @@ final integration verification.
   reparse points. Build success and Go mode bits are not ACL evidence.
 - Keep live databases on a local filesystem. Network, roaming, and synchronized
   filesystems were neither tested nor approved.
-- Decide in #196 whether the proposed fresh `ShutdownTimeout` extension and
-  background-cleanup escape are acceptable. They are not self-approved here.
+- ADR-0017 accepts the fresh `ShutdownTimeout` extension and background-cleanup
+  escape; this evidence task did not self-approve them.
 - If Linux OFD locking is considered, evaluate its process-wide and Linux-only
   consequences separately; v1.58.0 leaves it off by default and this probe did
   too.

@@ -32,16 +32,20 @@ No recorded Anthropic fixture is present. The same capture session found zero
 raw Copilot catalog entries advertising `/v1/messages`, the provider-shaped
 Anthropic catalog was empty, and one bounded request using the previously known
 `claude-opus-4.8` ID returned HTTP 400. A streaming request was not made after
-those two availability checks. Treating the synthetic fixtures below as a live
+those two availability checks. That dated observation remains historical; it no
+longer blocks the schema decision. The user approved the exact official
+[Messages Create](https://platform.claude.com/docs/en/api/messages/create)
+contract plus generated fixtures, with live Copilot Anthropic compatibility
+explicitly unverified. Treating any synthetic fixture below as a recorded
 Copilot capture would be false provenance.
 
-## Synthetic contract variants
+## Generated synthetic contract variants
 
-Every `*.synthetic.*` file is hand-authored. These files are parser-contract
-or worked-example inputs, not captured behavior and not proof that Copilot
-emits a field.
+Every `*.synthetic.*` file is a hand-authored generated fixture. These files are
+parser-contract or worked-example inputs, not captured behavior and not proof
+that Copilot emits a field.
 
-- `anthropic-messages-buffered.synthetic.json` is the proposed buffered
+- `anthropic-messages-buffered.synthetic.json` is the accepted buffered
   eligibility shape and includes all current stable Anthropic scalar token
   fields, including `output_tokens_details.thinking_tokens`.
 - `anthropic-messages-sse-cumulative.synthetic.sse` covers cumulative
@@ -56,7 +60,7 @@ emits a field.
   captures report numeric detail values, so null is not claimed as provider
   behavior.
 - `invalid-count-cases.synthetic.json` labels wrong-type, negative, and int64
-  overflow candidates that the proposed parsers must reject without changing
+  overflow candidates that the planned parsers must reject without changing
   their wire payload.
 
 ## Primary schema pins
@@ -67,5 +71,9 @@ Schema interpretation is pinned in the research note to:
   `65785ca59ffea26f592920b5aae7bbe302cf30cc` (2026-09-05).
 - Anthropic's official Go SDK v1.71.0 at commit
   `de6914c544629b14a67c0695ce147edae6a291e0` (2026-09-04).
-- The official OpenAI prompt-caching guide and Anthropic Messages, streaming,
-  and prompt-caching documentation, accessed 2026-09-05.
+- The official OpenAI prompt-caching guide and Anthropic's exact
+  [Messages Create](https://platform.claude.com/docs/en/api/messages/create),
+  streaming, and prompt-caching documentation, accessed 2026-09-05.
+
+The accepted projection and evidence substitution are recorded in
+[ADR-0018](../../../../docs/adr/0018-store-per-surface-native-usage.md).

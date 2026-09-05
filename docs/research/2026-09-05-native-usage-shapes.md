@@ -4,34 +4,39 @@
 
 **Issue:** #194 (epic #192)
 
-**Result:** OpenAI Responses is verified on all three transports; current
-Anthropic-through-Copilot evidence is blocked, so the five-path schema gate is
-**not closed**.
+**Result:** OpenAI Responses is verified on all three transports. Live
+Anthropic-through-Copilot evidence was unavailable; the approved replacement is
+the exact official Messages Create contract plus generated fixtures. The schema
+gate is closed with live Copilot Anthropic compatibility explicitly unverified.
 
 ## Executive answer
 
-The design's OpenAI parsers can observe today's real Copilot completions. One
-successful buffered response, one SSE `response.completed` event, and one
+The design's planned OpenAI parsers can observe today's real Copilot
+completions. One successful buffered response, one SSE `response.completed`
+event, and one
 WebSocket `response.completed` Message each carried their own non-empty response
 ID, returned model, `status:"completed"`, and complete `usage` object. No
 session accumulator or fallback to an earlier event is needed.
 
-The same conclusion cannot be made for Anthropic today. The available Copilot
+The same live conclusion cannot be made for Anthropic. The available Copilot
 account's raw catalog had zero models advertising `/v1/messages`, the
 provider-shaped Anthropic catalog was empty, and one bounded probe of the
 previously working `claude-opus-4.8` model returned HTTP 400. No live Anthropic
-completion existed to sanitize. The Anthropic fixtures in this change are
-therefore explicitly **synthetic contract variants**, not recorded Copilot
-evidence.
+completion existed to sanitize. The user therefore explicitly approved the exact
+official [Messages Create](https://platform.claude.com/docs/en/api/messages/create)
+contract and generated fixtures in place of a live capture. Those Anthropic
+fixtures remain honestly labeled **generated synthetic contract variants**, not
+recorded Copilot evidence.
 
-For migration 1, the OpenAI projection should retain the design's six token
-counts, including `input_tokens_details.cache_write_tokens`. Current OpenAI
-primary sources define cache-write tokens at exactly that Responses nesting,
-and all three Copilot captures contained the field as a genuine numeric zero.
-For Anthropic, current primary sources add
-`output_tokens_details.thinking_tokens`, a subset of `output_tokens`, which is
-missing from the design. That addition and the unresolved live-capture gap need
-#196 review before the complete projection can be frozen.
+[ADR-0018](../adr/0018-store-per-surface-native-usage.md) accepts migration 1's
+six OpenAI token counts, including
+`input_tokens_details.cache_write_tokens`, and seven Anthropic counts, including
+nullable `output_tokens_details.thinking_tokens`. Current OpenAI primary sources
+define cache-write tokens at exactly that Responses nesting, and all three
+Copilot captures contained the field as a genuine numeric zero. Primary
+Anthropic sources define thinking tokens as a re-tokenized output subset. Live
+Copilot Anthropic compatibility remains unverified rather than blocking the
+approved projection.
 
 ## Capture method, privacy, and request count
 
@@ -76,8 +81,8 @@ and `recorded-capture-metadata.json` beside the fixtures.
 
 | Surface | Transport and terminal | 2026-09-05 result | Identity/model/completed/usage together? | Fixture |
 | --- | --- | --- | --- | --- |
-| Anthropic Messages | buffered JSON; non-empty `stop_reason` | blocked: no catalog model; known model probe returned 400 | not observed | synthetic eligibility shape only |
-| Anthropic Messages | SSE; `message_stop` after cumulative state | not requested after the bounded availability failure | not observed | synthetic cumulative and late-usage streams only |
+| Anthropic Messages | buffered JSON; non-empty `stop_reason` | unavailable: no catalog model; known model probe returned 400 | not observed; approved official-contract substitute | generated synthetic eligibility shape only |
+| Anthropic Messages | SSE; `message_stop` after cumulative state | not requested after the bounded availability failure | not observed; approved official-contract substitute | generated synthetic cumulative and late-usage streams only |
 | OpenAI Responses | buffered JSON; response `status:"completed"` | recorded, returned `gpt-5.6-sol` | yes, in the same response object | `openai-responses-buffered.recorded.json` |
 | OpenAI Responses | SSE `response.completed` | recorded, sequence 11 | yes, in that event's `response` | `openai-responses-sse.recorded.sse` |
 | OpenAI Responses | WebSocket `response.completed` Message | recorded, sequence 11 | yes, in that Message's `response` | `openai-responses-websocket.recorded.jsonl` |
@@ -133,7 +138,7 @@ was available through the observed account.
 | `usage.cache_creation.ephemeral_5m_input_tokens` | 5-minute subset of cache creation | nullable detail column |
 | `usage.cache_creation.ephemeral_1h_input_tokens` | 1-hour subset of cache creation | nullable detail column |
 | `usage.output_tokens` | inclusive output total | required core column |
-| `usage.output_tokens_details.thinking_tokens` | re-tokenized internal-reasoning subset, always at most `output_tokens` | **missing from design; propose nullable `thinking_tokens`** |
+| `usage.output_tokens_details.thinking_tokens` | re-tokenized internal-reasoning subset, always at most `output_tokens` | accepted nullable `thinking_tokens` column |
 
 Anthropic documents that the two TTL fields sum to
 `cache_creation_input_tokens`, and that real input is
@@ -146,7 +151,7 @@ The official **beta** SDK additionally defines variable-cardinality
 `cache_creation_input_tokens`, `cache_read_input_tokens`, and the two
 `cache_creation` TTL counts. A compaction iteration's counts are explicitly not
 included in top-level usage. These paths are inventoried, not silently dropped,
-but they should be explicitly excluded from migration 1: they are beta,
+and are explicitly excluded from migration 1: they are beta,
 variable-cardinality, absent from the stable `Usage` type, and unobserved from
 Copilot. Supporting them later needs a reviewed child-table/schema design, not
 one more scalar column.
@@ -154,8 +159,8 @@ one more scalar column.
 ## Worked native semantics
 
 These are arithmetic examples grounded in provider documentation and stored as
-**synthetic** fixtures. They are not billing assertions and do not normalize the
-two Surfaces.
+**generated synthetic** fixtures. They are not billing assertions and do not
+normalize the two Surfaces.
 
 ### Anthropic is additive
 
@@ -183,8 +188,8 @@ total              8021  (= 8012 + 9, reported rather than synthesized)
 ```
 
 Persisting both examples into one normalized input column would erase their
-native meanings. Migration 1 should store the provider-reported values, not
-these explanatory calculations.
+native meanings. Migration 1 stores the provider-reported values, not these
+explanatory calculations.
 
 ## Recorded versus synthetic behavior matrix
 
@@ -192,9 +197,9 @@ these explanatory calculations.
 | --- | --- | --- |
 | self-contained OpenAI completion | three `*.recorded.*` fixtures | recorded Copilot: validate each own response ID/model/completed status/usage; never use session accumulation |
 | genuine numeric zero | all recorded OpenAI detail fields | recorded Copilot: zero is present data, not NULL |
-| cumulative last value | `anthropic-messages-sse-cumulative.synthetic.sse` | synthetic: final output is `9`, not `0+5+9` or `5+9` |
-| explicit null preservation | first synthetic Anthropic delta | synthetic: null input/cache updates preserve `12` and `2000` |
-| absent start usage, later complete | `anthropic-messages-sse-late-usage.synthetic.sse` | synthetic: later numeric zeros satisfy required presence before `message_stop` |
+| cumulative last value | `anthropic-messages-sse-cumulative.synthetic.sse` | generated synthetic: final output is `9`, not `0+5+9` or `5+9` |
+| explicit null preservation | first generated synthetic Anthropic delta | generated synthetic: null input/cache updates preserve `12` and `2000` |
+| absent start usage, later complete | `anthropic-messages-sse-late-usage.synthetic.sse` | generated synthetic: later numeric zeros satisfy required presence before `message_stop` |
 | optional null in a self-contained response | `openai-responses-null-details.synthetic.json` | synthetic design contract: map optional nulls to absent values, not zero; not current provider behavior |
 | wrong count type | `invalid-count-cases.synthetic.json` | synthetic: reject candidate and pass wire payload through unchanged |
 | negative count | same | synthetic: reject required or optional count rather than erase it |
@@ -205,27 +210,27 @@ The null, missing, malformed, negative, and overflow cases are deliberately not
 called provider behavior. They specify defensive parser behavior approved by
 the design/TDD seam.
 
-## Migration 1 recommendation and unresolved gate
+## Accepted migration 1 decision and evidence limit
 
-Proposed projection for #196 review:
+[ADR-0018](../adr/0018-store-per-surface-native-usage.md) accepts this projection:
 
-- **OpenAI:** keep `input_tokens`, `cached_tokens`, `cache_write_tokens`,
-  `output_tokens`, `reasoning_tokens`, and `total_tokens`. Keep only
-  `input_tokens` and `output_tokens` as parser-required core fields under the
-  current design; nullable detail columns preserve unsupported/older shapes.
-  `cache_write_tokens` is no longer semantically tentative and should stay,
-  documented as an input subset.
-- **Anthropic:** keep `input_tokens`, `output_tokens`,
+- **OpenAI:** `input_tokens`, `cached_tokens`, `cache_write_tokens`,
+  `output_tokens`, `reasoning_tokens`, and `total_tokens`. Only `input_tokens`
+  and `output_tokens` are parser-required core fields; nullable detail columns
+  preserve unsupported or older shapes. `cache_write_tokens` is an input subset,
+  not tentative.
+- **Anthropic:** `input_tokens`, `output_tokens`,
   `cache_creation_input_tokens`, `cache_read_input_tokens`,
-  `ephemeral_5m_input_tokens`, and `ephemeral_1h_input_tokens`; add nullable
-  `thinking_tokens` as an output subset. Explicitly exclude beta
-  `usage.iterations[]` from migration 1 pending a separate cardinality/scope
-  decision.
+  `ephemeral_5m_input_tokens`, `ephemeral_1h_input_tokens`, and nullable
+  `thinking_tokens` as an output subset. Beta variable-cardinality
+  `usage.iterations[]` is excluded pending a separate cardinality/scope review.
 
-This is a recommendation, not an approved schema change. The complete projection
-must not be called frozen until maintainers review the newly exposed Anthropic
-field and obtain a real buffered and SSE Copilot Messages capture. No production
-metering, persistence, ADR acceptance, or glossary policy is changed here.
+Required values remain signed 64-bit counts; missing optional reports remain
+`NULL` rather than fabricated zero, and native values are never normalized.
+Every later supported count requires a forward migration and adjacent Go semantic
+documentation. The user-approved official-contract/generated-fixture substitute
+closes the architecture gate without representing live Anthropic compatibility
+as verified. Production metering remains staged after this documentation decision.
 
 ## Primary sources
 
@@ -239,7 +244,7 @@ Accessed 2026-09-05 unless a source pin states otherwise.
    [`e2d7068`](https://github.com/openai/openai-go/commit/e2d7068792c9ad65593b39a5f46a86188bcebbba) on 2026-07-09.
 5. OpenAI official Go SDK,
    [`ResponseCompletedEvent`](https://github.com/openai/openai-go/blob/65785ca59ffea26f592920b5aae7bbe302cf30cc/responses/response.go#L5646-L5668).
-6. Anthropic, [Messages API reference](https://platform.claude.com/docs/en/api/messages).
+6. Anthropic, exact [Messages Create API reference](https://platform.claude.com/docs/en/api/messages/create).
 7. Anthropic, [Streaming Messages](https://platform.claude.com/docs/en/build-with-claude/streaming) — cumulative delta usage and `message_stop`.
 8. Anthropic, [Prompt caching](https://platform.claude.com/docs/en/build-with-claude/prompt-caching) — additive input and cache TTL breakdown.
 9. Anthropic official Go SDK v1.71.0 at
