@@ -1,7 +1,9 @@
 package shim
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
@@ -37,6 +39,12 @@ func enabledOpenAIUsageStream(ctx context.Context, sink usage.Sink) sse.FrameTra
 	registry := CanonicalRegistry(sink)
 	registry[len(registry)-1].Enabled = true
 	return registry.NewChain(ctx, endpoint.OpenAI, endpoint.RouteOpenAIResponses).StreamAdapter(ctx, nil)
+}
+
+func enabledOpenAIUsageWSServer(ctx context.Context, sink usage.Sink) MessageTransform {
+	registry := CanonicalRegistry(sink)
+	registry[len(registry)-1].Enabled = true
+	return registry.NewChain(ctx, endpoint.OpenAI, endpoint.RouteOpenAIResponses).WSServerAdapter(ctx, nil)
 }
 
 func TestOpenAIUsageMeterRecordsRecordedSSECompletionWithoutChangingFrames(t *testing.T) {
@@ -249,6 +257,199 @@ func TestOpenAIUsageMeterObservesUpstreamBasisInsideItemIDStabilizer(t *testing.
 	}
 }
 
+func TestOpenAIUsageMeterRecordsRecordedWebSocketCompletionWithoutChangingMessages(t *testing.T) {
+	fixture, err := os.ReadFile(filepath.Join("testdata", "usage", "openai-responses-websocket.recorded.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture = bytes.TrimSuffix(fixture, []byte("\n"))
+	sink := &memoryUsageSink{}
+	constructionCtx := logging.WithRequestID(context.Background(), "websocket-handshake-correlation")
+	adapter := enabledOpenAIUsageWSServer(constructionCtx, sink)
+	before := time.Now()
+	for _, kind := range []MessageKind{MessageText, MessageBinary} {
+		message := &Message{Kind: kind, Data: append([]byte(nil), fixture...)}
+		executionCtx := logging.WithRequestID(context.Background(), "must-not-replace-handshake-correlation")
+
+		if emit := adapter(executionCtx, message); !emit {
+			t.Fatalf("TransformServerMessage(%v) returned emit=false", kind)
+		}
+		if message.Kind != kind || !bytes.Equal(message.Data, fixture) {
+			t.Fatalf("TransformServerMessage(%v) changed Message to kind=%v data=%q", kind, message.Kind, message.Data)
+		}
+	}
+
+	turns := sink.snapshot()
+	if len(turns) != 2 {
+		t.Fatalf("recorded Turns = %d, want one for each qualifying duplicate Message", len(turns))
+	}
+	after := time.Now()
+	for index, turn := range turns {
+		if turn.At.Before(before) || turn.At.After(after) || turn.RequestID != "websocket-handshake-correlation" ||
+			turn.ResponseID != "resp_redacted_recorded_websocket" || turn.Model != "gpt-5.6-sol" ||
+			turn.Transport != usage.TransportWebSocket || turn.TurnIndex != index {
+			t.Errorf("Turn %d envelope = %+v", index, turn)
+		}
+		native, ok := turn.Usage.(usage.OpenAIUsage)
+		if !ok {
+			t.Fatalf("Turn %d Usage = %T, want usage.OpenAIUsage", index, turn.Usage)
+		}
+		if native.InputTokens != 12 || native.OutputTokens != 20 || pointerValue(native.CachedTokens) != 0 ||
+			pointerValue(native.CacheWriteTokens) != 0 || pointerValue(native.ReasoningTokens) != 12 ||
+			pointerValue(native.TotalTokens) != 32 {
+			t.Errorf("Turn %d native usage = %+v", index, native)
+		}
+	}
+}
+
+func TestOpenAIUsageMeterKeepsWebSocketCompletionsSelfContainedAcrossInvalidAndTerminalMessages(t *testing.T) {
+	sink := &memoryUsageSink{}
+	adapter := enabledOpenAIUsageWSServer(context.Background(), sink)
+	payloads := [][]byte{
+		[]byte(`{"type":"response.created","response":{"id":"created","model":"created-model","status":"in_progress","usage":{"input_tokens":99,"output_tokens":99}}}`),
+		[]byte(`{"type":"vendor.completed","response":{"id":"wrong-event-type","model":"bad","status":"completed","usage":{"input_tokens":99,"output_tokens":99}}}`),
+		[]byte(`{"type":"response.completed","response":{"id":"malformed"`),
+		[]byte(`{"type":"response.completed","response":{"id":"missing-core","model":"bad","status":"completed","usage":{"input_tokens":41}}}`),
+		[]byte(`{"type":"response.failed","response":{"id":"failed","model":"bad","status":"failed","usage":{"input_tokens":1,"output_tokens":2}}}`),
+		[]byte(`{"type":"response.incomplete","response":{"id":"incomplete","model":"bad","status":"incomplete","usage":{"input_tokens":3,"output_tokens":4}}}`),
+		[]byte(`{"type":"error","error":{"message":"session event"}}`),
+		[]byte(`{"type":"response.completed","response":{"id":"invalid-optional","model":"bad","status":"completed","usage":{"input_tokens":5,"output_tokens":6,"total_tokens":"11"}}}`),
+		[]byte(`{"type":"response.completed","response":{"id":"resp-a","model":"reported-a","status":"completed","usage":{"input_tokens":0,"output_tokens":0,"input_tokens_details":{"cached_tokens":null},"output_tokens_details":null,"total_tokens":null}}}`),
+		[]byte(`{"type":"response.completed","response":{"id":"negative-core","model":"bad","status":"completed","usage":{"input_tokens":-1,"output_tokens":2}}}`),
+		[]byte(`{"type":"response.completed","response":{"id":"resp-b","model":"reported-b","status":"completed","usage":{"input_tokens":7,"output_tokens":8,"input_tokens_details":{"cached_tokens":0,"cache_write_tokens":0},"output_tokens_details":{"reasoning_tokens":0},"total_tokens":0}}}`),
+		[]byte(`{"type":"response.completed","response":{"id":"resp-b","model":"reported-b-duplicate","status":"completed","usage":{"input_tokens":70,"output_tokens":80}}}`),
+	}
+	for index, payload := range payloads {
+		kind := MessageText
+		if index%2 == 1 {
+			kind = MessageBinary
+		}
+		message := &Message{Kind: kind, Data: append([]byte(nil), payload...)}
+		executionCtx := logging.WithRequestID(context.Background(), "must-not-backfill-missing-construction-correlation")
+		if emit := adapter(executionCtx, message); !emit {
+			t.Fatalf("Message %d returned emit=false", index)
+		}
+		if message.Kind != kind || !bytes.Equal(message.Data, payload) {
+			t.Fatalf("Message %d changed to kind=%v data=%q", index, message.Kind, message.Data)
+		}
+	}
+
+	turns := sink.snapshot()
+	if len(turns) != 3 {
+		t.Fatalf("recorded Turns = %+v, want only three independently valid completions", turns)
+	}
+	wantIDs := []string{"resp-a", "resp-b", "resp-b"}
+	wantModels := []string{"reported-a", "reported-b", "reported-b-duplicate"}
+	wantCounts := [][2]int64{{0, 0}, {7, 8}, {70, 80}}
+	for index, turn := range turns {
+		native := turn.Usage.(usage.OpenAIUsage)
+		if turn.RequestID != "" || turn.ResponseID != wantIDs[index] || turn.Model != wantModels[index] ||
+			turn.Transport != usage.TransportWebSocket || turn.TurnIndex != index ||
+			native.InputTokens != wantCounts[index][0] || native.OutputTokens != wantCounts[index][1] {
+			t.Errorf("Turn %d = %+v usage=%+v", index, turn, native)
+		}
+	}
+	missing := turns[0].Usage.(usage.OpenAIUsage)
+	if missing.CachedTokens != nil || missing.CacheWriteTokens != nil || missing.ReasoningTokens != nil || missing.TotalTokens != nil {
+		t.Errorf("omitted/null optional counts = %+v, want nil", missing)
+	}
+	reportedZero := turns[1].Usage.(usage.OpenAIUsage)
+	if reportedZero.CachedTokens == nil || reportedZero.CacheWriteTokens == nil || reportedZero.ReasoningTokens == nil || reportedZero.TotalTokens == nil {
+		t.Errorf("reported zero optional counts = %+v, want non-nil pointers", reportedZero)
+	}
+}
+
+func TestOpenAIUsageMeterAdvancesDuplicateWebSocketSubmissionOrdinalWhenSinkDrops(t *testing.T) {
+	sink := &dropFirstUsageSink{}
+	adapter := enabledOpenAIUsageWSServer(context.Background(), sink)
+	payload := []byte(`{"type":"response.completed","response":{"id":"resp-duplicate","model":"reported","status":"completed","usage":{"input_tokens":1,"output_tokens":2}}}`)
+
+	for range 2 {
+		message := &Message{Kind: MessageText, Data: append([]byte(nil), payload...)}
+		if emit := adapter(context.Background(), message); !emit || message.Kind != MessageText || !bytes.Equal(message.Data, payload) {
+			t.Fatalf("TransformServerMessage() = emit:%t Message:%+v, want true and exact input", emit, message)
+		}
+	}
+
+	turns := sink.kept.snapshot()
+	if sink.calls != 2 {
+		t.Fatalf("Sink.Record calls = %d, want one per qualifying duplicate", sink.calls)
+	}
+	if len(turns) != 1 || turns[0].ResponseID != "resp-duplicate" || turns[0].TurnIndex != 1 || turns[0].Transport != usage.TransportWebSocket {
+		t.Fatalf("retained Turns = %+v, want second duplicate submission at ordinal one", turns)
+	}
+}
+
+type lastUsageSink struct {
+	calls int
+	last  usage.Turn
+}
+
+func (s *lastUsageSink) Record(turn usage.Turn) {
+	s.calls++
+	s.last = turn
+}
+
+func TestOpenAIUsageMeterHandlesSustainedWebSocketTurnsWithoutHistoryDependence(t *testing.T) {
+	const completions = 4096
+	sink := &lastUsageSink{}
+	adapter := enabledOpenAIUsageWSServer(context.Background(), sink)
+	payload := []byte(`{"type":"response.completed","response":{"id":"resp-repeated","model":"reported","status":"completed","usage":{"input_tokens":1,"output_tokens":2}}}`)
+	for index := range completions {
+		message := &Message{Kind: MessageBinary, Data: append([]byte(nil), payload...)}
+		if emit := adapter(context.Background(), message); !emit || message.Kind != MessageBinary || !bytes.Equal(message.Data, payload) {
+			t.Fatalf("completion %d did not pass through exactly", index)
+		}
+	}
+	if sink.calls != completions || sink.last.ResponseID != "resp-repeated" || sink.last.TurnIndex != completions-1 || sink.last.Transport != usage.TransportWebSocket {
+		t.Fatalf("sustained submissions = calls:%d last:%+v", sink.calls, sink.last)
+	}
+}
+
+func TestOpenAIUsageMeterObservesUpstreamBasisInsideItemIDStabilizerWebSocket(t *testing.T) {
+	sink := &memoryUsageSink{}
+	registry := CanonicalRegistry(sink)
+	registry[1].Enabled = true
+	registry[len(registry)-1].Enabled = true
+	adapter := registry.NewChain(context.Background(), endpoint.OpenAI, endpoint.RouteOpenAIResponses).WSServerAdapter(context.Background(), nil)
+	addedPayload := []byte(`{"type":"response.output_item.added","output_index":0,"item":{"id":"item-upstream-first"}}`)
+	added := &Message{Kind: MessageText, Data: append([]byte(nil), addedPayload...)}
+	if emit := adapter(context.Background(), added); !emit || added.Kind != MessageText || !bytes.Equal(added.Data, addedPayload) {
+		t.Fatalf("first upstream item Message = emit:%t %+v, want exact input", emit, added)
+	}
+	completionPayload := []byte(`{"type":"response.completed","response":{"id":"response-upstream","model":"model-upstream","status":"completed","output":[{"id":"item-upstream-churned","content":[1,2]}],"usage":{"input_tokens":13,"output_tokens":21}}}`)
+	completion := &Message{Kind: MessageBinary, Data: append([]byte(nil), completionPayload...)}
+
+	if emit := adapter(context.Background(), completion); !emit {
+		t.Fatal("completion returned emit=false")
+	}
+	if completion.Kind != MessageBinary || bytes.Equal(completion.Data, completionPayload) {
+		t.Fatalf("stabilized completion = kind:%v data:%s, want binary with output-id alteration", completion.Kind, completion.Data)
+	}
+	var want, got map[string]any
+	if err := json.Unmarshal(completionPayload, &want); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(completion.Data, &got); err != nil {
+		t.Fatal(err)
+	}
+	wantResponse := want["response"].(map[string]any)
+	wantOutput := wantResponse["output"].([]any)
+	wantOutput[0].(map[string]any)["id"] = "item-upstream-first"
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("stabilizer changed fields beyond the output id:\n got: %#v\nwant: %#v", got, want)
+	}
+	turns := sink.snapshot()
+	if len(turns) != 1 {
+		t.Fatalf("recorded Turns = %+v", turns)
+	}
+	native := turns[0].Usage.(usage.OpenAIUsage)
+	if turns[0].ResponseID != "response-upstream" || turns[0].Model != "model-upstream" ||
+		turns[0].Transport != usage.TransportWebSocket || native.InputTokens != 13 || native.OutputTokens != 21 {
+		t.Errorf("upstream-basis Turn = %+v usage=%+v", turns[0], native)
+	}
+}
+
 func TestOpenAIUsageMeterRecordsRecordedBufferedCompletionWithoutChangingBody(t *testing.T) {
 	fixture, err := os.ReadFile(filepath.Join("testdata", "usage", "openai-responses-buffered.recorded.json"))
 	if err != nil {
@@ -364,7 +565,7 @@ func TestOpenAIUsageMeterDoesNotAddCrossFieldArithmeticValidation(t *testing.T) 
 	}
 }
 
-func TestCanonicalRegistryKeepsUsageMeterExactLastWithOnlyOpenAISSEActive(t *testing.T) {
+func TestCanonicalRegistryKeepsUsageMeterExactLastWithOpenAIStreamingHooksActive(t *testing.T) {
 	withoutSink := CanonicalRegistry(nil)
 	if len(withoutSink) != 3 || withoutSink[2].Name != "usage-meter" || withoutSink[2].Enabled {
 		t.Fatalf("CanonicalRegistry(nil) = %+v, want disabled usage-meter last", withoutSink)
@@ -402,9 +603,10 @@ func TestCanonicalRegistryKeepsUsageMeterExactLastWithOnlyOpenAISSEActive(t *tes
 		name    string
 		value   any
 		wantSSE bool
+		wantWS  bool
 	}{
 		{name: "Anthropic remains buffered only", value: registration.New(context.Background(), endpoint.Anthropic, endpoint.RouteAnthropicMessages)},
-		{name: "OpenAI adds SSE", value: registration.New(context.Background(), endpoint.OpenAI, endpoint.RouteOpenAIResponses), wantSSE: true},
+		{name: "OpenAI adds SSE and WebSocket", value: registration.New(context.Background(), endpoint.OpenAI, endpoint.RouteOpenAIResponses), wantSSE: true, wantWS: true},
 	}
 	for _, instance := range instances {
 		t.Run(instance.name, func(t *testing.T) {
@@ -414,17 +616,17 @@ func TestCanonicalRegistryKeepsUsageMeterExactLastWithOnlyOpenAISSEActive(t *tes
 			if _, ok := instance.value.(EventTransformer); ok != instance.wantSSE {
 				t.Fatalf("usage-meter instance %T EventTransformer = %t, want %t", instance.value, ok, instance.wantSSE)
 			}
-			if _, ok := instance.value.(ServerMessageTransformer); ok {
-				t.Fatalf("usage-meter instance = %T, issue #199 must not install WebSocket hooks", instance.value)
+			if _, ok := instance.value.(ServerMessageTransformer); ok != instance.wantWS {
+				t.Fatalf("usage-meter instance %T ServerMessageTransformer = %t, want %t", instance.value, ok, instance.wantWS)
 			}
 			if _, ok := instance.value.(ClientMessageTransformer); ok {
-				t.Fatalf("usage-meter instance = %T, issue #199 must not install client-message hooks", instance.value)
+				t.Fatalf("usage-meter instance = %T, must not install client-message hooks", instance.value)
 			}
 			if _, ok := instance.value.(StreamFinalizer); ok {
-				t.Fatalf("usage-meter instance = %T, issue #199 must not install finalizers", instance.value)
+				t.Fatalf("usage-meter instance = %T, must not install finalizers", instance.value)
 			}
 			if _, ok := instance.value.(PreludeTransformer); ok {
-				t.Fatalf("usage-meter instance = %T, issue #199 must not install Prelude hooks", instance.value)
+				t.Fatalf("usage-meter instance = %T, must not install Prelude hooks", instance.value)
 			}
 		})
 	}

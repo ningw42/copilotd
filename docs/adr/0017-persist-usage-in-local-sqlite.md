@@ -105,6 +105,6 @@ store has opened.
 This decision accepts the trade-offs documented in the
 [Usage meter design](../design/2026-07-26-token-usage-meter-design.md). The
 private store and buffered OpenAI recording path land in #197, buffered
-Anthropic recording lands in #198, and OpenAI SSE completion recording lands in
-#199. Anthropic SSE and OpenAI WebSocket parsers remain staged without changing
-this persistence policy.
+Anthropic recording lands in #198, OpenAI SSE completion recording lands in
+#199, and OpenAI WebSocket completion recording lands in #200. Only the Anthropic
+SSE parser remains staged, without changing this persistence policy.

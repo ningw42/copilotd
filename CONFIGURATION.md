@@ -183,9 +183,9 @@ by [`--usage-db-path`](#--usage-db-path). It is off by default: disabled `serve`
 and `login` do not open a database, create usage files, start a usage writer, or
 install a metering hook.
 
-**Implemented coverage is buffered Anthropic Messages plus buffered and SSE
-OpenAI Responses.** Anthropic Messages SSE and OpenAI Responses WebSocket
-metering remain staged and do not install usage hooks yet.
+**Implemented coverage is buffered Anthropic Messages plus buffered, SSE, and
+WebSocket OpenAI Responses.** Only Anthropic Messages SSE metering remains
+staged and does not install a usage hook yet.
 
 A buffered Anthropic row requires one self-contained object whose `type` is
 `"message"`, with its own non-empty `id` and reported `model`, a non-empty string
@@ -216,7 +216,10 @@ An OpenAI row requires a self-contained response object with its own non-empty
 object directly. SSE observes only `response.completed` frames, extracts their
 joined `data:` payload (including repeated fields and CRLF framing), requires the
 decoded event type to agree, and validates the nested `response` with the same
-predicate. It never fills fields from an earlier event or the client request.
+predicate. WebSocket observes each upstream server Message directly, validates
+the same self-contained `response.completed` envelope without using the SSE pump,
+and installs no client-message hook. Neither streaming observer fills fields
+from an earlier event or the client request.
 The meter also preserves these OpenAI-native fields when reported:
 
 - `input_tokens_details.cached_tokens` and
@@ -237,9 +240,12 @@ and metadata sources are never used as fallback or mapping inputs.
 Each row also records local completion-observation time as canonical `at_ms` plus
 generated millisecond UTC `at_utc`, inbound `request_id` (empty only when
 unavailable), upstream object identity as `message_id` or `response_id`, the
-applicable `transport` (`buffered`, or `sse` for OpenAI), and a zero-based
-submission-attempt `turn_index`. It does not store prompts, generated content,
-API keys, GitHub OAuth tokens, or Copilot tokens.
+applicable `transport` (`buffered`, `sse`, or `websocket` for OpenAI), and a
+zero-based submission-attempt `turn_index`. One WebSocket shim instance captures
+the handshake `request_id` once and uses it for every qualifying Turn even though
+message execution uses a session-rooted context; unavailable construction
+correlation stays empty. It does not store prompts, generated content, API keys,
+GitHub OAuth tokens, or Copilot tokens.
 
 The GitHub Copilot Surface, raw `/models`, provider/Codex Catalogs, and
 `/v1/messages/count_tokens` are not metered. There is no query API, CLI query
@@ -267,15 +273,21 @@ For OpenAI SSE, transport selection follows the typed Endpoint and upstream
 `Content-Type`, not the inbound `stream` field. An unsupported SSE
 `Content-Encoding` still returns the existing pre-hook `502`. The observer returns
 every frame with its exact original `Raw` bytes and structure; it does not hold,
-drop, coalesce, rewrite, or finalize frames.
+drop, coalesce, rewrite, or finalize frames. The OpenAI WebSocket observer likewise
+always emits each original server Message with the same kind and data. It retains
+only captured correlation plus a submission ordinal: no response map, usage
+accumulator, overlap guard, or per-session sum. Interleaved, malformed, failed,
+incomplete, and error Messages cannot contaminate a later valid completion.
 
 Observation happens before downstream writing. A row can remain after a client
 write failure or an outer Shim failure, and duplicate qualifying observations
 are not deduplicated. A clean SSE terminal may instead be `response.failed`,
-`response.incomplete`, or `error` and produce no row. Conversely, failed,
+`response.incomplete`, or `error` and produce no row; a WebSocket session can fail
+after preserving earlier successful-completion rows. Conversely, failed,
 incomplete, cancelled, malformed, or unparseable responses and queue/storage
 loss can omit real consumption. Application completion, usage availability, and
-downstream delivery are independent; the database and logs are not exhaustive or
+downstream delivery are independent; WebSocket summaries describe a session, not
+every inference Turn, and the database and logs are not exhaustive or
 billing-grade accounting.
 
 ### `--usage-db-path`

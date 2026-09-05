@@ -4,23 +4,29 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/coder/websocket"
 	"github.com/ningw42/copilotd/internal/cache"
+	"github.com/ningw42/copilotd/internal/config"
 	"github.com/ningw42/copilotd/internal/endpoint"
 	"github.com/ningw42/copilotd/internal/logging"
 	"github.com/ningw42/copilotd/internal/shim"
 	"github.com/ningw42/copilotd/internal/sse"
+	"github.com/ningw42/copilotd/internal/usage"
 	"github.com/ningw42/copilotd/internal/usage/sqlitestore"
 )
 
@@ -31,6 +37,107 @@ func (panicOnOpenAICompletion) TransformEvent(_ context.Context, frame sse.Frame
 		panic("outer shim failed after usage observation")
 	}
 	return []sse.Frame{frame}
+}
+
+type usageMeterWebSocketHarness struct {
+	cfg     config.ServeConfig
+	baseURL string
+	store   *sqlitestore.Store
+	cancel  context.CancelFunc
+	done    <-chan error
+
+	stopOnce    sync.Once
+	stopErr     error
+	closeOnce   sync.Once
+	closeReport sqlitestore.Report
+}
+
+func startUsageMeterWebSocketHarness(t *testing.T, upstreamURL string, base *slog.Logger, configure func(*config.ServeConfig), decorate func(shim.Registry) shim.Registry) *usageMeterWebSocketHarness {
+	t.Helper()
+	cfg := e2eConfig("gho-usage-meter-websocket-harness")
+	cfg.ImpersonationRefreshInterval = 0
+	cfg.WebSocketHandshakeTimeout = 5 * time.Second
+	cfg.ShimUsageMeterEnabled = true
+	cfg.UsageDBPath = filepath.Join(t.TempDir(), "usage", "usage.db")
+	if configure != nil {
+		configure(&cfg)
+	}
+	store, err := sqlitestore.Open(cfg.UsageDBPath, logging.ForComponent(base, "internal/usage/sqlitestore"))
+	if err != nil {
+		t.Fatalf("open usage store: %v", err)
+	}
+	var exchangeAuth, exchangeUA string
+	github := newGitHubExchangeStub(t, "copilot-usage-meter-websocket-harness", upstreamURL, &exchangeAuth, &exchangeUA)
+	cacheRegistry := cache.NewRegistry()
+	mgr, imp, err := buildServeProvider(cfg, base, github.URL, github.Client(), productionDiscoveryEdge(), cacheRegistry)
+	if err != nil {
+		t.Fatalf("build serve provider: %v", err)
+	}
+	registry := configuredShimRegistry(cfg, store)
+	if decorate != nil {
+		registry = decorate(registry)
+	}
+	if registry[len(registry)-1].Name != "usage-meter" {
+		t.Fatalf("last registration = %q, want usage-meter innermost", registry[len(registry)-1].Name)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- runBoundServe(ctx, cfg, base, mgr, imp, nil, cacheRegistry, registry, ln)
+	}()
+	harness := &usageMeterWebSocketHarness{
+		cfg: cfg, baseURL: "http://" + ln.Addr().String(), store: store,
+		cancel: cancel, done: done,
+	}
+	assertHTTPStatusEventually(t, harness.baseURL+"/healthz", http.StatusOK)
+	t.Cleanup(func() {
+		_ = harness.stop()
+		_ = harness.closeStore()
+	})
+	return harness
+}
+
+func (h *usageMeterWebSocketHarness) stop() error {
+	h.stopOnce.Do(func() {
+		h.cancel()
+		select {
+		case h.stopErr = <-h.done:
+		case <-time.After(5 * time.Second):
+			h.stopErr = errors.New("runBoundServe did not stop within five seconds")
+		}
+	})
+	return h.stopErr
+}
+
+func (h *usageMeterWebSocketHarness) closeStore() sqlitestore.Report {
+	h.closeOnce.Do(func() {
+		h.store.StopAdmission()
+		ctx, cancel := context.WithTimeout(context.Background(), h.cfg.ShutdownTimeout)
+		defer cancel()
+		h.closeReport = h.store.Close(ctx)
+	})
+	return h.closeReport
+}
+
+func dialUsageMeterWebSocket(t *testing.T, baseURL, requestID string) *websocket.Conn {
+	t.Helper()
+	conn, response, err := websocket.Dial(context.Background(), "ws"+strings.TrimPrefix(baseURL, "http")+"/openai/v1/responses", &websocket.DialOptions{
+		HTTPHeader: http.Header{
+			"Authorization": {"Bearer " + testAPIKey},
+			"X-Request-Id":  {requestID},
+		},
+	})
+	if err != nil {
+		if response != nil && response.Body != nil {
+			_ = response.Body.Close()
+		}
+		t.Fatalf("dial WebSocket transport: %v", err)
+	}
+	return conn
 }
 
 func TestRunServeUsageStoreFailurePrecedesBindAndDisabledServeCreatesNothing(t *testing.T) {
@@ -334,6 +441,620 @@ func TestRunBoundServeMetersOpenAISSECompletionWithoutChangingFrames(t *testing.
 		t.Errorf("persisted row = at_ms:%d request:%q response:%q turn:%d model:%q transport:%q usage:[%d %d %d %d %d %d]",
 			atMS, requestID, responseID, turnIndex, model, transport, inputTokens, cachedTokens, cacheWriteTokens, outputTokens, reasoningTokens, totalTokens)
 	}
+}
+
+func TestRunBoundServeMetersOpenAIWebSocketCompletionsWithoutChangingMessages(t *testing.T) {
+	recorded, err := os.ReadFile(filepath.Join("..", "..", "internal", "shim", "testdata", "usage", "openai-responses-websocket.recorded.jsonl"))
+	if err != nil {
+		t.Fatalf("read recorded WebSocket fixture: %v", err)
+	}
+	messages := []struct {
+		kind websocket.MessageType
+		data []byte
+	}{
+		{kind: websocket.MessageText, data: []byte(`{"type":"response.failed","response":{"id":"failed","model":"not-recorded","status":"failed","usage":{"input_tokens":99,"output_tokens":99}}}`)},
+		{kind: websocket.MessageBinary, data: []byte(`{"type":"response.completed","response":{"id":"incomplete","model":"not-recorded","status":"incomplete","usage":{"input_tokens":98,"output_tokens":98}}}`)},
+		{kind: websocket.MessageText, data: []byte(`{"type":"response.completed","response":{"id":"resp-ws-a","model":"reported-model-a","status":"completed","usage":{"input_tokens":3,"output_tokens":5}}}`)},
+		{kind: websocket.MessageBinary, data: []byte(`{"type":"response.completed","response":`)},
+		{kind: websocket.MessageText, data: []byte(`{"type":"error","error":{"message":"session continues"}}`)},
+		{kind: websocket.MessageText, data: bytes.TrimSuffix(recorded, []byte("\n"))},
+		{kind: websocket.MessageBinary, data: []byte(`{"type":"response.incomplete","response":{"id":"incomplete-terminal","model":"not-recorded","status":"incomplete","usage":{"input_tokens":97,"output_tokens":97}}}`)},
+		{kind: websocket.MessageBinary, data: []byte(`{"type":"response.completed","response":{"id":"resp-ws-b","model":"reported-model-b","status":"completed","usage":{"input_tokens":7,"output_tokens":11}}}`)},
+	}
+	bufferedPayload := []byte(`{"id":"resp-shared-http","model":"reported-http-model","status":"completed","usage":{"input_tokens":2,"output_tokens":3}}`)
+	clientMessage := []byte(`{"type":"response.create","model":"requested-model"}`)
+	upstreamReceived := make(chan struct {
+		kind websocket.MessageType
+		data []byte
+	}, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write(bufferedPayload)
+			return
+		}
+		conn, acceptErr := websocket.Accept(w, r, nil)
+		if acceptErr != nil {
+			t.Errorf("accept upstream WebSocket: %v", acceptErr)
+			return
+		}
+		defer func() { _ = conn.CloseNow() }()
+		kind, data, readErr := conn.Read(context.Background())
+		if readErr != nil {
+			t.Errorf("read upstream client Message: %v", readErr)
+			return
+		}
+		upstreamReceived <- struct {
+			kind websocket.MessageType
+			data []byte
+		}{kind: kind, data: data}
+		for _, message := range messages {
+			if writeErr := conn.Write(context.Background(), message.kind, message.data); writeErr != nil {
+				t.Errorf("write upstream server Message: %v", writeErr)
+				return
+			}
+		}
+		_ = conn.Close(websocket.StatusNormalClosure, "completed")
+	}))
+	defer upstream.Close()
+
+	dbPath := filepath.Join(t.TempDir(), "usage", "usage.db")
+	cfg := e2eConfig("gho-usage-meter-websocket")
+	cfg.ImpersonationRefreshInterval = 0
+	cfg.WebSocketHandshakeTimeout = 5 * time.Second
+	cfg.ShimUsageMeterEnabled = true
+	cfg.UsageDBPath = dbPath
+	base := discardLogger(t)
+	store, err := sqlitestore.Open(dbPath, logging.ForComponent(base, "internal/usage/sqlitestore"))
+	if err != nil {
+		t.Fatalf("open usage store: %v", err)
+	}
+
+	var exchangeAuth, exchangeUA string
+	github := newGitHubExchangeStub(t, "copilot-usage-meter-websocket", upstream.URL, &exchangeAuth, &exchangeUA)
+	cacheRegistry := cache.NewRegistry()
+	mgr, imp, err := buildServeProvider(cfg, base, github.URL, github.Client(), productionDiscoveryEdge(), cacheRegistry)
+	if err != nil {
+		t.Fatalf("build serve provider: %v", err)
+	}
+	registry := configuredShimRegistry(cfg, store)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- runBoundServe(ctx, cfg, base, mgr, imp, nil, cacheRegistry, registry, ln)
+	}()
+	baseURL := "http://" + ln.Addr().String()
+	assertHTTPStatusEventually(t, baseURL+"/healthz", http.StatusOK)
+
+	httpRequest, err := http.NewRequest(http.MethodPost, baseURL+"/openai/v1/responses", strings.NewReader(`{"model":"requested-http-model"}`))
+	if err != nil {
+		t.Fatalf("build shared-sink HTTP request: %v", err)
+	}
+	httpRequest.Header.Set("Authorization", "Bearer "+testAPIKey)
+	httpRequest.Header.Set("X-Request-Id", "meter-shared-http-request")
+	httpResponse, err := http.DefaultClient.Do(httpRequest)
+	if err != nil {
+		t.Fatalf("forward shared-sink HTTP response: %v", err)
+	}
+	httpBody, err := io.ReadAll(httpResponse.Body)
+	_ = httpResponse.Body.Close()
+	if err != nil {
+		t.Fatalf("read shared-sink HTTP response: %v", err)
+	}
+	if !bytes.Equal(httpBody, bufferedPayload) {
+		t.Fatalf("shared-sink HTTP body = %q, want exact %q", httpBody, bufferedPayload)
+	}
+
+	conn, response, err := websocket.Dial(context.Background(), "ws"+strings.TrimPrefix(baseURL, "http")+"/openai/v1/responses", &websocket.DialOptions{
+		HTTPHeader: http.Header{
+			"Authorization": {"Bearer " + testAPIKey},
+			"X-Request-Id":  {"meter-websocket-tracer-request"},
+		},
+	})
+	if err != nil {
+		if response != nil && response.Body != nil {
+			_ = response.Body.Close()
+		}
+		t.Fatalf("dial WebSocket transport: %v", err)
+	}
+	wsCtx, wsCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer wsCancel()
+	if err := conn.Write(wsCtx, websocket.MessageText, clientMessage); err != nil {
+		t.Fatalf("write client Message: %v", err)
+	}
+	select {
+	case got := <-upstreamReceived:
+		if got.kind != websocket.MessageText || !bytes.Equal(got.data, clientMessage) {
+			t.Errorf("upstream client Message = (%v, %q), want exact text %q", got.kind, got.data, clientMessage)
+		}
+	case <-wsCtx.Done():
+		t.Fatal("client Message did not reach fake Copilot WebSocket")
+	}
+	for i, want := range messages {
+		kind, data, readErr := conn.Read(wsCtx)
+		if readErr != nil {
+			t.Fatalf("read server Message %d: %v", i, readErr)
+		}
+		if kind != want.kind || !bytes.Equal(data, want.data) {
+			t.Errorf("server Message %d = (%v, %q), want exact (%v, %q)", i, kind, data, want.kind, want.data)
+		}
+	}
+	if _, _, readErr := conn.Read(wsCtx); websocket.CloseStatus(readErr) != websocket.StatusNormalClosure {
+		t.Errorf("WebSocket close = %v, want normal completion", readErr)
+	}
+	_ = conn.CloseNow()
+
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("runBoundServe after cancellation: %v", err)
+	}
+	store.StopAdmission()
+	closeCtx, closeCancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+	report := store.Close(closeCtx)
+	closeCancel()
+	if report.QueueFullDrops != 0 || report.RuntimeWriteLosses != 0 || report.LateAfterCutoffDrops != 0 || report.FinalFlushLosses != 0 || !report.DriverCleanupCompleted {
+		t.Fatalf("clean usage shutdown report = %+v", report)
+	}
+
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open usage database for external query: %v", err)
+	}
+	defer db.Close()
+	var httpRequestID, httpResponseID, httpModel, httpTransport string
+	var httpTurnIndex int
+	if err := db.QueryRow(`SELECT request_id, response_id, turn_index, model, transport FROM openai_turn WHERE transport = 'buffered'`).Scan(
+		&httpRequestID, &httpResponseID, &httpTurnIndex, &httpModel, &httpTransport,
+	); err != nil {
+		t.Fatalf("query shared-sink HTTP usage: %v", err)
+	}
+	if httpRequestID != "meter-shared-http-request" || httpResponseID != "resp-shared-http" || httpTurnIndex != 0 ||
+		httpModel != "reported-http-model" || httpTransport != "buffered" {
+		t.Errorf("shared-sink HTTP row = request:%q response:%q turn:%d model:%q transport:%q",
+			httpRequestID, httpResponseID, httpTurnIndex, httpModel, httpTransport)
+	}
+
+	rows, err := db.Query(`SELECT at_ms, request_id, response_id, turn_index, model, transport,
+		input_tokens, cached_tokens, cache_write_tokens, output_tokens, reasoning_tokens, total_tokens
+		FROM openai_turn WHERE transport = 'websocket' ORDER BY id`)
+	if err != nil {
+		t.Fatalf("query OpenAI WebSocket usage: %v", err)
+	}
+	defer rows.Close()
+	wantRows := []struct {
+		responseID     string
+		model          string
+		input          int64
+		output         int64
+		optionals      [4]int64
+		optionalsValid bool
+	}{
+		{responseID: "resp-ws-a", model: "reported-model-a", input: 3, output: 5},
+		{
+			responseID: "resp_redacted_recorded_websocket", model: "gpt-5.6-sol", input: 12, output: 20,
+			optionals: [4]int64{0, 0, 12, 32}, optionalsValid: true,
+		},
+		{responseID: "resp-ws-b", model: "reported-model-b", input: 7, output: 11},
+	}
+	for i, want := range wantRows {
+		if !rows.Next() {
+			t.Fatalf("persisted WebSocket rows ended at %d, want %d", i, len(wantRows))
+		}
+		var atMS, input, output int64
+		var requestID, responseID, model, transport string
+		var turnIndex int
+		var optionals [4]sql.NullInt64
+		if err := rows.Scan(&atMS, &requestID, &responseID, &turnIndex, &model, &transport,
+			&input, &optionals[0], &optionals[1], &output, &optionals[2], &optionals[3]); err != nil {
+			t.Fatalf("scan OpenAI WebSocket row %d: %v", i, err)
+		}
+		if atMS <= 0 || requestID != "meter-websocket-tracer-request" || responseID != want.responseID ||
+			turnIndex != i || model != want.model || transport != "websocket" || input != want.input || output != want.output {
+			t.Errorf("persisted WebSocket row %d = at_ms:%d request:%q response:%q turn:%d model:%q transport:%q usage:[%d %d]",
+				i, atMS, requestID, responseID, turnIndex, model, transport, input, output)
+		}
+		for field, got := range optionals {
+			if got.Valid != want.optionalsValid || got.Valid && got.Int64 != want.optionals[field] {
+				t.Errorf("persisted WebSocket row %d optional %d = %+v, want valid=%t value=%d",
+					i, field, got, want.optionalsValid, want.optionals[field])
+			}
+		}
+	}
+	if rows.Next() {
+		t.Fatal("persisted more OpenAI WebSocket rows than expected")
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate OpenAI WebSocket rows: %v", err)
+	}
+}
+
+func TestRunBoundServeRetainsOpenAIWebSocketUsageWhenSessionLaterFails(t *testing.T) {
+	completion := []byte(`{"type":"response.completed","response":{"id":"resp-before-session-error","model":"reported-before-session-error","status":"completed","usage":{"input_tokens":5,"output_tokens":8}}}`)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Errorf("accept upstream WebSocket: %v", err)
+			return
+		}
+		defer func() { _ = conn.CloseNow() }()
+		if _, _, err := conn.Read(context.Background()); err != nil {
+			return
+		}
+		if err := conn.Write(context.Background(), websocket.MessageText, completion); err != nil {
+			t.Errorf("write completion before session failure: %v", err)
+			return
+		}
+		_ = conn.CloseNow()
+	}))
+	t.Cleanup(upstream.Close)
+
+	var logs bytes.Buffer
+	base := newPhase4Logger(t, &logs)
+	harness := startUsageMeterWebSocketHarness(t, upstream.URL, base, nil, nil)
+	conn := dialUsageMeterWebSocket(t, harness.baseURL, "websocket-later-session-error")
+	wsCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := conn.Write(wsCtx, websocket.MessageText, []byte(`{"type":"response.create"}`)); err != nil {
+		t.Fatalf("write client Message: %v", err)
+	}
+	kind, data, err := conn.Read(wsCtx)
+	if err != nil || kind != websocket.MessageText || !bytes.Equal(data, completion) {
+		t.Fatalf("completion before session failure = kind:%v data:%q err:%v", kind, data, err)
+	}
+	if _, _, err := conn.Read(wsCtx); websocket.CloseStatus(err) != websocket.StatusInternalError {
+		t.Fatalf("session close = %v, want 1011 after upstream failure", err)
+	}
+	_ = conn.CloseNow()
+
+	if err := harness.stop(); err != nil {
+		t.Fatalf("runBoundServe after cancellation: %v", err)
+	}
+	report := harness.closeStore()
+	if report != (sqlitestore.Report{DriverCleanupCompleted: true}) {
+		t.Fatalf("usage shutdown report = %+v", report)
+	}
+	db, err := sql.Open("sqlite", harness.cfg.UsageDBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var requestID, responseID, model, transport string
+	var inputTokens, outputTokens int64
+	if err := db.QueryRow(`SELECT request_id, response_id, model, transport, input_tokens, output_tokens FROM openai_turn`).Scan(
+		&requestID, &responseID, &model, &transport, &inputTokens, &outputTokens,
+	); err != nil {
+		t.Fatalf("query retained WebSocket usage: %v", err)
+	}
+	if requestID != "websocket-later-session-error" || responseID != "resp-before-session-error" ||
+		model != "reported-before-session-error" || transport != "websocket" || inputTokens != 5 || outputTokens != 8 {
+		t.Errorf("retained WebSocket row = request:%q response:%q model:%q transport:%q usage:[%d %d]",
+			requestID, responseID, model, transport, inputTokens, outputTokens)
+	}
+	logText := logs.String()
+	accessLines := phase4LogLinesContaining(logText, "msg=access", "request_id=websocket-later-session-error")
+	if len(accessLines) != 1 {
+		t.Fatalf("terminal access records = %d, want one after handler completion:\n%s", len(accessLines), logText)
+	}
+	for _, want := range []string{"terminal_reason=error", "close_code=1011", "msgs_u2c=1", "hook_overruns=0"} {
+		if !strings.Contains(accessLines[0], want) {
+			t.Errorf("session-error access record missing %q: %s", want, accessLines[0])
+		}
+	}
+}
+
+type heldServerMessageShim struct {
+	entered     chan struct{}
+	release     chan struct{}
+	enteredOnce sync.Once
+	releaseOnce sync.Once
+}
+
+func newHeldServerMessageShim() *heldServerMessageShim {
+	return &heldServerMessageShim{entered: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (s *heldServerMessageShim) TransformServerMessage(_ context.Context, _ *shim.Message) bool {
+	s.enteredOnce.Do(func() { close(s.entered) })
+	<-s.release
+	return true
+}
+
+func (s *heldServerMessageShim) Release() {
+	s.releaseOnce.Do(func() { close(s.release) })
+}
+
+func withHeldServerMessageShim(held *heldServerMessageShim) func(shim.Registry) shim.Registry {
+	return func(registry shim.Registry) shim.Registry {
+		return append(shim.Registry{{
+			Name:    "hold-after-usage-observation",
+			Enabled: true,
+			Scope: func(surface endpoint.Surface, route endpoint.Route) bool {
+				return surface == endpoint.OpenAI && route == endpoint.RouteOpenAIResponses
+			},
+			New: func(context.Context, endpoint.Surface, endpoint.Route) any { return held },
+		}}, registry...)
+	}
+}
+
+func TestRunBoundServeRetainsOpenAIWebSocketUsageObservedBeforeDownstreamWriteFailure(t *testing.T) {
+	completion := []byte(`{"type":"response.completed","response":{"id":"resp-before-write-failure","model":"reported-before-write-failure","status":"completed","usage":{"input_tokens":13,"output_tokens":21}}}`)
+	upstreamClosed := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Errorf("accept upstream WebSocket: %v", err)
+			return
+		}
+		defer func() { _ = conn.CloseNow() }()
+		if _, _, err := conn.Read(context.Background()); err != nil {
+			return
+		}
+		if err := conn.Write(context.Background(), websocket.MessageText, completion); err != nil {
+			t.Errorf("write completion before downstream failure: %v", err)
+			return
+		}
+		_, _, _ = conn.Read(context.Background())
+		close(upstreamClosed)
+	}))
+	t.Cleanup(upstream.Close)
+
+	held := newHeldServerMessageShim()
+	defer held.Release()
+	var logs bytes.Buffer
+	base := newPhase4Logger(t, &logs)
+	harness := startUsageMeterWebSocketHarness(t, upstream.URL, base, nil, withHeldServerMessageShim(held))
+	conn := dialUsageMeterWebSocket(t, harness.baseURL, "websocket-downstream-write-failure")
+	if err := conn.Write(context.Background(), websocket.MessageText, []byte(`{"type":"response.create"}`)); err != nil {
+		t.Fatalf("write client Message: %v", err)
+	}
+	select {
+	case <-held.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("outer Shim did not hold the Message after the Usage meter observed it")
+	}
+	_ = conn.CloseNow()
+	select {
+	case <-upstreamClosed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("proxy did not observe the downstream close before the held Message was released")
+	}
+	held.Release()
+
+	if err := harness.stop(); err != nil {
+		t.Fatalf("runBoundServe after downstream failure: %v", err)
+	}
+	report := harness.closeStore()
+	if report != (sqlitestore.Report{DriverCleanupCompleted: true}) {
+		t.Fatalf("usage shutdown report = %+v", report)
+	}
+	db, err := sql.Open("sqlite", harness.cfg.UsageDBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var count int
+	if err := db.QueryRow(`SELECT count(*) FROM openai_turn WHERE request_id = 'websocket-downstream-write-failure' AND response_id = 'resp-before-write-failure' AND transport = 'websocket'`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Errorf("retained rows = %d, want completion observed before failed downstream write", count)
+	}
+	logText := logs.String()
+	accessLines := phase4LogLinesContaining(logText, "msg=access", "request_id=websocket-downstream-write-failure")
+	if len(accessLines) != 1 {
+		t.Fatalf("terminal access records = %d, want sole after-handler summary:\n%s", len(accessLines), logText)
+	}
+	if !strings.Contains(accessLines[0], "msgs_u2c=0") || !strings.Contains(accessLines[0], "bytes_u2c=0") {
+		t.Errorf("downstream-failure access record counted an unwritten completion: %s", accessLines[0])
+	}
+}
+
+func TestRunBoundServeOpenAIWebSocketStaysResponsiveWhileRealStoreIsFullAndFailing(t *testing.T) {
+	const submissions = 1153
+	completion := []byte(`{"type":"response.completed","response":{"id":"resp-duplicate-under-lock","model":"reported-under-lock","status":"completed","usage":{"input_tokens":1,"output_tokens":2}}}`)
+	recovery := []byte(`{"type":"response.completed","response":{"id":"resp-after-lock","model":"reported-after-lock","status":"completed","usage":{"input_tokens":3,"output_tokens":5}}}`)
+	sendRecovery := make(chan struct{})
+	var sendRecoveryOnce sync.Once
+	releaseRecovery := func() { sendRecoveryOnce.Do(func() { close(sendRecovery) }) }
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Errorf("accept upstream WebSocket: %v", err)
+			return
+		}
+		defer func() { _ = conn.CloseNow() }()
+		if _, _, err := conn.Read(context.Background()); err != nil {
+			return
+		}
+		for range submissions {
+			if err := conn.Write(context.Background(), websocket.MessageText, completion); err != nil {
+				return
+			}
+		}
+		<-sendRecovery
+		if err := conn.Write(context.Background(), websocket.MessageBinary, recovery); err != nil {
+			return
+		}
+		_ = conn.Close(websocket.StatusNormalClosure, "done")
+	}))
+	t.Cleanup(upstream.Close)
+	t.Cleanup(releaseRecovery)
+
+	base := discardLogger(t)
+	harness := startUsageMeterWebSocketHarness(t, upstream.URL, base, nil, nil)
+	locker, err := sql.Open("sqlite", harness.cfg.UsageDBPath)
+	if err != nil {
+		t.Fatalf("open external SQLite locker: %v", err)
+	}
+	defer locker.Close()
+	locker.SetMaxOpenConns(1)
+	if _, err := locker.Exec("BEGIN IMMEDIATE"); err != nil {
+		t.Fatalf("lock usage database: %v", err)
+	}
+	locked := true
+	defer func() {
+		if locked {
+			_, _ = locker.Exec("ROLLBACK")
+		}
+	}()
+
+	conn := dialUsageMeterWebSocket(t, harness.baseURL, "websocket-while-store-locked")
+	readCtx, readCancel := context.WithTimeout(context.Background(), 4*time.Second)
+	if err := conn.Write(readCtx, websocket.MessageText, []byte(`{"type":"response.create"}`)); err != nil {
+		readCancel()
+		t.Fatalf("write client Message: %v", err)
+	}
+	started := time.Now()
+	for index := range submissions {
+		kind, data, err := conn.Read(readCtx)
+		if err != nil {
+			readCancel()
+			t.Fatalf("read locked-store Message %d: %v", index, err)
+		}
+		if kind != websocket.MessageText || !bytes.Equal(data, completion) {
+			readCancel()
+			t.Fatalf("locked-store Message %d changed: kind=%v data=%q", index, kind, data)
+		}
+	}
+	elapsed := time.Since(started)
+	readCancel()
+	if elapsed >= 4*time.Second {
+		t.Fatalf("WebSocket pump took %s while SQLite writer was blocked, want prompt nonblocking forwarding", elapsed)
+	}
+
+	// Keep the real external write lock beyond the store's native runtime budget:
+	// the in-flight batch fails while the WebSocket session itself remains live.
+	time.Sleep(5500 * time.Millisecond)
+	if _, err := locker.Exec("ROLLBACK"); err != nil {
+		t.Fatalf("release usage database lock: %v", err)
+	}
+	locked = false
+	time.Sleep(100 * time.Millisecond)
+	releaseRecovery()
+	recoveryCtx, recoveryCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	kind, data, err := conn.Read(recoveryCtx)
+	if err != nil || kind != websocket.MessageBinary || !bytes.Equal(data, recovery) {
+		recoveryCancel()
+		t.Fatalf("recovery Message = kind:%v data:%q err:%v", kind, data, err)
+	}
+	if _, _, err := conn.Read(recoveryCtx); websocket.CloseStatus(err) != websocket.StatusNormalClosure {
+		t.Errorf("recovered WebSocket close = %v, want normal", err)
+	}
+	recoveryCancel()
+	_ = conn.CloseNow()
+
+	if err := harness.stop(); err != nil {
+		t.Fatalf("runBoundServe after cancellation: %v", err)
+	}
+	report := harness.closeStore()
+	if report.QueueFullDrops == 0 || report.RuntimeWriteLosses == 0 || report.LateAfterCutoffDrops != 0 ||
+		report.FinalFlushLosses != 0 || !report.DriverCleanupCompleted {
+		t.Fatalf("locked/failing-store shutdown report = %+v", report)
+	}
+	db, err := sql.Open("sqlite", harness.cfg.UsageDBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var rows, distinctOrdinals, recoveryRows int
+	var maxOrdinal int
+	if err := db.QueryRow(`SELECT count(*), count(DISTINCT turn_index), max(turn_index),
+		count(*) FILTER (WHERE response_id = 'resp-after-lock') FROM openai_turn WHERE transport = 'websocket'`).Scan(
+		&rows, &distinctOrdinals, &maxOrdinal, &recoveryRows,
+	); err != nil {
+		t.Fatalf("query locked-store WebSocket usage: %v", err)
+	}
+	attempts := submissions + 1
+	if rows+int(report.QueueFullDrops)+int(report.RuntimeWriteLosses) != attempts {
+		t.Errorf("persisted %d + queue drops %d + runtime losses %d = %d, want %d submission attempts",
+			rows, report.QueueFullDrops, report.RuntimeWriteLosses,
+			rows+int(report.QueueFullDrops)+int(report.RuntimeWriteLosses), attempts)
+	}
+	if distinctOrdinals != rows || recoveryRows != 1 || maxOrdinal != submissions {
+		t.Errorf("persisted ordinals/recovery = distinct:%d rows:%d max:%d recovery:%d", distinctOrdinals, rows, maxOrdinal, recoveryRows)
+	}
+}
+
+func TestRunBoundServeForcedWebSocketDrainAndFreshUsageFinalizationAreBounded(t *testing.T) {
+	completion := []byte(`{"type":"response.completed","response":{"id":"resp-before-forced-drain","model":"reported-before-forced-drain","status":"completed","usage":{"input_tokens":1,"output_tokens":2}}}`)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Errorf("accept upstream WebSocket: %v", err)
+			return
+		}
+		defer func() { _ = conn.CloseNow() }()
+		if _, _, err := conn.Read(context.Background()); err != nil {
+			return
+		}
+		_ = conn.Write(context.Background(), websocket.MessageText, completion)
+	}))
+	t.Cleanup(upstream.Close)
+
+	held := newHeldServerMessageShim()
+	defer held.Release()
+	base := discardLogger(t)
+	harness := startUsageMeterWebSocketHarness(t, upstream.URL, base, func(cfg *config.ServeConfig) {
+		cfg.ShutdownTimeout = 75 * time.Millisecond
+	}, withHeldServerMessageShim(held))
+	locker, err := sql.Open("sqlite", harness.cfg.UsageDBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer locker.Close()
+	locker.SetMaxOpenConns(1)
+	if _, err := locker.Exec("BEGIN IMMEDIATE"); err != nil {
+		t.Fatal(err)
+	}
+	locked := true
+	defer func() {
+		if locked {
+			_, _ = locker.Exec("ROLLBACK")
+		}
+	}()
+
+	conn := dialUsageMeterWebSocket(t, harness.baseURL, "websocket-forced-drain")
+	defer func() { _ = conn.CloseNow() }()
+	if err := conn.Write(context.Background(), websocket.MessageText, []byte(`{"type":"response.create"}`)); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-held.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("outer Shim did not hold the Message after usage observation")
+	}
+
+	drainStarted := time.Now()
+	serveErr := harness.stop()
+	drainElapsed := time.Since(drainStarted)
+	if !errors.Is(serveErr, context.DeadlineExceeded) {
+		t.Fatalf("forced drain error = %v, want deadline exceeded", serveErr)
+	}
+	if drainElapsed < 50*time.Millisecond || drainElapsed > 500*time.Millisecond {
+		t.Errorf("forced drain elapsed = %s, want one bounded shutdown interval", drainElapsed)
+	}
+
+	harness.store.StopAdmission()
+	harness.store.Record(usage.Turn{})
+	finalizeStarted := time.Now()
+	report := harness.closeStore()
+	finalizeElapsed := time.Since(finalizeStarted)
+	if finalizeElapsed < 50*time.Millisecond || finalizeElapsed > 500*time.Millisecond {
+		t.Errorf("fresh usage finalization elapsed = %s, want an independent bounded interval", finalizeElapsed)
+	}
+	if report.LateAfterCutoffDrops != 1 || report.FinalFlushLosses != 1 || report.QueueFullDrops != 0 || report.RuntimeWriteLosses != 0 {
+		t.Fatalf("forced-drain usage report = %+v, want one late call and one contended observed completion", report)
+	}
+
+	if _, err := locker.Exec("ROLLBACK"); err != nil {
+		t.Fatal(err)
+	}
+	locked = false
+	held.Release()
 }
 
 func TestRunBoundServeDeliversCleanOpenAINoncompletionTerminalsWithoutUsageRows(t *testing.T) {

@@ -19,8 +19,9 @@ type openAIUsageMeter struct {
 }
 
 var (
-	_ BufferedTransformer = (*openAIUsageMeter)(nil)
-	_ EventTransformer    = (*openAIUsageMeter)(nil)
+	_ BufferedTransformer      = (*openAIUsageMeter)(nil)
+	_ EventTransformer         = (*openAIUsageMeter)(nil)
+	_ ServerMessageTransformer = (*openAIUsageMeter)(nil)
 )
 
 func newOpenAIUsageMeter(ctx context.Context, sink usage.Sink) *openAIUsageMeter {
@@ -46,6 +47,14 @@ func (m *openAIUsageMeter) TransformEvent(_ context.Context, f sse.Frame) []sse.
 		}
 	}
 	return []sse.Frame{f}
+}
+
+// TransformServerMessage observes each upstream Message independently using the
+// shared completed-response validator. Every path preserves its kind and data
+// and emits it, including malformed, irrelevant, and noncompletion events.
+func (m *openAIUsageMeter) TransformServerMessage(_ context.Context, message *Message) bool {
+	m.observeResponseCompletedEvent(message.Data, usage.TransportWebSocket)
+	return true
 }
 
 func (m *openAIUsageMeter) observeResponseCompletedEvent(raw []byte, transport usage.Transport) {
