@@ -183,9 +183,8 @@ by [`--usage-db-path`](#--usage-db-path). It is off by default: disabled `serve`
 and `login` do not open a database, create usage files, start a usage writer, or
 install a metering hook.
 
-**Implemented coverage is buffered Anthropic Messages plus buffered, SSE, and
-WebSocket OpenAI Responses.** Only Anthropic Messages SSE metering remains
-staged and does not install a usage hook yet.
+**Implemented coverage is all five supported paths: buffered and SSE Anthropic
+Messages plus buffered, SSE, and WebSocket OpenAI Responses.**
 
 A buffered Anthropic row requires one self-contained object whose `type` is
 `"message"`, with its own non-empty `id` and reported `model`, a non-empty string
@@ -202,6 +201,19 @@ these Anthropic-native values without normalization:
 - `output_tokens`, the complete output count; and
 - `output_tokens_details.thinking_tokens`, a re-tokenized subset already inside
   output.
+
+Anthropic SSE keeps one accumulator per HTTP Shim instance. It routes only
+`message_start`, `message_delta`, `message_stop`, and `error` frames by advisory
+frame type, decodes their joined `data:` payload, and requires the decoded type
+to agree. The start supplies the upstream message identity and reported model;
+usage may be absent there and completed by later deltas. Each field is cumulative:
+the last numeric report wins, while omission or explicit `null` preserves an
+earlier report including zero. A valid `message_stop` submits only an active,
+unpoisoned candidate with both required counts and then clears that candidate;
+a duplicate stop or a stream without a stop submits nothing. Malformed relevant
+events, invalid reported counts, conflicting starts, and upstream errors
+permanently poison only that HTTP instance. They do not fault or rewrite the
+stream, and no stream finalizer manufactures a completion.
 
 Live Anthropic-through-Copilot compatibility remains unverified because the
 evidence account lacked Anthropic model access. This parser is grounded in the
@@ -240,9 +252,10 @@ and metadata sources are never used as fallback or mapping inputs.
 Each row also records local completion-observation time as canonical `at_ms` plus
 generated millisecond UTC `at_utc`, inbound `request_id` (empty only when
 unavailable), upstream object identity as `message_id` or `response_id`, the
-applicable `transport` (`buffered`, `sse`, or `websocket` for OpenAI), and a
-zero-based submission-attempt `turn_index`. One WebSocket shim instance captures
-the handshake `request_id` once and uses it for every qualifying Turn even though
+applicable `transport` (`buffered` or `sse` for Anthropic; `buffered`, `sse`, or
+`websocket` for OpenAI), and a zero-based submission-attempt `turn_index`. One
+WebSocket shim instance captures the handshake `request_id` once and uses it for
+every qualifying Turn even though
 message execution uses a session-rooted context; unavailable construction
 correlation stays empty. It does not store prompts, generated content, API keys,
 GitHub OAuth tokens, or Copilot tokens.
@@ -269,15 +282,16 @@ response. Unsupported, repeated, list-valued, or explicitly empty encodings
 bypass the buffered meter and remain opaque. Payload bytes are unchanged when a
 hook runs; whole-wire neutrality is not promised.
 
-For OpenAI SSE, transport selection follows the typed Endpoint and upstream
+For both SSE paths, transport selection follows the typed Endpoint and upstream
 `Content-Type`, not the inbound `stream` field. An unsupported SSE
-`Content-Encoding` still returns the existing pre-hook `502`. The observer returns
-every frame with its exact original `Raw` bytes and structure; it does not hold,
-drop, coalesce, rewrite, or finalize frames. The OpenAI WebSocket observer likewise
-always emits each original server Message with the same kind and data. It retains
-only captured correlation plus a submission ordinal: no response map, usage
-accumulator, overlap guard, or per-session sum. Interleaved, malformed, failed,
-incomplete, and error Messages cannot contaminate a later valid completion.
+`Content-Encoding` still returns the existing pre-hook `502`. Each observer
+returns every frame with its exact original `Raw` bytes and structure; neither
+holds, drops, coalesces, rewrites, or finalizes frames. The OpenAI WebSocket
+observer likewise always emits each original server Message with the same kind
+and data. It retains only captured correlation plus a submission ordinal: no
+response map, usage accumulator, overlap guard, or per-session sum. Interleaved,
+malformed, failed, incomplete, and error Messages cannot contaminate a later
+valid completion.
 
 Observation happens before downstream writing. A row can remain after a client
 write failure or an outer Shim failure, and duplicate qualifying observations

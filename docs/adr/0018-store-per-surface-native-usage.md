@@ -77,5 +77,7 @@ The [native usage evidence](../research/2026-09-05-native-usage-shapes.md) and
 provider semantics and evidence limitations behind this decision. Issue #197
 lands the frozen persistence shape and buffered OpenAI parser; issue #198 adds
 the buffered Anthropic parser; issue #199 adds self-contained OpenAI SSE
-completion observation; and issue #200 adds the same self-contained observer to
-OpenAI WebSocket server Messages. Only Anthropic SSE parsing remains staged.
+completion observation; issue #200 adds the same self-contained observer to
+OpenAI WebSocket server Messages; and issue #201 adds request-scoped Anthropic
+SSE accumulation. All five supported paths now preserve this frozen native
+projection.

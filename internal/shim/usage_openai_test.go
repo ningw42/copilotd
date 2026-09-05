@@ -605,7 +605,7 @@ func TestCanonicalRegistryKeepsUsageMeterExactLastWithOpenAIStreamingHooksActive
 		wantSSE bool
 		wantWS  bool
 	}{
-		{name: "Anthropic remains buffered only", value: registration.New(context.Background(), endpoint.Anthropic, endpoint.RouteAnthropicMessages)},
+		{name: "Anthropic adds SSE without WebSocket", value: registration.New(context.Background(), endpoint.Anthropic, endpoint.RouteAnthropicMessages), wantSSE: true},
 		{name: "OpenAI adds SSE and WebSocket", value: registration.New(context.Background(), endpoint.OpenAI, endpoint.RouteOpenAIResponses), wantSSE: true, wantWS: true},
 	}
 	for _, instance := range instances {

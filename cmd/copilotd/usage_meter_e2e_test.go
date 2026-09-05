@@ -39,6 +39,15 @@ func (panicOnOpenAICompletion) TransformEvent(_ context.Context, frame sse.Frame
 	return []sse.Frame{frame}
 }
 
+type panicOnAnthropicStop struct{}
+
+func (panicOnAnthropicStop) TransformEvent(_ context.Context, frame sse.Frame) []sse.Frame {
+	if frame.Type == "message_stop" {
+		panic("outer shim failed after usage observation")
+	}
+	return []sse.Frame{frame}
+}
+
 type usageMeterWebSocketHarness struct {
 	cfg     config.ServeConfig
 	baseURL string
@@ -1498,6 +1507,438 @@ func TestRunBoundServeOpenAISSEStaysResponsiveWhileSQLiteLockFillsQueue(t *testi
 	}
 	if !strings.Contains(logText, "msg=\"usage store finalized\"") || !strings.Contains(logText, "queue_full_drops=") || !strings.Contains(logText, "driver_cleanup_completed=true") {
 		t.Errorf("locked-store final loss report missing:\n%s", logText)
+	}
+}
+
+func TestRunBoundServeAnthropicMalformedErrorAndPrematureStreamsProduceNoUsageRows(t *testing.T) {
+	const start = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg-noncompletion\",\"model\":\"reported\",\"usage\":{\"input_tokens\":3,\"output_tokens\":0}}}\n\n"
+	responses := []string{
+		start + "event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":\"bad\"}}\n\n" +
+			"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+		start + "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"upstream terminal\"}}\n\n",
+		start + "event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":5}}\n\n",
+	}
+	var responseIndex atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		index := int(responseIndex.Add(1) - 1)
+		if index >= len(responses) {
+			http.Error(w, "unexpected request", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, responses[index])
+	}))
+	defer upstream.Close()
+	var logs bytes.Buffer
+	base := newPhase4Logger(t, &logs)
+	harness := startUsageMeterWebSocketHarness(t, upstream.URL, base, nil, nil)
+	for index, upstreamBody := range responses {
+		req, err := http.NewRequest(http.MethodPost, harness.baseURL+"/anthropic/v1/messages", strings.NewReader(`{"stream":true}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		requestID := fmt.Sprintf("anthropic-noncompletion-%d", index)
+		req.Header.Set("Authorization", "Bearer "+testAPIKey)
+		req.Header.Set("X-Request-Id", requestID)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("forward stream %d: %v", index, err)
+		}
+		body, err := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if err != nil {
+			t.Fatalf("read stream %d: %v", index, err)
+		}
+		if index < 2 && !bytes.Equal(body, []byte(upstreamBody)) {
+			t.Errorf("terminal stream %d changed: got %q want %q", index, body, upstreamBody)
+		}
+		if index == 2 && (!bytes.HasPrefix(body, []byte(upstreamBody)) ||
+			!bytes.Contains(body[len(upstreamBody):], []byte("event: error")) ||
+			!bytes.Contains(body[len(upstreamBody):], []byte("copilotd:"))) {
+			t.Errorf("premature stream body = %q, want upstream prefix plus synthesized Anthropic error", body)
+		}
+	}
+	if err := harness.stop(); err != nil {
+		t.Fatalf("runBoundServe after cancellation: %v", err)
+	}
+	if report := harness.closeStore(); report != (sqlitestore.Report{DriverCleanupCompleted: true}) {
+		t.Fatalf("clean usage shutdown report = %+v", report)
+	}
+	db, err := sql.Open("sqlite", harness.cfg.UsageDBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var rows int
+	if err := db.QueryRow("SELECT count(*) FROM anthropic_turn").Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 0 {
+		t.Errorf("Anthropic usage rows = %d, want none for malformed, error, or premature streams", rows)
+	}
+	logText := logs.String()
+	for index := range responses {
+		requestID := fmt.Sprintf("anthropic-noncompletion-%d", index)
+		if lines := phase4LogLinesContaining(logText, "msg=access", "request_id="+requestID); len(lines) != 1 {
+			t.Errorf("terminal access records for %q = %d, want one after handler return:\n%s", requestID, len(lines), logText)
+		}
+	}
+	if lines := phase4LogLinesContaining(logText, "msg=access"); len(lines) != len(responses) {
+		t.Errorf("total terminal access records = %d, want %d:\n%s", len(lines), len(responses), logText)
+	}
+}
+
+func TestRunBoundServeDisconnectBeforeAnthropicStopProducesNoUsageRow(t *testing.T) {
+	const partial = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg-interrupted\",\"model\":\"reported\",\"usage\":{\"input_tokens\":5,\"output_tokens\":0}}}\n\n" +
+		"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"partial\"}}\n\n"
+	upstreamCanceled := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, partial)
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		<-r.Context().Done()
+		close(upstreamCanceled)
+	}))
+	defer upstream.Close()
+	var logs bytes.Buffer
+	base := newPhase4Logger(t, &logs)
+	harness := startUsageMeterWebSocketHarness(t, upstream.URL, base, nil, nil)
+	req, err := http.NewRequest(http.MethodPost, harness.baseURL+"/anthropic/v1/messages", strings.NewReader(`{"stream":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+testAPIKey)
+	req.Header.Set("X-Request-Id", "disconnect-before-anthropic-stop")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("forward response: %v", err)
+	}
+	got := make([]byte, len(partial))
+	if _, err := io.ReadFull(resp.Body, got); err != nil {
+		t.Fatalf("read partial stream: %v", err)
+	}
+	if !bytes.Equal(got, []byte(partial)) {
+		t.Fatalf("partial stream = %q, want %q", got, partial)
+	}
+	if err := resp.Body.Close(); err != nil {
+		t.Fatalf("disconnect downstream: %v", err)
+	}
+	select {
+	case <-upstreamCanceled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("downstream disconnect did not cancel the upstream Anthropic stream")
+	}
+	if err := harness.stop(); err != nil {
+		t.Fatalf("runBoundServe after cancellation: %v", err)
+	}
+	if report := harness.closeStore(); report != (sqlitestore.Report{DriverCleanupCompleted: true}) {
+		t.Fatalf("clean usage shutdown report = %+v", report)
+	}
+	db, err := sql.Open("sqlite", harness.cfg.UsageDBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var rows int
+	if err := db.QueryRow("SELECT count(*) FROM anthropic_turn").Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 0 {
+		t.Errorf("Anthropic usage rows = %d, want none before message_stop observation", rows)
+	}
+	logText := logs.String()
+	accessLines := phase4LogLinesContaining(logText, "msg=access", "request_id=disconnect-before-anthropic-stop", "outcome=client_cancel")
+	if len(accessLines) != 1 {
+		t.Errorf("disconnect terminal access records = %d, want one after handler return:\n%s", len(accessLines), logText)
+	}
+}
+
+func TestRunBoundServeRetainsAnthropicSSEUsageObservedBeforeOuterShimPanic(t *testing.T) {
+	const stream = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg-before-panic\",\"model\":\"reported-before-panic\",\"usage\":{\"input_tokens\":5,\"output_tokens\":0}}}\n\n" +
+		"event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":8}}\n\n" +
+		"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, stream)
+	}))
+	defer upstream.Close()
+	var logs bytes.Buffer
+	base := newPhase4Logger(t, &logs)
+	harness := startUsageMeterWebSocketHarness(t, upstream.URL, base, nil, func(registry shim.Registry) shim.Registry {
+		return append(shim.Registry{{
+			Name:    "outer-panic-after-anthropic-usage",
+			Enabled: true,
+			Scope: func(surface endpoint.Surface, route endpoint.Route) bool {
+				return surface == endpoint.Anthropic && route == endpoint.RouteAnthropicMessages
+			},
+			New: func(context.Context, endpoint.Surface, endpoint.Route) any { return panicOnAnthropicStop{} },
+		}}, registry...)
+	})
+	req, err := http.NewRequest(http.MethodPost, harness.baseURL+"/anthropic/v1/messages", strings.NewReader(`{"stream":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+testAPIKey)
+	req.Header.Set("X-Request-Id", "anthropic-completion-before-outer-panic")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("forward response: %v", err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	if bytes.Contains(body, []byte("event: message_stop")) || !bytes.Contains(body, []byte("shim failed")) {
+		t.Errorf("post-panic body = %q, want pre-stop frames followed by existing shim-failure terminal", body)
+	}
+	if err := harness.stop(); err != nil {
+		t.Fatalf("runBoundServe after cancellation: %v", err)
+	}
+	if report := harness.closeStore(); report != (sqlitestore.Report{DriverCleanupCompleted: true}) {
+		t.Fatalf("clean usage shutdown report = %+v", report)
+	}
+	db, err := sql.Open("sqlite", harness.cfg.UsageDBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var requestID, messageID, model, transport string
+	var inputTokens, outputTokens int64
+	if err := db.QueryRow(`SELECT request_id, message_id, model, transport, input_tokens, output_tokens FROM anthropic_turn`).Scan(
+		&requestID, &messageID, &model, &transport, &inputTokens, &outputTokens,
+	); err != nil {
+		t.Fatalf("query retained Anthropic usage: %v", err)
+	}
+	if requestID != "anthropic-completion-before-outer-panic" || messageID != "msg-before-panic" ||
+		model != "reported-before-panic" || transport != "sse" || inputTokens != 5 || outputTokens != 8 {
+		t.Errorf("retained row = request:%q message:%q model:%q transport:%q input:%d output:%d",
+			requestID, messageID, model, transport, inputTokens, outputTokens)
+	}
+	logText := logs.String()
+	accessLines := phase4LogLinesContaining(logText, "msg=access", "request_id=anthropic-completion-before-outer-panic", "outcome=shim_error")
+	if len(accessLines) != 1 {
+		t.Errorf("outer-panic terminal access records = %d, want one after handler return:\n%s", len(accessLines), logText)
+	}
+}
+
+func TestRunBoundServeAnthropicSSEStaysResponsiveThroughFullFailingStoreAndRecovers(t *testing.T) {
+	const (
+		submissions = 1153
+		workers     = 32
+		completion  = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg-duplicate-under-lock\",\"model\":\"reported-under-lock\",\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n" +
+			"event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":2}}\n\n" +
+			"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+		recovery = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg-after-lock\",\"model\":\"reported-after-lock\",\"usage\":{\"input_tokens\":3,\"output_tokens\":0}}}\n\n" +
+			"event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":5}}\n\n" +
+			"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+	)
+	var responseIndex atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		if responseIndex.Add(1) <= submissions {
+			_, _ = io.WriteString(w, completion)
+			return
+		}
+		_, _ = io.WriteString(w, recovery)
+	}))
+	defer upstream.Close()
+
+	base := discardLogger(t)
+	harness := startUsageMeterWebSocketHarness(t, upstream.URL, base, nil, nil)
+	locker, err := sql.Open("sqlite", harness.cfg.UsageDBPath)
+	if err != nil {
+		t.Fatalf("open external SQLite locker: %v", err)
+	}
+	defer locker.Close()
+	locker.SetMaxOpenConns(1)
+	if _, err := locker.Exec("BEGIN IMMEDIATE"); err != nil {
+		t.Fatalf("lock usage database: %v", err)
+	}
+	locked := true
+	defer func() {
+		if locked {
+			_, _ = locker.Exec("ROLLBACK")
+		}
+	}()
+
+	client := &http.Client{Transport: &http.Transport{MaxIdleConns: workers, MaxIdleConnsPerHost: workers}}
+	defer client.CloseIdleConnections()
+	jobs := make(chan int)
+	errs := make(chan error, submissions)
+	var group sync.WaitGroup
+	for range workers {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			for index := range jobs {
+				requestCtx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+				req, err := http.NewRequestWithContext(requestCtx, http.MethodPost, harness.baseURL+"/anthropic/v1/messages", strings.NewReader(`{"stream":true}`))
+				if err == nil {
+					req.Header.Set("Authorization", "Bearer "+testAPIKey)
+					req.Header.Set("X-Request-Id", fmt.Sprintf("anthropic-sse-lock-%d", index))
+					var resp *http.Response
+					resp, err = client.Do(req)
+					if err == nil {
+						var body []byte
+						body, err = io.ReadAll(resp.Body)
+						_ = resp.Body.Close()
+						if err == nil && !bytes.Equal(body, []byte(completion)) {
+							err = fmt.Errorf("request %d body changed: got %q want %q", index, body, completion)
+						}
+					}
+				}
+				cancel()
+				if err != nil {
+					errs <- fmt.Errorf("request %d: %w", index, err)
+				}
+			}
+		}()
+	}
+	started := time.Now()
+	for index := range submissions {
+		jobs <- index
+	}
+	close(jobs)
+	group.Wait()
+	close(errs)
+	if err := <-errs; err != nil {
+		t.Fatal(err)
+	}
+	elapsed := time.Since(started)
+	if elapsed >= 4*time.Second {
+		t.Fatalf("%d Anthropic SSE requests took %s while SQLite writer was blocked", submissions, elapsed)
+	}
+
+	// Keep the real external lock beyond the runtime busy budget. An admitted
+	// batch must fail, while the request wave above already completed unchanged.
+	if remaining := 5500*time.Millisecond - elapsed; remaining > 0 {
+		time.Sleep(remaining)
+	}
+	if _, err := locker.Exec("ROLLBACK"); err != nil {
+		t.Fatalf("release usage database lock: %v", err)
+	}
+	locked = false
+	time.Sleep(100 * time.Millisecond)
+
+	req, err := http.NewRequest(http.MethodPost, harness.baseURL+"/anthropic/v1/messages", strings.NewReader(`{"stream":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+testAPIKey)
+	req.Header.Set("X-Request-Id", "anthropic-sse-after-store-recovery")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("forward recovery request: %v", err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if err != nil || !bytes.Equal(body, []byte(recovery)) {
+		t.Fatalf("recovery SSE = %q err:%v, want exact %q", body, err, recovery)
+	}
+
+	if err := harness.stop(); err != nil {
+		t.Fatalf("runBoundServe after cancellation: %v", err)
+	}
+	report := harness.closeStore()
+	if report.QueueFullDrops == 0 || report.RuntimeWriteLosses == 0 || report.LateAfterCutoffDrops != 0 ||
+		report.FinalFlushLosses != 0 || !report.DriverCleanupCompleted {
+		t.Fatalf("locked/failing-store shutdown report = %+v", report)
+	}
+	db, err := sql.Open("sqlite", harness.cfg.UsageDBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var rows, nonzeroOrdinals, recoveryRows int
+	if err := db.QueryRow(`SELECT count(*), count(*) FILTER (WHERE turn_index != 0),
+		count(*) FILTER (WHERE message_id = 'msg-after-lock') FROM anthropic_turn WHERE transport = 'sse'`).Scan(
+		&rows, &nonzeroOrdinals, &recoveryRows,
+	); err != nil {
+		t.Fatalf("query locked-store Anthropic SSE usage: %v", err)
+	}
+	attempts := submissions + 1
+	if rows+int(report.QueueFullDrops)+int(report.RuntimeWriteLosses) != attempts {
+		t.Errorf("persisted %d + queue drops %d + runtime losses %d = %d, want %d submission attempts",
+			rows, report.QueueFullDrops, report.RuntimeWriteLosses,
+			rows+int(report.QueueFullDrops)+int(report.RuntimeWriteLosses), attempts)
+	}
+	if nonzeroOrdinals != 0 || recoveryRows != 1 {
+		t.Errorf("per-request ordinals/recovery = nonzero:%d recovery:%d", nonzeroOrdinals, recoveryRows)
+	}
+}
+
+func TestRunBoundServeMetersAnthropicSSECompletionWithoutChangingFrames(t *testing.T) {
+	fixture, err := os.ReadFile(filepath.Join("..", "..", "internal", "shim", "testdata", "usage", "anthropic-messages-sse-cumulative.synthetic.sse"))
+	if err != nil {
+		t.Fatalf("read generated SSE fixture: %v", err)
+	}
+	if suffix := bytes.Index(fixture, []byte("\n\n: end of synthetic contract stream")); suffix >= 0 {
+		fixture = fixture[:suffix+2]
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write(fixture)
+	}))
+	defer upstream.Close()
+
+	base := discardLogger(t)
+	harness := startUsageMeterWebSocketHarness(t, upstream.URL, base, nil, nil)
+	req, err := http.NewRequest(http.MethodPost, harness.baseURL+"/anthropic/v1/messages", strings.NewReader(`{"model":"requested-model","stream":true}`))
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+testAPIKey)
+	req.Header.Set("X-Request-Id", "anthropic-sse-tracer-request")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("forward Anthropic SSE response: %v", err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if err != nil {
+		t.Fatalf("read Anthropic SSE response: %v", err)
+	}
+	if !bytes.Equal(body, fixture) {
+		t.Fatalf("forwarded Anthropic SSE frames changed:\n got: %q\nwant: %q", body, fixture)
+	}
+
+	if err := harness.stop(); err != nil {
+		t.Fatalf("runBoundServe after cancellation: %v", err)
+	}
+	if report := harness.closeStore(); report != (sqlitestore.Report{DriverCleanupCompleted: true}) {
+		t.Fatalf("clean usage shutdown report = %+v", report)
+	}
+	db, err := sql.Open("sqlite", harness.cfg.UsageDBPath)
+	if err != nil {
+		t.Fatalf("open usage database for external query: %v", err)
+	}
+	defer db.Close()
+	var (
+		atMS, inputTokens, outputTokens                              int64
+		cacheCreation, cacheRead, ephemeral5m, ephemeral1h, thinking int64
+		requestID, messageID, model, transport                       string
+		turnIndex                                                    int
+	)
+	err = db.QueryRow(`SELECT at_ms, request_id, message_id, turn_index, model, transport,
+		input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens,
+		ephemeral_5m_input_tokens, ephemeral_1h_input_tokens, thinking_tokens
+		FROM anthropic_turn`).Scan(
+		&atMS, &requestID, &messageID, &turnIndex, &model, &transport,
+		&inputTokens, &outputTokens, &cacheCreation, &cacheRead, &ephemeral5m, &ephemeral1h, &thinking,
+	)
+	if err != nil {
+		t.Fatalf("query Anthropic SSE usage: %v", err)
+	}
+	if atMS <= 0 || requestID != "anthropic-sse-tracer-request" ||
+		messageID != "msg_redacted_synthetic_cumulative" || turnIndex != 0 ||
+		model != "claude-synthetic" || transport != "sse" || inputTokens != 12 || outputTokens != 9 ||
+		cacheCreation != 2000 || cacheRead != 6000 || ephemeral5m != 750 || ephemeral1h != 1250 || thinking != 4 {
+		t.Errorf("persisted Anthropic SSE row = at_ms:%d request:%q message:%q turn:%d model:%q transport:%q usage:[%d %d %d %d %d %d %d]",
+			atMS, requestID, messageID, turnIndex, model, transport, inputTokens, outputTokens,
+			cacheCreation, cacheRead, ephemeral5m, ephemeral1h, thinking)
 	}
 }
 

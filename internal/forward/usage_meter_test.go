@@ -96,28 +96,46 @@ func TestForwardOpenAIUsageMeterSelectsTransportByEndpointAndUpstreamContentType
 	}
 }
 
-func TestForwardOpenAIUsageMeterRejectsUnsupportedSSEEncodingBeforeObservation(t *testing.T) {
-	const completedEvent = "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-sse\",\"model\":\"reported-model\",\"status\":\"completed\",\"usage\":{\"input_tokens\":12,\"output_tokens\":6}}}\n\n"
-	upstreamBody := &observedReadCloser{reader: strings.NewReader(completedEvent)}
-	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Header:     http.Header{"Content-Type": {"text/event-stream"}, "Content-Encoding": {"gzip"}},
-			Body:       upstreamBody,
-			Request:    r,
-		}, nil
-	})}
-	sink := &forwardUsageSink{}
-	forwarder := newTestForwarder(readyStub("https://upstream.invalid"), client, time.Second, time.Second, time.Second, time.Second, 1<<20, 1<<20, enabledUsageRegistry(sink))
-	recorder := newDeadlineRecorder()
-
-	forwarder.Handler(endpoint.OpenAIResponsesHTTP())(recorder, httptest.NewRequest(http.MethodPost, "/openai/v1/responses", strings.NewReader(`{"stream":true}`)))
-
-	if recorder.Code != http.StatusBadGateway || !strings.Contains(recorder.Body.String(), "unsupported Content-Encoding") {
-		t.Errorf("response = %d %q, want pre-hook 502", recorder.Code, recorder.Body.String())
+func TestForwardUsageMeterRejectsUnsupportedSSEEncodingBeforeObservation(t *testing.T) {
+	tests := []struct {
+		name     string
+		endpoint endpoint.HTTPForward
+		path     string
+		body     string
+	}{
+		{
+			name: "OpenAI Responses", endpoint: endpoint.OpenAIResponsesHTTP(), path: "/openai/v1/responses",
+			body: "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-sse\",\"model\":\"reported-model\",\"status\":\"completed\",\"usage\":{\"input_tokens\":12,\"output_tokens\":6}}}\n\n",
+		},
+		{
+			name: "Anthropic Messages", endpoint: endpoint.AnthropicMessages(), path: "/anthropic/v1/messages",
+			body: "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg-sse\",\"model\":\"reported-model\",\"usage\":{\"input_tokens\":12,\"output_tokens\":6}}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+		},
 	}
-	if upstreamBody.reads != 0 || sink.count() != 0 {
-		t.Errorf("upstream reads/usage observations = %d/%d, want 0/0", upstreamBody.reads, sink.count())
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			upstreamBody := &observedReadCloser{reader: strings.NewReader(test.body)}
+			client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": {"text/event-stream"}, "Content-Encoding": {"gzip"}},
+					Body:       upstreamBody,
+					Request:    r,
+				}, nil
+			})}
+			sink := &forwardUsageSink{}
+			forwarder := newTestForwarder(readyStub("https://upstream.invalid"), client, time.Second, time.Second, time.Second, time.Second, 1<<20, 1<<20, enabledUsageRegistry(sink))
+			recorder := newDeadlineRecorder()
+
+			forwarder.Handler(test.endpoint)(recorder, httptest.NewRequest(http.MethodPost, test.path, strings.NewReader(`{"stream":true}`)))
+
+			if recorder.Code != http.StatusBadGateway || !strings.Contains(recorder.Body.String(), "unsupported Content-Encoding") {
+				t.Errorf("response = %d %q, want pre-hook 502", recorder.Code, recorder.Body.String())
+			}
+			if upstreamBody.reads != 0 || sink.count() != 0 {
+				t.Errorf("upstream reads/usage observations = %d/%d, want 0/0", upstreamBody.reads, sink.count())
+			}
+		})
 	}
 }
 

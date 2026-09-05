@@ -434,7 +434,7 @@ func CanonicalRegistry(sink usage.Sink) Registry {
 			},
 			New: func(ctx context.Context, surface endpoint.Surface, _ endpoint.Route) any {
 				if surface == endpoint.Anthropic {
-					return newAnthropicUsageMeter(ctx, sink, usage.TransportBuffered)
+					return newAnthropicUsageMeter(ctx, sink)
 				}
 				return newOpenAIUsageMeter(ctx, sink)
 			},

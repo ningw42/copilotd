@@ -1,17 +1,16 @@
 # Token usage meter — Design
 
-**Status:** accepted architecture — implementation staged
+**Status:** accepted architecture — implemented
 **Date:** 2026-07-26
 **Accepted:** 2026-09-05
 **Repository baseline:** reviewed against `91e635c` plus the #194–#195 evidence commits
 
 The state-at-rest and Shim-observer exceptions are explicitly accepted in
 [ADR-0017](../adr/0017-persist-usage-in-local-sqlite.md) and
-[ADR-0018](../adr/0018-store-per-surface-native-usage.md). This remains the full
-implementation target. Issues #197–#200 implement the settings, private SQLite
-store, **buffered OpenAI Responses plus buffered Anthropic Messages**, and OpenAI
-SSE and WebSocket observers end to end. Only Anthropic SSE remains staged; target
-language below does not advertise that hook as currently active.
+[ADR-0018](../adr/0018-store-per-surface-native-usage.md). This is the implemented
+architecture. Issues #197–#201 deliver the settings, private SQLite store,
+**buffered and SSE Anthropic Messages**, and buffered, SSE, and WebSocket OpenAI
+Responses observers end to end: all five supported Surface/transport paths.
 
 The Upstream call concentration, infallible post-commit hooks, structured logging,
 terminal request summary, Hook overrun monitoring, and shared SSE data-payload
@@ -39,11 +38,10 @@ configured local usage database (OS-specific default in §10). Both final Routes
 support buffered JSON and SSE; only OpenAI Responses supports WebSocket. The
 GitHub Copilot Surface and the Catalogs are not metered.
 
-_Current checkpoint (#200):_ qualifying buffered Anthropic Messages, buffered
-OpenAI Responses objects, self-contained OpenAI `response.completed` SSE events,
-and qualifying OpenAI WebSocket server Messages submit rows. The store carries
-the frozen two-table migration unchanged. Only the Anthropic SSE usage observer
-is not active at this checkpoint.
+_Current implementation (#201):_ qualifying buffered and SSE Anthropic Messages,
+buffered OpenAI Responses objects, self-contained OpenAI `response.completed`
+SSE events, and qualifying OpenAI WebSocket server Messages submit rows. The
+store carries the frozen two-table migration unchanged.
 
 An eligible completion contains the required usage fields, identity, and model
 reported upstream (§6). This is best-effort observation, not an exactly-once
@@ -702,9 +700,8 @@ Costs and lifecycle obligations:
 
 Both serve-only settings are available as of #197 and are declared in
 `internal/config.serveSpecs` per ADR-0012, using the existing shim-toggle
-convention. At the #200 checkpoint they activate buffered recording for both
-inference Surfaces and OpenAI SSE/WebSocket recording described in §1; the
-remaining Anthropic SSE slice reuses the same settings and store:
+convention. They activate all five recording paths described in §1 through the
+same settings and store:
 
 | Flag | Field | Default |
 | --- | --- | --- |
@@ -968,13 +965,12 @@ all four cgo-free release targets with the chosen SQLite driver (§13).
   per-Surface verbatim projection, both cache-nesting examples, schema evolution
   rule, and read-only observer admission without a new Shim subtype.
 
-### Reconciled and staged docs
+### Reconciled implementation docs
 
 `CONTEXT.md` defines Shim, Usage meter, and Turn without embedding this
-implementation plan. As of #200, README and `CONFIGURATION.md` describe the
-available opt-in database and settings, explicitly limit implemented coverage to
-buffered Anthropic Messages plus buffered, SSE, and WebSocket OpenAI Responses,
-and state durability, filesystem, buffering, retention, backup, external-query,
+implementation plan. As of #201, README and `CONFIGURATION.md` describe the
+available opt-in database and settings, all five implemented recording paths,
+and the durability, filesystem, buffering, retention, backup, external-query,
 and shutdown consequences. The existing
 `docs/divergence-ledger.md` copilotd-originated error row already covers the
 meter-activated bounded-read `BadGateway`/`GatewayTimeout` Fabrications;
@@ -1016,10 +1012,10 @@ The four pre-implementation gates are explicitly closed:
    no ambiguous-batch replay, writer-owned cleanup, bounded coordinator wait,
    and observed-through-publication final reporting (§9.1).
 
-These approvals authorized staged implementation. Issue #197 supplies the shared
-contract, production SQLite dependency and writer, both settings, and the
+These approvals authorized the staged implementation. Issue #197 supplies the
+shared contract, production SQLite dependency and writer, both settings, and the
 buffered OpenAI hook; issue #198 adds the buffered Anthropic hook without changing
 migration 1; issue #199 adds self-contained OpenAI SSE completion observation;
-and issue #200 adds the same self-contained observation to OpenAI WebSocket
-server Messages. Anthropic SSE parsing remains the later stage and must not be
-inferred from the frozen schema or final-target sections.
+issue #200 adds the same self-contained observation to OpenAI WebSocket server
+Messages; and issue #201 adds request-scoped Anthropic SSE accumulation. The
+five recording paths are now implemented without changing the frozen schema.
