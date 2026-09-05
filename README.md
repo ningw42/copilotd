@@ -93,8 +93,9 @@ By default, there is no database or required companion service. The opt-in Usage
 meter is the one narrow exception: `--shim-usage-meter-enabled` creates a private
 local SQLite main/WAL/SHM file set for best-effort Turn history
 ([ADR-0017](docs/adr/0017-persist-usage-in-local-sqlite.md)). The current
-implementation records qualifying **buffered OpenAI Responses** completions only;
-Anthropic and OpenAI SSE/WebSocket recording remain staged. With the flag off,
+implementation records qualifying **buffered Anthropic Messages and buffered
+OpenAI Responses** completions. Both Surfaces' SSE recording and OpenAI WebSocket
+recording remain staged. With the flag off,
 `serve` creates no usage files or writer and installs no metering hook. See the
 [complete meter configuration and operating contract](CONFIGURATION.md#--shim-usage-meter-enabled).
 
@@ -122,7 +123,7 @@ handlers instead fetch support data and render their own representations.
 | Impersonation and cached values | `internal/impersonation`, `internal/cache` | Runtime version discovery and memory-only cached values with embedded fallbacks |
 | Upstream call | `internal/upstream` | Authenticated upstream request construction, headers, correlation, bounded reads, failure classification |
 | Forwarding and streaming | `internal/forward`, `internal/sse`, `internal/wsforward` | Raw HTTP/WebSocket forwarding, SSE framing and terminal handling, OpenAI SSE keepalives, cancellation |
-| Inference shims | `internal/shim` | Ordered hook contract for opt-in parity transforms and read-only observers, including the Responses item-id stabilizer and buffered OpenAI Usage meter |
+| Inference shims | `internal/shim` | Ordered hook contract for opt-in parity transforms and read-only observers, including the Responses item-id stabilizer and buffered Usage meter observers for both inference Surfaces |
 | Usage persistence | `internal/usage`, `internal/usage/sqlitestore` | Standard-library usage contract plus private local SQLite writer, migrations, bounded loss reporting, and finalization |
 | Catalogs | `internal/catalog` | Provider-shaped and Codex model catalogs |
 | Observability | `internal/logging`, `internal/requestsummary`, component-owned counters | Structured logs, request correlation, terminal summaries, metric scaffolding |

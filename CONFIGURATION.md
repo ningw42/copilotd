@@ -146,10 +146,10 @@ values must be positive.
 
 Caps model-catalog response bodies and upstream response bodies processed by a
 buffered-response shim; values must be positive. Enabling the Usage meter adds a
-buffered hook to OpenAI Responses, so an over-cap qualifying or non-qualifying
-non-SSE identity-encoded response returns `502` before commitment. With no other
-buffered hook and the meter disabled, the same response remains on the
-unbuffered passthrough path.
+buffered hook to Anthropic Messages and OpenAI Responses, so an over-cap
+qualifying or non-qualifying non-SSE identity-encoded response on either Route
+returns `502` before commitment. With no other buffered hook and the meter
+disabled, the same response remains on the unbuffered passthrough path.
 
 ### `--anthropic-catalog-model-id-normalization-enabled`
 
@@ -183,12 +183,37 @@ by [`--usage-db-path`](#--usage-db-path). It is off by default: disabled `serve`
 and `login` do not open a database, create usage files, start a usage writer, or
 install a metering hook.
 
-**Implemented coverage is currently buffered OpenAI Responses only.** A row is
-submitted when a complete buffered response object has its own non-empty `id`
-and reported `model`, `status: "completed"`, and valid nonnegative integer
-`usage.input_tokens` and `usage.output_tokens`. Optional numeric reports remain
-nullable: omitted or `null` values become SQL `NULL`, while a reported zero stays
-zero. The meter also preserves these OpenAI-native fields when reported:
+**Implemented coverage is currently the two buffered inference paths:
+Anthropic Messages and OpenAI Responses.** Both Surfaces' SSE paths and the
+OpenAI Responses WebSocket path remain staged and do not install usage hooks yet.
+
+A buffered Anthropic row requires one self-contained object whose `type` is
+`"message"`, with its own non-empty `id` and reported `model`, a non-empty string
+`stop_reason`, and valid nonnegative integer `usage.input_tokens` and
+`usage.output_tokens`. Stop reasons are not enumerated: `tool_use`, `max_tokens`,
+and unfamiliar future non-empty reasons remain eligible. The meter preserves
+these Anthropic-native values without normalization:
+
+- `input_tokens`, the uncached remainder;
+- `cache_creation_input_tokens` and `cache_read_input_tokens`, which are additive
+  to that remainder;
+- `cache_creation.ephemeral_5m_input_tokens` and
+  `cache_creation.ephemeral_1h_input_tokens`, TTL subsets inside cache creation;
+- `output_tokens`, the complete output count; and
+- `output_tokens_details.thinking_tokens`, a re-tokenized subset already inside
+  output.
+
+Live Anthropic-through-Copilot compatibility remains unverified because the
+evidence account lacked Anthropic model access. This parser is grounded in the
+exact official Messages Create contract and explicitly generated fixtures; those
+fixtures are not recorded Copilot responses. Beta variable-cardinality
+`usage.iterations[]` remains excluded pending a separate schema/cardinality
+review.
+
+A buffered OpenAI row requires a self-contained response object with its own
+non-empty `id` and reported `model`, `status: "completed"`, and valid nonnegative
+integer `usage.input_tokens` and `usage.output_tokens`. The meter also preserves
+these OpenAI-native fields when reported:
 
 - `input_tokens_details.cached_tokens` and
   `input_tokens_details.cache_write_tokens`, both subsets already inside complete
@@ -197,31 +222,32 @@ zero. The meter also preserves these OpenAI-native fields when reported:
   `output_tokens`; and
 - provider-reported `total_tokens`, without recalculation.
 
-Eligibility validates JSON types, required presence, nonnegative values, and the
-signed 64-bit range; it does not add cross-field arithmetic consistency checks.
-The reported response model is stored verbatim; requested model names, Catalog
-normalization, Codex aliases, and metadata sources are never used as fallback or
-mapping inputs. The row also records local completion-observation time as
-canonical `at_ms` plus generated millisecond UTC `at_utc`, inbound `request_id`
-(empty only when unavailable), upstream response-object `response_id`,
+For both Surfaces, optional numeric reports remain nullable: omitted or `null`
+values become SQL `NULL`, while a reported zero stays zero. Eligibility validates
+JSON types, required presence, nonnegative values, and the signed 64-bit range;
+it does not add cross-field arithmetic consistency checks. Malformed, incomplete,
+error, or irrelevant bodies simply produce no row. The reported response model
+is stored verbatim; requested model names, Catalog normalization, Codex aliases,
+and metadata sources are never used as fallback or mapping inputs.
+
+Each row also records local completion-observation time as canonical `at_ms` plus
+generated millisecond UTC `at_utc`, inbound `request_id` (empty only when
+unavailable), upstream object identity as `message_id` or `response_id`,
 `transport='buffered'`, and a zero-based submission-attempt `turn_index`. It does
 not store prompts, generated content, API keys, GitHub OAuth tokens, or Copilot
 tokens.
 
-Anthropic Messages and OpenAI SSE/WebSocket recording are later milestones and
-are **not** active yet. The GitHub Copilot Surface, raw `/models`, provider/Codex
-Catalogs, and `/v1/messages/count_tokens` are not metered. There is no query API,
-CLI query subcommand, aggregation, pricing or billing reconciliation, automatic
-pruning, per-key attribution, or non-token usage projection. Query the
-`openai_turn` table with external SQLite tooling, for example:
+The GitHub Copilot Surface, raw `/models`, provider/Codex Catalogs, and
+`/v1/messages/count_tokens` are not metered. There is no query API, CLI query
+subcommand, aggregation, pricing or billing reconciliation, automatic pruning,
+per-key attribution, or non-token usage projection. Query either native table
+with external SQLite tooling, for example:
 
 ```sh
 sqlite3 "$USAGE_DB" \
-  'SELECT at_utc, model, input_tokens, output_tokens FROM openai_turn ORDER BY at_ms DESC;'
+  'SELECT at_utc, model, input_tokens, output_tokens FROM anthropic_turn ORDER BY at_ms DESC;
+   SELECT at_utc, model, input_tokens, output_tokens FROM openai_turn ORDER BY at_ms DESC;'
 ```
-
-The frozen migration also creates `anthropic_turn` for forward compatibility,
-but this milestone does not submit Anthropic rows.
 
 Enabling this setting changes non-SSE forwarding even when a body is an error or
 is not JSON: every non-SSE response with no `Content-Encoding`, or exactly one

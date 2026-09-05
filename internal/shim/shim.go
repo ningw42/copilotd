@@ -429,9 +429,13 @@ func CanonicalRegistry(sink usage.Sink) Registry {
 			Name:    "usage-meter",
 			Enabled: false,
 			Scope: func(surface endpoint.Surface, route endpoint.Route) bool {
-				return surface == endpoint.OpenAI && route == endpoint.RouteOpenAIResponses
+				return (surface == endpoint.Anthropic && route == endpoint.RouteAnthropicMessages) ||
+					(surface == endpoint.OpenAI && route == endpoint.RouteOpenAIResponses)
 			},
-			New: func(ctx context.Context, _ endpoint.Surface, _ endpoint.Route) any {
+			New: func(ctx context.Context, surface endpoint.Surface, _ endpoint.Route) any {
+				if surface == endpoint.Anthropic {
+					return newAnthropicUsageMeter(ctx, sink, usage.TransportBuffered)
+				}
 				return newOpenAIUsageMeter(ctx, sink, usage.TransportBuffered)
 			},
 		},

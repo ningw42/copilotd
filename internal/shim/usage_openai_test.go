@@ -146,7 +146,7 @@ func TestOpenAIUsageMeterDoesNotAddCrossFieldArithmeticValidation(t *testing.T) 
 	}
 }
 
-func TestCanonicalRegistryKeepsBufferedOpenAIUsageMeterLastAndDisabledWithoutSink(t *testing.T) {
+func TestCanonicalRegistryKeepsBothBufferedUsageSurfacesExactLastAndDisabledByDefault(t *testing.T) {
 	withoutSink := CanonicalRegistry(nil)
 	if len(withoutSink) != 3 || withoutSink[2].Name != "usage-meter" || withoutSink[2].Enabled {
 		t.Fatalf("CanonicalRegistry(nil) = %+v, want disabled usage-meter last", withoutSink)
@@ -157,20 +157,52 @@ func TestCanonicalRegistryKeepsBufferedOpenAIUsageMeterLastAndDisabledWithoutSin
 	if registration.Name != "usage-meter" || registration.Enabled || registration.Scope == nil {
 		t.Fatalf("usage registration = %+v", registration)
 	}
-	if !registration.Scope(endpoint.OpenAI, endpoint.RouteOpenAIResponses) ||
-		registration.Scope(endpoint.Anthropic, endpoint.RouteAnthropicMessages) ||
-		registration.Scope(endpoint.OpenAI, endpoint.RouteModels) {
-		t.Error("usage-meter scope is not buffered OpenAI Responses-only for issue #197")
+	for _, tc := range []struct {
+		name    string
+		surface endpoint.Surface
+		route   endpoint.Route
+		want    bool
+	}{
+		{name: "Anthropic Messages", surface: endpoint.Anthropic, route: endpoint.RouteAnthropicMessages, want: true},
+		{name: "OpenAI Responses", surface: endpoint.OpenAI, route: endpoint.RouteOpenAIResponses, want: true},
+		{name: "Anthropic count tokens", surface: endpoint.Anthropic, route: endpoint.RouteAnthropicCountTokens},
+		{name: "Anthropic catalog source", surface: endpoint.Anthropic, route: endpoint.RouteModels},
+		{name: "Anthropic with Responses route", surface: endpoint.Anthropic, route: endpoint.RouteOpenAIResponses},
+		{name: "OpenAI with Messages route", surface: endpoint.OpenAI, route: endpoint.RouteAnthropicMessages},
+		{name: "OpenAI catalog source", surface: endpoint.OpenAI, route: endpoint.RouteModels},
+		{name: "GitHub Copilot support", surface: endpoint.GitHubCopilot, route: endpoint.RouteModels},
+		{name: "GitHub Copilot with Responses route", surface: endpoint.GitHubCopilot, route: endpoint.RouteOpenAIResponses},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := registration.Scope(tc.surface, tc.route); got != tc.want {
+				t.Errorf("Scope(%q, %q) = %t, want %t", tc.surface, tc.route, got, tc.want)
+			}
+		})
 	}
-	instance := registration.New(context.Background(), endpoint.OpenAI, endpoint.RouteOpenAIResponses)
-	if _, ok := instance.(BufferedTransformer); !ok {
-		t.Fatalf("usage-meter instance = %T, want BufferedTransformer", instance)
+
+	instances := []any{
+		registration.New(context.Background(), endpoint.Anthropic, endpoint.RouteAnthropicMessages),
+		registration.New(context.Background(), endpoint.OpenAI, endpoint.RouteOpenAIResponses),
 	}
-	if _, ok := instance.(EventTransformer); ok {
-		t.Fatalf("usage-meter instance = %T, issue #197 must not install SSE hooks", instance)
-	}
-	if _, ok := instance.(ServerMessageTransformer); ok {
-		t.Fatalf("usage-meter instance = %T, issue #197 must not install WebSocket hooks", instance)
+	for _, instance := range instances {
+		if _, ok := instance.(BufferedTransformer); !ok {
+			t.Fatalf("usage-meter instance = %T, want BufferedTransformer", instance)
+		}
+		if _, ok := instance.(EventTransformer); ok {
+			t.Fatalf("usage-meter instance = %T, issue #198 must not install SSE hooks", instance)
+		}
+		if _, ok := instance.(ServerMessageTransformer); ok {
+			t.Fatalf("usage-meter instance = %T, issue #198 must not install WebSocket hooks", instance)
+		}
+		if _, ok := instance.(ClientMessageTransformer); ok {
+			t.Fatalf("usage-meter instance = %T, issue #198 must not install client-message hooks", instance)
+		}
+		if _, ok := instance.(StreamFinalizer); ok {
+			t.Fatalf("usage-meter instance = %T, issue #198 must not install finalizers", instance)
+		}
+		if _, ok := instance.(PreludeTransformer); ok {
+			t.Fatalf("usage-meter instance = %T, issue #198 must not install Prelude hooks", instance)
+		}
 	}
 }
 

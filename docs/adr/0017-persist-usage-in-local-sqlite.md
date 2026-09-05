@@ -104,5 +104,6 @@ store has opened.
 
 This decision accepts the trade-offs documented in the
 [Usage meter design](../design/2026-07-26-token-usage-meter-design.md). The
-private store and buffered OpenAI recording path land in #197; additional
-transport parsers remain staged without changing this persistence policy.
+private store and buffered OpenAI recording path land in #197, and buffered
+Anthropic recording lands in #198; SSE and WebSocket parsers remain staged
+without changing this persistence policy.
