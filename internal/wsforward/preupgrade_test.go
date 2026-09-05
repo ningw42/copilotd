@@ -3,6 +3,7 @@ package wsforward
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -18,6 +19,8 @@ import (
 	"github.com/ningw42/copilotd/internal/endpoint"
 	"github.com/ningw42/copilotd/internal/identity"
 	"github.com/ningw42/copilotd/internal/logging"
+	"github.com/ningw42/copilotd/internal/requestsummary"
+	"github.com/ningw42/copilotd/internal/upstream"
 )
 
 func TestProxyRejectsInvalidUpgradeBeforeCredentialOrDial(t *testing.T) {
@@ -190,6 +193,77 @@ func TestProxyReturnsGatewayTimeoutBeforeAcceptWhenUpstreamDialTimesOut(t *testi
 	const wantBody = `{"error":{"message":"the upstream request timed out","type":"api_error","code":null,"param":null}}`
 	if got := recorder.Body.String(); got != wantBody {
 		t.Errorf("body = %q, want %q", got, wantBody)
+	}
+}
+
+func TestProxyCorrelatesRejectedHandshakeWarningAndSummary(t *testing.T) {
+	const requestID = "copilotd-handshake-rejected"
+	for _, tc := range []struct {
+		name              string
+		upstreamRequestID string
+		wantCorrelation   bool
+	}{
+		{name: "different", upstreamRequestID: "upstream-handshake-rejected", wantCorrelation: true},
+		{name: "identical", upstreamRequestID: requestID},
+		{name: "absent"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			upstreamServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if tc.upstreamRequestID != "" {
+					w.Header().Set(upstream.RequestIDHeader, tc.upstreamRequestID)
+				}
+				http.Error(w, "upstream handshake rejected", http.StatusForbidden)
+			}))
+			t.Cleanup(upstreamServer.Close)
+
+			var logs bytes.Buffer
+			base, err := logging.NewWithWriter(&logs, config.ServeConfig{LogLevel: "info", LogFormat: "json"})
+			if err != nil {
+				t.Fatalf("build logger: %v", err)
+			}
+			provider := identity.NewStatic(identity.Credential{
+				BaseURL: upstreamServer.URL,
+				Token:   "copilot-token",
+			}, true)
+			proxy := New(newTestCaller(provider, logging.ForComponent(base, "internal/upstream")),
+				upstreamServer.Client(), time.Second, time.Second, 1<<20, nil,
+				logging.ForComponent(base, "internal/wsforward"), logging.ForComponent(base, "internal/shim"), 0, WsMetrics{})
+			t.Cleanup(func() { shutdownPreupgradeTestProxy(t, proxy) })
+
+			request := validUpgradeRequest()
+			ctx, summary := requestsummary.Begin(logging.WithRequestID(request.Context(), requestID), telemetryStreamObserver{})
+			recorder := httptest.NewRecorder()
+			proxy.Handler(endpoint.OpenAIResponsesWS()).ServeHTTP(recorder, request.WithContext(ctx))
+			if recorder.Code != http.StatusBadGateway {
+				t.Errorf("status = %d, want 502 before any downstream 101", recorder.Code)
+			}
+			publication := summary.Finish(requestsummary.ResponseResult{Method: request.Method, Status: recorder.Code})
+			logging.ForComponent(base, "internal/server").LogAttrs(publication.Context, publication.Level, "access", publication.Attrs...)
+
+			lines := bytes.Split(bytes.TrimSpace(logs.Bytes()), []byte("\n"))
+			if len(lines) != 2 {
+				t.Fatalf("log records = %d, want one failure warning and one summary: %s", len(lines), logs.String())
+			}
+			for i, component := range []string{"internal/upstream", "internal/server"} {
+				var record map[string]any
+				if err := json.Unmarshal(lines[i], &record); err != nil {
+					t.Fatalf("decode %s record: %v: %s", component, err, lines[i])
+				}
+				for key, want := range map[string]string{
+					"level":      "WARN",
+					"component":  component,
+					"request_id": requestID,
+				} {
+					if got := record[key]; got != want {
+						t.Errorf("%s record %s = %v, want %q", component, key, got, want)
+					}
+				}
+				gotID, present := record["upstream_request_id"]
+				if present != tc.wantCorrelation || (present && gotID != tc.upstreamRequestID) {
+					t.Errorf("%s record upstream_request_id = %v (present %t), want %q (present %t)", component, gotID, present, tc.upstreamRequestID, tc.wantCorrelation)
+				}
+			}
+		})
 	}
 }
 

@@ -203,6 +203,9 @@ func (p *Proxy) Handler(ep endpoint.WSForward) http.HandlerFunc {
 			if dialDeadlineExceeded {
 				classificationCtx = dialCtx
 			}
+			if response != nil {
+				classificationCtx = p.caller.Correlate(classificationCtx, response.Header)
+			}
 			if p.caller.Classify(classificationCtx, err).RespondTo(w, surface) {
 				p.metrics.observeAccept(AcceptDialFailed)
 			}
