@@ -82,14 +82,6 @@ func TestConfiguredShimRegistryFoldsTogglesAndLogsEnabledOrder(t *testing.T) {
 	}
 }
 
-func TestConfiguredShimRegistryRejectsTypedNilUsageSink(t *testing.T) {
-	var typedNil *discardUsageSink
-	registry := configuredShimRegistry(config.ServeConfig{ShimUsageMeterEnabled: true}, typedNil)
-	if registry[len(registry)-1].Enabled {
-		t.Fatal("typed-nil usage Sink enabled the usage-meter registration")
-	}
-}
-
 func TestLogCodexCatalogStaging(t *testing.T) {
 	tests := []struct {
 		name    string

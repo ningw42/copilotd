@@ -15,7 +15,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"reflect"
 	"strings"
 	"syscall"
 	"time"
@@ -447,9 +446,6 @@ func logCodexCatalogStaging(logger *slog.Logger, cfg config.ServeConfig) {
 }
 
 func configuredShimRegistry(cfg config.ServeConfig, sink usage.Sink) shim.Registry {
-	if !usableUsageSink(sink) {
-		sink = nil
-	}
 	registry := shim.CanonicalRegistry(sink)
 	for i := range registry {
 		switch registry[i].Name {
@@ -462,19 +458,6 @@ func configuredShimRegistry(cfg config.ServeConfig, sink usage.Sink) shim.Regist
 		}
 	}
 	return registry
-}
-
-func usableUsageSink(sink usage.Sink) bool {
-	if sink == nil {
-		return false
-	}
-	value := reflect.ValueOf(sink)
-	switch value.Kind() {
-	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
-		return !value.IsNil()
-	default:
-		return true
-	}
 }
 
 func logShimChain(logger *slog.Logger, registry shim.Registry) {

@@ -592,18 +592,8 @@ func TestRunBoundServeRetainsOpenAIWebSocketUsageWhenSessionLaterFails(t *testin
 	}
 	_ = conn.CloseNow()
 
-	if err := harness.stop(); err != nil {
-		t.Fatalf("runBoundServe after cancellation: %v", err)
-	}
-	report := harness.closeStore()
-	if report != (sqlitestore.Report{DriverCleanupCompleted: true}) {
-		t.Fatalf("usage shutdown report = %+v", report)
-	}
-	db, err := sql.Open("sqlite", harness.cfg.UsageDBPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	db, report := externalUsageDB(t, harness)
+	assertCleanUsageReport(t, report)
 	var requestID, responseID, model, transport string
 	var inputTokens, outputTokens int64
 	if err := db.QueryRow(`SELECT request_id, response_id, model, transport, input_tokens, output_tokens FROM openai_turn`).Scan(
@@ -706,18 +696,8 @@ func TestRunBoundServeRetainsOpenAIWebSocketUsageObservedBeforeDownstreamWriteFa
 	}
 	held.Release()
 
-	if err := harness.stop(); err != nil {
-		t.Fatalf("runBoundServe after downstream failure: %v", err)
-	}
-	report := harness.closeStore()
-	if report != (sqlitestore.Report{DriverCleanupCompleted: true}) {
-		t.Fatalf("usage shutdown report = %+v", report)
-	}
-	db, err := sql.Open("sqlite", harness.cfg.UsageDBPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	db, report := externalUsageDB(t, harness)
+	assertCleanUsageReport(t, report)
 	var count int
 	if err := db.QueryRow(`SELECT count(*) FROM openai_turn WHERE request_id = 'websocket-downstream-write-failure' AND response_id = 'resp-before-write-failure' AND transport = 'websocket'`).Scan(&count); err != nil {
 		t.Fatal(err)
@@ -1380,17 +1360,8 @@ func TestRunBoundServeAnthropicMalformedErrorAndPrematureStreamsProduceNoUsageRo
 			t.Errorf("premature stream body = %q, want upstream prefix plus synthesized Anthropic error", body)
 		}
 	}
-	if err := harness.stop(); err != nil {
-		t.Fatalf("runBoundServe after cancellation: %v", err)
-	}
-	if report := harness.closeStore(); report != (sqlitestore.Report{DriverCleanupCompleted: true}) {
-		t.Fatalf("clean usage shutdown report = %+v", report)
-	}
-	db, err := sql.Open("sqlite", harness.cfg.UsageDBPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	db, report := externalUsageDB(t, harness)
+	assertCleanUsageReport(t, report)
 	var rows int
 	if err := db.QueryRow("SELECT count(*) FROM anthropic_turn").Scan(&rows); err != nil {
 		t.Fatal(err)
@@ -1452,17 +1423,8 @@ func TestRunBoundServeDisconnectBeforeAnthropicStopProducesNoUsageRow(t *testing
 	case <-time.After(2 * time.Second):
 		t.Fatal("downstream disconnect did not cancel the upstream Anthropic stream")
 	}
-	if err := harness.stop(); err != nil {
-		t.Fatalf("runBoundServe after cancellation: %v", err)
-	}
-	if report := harness.closeStore(); report != (sqlitestore.Report{DriverCleanupCompleted: true}) {
-		t.Fatalf("clean usage shutdown report = %+v", report)
-	}
-	db, err := sql.Open("sqlite", harness.cfg.UsageDBPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	db, report := externalUsageDB(t, harness)
+	assertCleanUsageReport(t, report)
 	var rows int
 	if err := db.QueryRow("SELECT count(*) FROM anthropic_turn").Scan(&rows); err != nil {
 		t.Fatal(err)
@@ -1516,17 +1478,8 @@ func TestRunBoundServeRetainsAnthropicSSEUsageObservedBeforeOuterShimPanic(t *te
 	if bytes.Contains(body, []byte("event: message_stop")) || !bytes.Contains(body, []byte("shim failed")) {
 		t.Errorf("post-panic body = %q, want pre-stop frames followed by existing shim-failure terminal", body)
 	}
-	if err := harness.stop(); err != nil {
-		t.Fatalf("runBoundServe after cancellation: %v", err)
-	}
-	if report := harness.closeStore(); report != (sqlitestore.Report{DriverCleanupCompleted: true}) {
-		t.Fatalf("clean usage shutdown report = %+v", report)
-	}
-	db, err := sql.Open("sqlite", harness.cfg.UsageDBPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	db, report := externalUsageDB(t, harness)
+	assertCleanUsageReport(t, report)
 	var requestID, messageID, model, transport string
 	var inputTokens, outputTokens int64
 	if err := db.QueryRow(`SELECT request_id, message_id, model, transport, input_tokens, output_tokens FROM anthropic_turn`).Scan(
