@@ -798,11 +798,10 @@ func TestStoreFinalFlushUsesNativeTimeoutAndBoundsCoordinatorWait(t *testing.T) 
 	_, _ = locker.Exec("ROLLBACK")
 }
 
-func TestStoreCopiesOptionalValuesAndHandlesConcurrentProducersAndCloseRaces(t *testing.T) {
+func TestStoreRecordsImmutableValuesWithConcurrentProducersAndCutoff(t *testing.T) {
 	path, store := openStore(t, io.Discard)
 	optional := int64(7)
 	store.Record(usage.Turn{At: time.UnixMilli(1), ResponseID: "immutable", Model: "m", Transport: usage.TransportBuffered, Usage: usage.OpenAIUsage{InputTokens: 1, OutputTokens: 1, CachedTokens: &optional}})
-	optional = 99
 
 	var producers sync.WaitGroup
 	for worker := range 8 {
@@ -816,7 +815,7 @@ func TestStoreCopiesOptionalValuesAndHandlesConcurrentProducersAndCloseRaces(t *
 	}
 	producers.Wait()
 	store.StopAdmission()
-	// Late concurrent calls must be prompt and panic-free; none can be sent to a
+	// Calls after cutoff must be prompt and panic-free; none can be sent to a
 	// closed channel because the Store never closes its admission queue.
 	for range 20 {
 		store.Record(usage.Turn{ResponseID: "late", Model: "m", Transport: usage.TransportBuffered, Usage: usage.OpenAIUsage{InputTokens: 1, OutputTokens: 1}})
@@ -828,7 +827,7 @@ func TestStoreCopiesOptionalValuesAndHandlesConcurrentProducersAndCloseRaces(t *
 	db := openExternal(t, path)
 	var cached int64
 	if err := db.QueryRow(`SELECT cached_tokens FROM openai_turn WHERE response_id='immutable'`).Scan(&cached); err != nil || cached != 7 {
-		t.Fatalf("immutable cached_tokens = %d, %v; want snapshot 7", cached, err)
+		t.Fatalf("immutable cached_tokens = %d, %v; want submitted value 7", cached, err)
 	}
 	var count int
 	if err := db.QueryRow("SELECT count(*) FROM openai_turn").Scan(&count); err != nil || count != 401 {

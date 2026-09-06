@@ -51,8 +51,8 @@ type finalizeRequest struct {
 	ctx context.Context
 }
 
-// Store is a concurrency-safe usage Sink. Record performs only an immutable
-// snapshot copy and one non-blocking queue admission attempt.
+// Store is a concurrency-safe usage Sink. Record makes a non-blocking queue
+// admission attempt with the supplied immutable Turn.
 type Store struct {
 	logger *slog.Logger
 	conn   *sql.Conn
@@ -74,8 +74,6 @@ type Store struct {
 
 	outcomeMu                sync.Mutex
 	outcomesSealed           bool
-	writeFailureActive       bool
-	writeFailurePersistent   bool
 	consecutiveWriteFailures uint64
 	failureStateVersion      uint64
 	lastWriteError           error
@@ -89,7 +87,6 @@ type Store struct {
 
 	closeOnce        sync.Once
 	publishFinalOnce sync.Once
-	finalReportMu    sync.Mutex
 	finalReport      Report
 }
 
@@ -131,7 +128,7 @@ func openStore(path string, logger *slog.Logger, openDB func(string, string) (*s
 	return store, nil
 }
 
-// Record attempts to admit one immutable Turn snapshot. It never waits for the
+// Record attempts to admit the supplied immutable Turn. It never waits for the
 // writer, touches SQLite, or logs. A racing or post-cutoff call is counted and
 // returns promptly; the queue is never closed under producers.
 func (s *Store) Record(turn usage.Turn) {
@@ -147,7 +144,6 @@ func (s *Store) Record(turn usage.Turn) {
 		return
 	}
 
-	turn = cloneTurn(turn)
 	select {
 	case s.queue <- turn:
 	default:
@@ -176,15 +172,9 @@ func (s *Store) Close(ctx context.Context) Report {
 	}
 
 	s.publishFinalOnce.Do(func() {
-		report := s.publishFinal()
-		s.finalReportMu.Lock()
-		s.finalReport = report
-		s.finalReportMu.Unlock()
+		s.finalReport = s.publishFinal()
 	})
-	s.finalReportMu.Lock()
-	report := s.finalReport
-	s.finalReportMu.Unlock()
-	return report
+	return s.finalReport
 }
 
 func (s *Store) runWriter(interval time.Duration) {
@@ -373,33 +363,6 @@ func nullable(value *int64) any {
 	return *value
 }
 
-func cloneTurn(turn usage.Turn) usage.Turn {
-	switch native := turn.Usage.(type) {
-	case usage.AnthropicUsage:
-		native.CacheCreationInputTokens = cloneInt64(native.CacheCreationInputTokens)
-		native.CacheReadInputTokens = cloneInt64(native.CacheReadInputTokens)
-		native.Ephemeral5mInputTokens = cloneInt64(native.Ephemeral5mInputTokens)
-		native.Ephemeral1hInputTokens = cloneInt64(native.Ephemeral1hInputTokens)
-		native.ThinkingTokens = cloneInt64(native.ThinkingTokens)
-		turn.Usage = native
-	case usage.OpenAIUsage:
-		native.CachedTokens = cloneInt64(native.CachedTokens)
-		native.CacheWriteTokens = cloneInt64(native.CacheWriteTokens)
-		native.ReasoningTokens = cloneInt64(native.ReasoningTokens)
-		native.TotalTokens = cloneInt64(native.TotalTokens)
-		turn.Usage = native
-	}
-	return turn
-}
-
-func cloneInt64(value *int64) *int64 {
-	if value == nil {
-		return nil
-	}
-	cloned := *value
-	return &cloned
-}
-
 type liveFailureState struct {
 	active     bool
 	persistent bool
@@ -414,9 +377,7 @@ func (s *Store) settleCommitted(count uint64) {
 		return
 	}
 	saturatingAdd(&s.committed, count)
-	if s.writeFailureActive {
-		s.writeFailureActive = false
-		s.writeFailurePersistent = false
+	if s.consecutiveWriteFailures > 0 {
 		s.consecutiveWriteFailures = 0
 		s.lastWriteError = nil
 		s.advanceFailureStateLocked()
@@ -442,11 +403,9 @@ func (s *Store) settleFinalFailure(err error) {
 }
 
 func (s *Store) noteWriteFailureLocked(err error) {
-	s.writeFailureActive = true
 	if s.consecutiveWriteFailures != ^uint64(0) {
 		s.consecutiveWriteFailures++
 	}
-	s.writeFailurePersistent = s.consecutiveWriteFailures > 1
 	s.lastWriteError = err
 	s.advanceFailureStateLocked()
 }
@@ -461,8 +420,8 @@ func (s *Store) failureState() liveFailureState {
 	s.outcomeMu.Lock()
 	defer s.outcomeMu.Unlock()
 	return liveFailureState{
-		active:     s.writeFailureActive,
-		persistent: s.writeFailurePersistent,
+		active:     s.consecutiveWriteFailures > 0,
+		persistent: s.consecutiveWriteFailures > 1,
 		version:    s.failureStateVersion,
 		err:        s.lastWriteError,
 	}
