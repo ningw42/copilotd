@@ -164,13 +164,11 @@ func TestRunServeUsageStoreFailurePrecedesBindAndDisabledServeCreatesNothing(t *
 	}
 	t.Cleanup(func() { _ = held.Close() })
 
-	t.Run("requested unsafe store fails before bind", func(t *testing.T) {
+	t.Run("requested invalid store fails before bind", func(t *testing.T) {
 		root := t.TempDir()
-		parent := filepath.Join(root, "shared")
-		if err := os.Mkdir(parent, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Chmod(parent, 0o755); err != nil {
+		parent := filepath.Join(root, "not-a-directory")
+		sentinel := []byte("preserve this regular file")
+		if err := os.WriteFile(parent, sentinel, 0o600); err != nil {
 			t.Fatal(err)
 		}
 		dbPath := filepath.Join(parent, "usage.db")
@@ -191,8 +189,13 @@ func TestRunServeUsageStoreFailurePrecedesBindAndDisabledServeCreatesNothing(t *
 		if !strings.Contains(string(logs), "opening usage database failed") || strings.Contains(string(logs), "bind failed") {
 			t.Errorf("startup logs do not prove store failure before bind:\n%s", logs)
 		}
-		if _, err := os.Stat(dbPath); !os.IsNotExist(err) {
-			t.Errorf("unsafe store path exists: %v", err)
+		// A regular file cannot contain the database on any supported OS; do
+		// not require Unix's particular ENOTDIR error or permission semantics.
+		if _, err := os.Stat(dbPath); err == nil {
+			t.Error("invalid store path unexpectedly contains a database")
+		}
+		if got, err := os.ReadFile(parent); err != nil || !bytes.Equal(got, sentinel) {
+			t.Errorf("invalid parent changed: got %q, %v; want %q", got, err, sentinel)
 		}
 	})
 

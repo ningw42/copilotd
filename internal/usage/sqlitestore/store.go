@@ -100,6 +100,12 @@ var _ usage.Sink = (*Store)(nil)
 // and starts the writer. logger is required and must belong to
 // internal/usage/sqlitestore.
 func Open(path string, logger *slog.Logger) (*Store, error) {
+	return openStore(path, logger, sql.Open)
+}
+
+// openStore keeps database construction per-call so tests can coordinate real
+// driver locks without changing process-global driver registrations or hooks.
+func openStore(path string, logger *slog.Logger, openDB func(string, string) (*sql.DB, error)) (*Store, error) {
 	literalPath, err := filepath.Abs(path)
 	if err != nil {
 		return nil, fmt.Errorf("resolve usage database path %q: %w", path, err)
@@ -107,7 +113,7 @@ func Open(path string, logger *slog.Logger) (*Store, error) {
 	if err := preparePrivateDatabase(literalPath); err != nil {
 		return nil, err
 	}
-	db, conn, err := admit(literalPath)
+	db, conn, err := admit(literalPath, openDB)
 	if err != nil {
 		return nil, err
 	}
@@ -644,14 +650,14 @@ func (s *Store) publishFinal() Report {
 	return report
 }
 
-func admit(path string) (*sql.DB, *sql.Conn, error) {
+func admit(path string, openDB func(string, string) (*sql.DB, error)) (*sql.DB, *sql.Conn, error) {
 	deadline := time.Now().Add(startupBudget)
 	var lastBusy error
 	for {
 		if time.Until(deadline) <= 0 {
 			return nil, nil, startupBudgetError(lastBusy)
 		}
-		db, conn, acquired, err := attemptAdmission(path, deadline)
+		db, conn, acquired, err := attemptAdmission(path, deadline, openDB)
 		if err == nil {
 			return db, conn, nil
 		}
@@ -685,12 +691,12 @@ func startupBudgetError(cause error) error {
 	return fmt.Errorf("usage database startup contention budget exhausted after %s: %w", startupBudget, errors.Join(context.DeadlineExceeded, cause))
 }
 
-func attemptAdmission(path string, deadline time.Time) (*sql.DB, *sql.Conn, bool, error) {
+func attemptAdmission(path string, deadline time.Time, openDB func(string, string) (*sql.DB, error)) (*sql.DB, *sql.Conn, bool, error) {
 	remaining := time.Until(deadline)
 	if remaining <= 0 {
 		return nil, nil, false, context.DeadlineExceeded
 	}
-	db, err := sql.Open("sqlite", sqliteDSN(path, remaining))
+	db, err := openDB("sqlite", sqliteDSN(path, remaining))
 	if err != nil {
 		return nil, nil, false, fmt.Errorf("open usage database %q: %w", path, err)
 	}
