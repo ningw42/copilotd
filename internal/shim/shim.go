@@ -1,9 +1,11 @@
-// Package shim defines copilotd's composable parity-extension contract.
+// Package shim defines copilotd's composable inference-extension contract.
 //
-// Shims may alter, drop, hold, or coalesce information derived from a request or
-// upstream response, but must not fabricate information without an upstream
-// basis. A hook must not access Copilot or drive an upstream retry. Both rules
-// are policy invariants enforced by review rather than by the type system.
+// A Shim may close a parity gap by transforming inference data or observe it
+// read-only by returning every input unchanged. Shims may alter, drop, hold, or
+// coalesce information derived from a request or upstream response, but must not
+// fabricate information without an upstream basis. A hook must not access
+// Copilot or drive an upstream retry. These rules are policy invariants enforced
+// by review rather than by the type system.
 //
 // SSE stream hooks run synchronously in the SSE pump and therefore must be
 // prompt and non-blocking: CPU-bound transformation only, with no I/O or
@@ -41,6 +43,7 @@ import (
 	"github.com/ningw42/copilotd/internal/endpoint"
 	"github.com/ningw42/copilotd/internal/requestsummary"
 	"github.com/ningw42/copilotd/internal/sse"
+	"github.com/ningw42/copilotd/internal/usage"
 )
 
 // Request carries the mutable inbound payload. Query is deliberately private:
@@ -402,8 +405,9 @@ func (a *sseAdapter) transformFrames(ctx context.Context, shimName string, trans
 type NopShim struct{}
 
 // CanonicalRegistry returns a fresh copy of the canonical registration order.
-func CanonicalRegistry() Registry {
-	return Registry{
+// A nil sink leaves the Usage meter registration disabled.
+func CanonicalRegistry(sink usage.Sink) Registry {
+	registry := Registry{
 		{
 			Name:    "nop",
 			Enabled: false,
@@ -421,5 +425,23 @@ func CanonicalRegistry() Registry {
 				return newResponsesItemIDStabilizer()
 			},
 		},
+		{
+			Name:    "usage-meter",
+			Enabled: false,
+			Scope: func(surface endpoint.Surface, route endpoint.Route) bool {
+				return (surface == endpoint.Anthropic && route == endpoint.RouteAnthropicMessages) ||
+					(surface == endpoint.OpenAI && route == endpoint.RouteOpenAIResponses)
+			},
+			New: func(ctx context.Context, surface endpoint.Surface, _ endpoint.Route) any {
+				if surface == endpoint.Anthropic {
+					return newAnthropicUsageMeter(ctx, sink)
+				}
+				return newOpenAIUsageMeter(ctx, sink)
+			},
+		},
 	}
+	if sink == nil {
+		registry[len(registry)-1].Enabled = false
+	}
+	return registry
 }

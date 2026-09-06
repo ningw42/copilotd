@@ -1,0 +1,17 @@
+{
+  "id": "resp_redacted_synthetic_null_details",
+  "model": "gpt-synthetic",
+  "status": "completed",
+  "usage": {
+    "input_tokens": 12,
+    "input_tokens_details": {
+      "cache_write_tokens": null,
+      "cached_tokens": null
+    },
+    "output_tokens": 0,
+    "output_tokens_details": {
+      "reasoning_tokens": null
+    },
+    "total_tokens": null
+  }
+}

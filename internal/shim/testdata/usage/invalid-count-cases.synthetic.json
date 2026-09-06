@@ -1,0 +1,70 @@
+{
+  "fixture_kind": "synthetic contract variants",
+  "provider_behavior": "not asserted",
+  "expected": "every candidate is ineligible and its wire payload remains unchanged",
+  "cases": [
+    {
+      "name": "anthropic required count has string type",
+      "surface": "anthropic",
+      "payload": {
+        "id": "msg_redacted_synthetic_wrong_type",
+        "type": "message",
+        "model": "claude-synthetic",
+        "stop_reason": "end_turn",
+        "usage": {"input_tokens": "12", "output_tokens": 1}
+      }
+    },
+    {
+      "name": "anthropic optional count is negative",
+      "surface": "anthropic",
+      "payload": {
+        "id": "msg_redacted_synthetic_negative",
+        "type": "message",
+        "model": "claude-synthetic",
+        "stop_reason": "end_turn",
+        "usage": {"input_tokens": 12, "output_tokens": 1, "cache_read_input_tokens": -1}
+      }
+    },
+    {
+      "name": "anthropic required count exceeds int64",
+      "surface": "anthropic",
+      "payload": {
+        "id": "msg_redacted_synthetic_overflow",
+        "type": "message",
+        "model": "claude-synthetic",
+        "stop_reason": "end_turn",
+        "usage": {"input_tokens": 9223372036854775808, "output_tokens": 1}
+      }
+    },
+    {
+      "name": "openai required count has string type",
+      "surface": "openai",
+      "payload": {
+        "id": "resp_redacted_synthetic_wrong_type",
+        "model": "gpt-synthetic",
+        "status": "completed",
+        "usage": {"input_tokens": 12, "output_tokens": "1"}
+      }
+    },
+    {
+      "name": "openai optional subset is negative",
+      "surface": "openai",
+      "payload": {
+        "id": "resp_redacted_synthetic_negative",
+        "model": "gpt-synthetic",
+        "status": "completed",
+        "usage": {"input_tokens": 12, "input_tokens_details": {"cache_write_tokens": -1}, "output_tokens": 1}
+      }
+    },
+    {
+      "name": "openai optional total exceeds int64",
+      "surface": "openai",
+      "payload": {
+        "id": "resp_redacted_synthetic_overflow",
+        "model": "gpt-synthetic",
+        "status": "completed",
+        "usage": {"input_tokens": 12, "output_tokens": 1, "total_tokens": 9223372036854775808}
+      }
+    }
+  ]
+}

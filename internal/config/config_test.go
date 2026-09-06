@@ -60,6 +60,7 @@ func defaultConfig() ServeConfig {
 		ResponseHeaderTimeout:        600 * time.Second,
 		WebSocketHandshakeTimeout:    10 * time.Second,
 		ShimHookOverrunThreshold:     time.Second,
+		UsageDBPath:                  expectedDefaultUsageDBPath(),
 		MaxRequestBytes:              33554432,
 		MaxBufferedResponseBytes:     33554432,
 		CodexCatalogRefreshInterval:  24 * time.Hour,
@@ -1458,6 +1459,57 @@ func TestLoadOAuthTokenFile(t *testing.T) {
 	}
 }
 
+func TestUsageMeterConfigPrecedenceDefaultsAndPathIndependence(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "copilotd.toml")
+	if err := os.WriteFile(path, []byte("shim-usage-meter-enabled = true\nusage-db-path = \"file/usage.db\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name        string
+		args        []string
+		env         map[string]string
+		wantEnabled bool
+		wantPath    string
+	}{
+		{name: "defaults", wantPath: expectedDefaultUsageDBPath()},
+		{name: "TOML", args: []string{"--config", path}, wantEnabled: true, wantPath: "file/usage.db"},
+		{name: "environment over TOML", args: []string{"--config", path}, env: map[string]string{"COPILOTD_SHIM_USAGE_METER_ENABLED": "false", "COPILOTD_USAGE_DB_PATH": "env/usage.db"}, wantPath: "env/usage.db"},
+		{name: "flags over environment", args: []string{"--config", path, "--shim-usage-meter-enabled=true", "--usage-db-path", "flag/usage.db"}, env: map[string]string{"COPILOTD_SHIM_USAGE_METER_ENABLED": "false", "COPILOTD_USAGE_DB_PATH": "env/usage.db"}, wantEnabled: true, wantPath: "flag/usage.db"},
+		{name: "OAuth override does not move usage", args: []string{"--github-oauth-token-file", "/different/github-token"}, wantPath: expectedDefaultUsageDBPath()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := map[string]string{"COPILOTD_APIKEY": testAPIKey}
+			for key, value := range tc.env {
+				env[key] = value
+			}
+			got, err := loadServe(tc.args, envFunc(env))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.ShimUsageMeterEnabled != tc.wantEnabled || got.UsageDBPath != tc.wantPath {
+				t.Errorf("usage settings = %t/%q, want %t/%q", got.ShimUsageMeterEnabled, got.UsageDBPath, tc.wantEnabled, tc.wantPath)
+			}
+		})
+	}
+}
+
+func TestUsageDBPathValidationHasNoFilesystemEffects(t *testing.T) {
+	for _, raw := range []string{"", "   ", "bad\x00path", string(filepath.Separator)} {
+		_, err := loadServe([]string{"--apikey", testAPIKey, "--usage-db-path", raw}, noEnv())
+		if err == nil || !strings.Contains(err.Error(), "usage-db-path") {
+			t.Errorf("path %q error = %v, want syntactic rejection", raw, err)
+		}
+	}
+	path := filepath.Join(t.TempDir(), "does-not-exist", "usage.db")
+	cfg, err := loadServe([]string{"--apikey", testAPIKey, "--shim-usage-meter-enabled=true", "--usage-db-path", path}, noEnv())
+	if err != nil || cfg.UsageDBPath != path {
+		t.Fatalf("valid unresolved path = %+v, %v", cfg, err)
+	}
+	if _, err := os.Stat(filepath.Dir(path)); !os.IsNotExist(err) {
+		t.Errorf("configuration resolution touched usage parent: %v", err)
+	}
+}
+
 func TestLoadValidationErrors(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -1515,6 +1567,8 @@ func TestConfigLogValueEmitsOnlyNonSecretFields(t *testing.T) {
 		AnthropicCatalogModelIDNormalizationEnabled: true,
 		ShimNopEnabled:                       true,
 		ShimResponsesItemIDStabilizerEnabled: true,
+		ShimUsageMeterEnabled:                true,
+		UsageDBPath:                          "/home/op/.config/copilotd/usage.db",
 		ShimHookOverrunThreshold:             750 * time.Millisecond,
 		GithubOAuthToken:                     "gho-super-secret-oauth-value",
 		CodexCatalogEnabled:                  true,
@@ -1559,6 +1613,8 @@ func TestConfigLogValueEmitsOnlyNonSecretFields(t *testing.T) {
 		"config.anthropic-catalog-model-id-normalization-enabled=true",
 		"config.shim-nop-enabled=true",
 		"config.shim-responses-item-id-stabilizer-enabled=true",
+		"config.shim-usage-meter-enabled=true",
+		"config.usage-db-path=/home/op/.config/copilotd/usage.db",
 		"config.shim-hook-overrun-threshold=750ms",
 		"config.startup-mint-retries=3",
 		"config.vscode-version=1.2.3",
@@ -1617,6 +1673,8 @@ func TestConfigLogValueEmitsOnlyNonSecretFields(t *testing.T) {
 		"anthropic-catalog-model-id-normalization-enabled",
 		"shim-nop-enabled",
 		"shim-responses-item-id-stabilizer-enabled",
+		"shim-usage-meter-enabled",
+		"usage-db-path",
 		"shim-hook-overrun-threshold",
 		"codex-catalog-enabled",
 		"codex-catalog-model-aliases",
@@ -1775,6 +1833,28 @@ func loadLogin(args []string, lookupEnv func(string) (string, bool)) (LoginConfi
 		return LoginConfig{}, fmt.Errorf("parse flags: %w", err)
 	}
 	return lf.Resolve(lookupEnv)
+}
+
+func TestLoginDoesNotExposeUsageMeterSettings(t *testing.T) {
+	for _, args := range [][]string{{"--shim-usage-meter-enabled=true"}, {"--usage-db-path", "usage.db"}} {
+		if _, err := loadLogin(args, noEnv()); err == nil {
+			t.Errorf("login accepted serve-only usage setting %q", args)
+		}
+	}
+	path := filepath.Join(t.TempDir(), "copilotd.toml")
+	if err := os.WriteFile(path, []byte("shim-usage-meter-enabled = true\nusage-db-path = \"ignored/usage.db\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := loadLogin([]string{"--config", path}, envFunc(map[string]string{
+		"COPILOTD_SHIM_USAGE_METER_ENABLED": "true",
+		"COPILOTD_USAGE_DB_PATH":            "ignored/env.db",
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != (LoginConfig{LogLevel: "info", LogFormat: "text", GithubOAuthTokenFile: defaultOAuthTokenFile(), GithubClientID: defaultGithubClientID, GithubScope: defaultGithubScope}) {
+		t.Errorf("login config changed by usage settings: %+v", got)
+	}
 }
 
 func TestLoadLoginDefaults(t *testing.T) {

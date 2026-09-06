@@ -149,10 +149,11 @@ sanctioned term for a **cached value**'s re-fetch cadence, e.g.
 `--impersonation-refresh-interval`.)
 
 **Shim**:
-A composable middleware layer that closes one specific parity gap. A shim spans
-transports through one registry: it may hook the inbound request, the response
-Prelude, the buffered body, the SSE stream, and — opt-in and bidirectional —
-individual WebSocket **Messages** in each direction. The
+A composable inference layer that either closes one specific parity gap or
+observes forwarded inference data without changing it. A shim spans transports
+through one registry: it may hook the inbound request, the response Prelude, the
+buffered body, the SSE stream, and — opt-in and bidirectional — individual
+WebSocket **Messages** in each direction. The
 post-commit stream and message hooks are infallible; the WebSocket hooks hold nothing
 and never split, so one message maps to at most one message, or is dropped.
 _Avoid_: middleware as the *name* of the mechanism — call it a shim (nested via the
@@ -164,6 +165,16 @@ The ordered registry entry that names and constructs a Shim. A shipped
 registration's non-empty, unique name is its stable operator-facing identity;
 the per-request or per-session object it constructs is a shim instance.
 _Avoid_: using shim instance for the registry entry
+
+**Usage meter**:
+The opt-in read-only Shim that records Surface-native token counts from observed
+successful inference completions.
+_Avoid_: billing meter, usage tracker
+
+**Turn**:
+One qualifying successful inference completion observed by the Usage meter; one
+WebSocket session can contain multiple Turns.
+_Avoid_: request, session
 
 **Decline by passthrough**:
 The required outcome when a post-commit shim cannot confidently interpret an SSE

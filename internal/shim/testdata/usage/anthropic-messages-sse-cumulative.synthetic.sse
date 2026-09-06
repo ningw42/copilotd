@@ -1,0 +1,13 @@
+event: message_start
+data: {"type":"message_start","message":{"id":"msg_redacted_synthetic_cumulative","type":"message","model":"claude-synthetic","stop_reason":null,"usage":{"input_tokens":12,"cache_creation_input_tokens":2000,"cache_read_input_tokens":6000,"cache_creation":{"ephemeral_5m_input_tokens":750,"ephemeral_1h_input_tokens":1250},"output_tokens":0,"output_tokens_details":{"thinking_tokens":0}}}}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":null},"usage":{"input_tokens":null,"cache_creation_input_tokens":null,"output_tokens":5}}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"future_stop_reason"},"usage":{"output_tokens":9,"output_tokens_details":{"thinking_tokens":4}}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+: end of synthetic contract stream
