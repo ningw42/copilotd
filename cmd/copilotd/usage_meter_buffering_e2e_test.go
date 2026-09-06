@@ -76,6 +76,9 @@ func doUsagePOST(t *testing.T, ctx context.Context, baseURL, target, requestID, 
 
 func externalUsageDB(t *testing.T, harness *usageMeterServeHarness) (*sql.DB, sqlitestore.Report) {
 	t.Helper()
+	if !harness.cfg.ShimUsageMeterEnabled {
+		t.Fatal("externalUsageDB requires an enabled meter; assert file absence without opening SQLite when disabled")
+	}
 	if err := harness.stop(); err != nil {
 		t.Fatalf("runBoundServe after cancellation: %v", err)
 	}
@@ -242,10 +245,14 @@ func TestRunBoundServeUsageMeterAloneActivatesBoundedRead(t *testing.T) {
 					t.Errorf("meter on response = %d %q, want precommit 502", resp.StatusCode, body)
 				}
 
-				db, report := externalUsageDB(t, harness)
-				assertCleanUsageReport(t, report)
-				if got := queryUsageCount(t, db, surface.table, ""); got != 0 {
-					t.Errorf("over-cap rows = %d, want none", got)
+				if !enabled {
+					assertDisabledUsageStore(t, harness)
+				} else {
+					db, report := externalUsageDB(t, harness)
+					assertCleanUsageReport(t, report)
+					if got := queryUsageCount(t, db, surface.table, ""); got != 0 {
+						t.Errorf("over-cap rows = %d, want none", got)
+					}
 				}
 			})
 		}
@@ -469,17 +476,17 @@ func TestRunBoundServeUsageMeterDelaysCommitAndRecomputesChunkedLength(t *testin
 				if got.resp.StatusCode != http.StatusCreated || !bytes.Equal(got.body, []byte(completion)) {
 					t.Errorf("downstream response = status %d length %d, want unchanged %d-byte chunked upstream body", got.resp.StatusCode, len(got.body), len(completion))
 				}
+				if !meterEnabled {
+					assertDisabledUsageStore(t, harness)
+					return
+				}
 				db, report := externalUsageDB(t, harness)
 				assertCleanUsageReport(t, report)
-				wantRows := 0
-				if meterEnabled {
-					wantRows = 1
-					if got.resp.ContentLength != int64(len(completion)) || got.resp.Header.Get("Content-Length") != strconv.Itoa(len(completion)) || len(got.resp.TransferEncoding) != 0 {
-						t.Errorf("downstream length = parsed:%d header:%q transfer:%v, want recomputed %d", got.resp.ContentLength, got.resp.Header.Get("Content-Length"), got.resp.TransferEncoding, len(completion))
-					}
+				if got.resp.ContentLength != int64(len(completion)) || got.resp.Header.Get("Content-Length") != strconv.Itoa(len(completion)) || len(got.resp.TransferEncoding) != 0 {
+					t.Errorf("downstream length = parsed:%d header:%q transfer:%v, want recomputed %d", got.resp.ContentLength, got.resp.Header.Get("Content-Length"), got.resp.TransferEncoding, len(completion))
 				}
-				if got := queryUsageCount(t, db, surface.table, "request_id = ?", requestID); got != wantRows {
-					t.Errorf("persisted rows = %d, want %d", got, wantRows)
+				if got := queryUsageCount(t, db, surface.table, "request_id = ?", requestID); got != 1 {
+					t.Errorf("persisted rows = %d, want 1", got)
 				}
 			})
 		}

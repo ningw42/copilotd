@@ -443,14 +443,13 @@ func TestStoreMigrationFailureRollsBackPendingDDLAndVersion(t *testing.T) {
 	}
 }
 
-func TestStoreFlushesIndependentlyOnTimerBatchFillAndShutdown(t *testing.T) {
+func TestStoreFlushesOnTimerAndShutdown(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		count int
 		wait  bool
 	}{
 		{name: "timer", count: 1, wait: true},
-		{name: "batch fill", count: 128, wait: true},
 		{name: "shutdown", count: 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

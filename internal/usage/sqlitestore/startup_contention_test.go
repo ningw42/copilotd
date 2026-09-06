@@ -53,7 +53,7 @@ func TestStoreStartupSharesBudgetAcrossSequentialWALAndBeginContention(t *testin
 		return sql.OpenDB(startupContentionConnector{Connector: connector, contention: contention}), nil
 	}
 	started := time.Now()
-	store, err := openStore(path, slog.New(slog.NewTextHandler(io.Discard, nil)), openDB)
+	store, err := openStore(path, slog.New(slog.NewTextHandler(io.Discard, nil)), openDB, flushInterval)
 	elapsed := time.Since(started)
 	if store != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)

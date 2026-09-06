@@ -100,12 +100,13 @@ var _ usage.Sink = (*Store)(nil)
 // and starts the writer. logger is required and must belong to
 // internal/usage/sqlitestore.
 func Open(path string, logger *slog.Logger) (*Store, error) {
-	return openStore(path, logger, sql.Open)
+	return openStore(path, logger, sql.Open, flushInterval)
 }
 
-// openStore keeps database construction per-call so tests can coordinate real
-// driver locks without changing process-global driver registrations or hooks.
-func openStore(path string, logger *slog.Logger, openDB func(string, string) (*sql.DB, error)) (*Store, error) {
+// openStore keeps database construction and the flush interval per-call so tests
+// can control real driver contention and distinguish fill from timer flushing
+// without process-global hooks or public tuning knobs.
+func openStore(path string, logger *slog.Logger, openDB func(string, string) (*sql.DB, error), interval time.Duration) (*Store, error) {
 	literalPath, err := filepath.Abs(path)
 	if err != nil {
 		return nil, fmt.Errorf("resolve usage database path %q: %w", path, err)
@@ -126,7 +127,7 @@ func openStore(path string, logger *slog.Logger, openDB func(string, string) (*s
 		cleanupDone: make(chan struct{}),
 	}
 	store.admitting.Store(true)
-	go store.runWriter()
+	go store.runWriter(interval)
 	return store, nil
 }
 
@@ -186,11 +187,11 @@ func (s *Store) Close(ctx context.Context) Report {
 	return report
 }
 
-func (s *Store) runWriter() {
-	timer := time.NewTimer(flushInterval)
+func (s *Store) runWriter(interval time.Duration) {
+	timer := time.NewTimer(interval)
 	defer timer.Stop()
 	batch := make([]usage.Turn, 0, batchCapacity)
-	nextLossReport := time.Now().Add(flushInterval)
+	nextLossReport := time.Now().Add(interval)
 
 	for {
 		select {
@@ -205,7 +206,7 @@ func (s *Store) runWriter() {
 			batch = batch[:0]
 			if !time.Now().Before(nextLossReport) {
 				s.publishRuntimeLosses()
-				nextLossReport = time.Now().Add(flushInterval)
+				nextLossReport = time.Now().Add(interval)
 			}
 			continue
 		}
@@ -222,8 +223,8 @@ func (s *Store) runWriter() {
 				batch = batch[:0]
 			}
 			s.publishRuntimeLosses()
-			nextLossReport = time.Now().Add(flushInterval)
-			timer.Reset(flushInterval)
+			nextLossReport = time.Now().Add(interval)
+			timer.Reset(interval)
 		}
 	}
 }

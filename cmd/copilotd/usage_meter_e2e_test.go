@@ -71,9 +71,15 @@ func startUsageMeterServeHarness(t *testing.T, upstreamURL string, base *slog.Lo
 	if configure != nil {
 		configure(&cfg)
 	}
-	store, err := sqlitestore.Open(cfg.UsageDBPath, logging.ForComponent(base, "internal/usage/sqlitestore"))
-	if err != nil {
-		t.Fatalf("open usage store: %v", err)
+	var store *sqlitestore.Store
+	var sink usage.Sink
+	if cfg.ShimUsageMeterEnabled {
+		var err error
+		store, err = sqlitestore.Open(cfg.UsageDBPath, logging.ForComponent(base, "internal/usage/sqlitestore"))
+		if err != nil {
+			t.Fatalf("open usage store: %v", err)
+		}
+		sink = store
 	}
 	harness := &usageMeterServeHarness{cfg: cfg, store: store}
 	t.Cleanup(func() { _ = harness.closeStore() })
@@ -85,7 +91,7 @@ func startUsageMeterServeHarness(t *testing.T, upstreamURL string, base *slog.Lo
 	if err != nil {
 		t.Fatalf("build serve provider: %v", err)
 	}
-	registry := configuredShimRegistry(cfg, store)
+	registry := configuredShimRegistry(cfg, sink)
 	if decorate != nil {
 		registry = decorate(registry)
 	}
