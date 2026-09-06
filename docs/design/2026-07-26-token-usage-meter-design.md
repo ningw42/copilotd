@@ -984,16 +984,24 @@ observation itself adds no usage-rewriting Alteration (§4.2).
 ### Dependency
 
 ADR-0017 selects `modernc.org/sqlite v1.58.0`, embedding SQLite 3.53.4 with the
-required matching `modernc.org/libc v1.75.6`. The retained feasibility module
-builds a reachable driver path with `CGO_ENABLED=0` for `linux/amd64`,
-`windows/amd64`, `windows/arm64`, and `darwin/arm64`; only Linux has runtime,
-filesystem, contention, and race evidence. Windows/Darwin runtime behavior and
-Windows ACLs remain accepted limitations, not certification. Issue #197 pins the
-dependency in root `go.mod`/`go.sum` and updates the Nix vendor hash. Its
-completion gate builds the actual feature-bearing `copilotd` binary—not only the
-disposable probe—with `CGO_ENABLED=0` for all four
-current release targets, and `flake.nix`'s `vendorHash` must match the root module
-dependency graph. The preceding #196 architecture checkpoint added neither
+required matching `modernc.org/libc v1.75.6`. The retained
+[feasibility findings](../research/sqlite-feasibility/FINDINGS.md) record the
+2026-09-05 probe's reachable driver path building with `CGO_ENABLED=0` for
+`linux/amd64`, `windows/amd64`, `windows/arm64`, and `darwin/arm64`. The disposable
+nested module has since been removed: its distinct driver, admitted-connection,
+and process checks now run against the root-selected driver and real store in
+`internal/usage/sqlitestore`, alongside production sequential-startup contention
+and lifecycle regressions. The findings provide current root-test and actual
+feature-binary build recipes, not commands for the deleted prototype.
+
+Only Linux has runtime, filesystem, contention, and race evidence.
+Windows/Darwin runtime behavior and Windows ACLs remain accepted limitations,
+not certification. Issue #197 pins the production dependency in root
+`go.mod`/`go.sum` and updates the Nix vendor hash; removing the research module
+removes neither those dependencies nor any release target. The completion gate
+builds the actual feature-bearing `copilotd` binary with `CGO_ENABLED=0` for all
+four current release targets, and `flake.nix`'s `vendorHash` must match the root
+module graph. The preceding #196 architecture checkpoint added neither
 production code nor a root dependency; #197 does.
 
 ---

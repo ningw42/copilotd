@@ -1,53 +1,46 @@
 # SQLite driver and lifecycle feasibility
 
 **Issue:** #195
-**Evidence date:** 2026-09-05
-**Repository baseline:** `91e635c965dd846e73e9c78ad68d0defaacb8280`
-**Feature starting tip:** `09a9bb7af98634be1896964b4ae25973d53db199`
+**Historical evidence date:** 2026-09-05
+**Historical repository baseline:** `91e635c965dd846e73e9c78ad68d0defaacb8280`
+**Historical feature starting tip:** `09a9bb7af98634be1896964b4ae25973d53db199`
+**Root-test migration:** PR #202 follow-up, 2026-09-06
 
-## Verdict
+## Verdict and evidence boundary
 
-`modernc.org/sqlite v1.58.0` is a feasible candidate for the current cgo-free
-release matrix. A command that opens and uses the real driver cross-compiles with
-`CGO_ENABLED=0` for all four required targets:
+The 2026-09-05 experiments found `modernc.org/sqlite v1.58.0` feasible for the
+cgo-free release matrix. A command with a reachable real-driver open, migration,
+insert, and query path built with `CGO_ENABLED=0` for `linux/amd64`,
+`windows/amd64`, `windows/arm64`, and `darwin/arm64`. Linux filesystem, WAL,
+contention, migration, reader/writer, cancellation, and race probes passed. The
+recorded timings and artifact results below are **historical probe results**, not
+measurements of the current production binary.
 
-- `linux/amd64`
-- `windows/amd64`
-- `windows/arm64`
-- `darwin/arm64`
+These experiments did not themselves grant production persistence approval.
+Maintainer Ning Wang's [2026-09-06 current approval](../../design/2026-07-26-token-usage-meter-design.md#maintainer-approval-2026-09-06)
+accepts [ADR-0017](../../adr/0017-persist-usage-in-local-sqlite.md) and its evidence
+limits; historical pre-implementation approval remains unverified. Windows and
+Darwin have compile/link evidence, not runtime certification. Windows ACL
+behavior remains unverified.
 
-The Linux artifact also passes the real-driver filesystem, WAL, contention,
-migration, reader/writer, cancellation, and race probes described below. No
-build or Linux-runtime design blocker was found.
+The disposable nested Go module has been removed. Its distinct checks now live
+beside the real store in the **root module**, using the root-selected driver;
+there is no second admission implementation, migration engine, driver pin, or
+research executable to maintain. Root `go.mod`, `go.sum`, and the Nix vendor hash
+remain production dependencies. This document stays at its original URL for the
+ADR evidence link.
 
-These probes are feasibility evidence and did not themselves grant production
-persistence approval. Maintainer Ning Wang's [2026-09-06 current approval](../../design/2026-07-26-token-usage-meter-design.md#maintainer-approval-2026-09-06)
-accepts the decision in [ADR-0017](../../adr/0017-persist-usage-in-local-sqlite.md)
-and its evidence limits; historical pre-implementation approval remains
-unverified. Windows and Darwin have compile/link evidence, not runtime
-certification, and Windows ACL behavior is unverified. Nothing in this nested
-module is imported by the root module or a production package.
-
-## Disposable evidence boundary
-
-All code is isolated in the nested module
-`docs/research/sqlite-feasibility`. Its `go.mod` pins the candidate without
-changing the repository root's `go.mod`, `go.sum`, or `flake.nix` vendor hash.
-The retained programs are probes, not a usage writer:
-
-- `cmd/driverprobe` opens, migrates, writes, and reads a database under a newly
-  created temporary directory, then removes the directory.
-- `cmd/artifactcheck` uses standard-library executable readers to report object
-  format, architecture, and imported libraries.
-- Tests use `t.TempDir` and paths named `usage.db` only inside those disposable
-  directories. The subprocess test passes only such a path to its helpers.
-
-The probes have no option for an operator database. No database, sidecar, build
-binary, or raw command log is retained in the repository.
+The original module was introduced in
+[`3d52c6f44951f54df44d956a1f852da80e3f40ae`](https://github.com/ningw42/copilotd/tree/3d52c6f44951f54df44d956a1f852da80e3f40ae/docs/research/sqlite-feasibility)
+and reviewed at `1719f5cb9f8631db4aea44ed37792b2d22dc7d8f`. Those snapshots are
+supplementary historical source, **not the only executable reproduction**: use
+the maintained root checks below. All runtime reproducers use temporary files;
+no operator database, sidecar, binary, or raw command log is checked in.
 
 ## Candidate and primary sources
 
-Chosen versions:
+Exact candidate identity used in the historical experiments and selected in the
+root dependency graph at this migration:
 
 | Item | Version/evidence |
 | --- | --- |
@@ -64,422 +57,301 @@ Primary driver sources at the selected tag:
   describes the package as a cgo-free `database/sql` driver and lists all four
   copilotd targets as supported with SQLite 3.53.4.
 - [`go.mod`](https://gitlab.com/cznic/sqlite/-/blob/v1.58.0/go.mod)
-  requires Go 1.25 and pins `modernc.org/libc v1.75.6`; its warning says a
-  downstream must use the exact matching libc version. The nested module's
-  resolved graph does so.
+  requires Go 1.25 and pins `modernc.org/libc v1.75.6`; its warning requires the
+  exact matching libc version downstream. The historical probe and current root
+  graph both use it.
 - [`CHANGELOG.md`](https://gitlab.com/cznic/sqlite/-/blob/v1.58.0/CHANGELOG.md)
-  identifies v1.58.0 as the SQLite 3.53.4 update. It also records that
-  `darwin/arm64`, `windows/amd64`, and `windows/arm64` are supported and that
-  the driver has been fully cgo-free since v1.5.0.
+  identifies v1.58.0 as the SQLite 3.53.4 update, records support for
+  `darwin/arm64`, `windows/amd64`, and `windows/arm64`, and states that the driver
+  has been fully cgo-free since v1.5.0.
 - [`builder.json`](https://gitlab.com/cznic/sqlite/-/blob/v1.58.0/builder.json)
-  includes the four target pairs in the upstream test matrix.
+  includes all four target pairs in the upstream test matrix.
 
 `nix develop -c go mod download -json modernc.org/sqlite@v1.58.0` produced the
-source identity and checksums above. The selected release is not among the
+source identity and checksum above. The selected release is not among the
 retracted versions in the driver's `go.mod`.
 
-A v1.58.0-specific Linux caveat is relevant to future production review: the
-release adds opt-in Open File Description locking but leaves it off by default.
-The changelog explains the ordinary POSIX-lock hazard when unrelated file
-descriptors for the same database inode are closed in the same process. This
-probe used the cross-platform default and does not recommend enabling the
-Linux-only mode without a separate policy decision. Production code should at
-minimum avoid opening and closing unrelated descriptors for a live database.
-The pre-creation probe closes its descriptor before SQLite opens or locks the
-file.
+A v1.58.0-specific Linux caveat remains relevant: the release adds opt-in Open
+File Description locking but leaves it off by default. The changelog explains
+the ordinary POSIX-lock hazard when unrelated descriptors for the same database
+inode are closed in one process. The probe used the cross-platform default;
+Linux-only OFD locking requires a separate policy decision. Avoid unrelated
+open/close operations on a live database inode. Main-file pre-creation closes
+its descriptor before SQLite opens or locks the file.
 
-## Release-target build and artifact evidence
+## Current reproduction: root tests and feature binary
 
-The retained `driverprobe` does more than blank-import the package: its main path
-calls `PreparePrivateDatabase`, obtains the dedicated `*sql.Conn` from `Admit`,
-executes a migration and insert, and queries the inserted value. Therefore each
-cross-built command contains a reachable real-driver open/use path.
+Run from the repository root, with Go supplied by `nix develop`. On 2026-09-06,
+the transferred driver/admission/process subset below passed on Linux both
+normally and under `-race`, three repetitions each. These are current root-test
+results, separate from the 2026-09-05 timings and probe builds. They add no native
+Windows/Darwin evidence or substitute for final four-target feature builds.
 
-Build command, run from the authoritative feature worktree:
+The compact checks preserve the unique experiments without duplicating the
+production migration/filesystem/writer tests:
+
+| Root test file | Distinct check |
+| --- | --- |
+| [`driver_characterization_test.go`](../../../internal/usage/sqlitestore/driver_characterization_test.go) | Native immediate WAL `SQLITE_BUSY` despite a 2000 ms timeout; 500 ms native wait versus a 50 ms context, followed by connection reuse. Upgrade-sensitive driver characterization, **not a requirement that future drivers remain slow to cancel**. |
+| [`admission_test.go`](../../../internal/usage/sqlitestore/admission_test.go) | WAL, NORMAL, full runtime `busy_timeout=5000`, migrated `user_version=1`, and SQLite 3.53.4 read from the actual physical connection returned by production admission, not an unrelated external connection. |
+| [`process_test.go`](../../../internal/usage/sqlitestore/process_test.go) | Two OS subprocesses both ready before releasing fresh `Store.Open`; each records a Turn and performs bounded `Close`; shared schema and both rows verified afterward. Child cleanup is bounded. The barrier attempts concurrency, not proof of measured overlap inside SQLite. |
+| [`startup_contention_test.go`](../../../internal/usage/sqlitestore/startup_contention_test.go) | Real production startup first contends at WAL, then at `BEGIN IMMEDIATE`; physical timeout readback proves the later stage receives a shrinking remainder of one five-second budget. |
+| [`flush_test.go`](../../../internal/usage/sqlitestore/flush_test.go) | Real-store fill flush observed independently of the timer and shutdown. |
+
+Existing [`store_test.go`](../../../internal/usage/sqlitestore/store_test.go),
+platform/permission and reporting tests cover the real migration, reopening,
+future-version refusal, non-contention failure, external reader, runtime
+writer/loss, privacy, and shutdown behavior. Composition-root tests under
+[`cmd/copilotd`](../../../cmd/copilotd/usage_meter_e2e_test.go) cover actual enabled
+serve wiring and finalization; the old admission-only prototype had no usage
+queue, writer, or bounded finalizer.
 
 ```sh
-rm -rf /tmp/copilotd-sqlite-feasibility-builds
-mkdir -p /tmp/copilotd-sqlite-feasibility-builds
+# Compact transferred checks, including subprocesses, repeated a few times.
+nix develop -c go test ./internal/usage/sqlitestore \
+  -run 'Test(Driver|AdmissionConfigures|StoreConcurrentProcesses)' -count=3 -v
+nix develop -c go test -race ./internal/usage/sqlitestore \
+  -run 'Test(Driver|AdmissionConfigures|StoreConcurrentProcesses)' -count=3 -v
+
+# Production lifecycle and composition coverage, not a separate prototype.
+nix develop -c go test ./internal/usage/sqlitestore ./cmd/copilotd -count=1
+nix develop -c go test -race ./internal/usage/sqlitestore ./cmd/copilotd -count=1
+nix flake check
+```
+
+Build the **actual feature-bearing binary**, not the deleted driver probe. Its
+composition root reaches `sqlitestore.Open` when metering is enabled, so runtime
+flags do not remove the linked driver. These are reproduction instructions,
+not a claim that the historical four probe builds certify today's binary:
+
+```sh
 nix develop -c sh -c '
   set -eu
-  cd docs/research/sqlite-feasibility
+  output_dir=$(mktemp -d /tmp/copilotd-usage-builds.XXXXXX)
+  printf "Artifacts: %s\n" "$output_dir"
   for target in linux/amd64 windows/amd64 windows/arm64 darwin/arm64; do
     goos=${target%/*}
     goarch=${target#*/}
     suffix=
     [ "$goos" = windows ] && suffix=.exe
-    output=/tmp/copilotd-sqlite-feasibility-builds/driverprobe-${goos}-${goarch}${suffix}
+    output="$output_dir/copilotd-${goos}-${goarch}${suffix}"
     CGO_ENABLED=0 GOOS=$goos GOARCH=$goarch \
-      go build -trimpath -o "$output" ./cmd/driverprobe
-    file "$output"
+      go build -trimpath -o "$output" ./cmd/copilotd
+    go version -m "$output"
+    go tool nm "$output" > "$output.nm"
+    grep "modernc.org/sqlite.*Driver.*Open" "$output.nm"
   done
 '
 ```
 
-All four commands exited zero. Artifact results:
+Check embedded driver/libc versions, GOOS/GOARCH, and `CGO_ENABLED=0` in each
+artifact's metadata. For link inspection, use `file` on each binary; on Linux,
+`readelf -l -d` identifies an ELF interpreter/dynamic dependencies. For Mach-O,
+use `llvm-objdump --macho --dylibs-used` (or `otool -L` on Darwin); for PE use
+`llvm-readobj --file-headers --coff-imports`. These object-inspection tools must
+be available separately; there is no retained research inspector. Cross-building
+and inspecting an executable do **not** execute it on Windows or Darwin.
 
-| Target | `file` / object-reader result | Certification level |
+## Historical release-target build and artifact evidence (2026-09-05)
+
+The disposable `driverprobe` opened, migrated, inserted, and read via the real
+candidate driver. All four cgo-free builds exited zero. Standard-library
+`debug/elf`, `debug/macho`, and `debug/pe` inspection plus `file` reported:
+
+| Target | Object / linkage result | Certification level |
 | --- | --- | --- |
 | `linux/amd64` | ELF x86-64, **statically linked**; imported-library list empty | Build, link inspection, and runtime probe on the development host |
 | `windows/amd64` | PE32+ x86-64; machine `0x8664` | Build/link only; not run on Windows |
 | `windows/arm64` | PE32+ ARM64; machine `0xaa64` | Build/link only; not run on Windows ARM64 |
 | `darwin/arm64` | Mach-O arm64 with `DYLDLINK`; imports `/usr/lib/libSystem.B.dylib` and `/usr/lib/libresolv.9.dylib` | Build/link only; not run on Darwin |
 
-Linux is genuinely static. Darwin is not and must not be described as static:
-it has the expected libSystem dependency; this particular probe also imports
-libresolv. The existing non-SQLite copilotd Darwin artifact already imports
-libSystem, libresolv, CoreFoundation, and Security, so compile success does not
-remove the ordinary Apple system-library dependency.
+Linux was genuinely static. Darwin was not: the probe linked libSystem and
+libresolv. The then-existing non-SQLite copilotd Darwin artifact already imported
+libSystem, libresolv, CoreFoundation, and Security. Cgo-free does not mean fully
+static on Darwin or remove ordinary Apple system-library dependencies.
 
-The following retained/reproducible checks were also run:
-
-```sh
-# Report executable imports with debug/{elf,macho,pe}.
-nix develop -c sh -c '
-  cd docs/research/sqlite-feasibility
-  go run ./cmd/artifactcheck /tmp/copilotd-sqlite-feasibility-builds/driverprobe-*
-'
-
-# Report embedded modules and build settings for every artifact.
-nix develop -c sh -c '
-  cd docs/research/sqlite-feasibility
-  for artifact in /tmp/copilotd-sqlite-feasibility-builds/driverprobe-*; do
-    go version -m "$artifact"
-  done
-'
-
-# Inspect linked driver symbols.
-nix develop -c sh -c '
-  cd docs/research/sqlite-feasibility
-  for artifact in /tmp/copilotd-sqlite-feasibility-builds/driverprobe-*; do
-    go tool nm "$artifact" 2>/dev/null | grep -m 3 modernc.org/sqlite
-  done
-'
-```
-
-For every target, `go version -m` reported Go 1.27.0,
+For each probe artifact, `go version -m` reported Go 1.27.0,
 `modernc.org/sqlite v1.58.0`, `modernc.org/libc v1.75.6`, the requested GOOS and
-GOARCH, and `CGO_ENABLED=0`. `go tool nm` found linked symbols including
-`modernc.org/sqlite.(*Driver).Open` in every artifact.
-
-## Real-driver lifecycle evidence
-
-Linux runtime environment: Linux 6.18.44 x86-64; `stat -f -c %T /tmp` reported
-`ext2/ext3` for the local temporary filesystem. These tests do not certify a
-network, roaming, or synchronized filesystem; those remain unsupported by the
-design.
-
-### Dedicated connection and configuration
-
-`Admit` limits its `*sql.DB` to one connection and obtains one dedicated
-`*sql.Conn`. Every connection-scoped PRAGMA, `BEGIN IMMEDIATE`, schema query,
-migration, and later probe write uses that same pinned native connection.
-
-The green probe establishes and reads back:
-
-- `PRAGMA journal_mode=WAL` returns `wal`; the returned value is checked rather
-  than assuming the requested mode took effect.
-- `PRAGMA synchronous=NORMAL`; `PRAGMA synchronous` reads back `1`.
-- `PRAGMA user_version` is read only after `BEGIN IMMEDIATE` succeeds.
-- Pending migration SQL and the `user_version` bump commit in that transaction.
-- After admission, `PRAGMA busy_timeout` reads back the full runtime value
-  `5000` ms rather than the startup budget's last reduced value.
-
-Two simultaneously started goroutine openers passed repeatedly. More
-importantly, two separately executed copies of the Go test binary simultaneously
-pre-created and admitted the same fresh file; exactly one `O_EXCL` creation won,
-both driver opens completed, and a later connection observed `user_version=1`.
-The migration's `CREATE TABLE` would have exposed a stale version check outside
-the serialized transaction.
-
-A database at `user_version=2` was refused by a probe supporting one migration.
-Its trace orders `BEGIN IMMEDIATE` before the `user_version` read, and the error
-names both versions.
-
-### Immediate WAL busy and one monotonic budget
-
-With one real connection holding `BEGIN IMMEDIATE` on a fresh rollback-journal
-database, a second dedicated connection set and read back a native
-`busy_timeout=2000`, then attempted `PRAGMA journal_mode=WAL`. The operation
-returned SQLite code 5 (`SQLITE_BUSY`) in 92.44 microseconds on the recorded run,
-not after the two-second timeout. This confirms that native timeout alone does
-not cover WAL activation.
-
-`Admit` therefore retries only pre-acquisition `SQLITE_BUSY`, closes the failed
-attempt, and starts setup on a fresh native connection. One monotonic deadline
-is created before the first attempt. The remaining time is recomputed and the
-native busy timeout is reduced before connection open, WAL activation,
-`synchronous=NORMAL`, and `BEGIN IMMEDIATE`.
-
-A real sequential-contention test held WAL activation first, then acquired a
-second real write transaction immediately before the probe's transaction stage.
-With the exact default five-second budget, the recorded run showed:
-
-- first WAL native timeout: `4.999s`;
-- later `BEGIN IMMEDIATE` native timeout: `4.839s`;
-- total elapsed: `393.769277ms`.
-
-Thus the later stage receives a smaller remainder, not a reset five seconds.
-The test checks that WAL produced native `SQLITE_BUSY` and that the later
-transaction also had to wait for a separately held real lock.
-
-With a 150 ms test budget and a continuously held lock, the probe exhausted one
-budget in `150.556994ms`; 15 connection-open trace events completed before the
-16th attempt observed deadline exhaustion. The returned error explicitly says
-`startup contention budget exhausted` and retains
-`context.DeadlineExceeded`.
-
-An existing private regular file containing non-database sentinel bytes produced
-a non-contention driver error after one attempt. Its bytes were unchanged.
-Non-contention errors are not retried.
-
-### Migration errors are outside retry
-
-A two-step migration where step one creates a table and step two contains invalid
-SQL acquired `BEGIN IMMEDIATE` once, failed at migration 2, and was not retried.
-A fresh admission observed `user_version=0` and no table from step one, proving
-the migration and version bump rolled back together.
-
-This behavior is deliberately different from pre-acquisition lock handling: a
-post-acquisition migration error is a startup failure even if its SQLite code
-could otherwise look transient.
-
-### Context cancellation under write contention
-
-A real contention experiment disproved the initial hypothesis that
-`ExecContext` cancellation promptly preempts the driver's busy wait. A second
-connection used `busy_timeout=500ms`, attempted `BEGIN IMMEDIATE` behind a held
-writer, and received a 50 ms context deadline. It returned
-`context deadline exceeded` only after `501.02113ms`, near the native timeout,
-then remained usable for `SELECT 1`.
-
-The first exploratory form used a five-second native timeout and failed its
-prompt-cancellation assertion after `5.004477578s`. The retained test encodes the
-observed behavior instead of claiming the desired one.
-
-Consequence: a bounded startup, runtime batch, or final flush must cap the native
-busy timeout to the operation's current remaining budget **before every
-potentially blocking lock operation**. `ExecContext` is still required for
-already-canceled contexts and other interruptible work, but context cancellation
-alone is not a contention bound for this candidate.
-
-### External reader and WAL writer
-
-An admitted writer inserted one row. A fresh external driver connection enabled
-`query_only`, began a read transaction, and observed that row. While that read
-snapshot remained active, the admitted connection acquired `BEGIN IMMEDIATE`,
-inserted a second row, and committed successfully. The reader retained its
-one-row snapshot and observed two rows after ending the transaction. This is the
-required external-reader coexistence evidence on the tested Linux filesystem.
-
-## Filesystem and permission evidence
-
-Unix probes set process umask to `000` around creation and then verify:
-
-1. a missing parent is created as `0700`;
-2. the main file is pre-created with
-   `O_CREATE|O_EXCL|O_RDWR` and mode `0600`, then closed before SQLite opens it;
-3. an existing file follows validation and is never opened with truncation;
-4. an existing parent at `0777` is refused and remains `0777`—the probe never
-   chmods an operator directory;
-5. a symlink destination and other non-regular destination are refused;
-6. an existing main file at `0644` is refused;
-7. 16 concurrent in-process creators produce exactly one creation winner; and
-8. two concurrent processes also safely race fresh-file creation.
-
-With a live WAL connection and a committed write under umask `000`, all three
-regular files existed. The recorded Linux modes were `0600` for `usage.db`,
-`usage.db-wal`, and `usage.db-shm`. The security contract must nevertheless rely
-on the enclosing `0700` directory rather than assuming a stable SQLite sidecar
-mode.
-
-On Windows, the retained build uses best-effort exclusive creation and
-regular-file validation only. Go's Unix-like `FileMode` values neither set nor
-prove a Windows ACL. Neither Windows target was executed, so ACL inheritance,
-sidecar ACLs, concurrent creation, WAL locking, and final-path reparse-point
-handling remain unresolved runtime evidence. The
-[current approval](../../design/2026-07-26-token-usage-meter-design.md#maintainer-approval-2026-09-06)
-accepts ADR-0017's best-effort limitation, not certification; inherited ACLs and
-sidecar protection remain unverified, and a Unix mode assertion cannot establish
-Windows behavior.
-
-## Historical bounded final-flush proposal and current acceptance
-
-This section preserves the proposal prepared for #196. The policy documented in
-[ADR-0017](../../adr/0017-persist-usage-in-local-sqlite.md) now has the maintainer's
-[2026-09-06 approval](../../design/2026-07-26-token-usage-meter-design.md#maintainer-approval-2026-09-06),
-including the native-wait-only bound below. That record does not establish
-approval at the #196 checkpoint.
-
-### Current coordinator behavior
-
-`internal/server.Server.Run` enters shutdown when its context is canceled.
-`shutdown` creates one
-`context.WithTimeout(context.Background(), cfg.ShutdownTimeout)`, calls
-`ws.StartDrain`, then `http.Shutdown`, then `ws.Shutdown` with that same context.
-If either drain reports an error, it force-closes HTTP. The WebSocket proxy
-force-cancels and force-closes surviving sessions when the shared deadline wins.
-The default `ShutdownTimeout` is 10 seconds.
-
-`cmd/copilotd.runServe` keeps the base logger open with a deferred logger close
-until `runBoundServe` has returned and its server error has been logged. That
-composition-root interval is the place where store finalization can report its
-last aggregate without moving storage into `internal/server`.
-
-### Sharing the existing deadline
-
-Reusing the original deadline for a final flush after HTTP/WebSocket drain is
-not recommended. A legitimate drain can consume all of it, leaving no chance to
-persist rows admitted by the drained requests. Starting the flush concurrently
-would instead require an early admission cutoff and could lose rows from handlers
-that shutdown is specifically allowing to finish. A deferred context-free
-`store.Close()` would avoid both choices only by becoming unbounded.
-
-### Accepted policy: one explicit bounded extension
-
-The current approval linked above covers this policy:
-
-1. Let `Server.Run` complete its existing drain or force-close sequence under
-   the first `ShutdownTimeout` deadline. Admission remains open during this
-   phase, so completing HTTP and WebSocket hooks can still submit rows.
-2. Immediately after `Server.Run` returns, atomically cut off store admission.
-   `Record` racing with or following the cutoff must return promptly, increment
-   a `late_after_cutoff` loss counter, and never send to a closed channel.
-3. Create a **fresh**
-   `context.WithTimeout(context.Background(), cfg.ShutdownTimeout)` for final
-   flush. This is an explicit extension after drain: server drain and meter
-   SQL/native-cleanup waits have a total budget of `2 * ShutdownTimeout` (20
-   seconds with the current default). Synchronous logging is excluded, and
-   arbitrary filesystem I/O or process exit is not guaranteed by it (see below).
-   It adds no second setting or hidden timeout constant.
-4. The single writer owns finalization. It drains the already accepted bounded
-   queue and attempts bounded batches. Before each possibly blocking
-   `BEGIN IMMEDIATE`/write/commit stage, recompute the extension's remaining
-   monotonic time and cap native `busy_timeout` to that remainder as well as
-   passing the context. The cancellation experiment above is why both controls
-   are mandatory.
-5. On deadline, failed storage, or an ambiguously completed batch, do not replay.
-   Conservatively count every queued or not-confirmed row as lost and return to
-   the coordinator. A disk-full, read-only, I/O, corruption, or other
-   non-contention failure is not a retry loop. A batch already reported committed
-   is not loss; one whose result is unknown is unconfirmed loss.
-6. Before the logger closes, emit one final aggregate from Component
-   `internal/usage/sqlitestore` using ADR-0015 keys. It should include at least
-   queue-full drops, runtime write losses, late-after-cutoff drops, final-flush
-   losses, and whether driver cleanup completed. The snapshot covers losses
-   observed through publication. A permanently stuck producer that calls
-   `Record` after that final snapshot is inherently unreportable during process
-   exit; forced shutdown cannot promise otherwise.
-7. Apply the same bounded finalizer on bind/serve failure after a store has been
-   opened. Usually its queue is empty, but cleanup must not hide in an unbounded
-   defer.
-
-### What this can and cannot bound
-
-The policy bounds how long the coordinator **waits** for queue draining,
-contention, final writes, and driver cleanup. It does not make arbitrary
-filesystem I/O preemptible. Final `slog.Handler` publication and any wait for an
-earlier synchronous runtime log are outside that native bound; a stuck log
-destination can extend finalizer return.
-
-Go's `database/sql.Conn.Close` documentation says it blocks until concurrent
-operations finish; `DB.Close` waits for started queries. Neither takes a context.
-The candidate's native `conn.Close` takes its connection mutex and calls
-`sqlite3_close_v2`, also without a context. Therefore the writer should own the
-connection and cleanup in its worker goroutine; the coordinator waits only until
-the fresh deadline. If the worker has not returned, publish
-`driver_cleanup_completed=false` and let serve process exit abandon that
-background cleanup rather than blocking forever.
-
-Normally the recomputed native timeout causes a contended SQLite call to return
-before cleanup starts, making close prompt. No Go deadline can guarantee that a
-kernel or remote/broken filesystem call returns, however, and even abandoning a
-Go goroutine cannot promise an operating-system process-exit bound under
-arbitrary storage failure. The second signal's existing hard-kill behavior
-remains the ultimate operator escape. These limitations are reasons to require a
-local filesystem, not reasons to claim an unbounded close is safe.
-
-## TDD and verification record
-
-Tests exercise disposable driver-probe and filesystem/database system boundaries.
-They use the real candidate driver and real temporary files, locks, connections,
-processes, and contexts; there is no Python SQLite substitute and no mock writer
-queue or goroutine.
-
-Representative red-to-green observations:
-
-| Slice | Red observation | Green observation |
-| --- | --- | --- |
-| Private pre-creation | focused test failed to compile: `undefined: PreparePrivateDatabase` | parent `0700` and file `0600` under umask `000` |
-| Dedicated WAL admission | focused test failed to compile: `undefined: Admit` and `AdmissionOptions` | SQLite 3.53.4, WAL, NORMAL, migration v1 on one `*sql.Conn` |
-| Budget exhaustion contract | test returned bare `context deadline exceeded` | error now identifies the exhausted shared budget and wraps the deadline |
-| Runtime timeout restoration | test observed `busy_timeout=4992`, not `5000` | admitted connection now reads back the full 5000 ms runtime policy |
-| Busy cancellation hypothesis | prompt-cancel hypothesis failed after `5.004477578s` with a 5 s native timeout | retained test honestly demonstrates ~500 ms native wait despite a 50 ms context |
-
-Every cycle used the same Nix-wrapped focused form. The commands that produced
-the representative red observations were:
-
-```sh
-nix develop -c sh -c 'cd docs/research/sqlite-feasibility && go test -run TestPreparePrivateDatabaseCreatesPrivateParentAndFileUnderPermissiveUmask -count=1'
-nix develop -c sh -c 'cd docs/research/sqlite-feasibility && go test -run TestAdmitConfiguresDedicatedWALConnectionAndMigratesAtomically -count=1 -v'
-nix develop -c sh -c 'cd docs/research/sqlite-feasibility && go test -run TestAdmitExhaustsOneContentionBudgetAcrossFreshAttempts -count=1 -v'
-nix develop -c sh -c 'cd docs/research/sqlite-feasibility && go test -run TestContendedExecContextHonorsCancellation -count=1 -v'
-```
-
-The dedicated-admission command was intentionally rerun for two different red
-slices: first the undefined public probe, later the `4992` ms runtime-timeout
-observation. The cancellation test was renamed only after its expected prompt
-return was disproved; the replacement names and asserts the observed native
-busy-timeout behavior.
-
-Successful focused commands:
-
-```sh
-nix develop -c sh -c '
-  cd docs/research/sqlite-feasibility
-  CGO_ENABLED=0 go test ./... -count=1
-  CGO_ENABLED=0 go run ./cmd/driverprobe
-'
-
-nix develop -c sh -c '
-  cd docs/research/sqlite-feasibility
-  CGO_ENABLED=0 go test \
-    -run "Test(WALActivation|ContendedExecContext|AdmitShares|AdmitExhausts|ConcurrentFreshAdmissions|ConcurrentProcesses|ExternalReader)" \
-    -count=5
-'
-
-nix develop -c sh -c '
-  cd docs/research/sqlite-feasibility
-  go test -race ./... -count=1
-'
-```
-
-The full nested-module cgo-free test and command run exited zero and printed:
+GOARCH, and `CGO_ENABLED=0`. `go tool nm` found linked driver symbols including
+`modernc.org/sqlite.(*Driver).Open` in every target. The nested cgo-free test
+suite, five-repeat contention/process subset, race suite, and Linux probe run
+all exited zero. The Linux command printed:
 
 ```text
 driver=v1.58.0 sqlite=3.53.4 journal_mode=wal synchronous=1 value=linked
 ```
 
-The race run exited zero. The repeated contention/process subset and every
-four-target cross-build exited zero. The root repository's full `go test ./...`,
-`nix flake check`, and production release build were intentionally not run for
-this evidence slice; the coordination contract reserves the complete suite for
-final integration verification.
+The root full suite, Nix checks, and production release builds were not run as
+part of that historical feasibility slice. Current root reproduction above
+replaces the obsolete nested-module commands; final integration verification
+must still check the actual release artifacts.
+
+## Historical real-driver lifecycle evidence (2026-09-05)
+
+Linux runtime environment: Linux 6.18.44 x86-64; `stat -f -c %T /tmp` reported
+`ext2/ext3` for the local temporary filesystem. No network, roaming, or
+synchronized filesystem was certified.
+
+### Dedicated connection, migration, and readers
+
+The probe pinned one `*sql.Conn` for configuration, `BEGIN IMMEDIATE`, schema
+reads, migration, and subsequent writes. Readbacks confirmed WAL, synchronous
+`1` (NORMAL), migrated version `1`, and the restored full runtime timeout
+`5000` ms. An earlier failed restoration check observed `4992` ms; this is why
+reading the actual admitted connection matters.
+
+The version read occurred after transaction acquisition; pending DDL and the
+version bump committed together. A future `user_version=2` was refused by the
+one-migration probe, naming both versions. A two-step migration with invalid SQL
+in step two rolled back step one's table and the version bump, without retrying.
+Non-database sentinel bytes produced a non-contention error after one attempt
+and remained unchanged. Post-acquisition migration failure was outside the
+pre-acquisition BUSY retry policy.
+
+Two goroutine openers passed repeatedly. Two separately executed test processes
+also completed fresh-file creation/admission and left `user_version=1`. That
+process check did **not** measure overlap or count creation winners; exactly one
+`O_EXCL` winner was asserted in the separate 16-creator in-process test. Current
+root subprocess tests strengthen the start barrier and verify real usage rows.
+
+A read-only external connection held a one-row WAL snapshot while the admitted
+writer inserted and committed another row. The reader kept the one-row snapshot
+until ending its transaction, then observed two rows. The real-store reader test
+now checks this against the asynchronous production writer.
+
+### Immediate WAL busy and one monotonic budget
+
+With a real `BEGIN IMMEDIATE` held on a fresh rollback-journal database, a second
+connection read back `busy_timeout=2000`, attempted `PRAGMA journal_mode=WAL`, and
+received SQLite code 5 (`SQLITE_BUSY`) in **92.44 microseconds**, rather than two
+seconds. Native timeout alone therefore did not cover WAL activation.
+
+The probe retried only pre-acquisition BUSY, closing failed attempts and
+restarting setup on fresh connections. One monotonic deadline covered connection
+setup, WAL activation, synchronous configuration, and transaction acquisition;
+each potentially blocking stage received a newly capped native timeout.
+
+A real sequential-contention experiment held WAL activation first and then a
+second lock at `BEGIN IMMEDIATE`. With the default five-second budget it recorded
+initial WAL cap **4.999 s**, later BEGIN cap **4.839 s**, and total elapsed
+**393.769277 ms**. A continuously held lock exhausted a separate 150 ms probe
+budget in **150.556994 ms**: 15 open trace events completed before the 16th
+attempt observed exhaustion. The error named `startup contention budget
+exhausted` and retained `context.DeadlineExceeded`.
+
+These timings describe the former probe. The maintained sequential regression
+now runs the **production** admission path and reads actual native caps; the
+prototype is no longer a substitute for that production gate.
+
+### Cancellation counterexample
+
+A real contention experiment disproved the hypothesis that `ExecContext`
+cancellation promptly preempts the selected driver's native busy wait. A second
+connection used **500 ms** native timeout and a **50 ms** context for contended
+`BEGIN IMMEDIATE`; it returned `context deadline exceeded` only after
+**501.02113 ms**, then remained usable for `SELECT 1`.
+
+The initial exploratory prompt-cancellation assertion had failed after
+**5.004477578 s** with a five-second native timeout. The maintained driver test
+characterizes the observed 500/50 ms behavior and subsequent connection reuse;
+a future driver that cancels promptly should trigger reevaluation, not be
+rejected as violating a product requirement to stay slow.
+
+Consequence for this candidate: cap native `busy_timeout` to the operation's
+current remaining budget **before every potentially blocking lock operation**.
+Contexts remain required for already-canceled contexts and other interruptible
+work, but context cancellation alone is not its contention bound. A prompt
+`Store.Close` coordinator return cannot alone prove native timeout recapping,
+since the coordinator may stop waiting while the worker finishes.
+
+## Filesystem and permission evidence
+
+Historical Unix probes set umask to `000` and verified private `0700` parent and
+exclusive `0600` main-file creation, closing the pre-creation handle before
+SQLite opened it. Existing data was never truncated; unsafe `0777` parents were
+refused without chmod, as were symlink/non-regular destinations and `0644` main
+files. In-process and subprocess creation cases completed safely, within the
+oracle limits above.
+
+With a live WAL connection and committed write under umask `000`, Linux modes
+were `0600` for `usage.db`, `usage.db-wal`, and `usage.db-shm`. The security
+contract nevertheless relies on the enclosing `0700` directory, not stable
+SQLite sidecar modes. Production permission and literal-path tests remain in
+the root suite; copying the former probe's file-preparation engine would not
+certify the production implementation.
+
+Windows uses best-effort exclusive creation and regular-file validation. Go's
+Unix-like `FileMode` values neither set nor prove a Windows ACL. Neither Windows
+target was executed in the historical experiments, and this root-test migration
+adds no native Windows or Darwin evidence. ACL inheritance, sidecar ACLs,
+reparse points, concurrent creation, WAL locking, and cleanup remain unverified
+there. The [current approval](../../design/2026-07-26-token-usage-meter-design.md#maintainer-approval-2026-09-06)
+accepts the documented limitation, not runtime or ACL certification.
+
+## Historical final-flush proposal and current acceptance
+
+The admission-only probe had ordinary cleanup, **not** a queue, usage writer, or
+bounded `Close(ctx)`. Its shutdown work was feasibility reasoning prepared for
+#196. [ADR-0017](../../adr/0017-persist-usage-in-local-sqlite.md) and the
+[2026-09-06 approval](../../design/2026-07-26-token-usage-meter-design.md#maintainer-approval-2026-09-06)
+now cover the following policy, without establishing approval at the historical
+#196 checkpoint. Production store and composition-root tests, not the deleted
+probe, exercise its implementation.
+
+### Accepted policy and loss scope
+
+1. `Server.Run` completes HTTP/WebSocket drain or force-close under the existing
+   shared `ShutdownTimeout`; store admission stays open so completing hooks may
+   submit Turns. Reusing the spent drain deadline could leave no flush time;
+   closing admission during drain would discard otherwise completing work.
+2. After `Server.Run` returns, the composition root atomically cuts off admission
+   and gives finalization a **fresh `ShutdownTimeout`**. Racing/late `Record`
+   calls return promptly, count late loss, and never send to a closed channel.
+3. The single writer drains the accepted bounded queue and attempts bounded
+   batches, recomputing the remaining native timeout before each potentially
+   blocking BEGIN/write/commit stage, in addition to passing the context.
+4. Deadline, failed storage, or ambiguous completion is not a replay loop.
+   Queued/not-confirmed observations are conservatively lost; confirmed commits
+   are not. Queue-full drops, runtime write losses, late-after-cutoff drops, and
+   final-flush losses are reported in a final aggregate, including whether
+   native cleanup completed. A producer arriving after the published snapshot
+   cannot be promised inclusion during process exit.
+5. Keep the logger alive through final publication from Component
+   `internal/usage/sqlitestore` using ADR-0015 keys. Apply the same bounded
+   finalizer after bind/serve failure once a store has opened.
+
+This permits a total **SQL/native-wait budget of `2 * ShutdownTimeout`** for
+drain plus finalization (20 seconds at the ten-second default), not a blanket
+wall-clock process-exit promise. Final synchronous logging, including waiting
+for an earlier runtime log, is excluded and may extend return. No Go deadline
+makes arbitrary filesystem or log I/O preemptible.
+
+[`sql.Conn.Close`](https://pkg.go.dev/database/sql#Conn.Close) waits for concurrent
+operations; [`sql.DB.Close`](https://pkg.go.dev/database/sql#DB.Close) waits for
+started queries. Neither accepts a context. The candidate's native `conn.Close`
+takes its mutex and calls `sqlite3_close_v2`, also without a context. The writer
+therefore owns cleanup while the coordinator waits only to its deadline. If
+unfinished, report `driver_cleanup_completed=false` and allow serve exit to
+abandon background cleanup. Even abandoning a goroutine does not guarantee OS
+process exit under arbitrary kernel/storage failure; the existing second-signal
+hard-kill remains the operator escape.
 
 ## Remaining evidence and accepted limitations
 
-- Run the retained real-driver tests natively on Windows amd64, Windows arm64,
-  and Darwin arm64 before calling those runtime combinations certified.
-- Resolve and test the Windows ACL policy, including WAL and SHM sidecars and
-  reparse points. Build success and Go mode bits are not ACL evidence.
-- Keep live databases on a local filesystem. Network, roaming, and synchronized
-  filesystems were neither tested nor approved.
+- Run the **root** real-driver/store tests natively on Windows amd64, Windows
+  arm64, and Darwin arm64 before calling those runtime combinations certified.
+  Current Linux results and cross-builds do not supply that evidence.
+- Resolve and test the Windows ACL policy, including WAL/SHM sidecars and reparse
+  points. Go mode bits and successful builds are not ACL evidence.
+- Keep live databases and sidecars together on a local filesystem. Network,
+  roaming, and synchronized live filesystems are unsupported.
 - The [current approval](../../design/2026-07-26-token-usage-meter-design.md#maintainer-approval-2026-09-06)
-  accepts ADR-0017's fresh `ShutdownTimeout` extension and background-cleanup
-  escape, excluding synchronous logging from the bound; this evidence task did
-  not self-approve them or establish pre-implementation acceptance.
-- If Linux OFD locking is considered, evaluate its process-wide and Linux-only
-  consequences separately; v1.58.0 leaves it off by default and this probe did
-  too.
-- WAL with `synchronous=NORMAL` remains best-effort durability. These probes test
-  configuration, transactions, and contention, not power-loss survival.
+  accepts the fresh shutdown extension, background-cleanup escape, and exclusion
+  of synchronous logging; it does not retroactively verify pre-implementation
+  approval timing.
+- Evaluate Linux-only OFD locking separately if considered; v1.58.0 and these
+  checks use the default locking policy.
+- WAL with `synchronous=NORMAL` is best-effort durability, not power-loss
+  certification. Queue pressure, write failures, forced shutdown, hard process
+  kill, OS crash, power loss, or stuck I/O may lose observations. The ~1 s flush
+  target is not a one-second loss bound under backlog or failure.
