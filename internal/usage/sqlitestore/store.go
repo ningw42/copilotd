@@ -132,22 +132,22 @@ func openStore(path string, logger *slog.Logger, openDB func(string, string) (*s
 // writer, touches SQLite, or logs. A racing or post-cutoff call is counted and
 // returns promptly; the queue is never closed under producers.
 func (s *Store) Record(turn usage.Turn) {
-	saturatingAdd(&s.recordStarted, 1)
+	s.recordStarted.Add(1)
 	if !s.admitting.Load() {
-		saturatingAdd(&s.lateAfterCutoffDrops, 1)
+		s.lateAfterCutoffDrops.Add(1)
 		return
 	}
 	s.producers.Add(1)
 	defer s.producers.Add(-1)
 	if !s.admitting.Load() {
-		saturatingAdd(&s.lateAfterCutoffDrops, 1)
+		s.lateAfterCutoffDrops.Add(1)
 		return
 	}
 
 	select {
 	case s.queue <- turn:
 	default:
-		saturatingAdd(&s.queueFullDrops, 1)
+		s.queueFullDrops.Add(1)
 	}
 }
 
@@ -376,11 +376,11 @@ func (s *Store) settleCommitted(count uint64) {
 	if s.outcomesSealed {
 		return
 	}
-	saturatingAdd(&s.committed, count)
+	s.committed.Add(count)
 	if s.consecutiveWriteFailures > 0 {
 		s.consecutiveWriteFailures = 0
 		s.lastWriteError = nil
-		s.advanceFailureStateLocked()
+		s.failureStateVersion++
 	}
 }
 
@@ -390,7 +390,7 @@ func (s *Store) settleRuntimeFailure(count uint64, err error) {
 	if s.outcomesSealed {
 		return
 	}
-	saturatingAdd(&s.runtimeWriteLosses, count)
+	s.runtimeWriteLosses.Add(count)
 	s.noteWriteFailureLocked(err)
 }
 
@@ -403,17 +403,9 @@ func (s *Store) settleFinalFailure(err error) {
 }
 
 func (s *Store) noteWriteFailureLocked(err error) {
-	if s.consecutiveWriteFailures != ^uint64(0) {
-		s.consecutiveWriteFailures++
-	}
+	s.consecutiveWriteFailures++
 	s.lastWriteError = err
-	s.advanceFailureStateLocked()
-}
-
-func (s *Store) advanceFailureStateLocked() {
-	if s.failureStateVersion != ^uint64(0) {
-		s.failureStateVersion++
-	}
+	s.failureStateVersion++
 }
 
 func (s *Store) failureState() liveFailureState {
@@ -452,22 +444,6 @@ func waitForProducers(ctx context.Context, active *atomic.Int64) bool {
 	return true
 }
 
-func saturatingAdd(counter *atomic.Uint64, delta uint64) {
-	for {
-		old := counter.Load()
-		if old == ^uint64(0) {
-			return
-		}
-		next := old + delta
-		if next < old {
-			next = ^uint64(0)
-		}
-		if counter.CompareAndSwap(old, next) {
-			return
-		}
-	}
-}
-
 func (s *Store) runtimeSnapshot() (Report, liveFailureState) {
 	state := s.failureState()
 	return Report{
@@ -487,18 +463,14 @@ func (s *Store) settleFinalReport(cleanup bool) Report {
 	runtimeLost := s.runtimeWriteLosses.Load()
 	s.outcomeMu.Unlock()
 
-	// Rejected counters are sampled before recordStarted. Record increments
-	// started first, so a call racing this snapshot is either represented by its
-	// completed outcome or conservatively remains in the direct residual below.
-	// Writer outcomes no longer depend on a post-send admission counter, so they
-	// cannot overtake a stale counter that would cap confirmed outcomes.
+	// Record increments started before any rejection or enqueue. Writer outcomes
+	// are now sealed, and rejection counters are sampled before started. These
+	// disjoint outcomes therefore sum to at most started, so subtraction cannot
+	// underflow. Calls without an observed outcome remain in the residual.
 	queueFull := s.queueFullDrops.Load()
 	late := s.lateAfterCutoffDrops.Load()
 	started := s.recordStarted.Load()
-	settled := saturatingSum(queueFull, late)
-	settled = saturatingSum(settled, committed)
-	settled = saturatingSum(settled, runtimeLost)
-	finalLost := positiveDifference(started, settled)
+	finalLost := started - queueFull - late - committed - runtimeLost
 
 	return Report{
 		QueueFullDrops:         queueFull,
@@ -507,20 +479,6 @@ func (s *Store) settleFinalReport(cleanup bool) Report {
 		FinalFlushLosses:       finalLost,
 		DriverCleanupCompleted: cleanup,
 	}
-}
-
-func saturatingSum(left, right uint64) uint64 {
-	if ^uint64(0)-left < right {
-		return ^uint64(0)
-	}
-	return left + right
-}
-
-func positiveDifference(left, right uint64) uint64 {
-	if right >= left {
-		return 0
-	}
-	return left - right
 }
 
 func (s *Store) publishRuntimeLosses() {
