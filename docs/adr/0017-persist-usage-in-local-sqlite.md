@@ -1,6 +1,10 @@
 # Persist opt-in token usage in a private local SQLite database
 
-**Status:** accepted
+**Status:** accepted (current approval: 2026-09-06)
+
+Maintainer Ning Wang's [current approval record](../design/2026-07-26-token-usage-meter-design.md#maintainer-approval-2026-09-06)
+covers this decision and its stated limits; historical pre-implementation
+approval remains unverified.
 
 The Usage meter is the sole usage-specific exception to copilotd's no-database
 state-at-rest policy. When explicitly enabled, it persists best-effort Turn
@@ -41,8 +45,8 @@ demonstrates a reachable driver open/use path building with `CGO_ENABLED=0` for
 received native runtime, WAL, locking, migration, filesystem, and race tests. The
 Windows and Darwin results are compile/link evidence, not runtime certification;
 Darwin retains its normal system-library links. Windows ACL inheritance, sidecar
-ACLs, reparse-point behavior, locking, and cleanup remain explicitly accepted
-limitations, not certified behavior.
+ACLs, reparse-point behavior, locking, and cleanup remain unverified limitations,
+not certified behavior.
 
 ## Files, permissions, and durability
 
@@ -102,9 +106,9 @@ guarantee return from arbitrary stuck filesystem or log I/O, or guarantee OS
 process exit. The same finalizer applies after bind or serve failure once the
 store has opened.
 
-This decision accepts the trade-offs documented in the
-[Usage meter design](../design/2026-07-26-token-usage-meter-design.md). The
-private store and buffered OpenAI recording path land in #197, buffered
+The [Usage meter design](../design/2026-07-26-token-usage-meter-design.md)
+details these trade-offs. The private store and buffered OpenAI recording path
+land in #197, buffered
 Anthropic recording lands in #198, OpenAI SSE completion recording lands in
 #199, OpenAI WebSocket completion recording lands in #200, and Anthropic SSE
 completion recording lands in #201. All five supported paths now use this

@@ -32,12 +32,14 @@ No recorded Anthropic fixture is present. The same capture session found zero
 raw Copilot catalog entries advertising `/v1/messages`, the provider-shaped
 Anthropic catalog was empty, and one bounded request using the previously known
 `claude-opus-4.8` ID returned HTTP 400. A streaming request was not made after
-those two availability checks. That dated observation remains historical; it no
-longer blocks the schema decision. The user approved the exact official
+those two availability checks. Maintainer Ning Wang's
+[2026-09-06 current approval](../../../../docs/design/2026-07-26-token-usage-meter-design.md#maintainer-approval-2026-09-06)
+accepts the exact official
 [Messages Create](https://platform.claude.com/docs/en/api/messages/create)
-contract plus generated fixtures, with live Copilot Anthropic compatibility
-explicitly unverified. Treating any synthetic fixture below as a recorded
-Copilot capture would be false provenance.
+contract plus generated fixtures in place of live captures pending live evidence.
+Live Copilot Anthropic compatibility and historical pre-implementation approval
+remain unverified. Treating any synthetic fixture below as a recorded Copilot
+capture would be false provenance.
 
 ## Generated synthetic contract variants
 

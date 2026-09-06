@@ -2,22 +2,25 @@
 
 **Status:** accepted architecture — implemented
 **Date:** 2026-07-26
-**Accepted:** 2026-09-05
+**Current acceptance:** 2026-09-06; historical pre-implementation approval unverified
 **Repository baseline:** reviewed against `91e635c` plus the #194–#195 evidence commits
 
-The state-at-rest and Shim-observer exceptions are explicitly accepted in
+Maintainer Ning Wang's [current approval](#maintainer-approval-2026-09-06)
+accepts the state-at-rest and Shim-observer exceptions documented in
 [ADR-0017](../adr/0017-persist-usage-in-local-sqlite.md) and
-[ADR-0018](../adr/0018-store-per-surface-native-usage.md). This is the implemented
-architecture. Issues #197–#201 deliver the settings, private SQLite store,
-**buffered and SSE Anthropic Messages**, and buffered, SSE, and WebSocket OpenAI
+[ADR-0018](../adr/0018-store-per-surface-native-usage.md), with the stated evidence
+limits. This is the implemented architecture. Issues #197–#201 deliver the
+settings, private SQLite store, **buffered and SSE Anthropic Messages**, and
+buffered, SSE, and WebSocket OpenAI
 Responses observers end to end: all five supported Surface/transport paths.
 
 The Upstream call concentration, infallible post-commit hooks, structured logging,
 terminal request summary, Hook overrun monitoring, and shared SSE data-payload
 handling have landed. The design below uses those current contracts, not the
 rollout order or source line numbers from the original draft. The supported
-usage projection and driver evidence gates are closed with the explicit evidence
-limitations in §11.3 and §13.
+usage projection and driver choice are accepted now with the explicit evidence
+limitations in §11.3 and §13; this does not establish that the original
+pre-implementation gates were satisfied at that time (§14).
 
 A shim-hosted, opt-in meter that submits one row per observed successful inference
 completion to a local SQLite database, capturing the two inference Surfaces'
@@ -446,8 +449,9 @@ claim that the repository has only two Surfaces or two Routes.
 
 ### 7.1 DDL (migration 1)
 
-This is the accepted exact initial schema. The only projection change from the
-reviewed draft is the approved nullable Anthropic `thinking_tokens` field.
+This is the exact initial schema covered by the
+[current approval](#maintainer-approval-2026-09-06). The only projection change
+from the reviewed draft is the nullable Anthropic `thinking_tokens` field.
 
 ```sql
 CREATE TABLE anthropic_turn (
@@ -850,8 +854,9 @@ cache writes prove field presence on those requests, not non-zero Copilot cache
 accounting. The older item-ID stabilizer fixtures remain non-evidence for usage.
 
 The 2026-09-05 account had no working Anthropic Messages model, so no live
-Copilot Anthropic fixture exists. The explicitly approved replacement evidence is
-the exact official [Messages Create](https://platform.claude.com/docs/en/api/messages/create)
+Copilot Anthropic fixture exists. The replacement evidence accepted in the
+[current approval](#maintainer-approval-2026-09-06) is the exact official
+[Messages Create](https://platform.claude.com/docs/en/api/messages/create)
 reference, related primary streaming/cache documentation, and clearly labeled
 generated fixtures. They support the seven scalar fields in §5 and the cumulative
 last-value parser contract. Anthropic documents `thinking_tokens` as a re-tokenized
@@ -863,10 +868,10 @@ Live Copilot Anthropic compatibility remains unverified.
 Beta variable-cardinality `usage.iterations[]` is explicitly excluded from
 migration 1 pending a separate schema/cardinality review. Compaction iteration
 counts are not included in top-level usage, so this meter does not claim exhaustive
-consumption. An independent schema/accounting review found no blocking issue with
-the six-plus-seven projection. Subject to the recorded limitations, ADR-0018
-freezes migration 1; no provider billing behavior is inferred from these native
-counts.
+consumption. Subject to the recorded limitations and
+[current approval](#maintainer-approval-2026-09-06), ADR-0018 records the frozen
+six-plus-seven projection supported by the primary-source field evidence above;
+no provider billing behavior is inferred from these native counts.
 
 ---
 
@@ -993,29 +998,52 @@ production code nor a root dependency; #197 does.
 
 ---
 
-## 14. Approved architecture gates
+## 14. Current approval and historical evidence
 
-The four pre-implementation gates are explicitly closed:
+### Maintainer approval 2026-09-06
 
-1. **Persistence:** the narrow opt-in SQLite exception and its best-effort
-   durability, local-filesystem, sidecar, permission, and platform limitations
-   are accepted by ADR-0017.
-2. **Shim language:** the existing Shim definition admits read-only observers;
-   no observer subtype is introduced. README and package policy use the same
-   broader wording.
-3. **Projection:** migration 1 has six OpenAI and seven Anthropic scalar counts,
-   including inclusive `cache_write_tokens` and nullable `thinking_tokens`.
-   Native values, nil/zero, required core fields, schema evolution, and the
-   `usage.iterations[]` exclusion follow ADR-0018 and §11.3.
-4. **Shutdown:** one fresh `ShutdownTimeout` finalization extension follows the
+On **2026-09-06**, maintainer **Ning Wang** selected **“Approve and record now”**
+in the PR #202 follow-up conversation. The selected option's meaning was:
+
+> Explicitly accept these documented choices and limitations now. Record this
+> approval without asserting that historical pre-implementation approval was
+> verified.
+
+That current approval covers:
+
+1. **Persistence:** the narrow opt-in SQLite exception in ADR-0017, off by
+   default, with its best-effort durability, local-filesystem, sidecar, and
+   permission limits. Windows/Darwin native runtime behavior and Windows ACL
+   behavior remain unverified; cross-builds are not runtime certification.
+2. **Shim language:** admission of read-only observers through the existing
+   Shim definition, without an observer subtype, and the corresponding README
+   and package-policy wording.
+3. **Projection and evidence:** migration 1's six OpenAI and seven Anthropic
+   scalar counts, including inclusive `cache_write_tokens` and nullable
+   `thinking_tokens`, excluding beta variable-cardinality `usage.iterations[]`.
+   The exact official Messages Create contract and generated synthetic Anthropic
+   fixtures are accepted in place of live captures pending live evidence; live
+   Copilot Anthropic compatibility remains unverified (ADR-0018 and §11.3).
+   Native values, nil/zero, required core fields, and schema evolution are unchanged.
+4. **Shutdown:** one fresh `ShutdownTimeout` finalization extension after the
    existing drain/force-close sequence, with atomic cutoff, late-loss counting,
-   no ambiguous-batch replay, writer-owned cleanup, bounded coordinator wait,
-   and observed-through-publication final reporting (§9.1).
+   no ambiguous-batch replay, writer-owned cleanup, and final reporting (§9.1).
+   The coordinator's SQL/native-cleanup wait is bounded; synchronous logging is
+   excluded from that bound, and process exit is not guaranteed by it.
 
-These approvals authorized the staged implementation. Issue #197 supplies the
-shared contract, production SQLite dependency and writer, both settings, and the
-buffered OpenAI hook; issue #198 adds the buffered Anthropic hook without changing
-migration 1; issue #199 adds self-contained OpenAI SSE completion observation;
+This records acceptance **now**, not proof of approval before implementation.
+The original design at `91e635c` required approval and evidence before
+implementation. The earlier claim of 2026-09-05 acceptance, including
+“maintainer-approved” in `966519f`, cannot be independently verified from the
+available record; this entry neither establishes that timing nor asserts that
+prior approval never occurred. The original temporal requirement is not
+retroactively demonstrated by this approval or by the later implementation/review
+work.
+
+Issue #197 supplies the shared contract, production SQLite dependency and writer,
+both settings, and the buffered OpenAI hook; issue #198 adds the buffered
+Anthropic hook without changing migration 1; issue #199 adds self-contained
+OpenAI SSE completion observation;
 issue #200 adds the same self-contained observation to OpenAI WebSocket server
 Messages; and issue #201 adds request-scoped Anthropic SSE accumulation. The
 five recording paths are now implemented without changing the frozen schema.

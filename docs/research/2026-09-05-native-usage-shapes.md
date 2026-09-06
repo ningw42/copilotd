@@ -5,9 +5,9 @@
 **Issue:** #194 (epic #192)
 
 **Result:** OpenAI Responses is verified on all three transports. Live
-Anthropic-through-Copilot evidence was unavailable; the approved replacement is
-the exact official Messages Create contract plus generated fixtures. The schema
-gate is closed with live Copilot Anthropic compatibility explicitly unverified.
+Anthropic-through-Copilot evidence was unavailable. The exact official Messages
+Create contract plus generated fixtures provide contract evidence, not live
+Copilot Anthropic compatibility verification.
 
 ## Executive answer
 
@@ -22,9 +22,11 @@ The same live conclusion cannot be made for Anthropic. The available Copilot
 account's raw catalog had zero models advertising `/v1/messages`, the
 provider-shaped Anthropic catalog was empty, and one bounded probe of the
 previously working `claude-opus-4.8` model returned HTTP 400. No live Anthropic
-completion existed to sanitize. The user therefore explicitly approved the exact
-official [Messages Create](https://platform.claude.com/docs/en/api/messages/create)
-contract and generated fixtures in place of a live capture. Those Anthropic
+completion existed to sanitize. In the [2026-09-06 current approval](../design/2026-07-26-token-usage-meter-design.md#maintainer-approval-2026-09-06),
+maintainer Ning Wang accepts the exact official
+[Messages Create](https://platform.claude.com/docs/en/api/messages/create)
+contract and generated fixtures in place of live captures pending live evidence.
+This does not verify historical pre-implementation approval. Those Anthropic
 fixtures remain honestly labeled **generated synthetic contract variants**, not
 recorded Copilot evidence.
 
@@ -81,8 +83,8 @@ and `recorded-capture-metadata.json` beside the fixtures.
 
 | Surface | Transport and terminal | 2026-09-05 result | Identity/model/completed/usage together? | Fixture |
 | --- | --- | --- | --- | --- |
-| Anthropic Messages | buffered JSON; non-empty `stop_reason` | unavailable: no catalog model; known model probe returned 400 | not observed; approved official-contract substitute | generated synthetic eligibility shape only |
-| Anthropic Messages | SSE; `message_stop` after cumulative state | not requested after the bounded availability failure | not observed; approved official-contract substitute | generated synthetic cumulative and late-usage streams only |
+| Anthropic Messages | buffered JSON; non-empty `stop_reason` | unavailable: no catalog model; known model probe returned 400 | not observed; official-contract substitute accepted 2026-09-06 (approval above) | generated synthetic eligibility shape only |
+| Anthropic Messages | SSE; `message_stop` after cumulative state | not requested after the bounded availability failure | not observed; official-contract substitute accepted 2026-09-06 (approval above) | generated synthetic cumulative and late-usage streams only |
 | OpenAI Responses | buffered JSON; response `status:"completed"` | recorded, returned `gpt-5.6-sol` | yes, in the same response object | `openai-responses-buffered.recorded.json` |
 | OpenAI Responses | SSE `response.completed` | recorded, sequence 11 | yes, in that event's `response` | `openai-responses-sse.recorded.sse` |
 | OpenAI Responses | WebSocket `response.completed` Message | recorded, sequence 11 | yes, in that Message's `response` | `openai-responses-websocket.recorded.jsonl` |
@@ -207,8 +209,7 @@ explanatory calculations.
 | completion markers | recorded OpenAI status/event types; synthetic Anthropic stop reason/`message_stop` | provider markers are documented; Anthropic Copilot occurrence remains unverified |
 
 The null, missing, malformed, negative, and overflow cases are deliberately not
-called provider behavior. They specify defensive parser behavior approved by
-the design/TDD seam.
+called provider behavior. They specify the design's defensive parser behavior.
 
 ## Accepted migration 1 decision and evidence limit
 
@@ -228,9 +229,10 @@ the design/TDD seam.
 Required values remain signed 64-bit counts; missing optional reports remain
 `NULL` rather than fabricated zero, and native values are never normalized.
 Every later supported count requires a forward migration and adjacent Go semantic
-documentation. The user-approved official-contract/generated-fixture substitute
-closes the architecture gate without representing live Anthropic compatibility
-as verified. Production metering remains staged after this documentation decision.
+documentation. The official-contract/generated-fixture substitute is accepted
+under the [current approval](../design/2026-07-26-token-usage-meter-design.md#maintainer-approval-2026-09-06),
+not proof that the original before-implementation gate was satisfied. Live
+Anthropic compatibility remains unverified.
 
 ## Primary sources
 

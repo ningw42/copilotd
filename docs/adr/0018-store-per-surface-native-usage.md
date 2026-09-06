@@ -1,6 +1,10 @@
 # Store per-Surface native token counts verbatim
 
-**Status:** accepted
+**Status:** accepted (current approval: 2026-09-06)
+
+Maintainer Ning Wang's [current approval record](../design/2026-07-26-token-usage-meter-design.md#maintainer-approval-2026-09-06)
+covers this projection, evidence substitution, and observer admission; historical
+pre-implementation approval remains unverified.
 
 The Usage meter stores one Turn in the table for its inference Surface,
 preserving supported provider-reported token counts as signed 64-bit values

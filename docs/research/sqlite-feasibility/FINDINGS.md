@@ -21,9 +21,10 @@ migration, reader/writer, cancellation, and race probes described below. No
 build or Linux-runtime design blocker was found.
 
 These probes are feasibility evidence and did not themselves grant production
-persistence approval. That later explicit approval is recorded in
-[ADR-0017](../../adr/0017-persist-usage-in-local-sqlite.md), which retains the
-evidence limits: Windows and Darwin have compile/link evidence, not runtime
+persistence approval. Maintainer Ning Wang's [2026-09-06 current approval](../../design/2026-07-26-token-usage-meter-design.md#maintainer-approval-2026-09-06)
+accepts the decision in [ADR-0017](../../adr/0017-persist-usage-in-local-sqlite.md)
+and its evidence limits; historical pre-implementation approval remains
+unverified. Windows and Darwin have compile/link evidence, not runtime
 certification, and Windows ACL behavior is unverified. Nothing in this nested
 module is imported by the root module or a production package.
 
@@ -296,17 +297,19 @@ On Windows, the retained build uses best-effort exclusive creation and
 regular-file validation only. Go's Unix-like `FileMode` values neither set nor
 prove a Windows ACL. Neither Windows target was executed, so ACL inheritance,
 sidecar ACLs, concurrent creation, WAL locking, and final-path reparse-point
-handling remain unresolved runtime evidence. ADR-0017 accepts this as an explicit
-best-effort limitation rather than certification; inherited ACLs and sidecar
-protection remain unverified, and a
-Unix mode assertion cannot establish Windows behavior.
+handling remain unresolved runtime evidence. The
+[current approval](../../design/2026-07-26-token-usage-meter-design.md#maintainer-approval-2026-09-06)
+accepts ADR-0017's best-effort limitation, not certification; inherited ACLs and
+sidecar protection remain unverified, and a Unix mode assertion cannot establish
+Windows behavior.
 
-## Historical bounded final-flush proposal, later accepted
+## Historical bounded final-flush proposal and current acceptance
 
-This section preserves the proposal reviewed for #196. Its policy was later
-explicitly accepted in
-[ADR-0017](../../adr/0017-persist-usage-in-local-sqlite.md) and reconciled into
-the authoritative [Usage meter design](../../design/2026-07-26-token-usage-meter-design.md).
+This section preserves the proposal prepared for #196. The policy documented in
+[ADR-0017](../../adr/0017-persist-usage-in-local-sqlite.md) now has the maintainer's
+[2026-09-06 approval](../../design/2026-07-26-token-usage-meter-design.md#maintainer-approval-2026-09-06),
+including the native-wait-only bound below. That record does not establish
+approval at the #196 checkpoint.
 
 ### Current coordinator behavior
 
@@ -334,7 +337,7 @@ that shutdown is specifically allowing to finish. A deferred context-free
 
 ### Accepted policy: one explicit bounded extension
 
-The later architecture decision accepts this policy:
+The current approval linked above covers this policy:
 
 1. Let `Server.Run` complete its existing drain or force-close sequence under
    the first `ShutdownTimeout` deadline. Admission remains open during this
@@ -344,10 +347,11 @@ The later architecture decision accepts this policy:
    a `late_after_cutoff` loss counter, and never send to a closed channel.
 3. Create a **fresh**
    `context.WithTimeout(context.Background(), cfg.ShutdownTimeout)` for final
-   flush. This is an explicit extension after drain, so the configured graceful
-   maximum is at most `2 * ShutdownTimeout` (20 seconds with the current
-   default), apart from the filesystem limitation below. It adds no second
-   setting or hidden timeout constant.
+   flush. This is an explicit extension after drain: server drain and meter
+   SQL/native-cleanup waits have a total budget of `2 * ShutdownTimeout` (20
+   seconds with the current default). Synchronous logging is excluded, and
+   arbitrary filesystem I/O or process exit is not guaranteed by it (see below).
+   It adds no second setting or hidden timeout constant.
 4. The single writer owns finalization. It drains the already accepted bounded
    queue and attempts bounded batches. Before each possibly blocking
    `BEGIN IMMEDIATE`/write/commit stage, recompute the extension's remaining
@@ -374,7 +378,9 @@ The later architecture decision accepts this policy:
 
 The policy bounds how long the coordinator **waits** for queue draining,
 contention, final writes, and driver cleanup. It does not make arbitrary
-filesystem I/O preemptible.
+filesystem I/O preemptible. Final `slog.Handler` publication and any wait for an
+earlier synchronous runtime log are outside that native bound; a stuck log
+destination can extend finalizer return.
 
 Go's `database/sql.Conn.Close` documentation says it blocks until concurrent
 operations finish; `DB.Close` waits for started queries. Neither takes a context.
@@ -395,10 +401,10 @@ local filesystem, not reasons to claim an unbounded close is safe.
 
 ## TDD and verification record
 
-Tests exercise the user-approved disposable driver-probe and filesystem/database
-system boundaries. They use the real candidate driver and real temporary files,
-locks, connections, processes, and contexts; there is no Python SQLite substitute
-and no mock writer queue or goroutine.
+Tests exercise disposable driver-probe and filesystem/database system boundaries.
+They use the real candidate driver and real temporary files, locks, connections,
+processes, and contexts; there is no Python SQLite substitute and no mock writer
+queue or goroutine.
 
 Representative red-to-green observations:
 
@@ -468,8 +474,10 @@ final integration verification.
   reparse points. Build success and Go mode bits are not ACL evidence.
 - Keep live databases on a local filesystem. Network, roaming, and synchronized
   filesystems were neither tested nor approved.
-- ADR-0017 accepts the fresh `ShutdownTimeout` extension and background-cleanup
-  escape; this evidence task did not self-approve them.
+- The [current approval](../../design/2026-07-26-token-usage-meter-design.md#maintainer-approval-2026-09-06)
+  accepts ADR-0017's fresh `ShutdownTimeout` extension and background-cleanup
+  escape, excluding synchronous logging from the bound; this evidence task did
+  not self-approve them or establish pre-implementation acceptance.
 - If Linux OFD locking is considered, evaluate its process-wide and Linux-only
   consequences separately; v1.58.0 leaves it off by default and this probe did
   too.
