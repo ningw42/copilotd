@@ -43,6 +43,53 @@ func TestCommandRejectsUnfinishedSelectionsBeforeHTTP(t *testing.T) {
 	}
 }
 
+func TestCommandRendersAnthropicNativeCoverageAndPeriodAnnotations(t *testing.T) {
+	result := commandReport()
+	result.Surface = "all"
+	result.Buckets[0].RangePartial, result.Buckets[0].InProgress = true, true
+	first := report.Total{Turns: 2, Usage: map[string]report.Metric{
+		"input_tokens": {Sum: number(12), ReportedTurns: 2}, "output_tokens": {Sum: number(9), ReportedTurns: 2},
+		"cache_creation_input_tokens": {Sum: number(2000), ReportedTurns: 1}, "cache_read_input_tokens": {Sum: number(0), ReportedTurns: 1},
+		"ephemeral_5m_input_tokens": {}, "ephemeral_1h_input_tokens": {}, "thinking_tokens": {},
+	}}
+	second := report.Total{Turns: 1, Usage: map[string]report.Metric{
+		"input_tokens": {Sum: number(9007199254740993), ReportedTurns: 1}, "output_tokens": {Sum: number(3), ReportedTurns: 1},
+		"cache_creation_input_tokens": {}, "cache_read_input_tokens": {}, "ephemeral_5m_input_tokens": {}, "ephemeral_1h_input_tokens": {}, "thinking_tokens": {},
+	}}
+	total := report.Total{Turns: 3, Usage: map[string]report.Metric{
+		"input_tokens": {Sum: number(9007199254741005), ReportedTurns: 3}, "output_tokens": {Sum: number(12), ReportedTurns: 3},
+		"cache_creation_input_tokens": {Sum: number(2000), ReportedTurns: 1}, "cache_read_input_tokens": {Sum: number(0), ReportedTurns: 1},
+		"ephemeral_5m_input_tokens": {}, "ephemeral_1h_input_tokens": {}, "thinking_tokens": {},
+	}}
+	a, z := report.ModelTotal{Model: "a\x1b\n\u202e", Total: first}, report.ModelTotal{Model: "z", Total: second}
+	result.Anthropic = &report.Section{Rows: []report.Row{{BucketStart: "2026-09-01", ModelTotal: a}, {BucketStart: "2026-09-01", ModelTotal: z}}, Models: []report.ModelTotal{a, z}, Total: total}
+	server := httptest.NewServer(reporthttp.Handler(func(context.Context, report.Query) (report.Report, error) { return result, nil }))
+	defer server.Close()
+	client, _ := reporthttp.NewClient(server.URL)
+	utc := "UTC"
+	var out bytes.Buffer
+	options := reportcli.Options{Endpoint: server.URL, Timezone: &utc, Query: report.Query{Surface: "all", Since: "2026-09-01", Until: "2026-09-02"}, Timeout: time.Second}
+	if err := reportcli.Run(context.Background(), client, options, &out); err != nil {
+		t.Fatal(err)
+	}
+	text := out.String()
+	anthropic, openai, found := strings.Cut(text, "OpenAI\n")
+	if !found || !strings.Contains(anthropic, "Anthropic\n") {
+		t.Fatalf("section ordering: %s", text)
+	}
+	for _, want := range []string{"Uncached input", "Output", "Cache create", "Cache read", "2,000*", "0*", "—", "cache create: 1/2 stored Turns", "cache read: 1/2 stored Turns", "cache read: 1/3 stored Turns", "9,007,199,254,741,005", `"a\x1b\n\u202e"`, "[clipped] [in progress]"} {
+		if !strings.Contains(anthropic, want) {
+			t.Errorf("missing %q: %s", want, anthropic)
+		}
+	}
+	if strings.ContainsAny(text, "\x1b\u202e") || strings.Contains(anthropic, "Cache write") || strings.Contains(openai, "Uncached input") || strings.Contains(text, "Grand total") {
+		t.Fatalf("unsafe or cross-Surface presentation: %s", text)
+	}
+	if !strings.Contains(openai, "6,000*") || !strings.Contains(openai, "Persisted successful Turns") {
+		t.Fatal("OpenAI/caveat regressed")
+	}
+}
+
 func TestCommandRendersServerValuesSafelyAndReturnsOutputFailures(t *testing.T) {
 	server := httptest.NewServer(reporthttp.Handler(func(context.Context, report.Query) (report.Report, error) { return commandReport(), nil }))
 	defer server.Close()

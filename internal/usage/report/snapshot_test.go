@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -15,6 +16,136 @@ import (
 	"github.com/ningw42/copilotd/internal/usage/report"
 	"github.com/ningw42/copilotd/internal/usage/sqlitestore"
 )
+
+func TestQueryBothNativeSectionsShareOneCommittedSnapshot(t *testing.T) {
+	var turns []usage.Turn
+	for range 256 {
+		turns = append(turns,
+			anthropicTurn("2026-09-01T00:00:00Z", "same-model", usage.AnthropicUsage{InputTokens: 12, OutputTokens: 9}),
+			turn("2026-09-01T00:00:00Z", "same-model", usage.OpenAIUsage{InputTokens: 8012, OutputTokens: 9}))
+	}
+	path := stored(t, turns...)
+	writer, err := sql.Open("sqlite", sqlitestore.LiteralFileURL(path).String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	writer.SetMaxOpenConns(1)
+	if _, err = writer.Exec("PRAGMA busy_timeout=73; PRAGMA synchronous=NORMAL"); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ready, done := make(chan struct{}), make(chan error, 1)
+	var commits atomic.Int64
+	go func() {
+		var writeErr error
+		defer func() { done <- writeErr }()
+		for revision := 0; ctx.Err() == nil; revision++ {
+			a, o := 24, 16024
+			if revision%2 != 0 {
+				a, o = 12, 8012
+			}
+			// Stop between transactions rather than canceling a SQL operation:
+			// this fixture observes the same writer connection's pragmas below.
+			tx, err := writer.Begin()
+			if err == nil {
+				_, err = tx.Exec("UPDATE anthropic_turn SET input_tokens=?", a)
+				if err == nil {
+					_, err = tx.Exec("UPDATE openai_turn SET input_tokens=?", o)
+				}
+				if err == nil {
+					err = tx.Commit()
+				} else {
+					_ = tx.Rollback()
+				}
+			}
+			if err != nil {
+				writeErr = err
+				if revision == 0 {
+					close(ready)
+				}
+				return
+			}
+			commits.Add(1)
+			if revision == 0 {
+				close(ready)
+			}
+		}
+	}()
+	joined := false
+	defer func() {
+		if !joined {
+			cancel()
+			<-done
+		}
+	}()
+	<-ready
+	reporter := report.New(path)
+	q := selection()
+	q.Surface = "all"
+	overlapped := false
+	for range 20 {
+		before := commits.Load()
+		got, err := reporter.Query(context.Background(), q)
+		if err != nil {
+			t.Fatal(err)
+		}
+		overlapped = overlapped || commits.Load() > before
+		a, o := got.Anthropic, got.OpenAI
+		if a == nil || o == nil || len(a.Rows) != 1 || len(o.Rows) != 1 || len(a.Models) != 1 || len(o.Models) != 1 {
+			t.Fatalf("snapshot sections: %+v", got)
+		}
+		inputA, inputO := *a.Total.Usage["input_tokens"].Sum, *o.Total.Usage["input_tokens"].Sum
+		// Only these two states can be committed. A read begun for each
+		// Surface independently can mix them into an impossible pair.
+		if !(inputA == 3072 && inputO == 2051072 || inputA == 6144 && inputO == 4102144) {
+			t.Fatalf("mixed committed snapshots: Anthropic=%d OpenAI=%d", inputA, inputO)
+		}
+		for _, native := range []struct {
+			section *report.Section
+			input   int64
+		}{{a, inputA}, {o, inputO}} {
+			for _, total := range []report.Total{native.section.Total, native.section.Rows[0].Total, native.section.Models[0].Total} {
+				if total.Turns != 256 || *total.Usage["input_tokens"].Sum != native.input || total.Usage["input_tokens"].ReportedTurns != 256 || *total.Usage["output_tokens"].Sum != 2304 {
+					t.Fatalf("inconsistent snapshot aggregates: %+v", total)
+				}
+			}
+		}
+	}
+	cancel()
+	writeErr := <-done
+	joined = true
+	if writeErr != nil {
+		t.Fatal(writeErr)
+	}
+	if !overlapped {
+		t.Fatal("fixture did not commit during a report; snapshot evidence is inconclusive")
+	}
+	// Observe the real driver's writer connection, not a report-internal SQL
+	// hook: read-only reports must not alter its connection-local pragmas/WAL.
+	var journal string
+	var busy, synchronous, queryOnly int
+	if err := writer.QueryRow("PRAGMA journal_mode").Scan(&journal); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.QueryRow("PRAGMA busy_timeout").Scan(&busy); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.QueryRow("PRAGMA synchronous").Scan(&synchronous); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.QueryRow("PRAGMA query_only").Scan(&queryOnly); err != nil {
+		t.Fatal(err)
+	}
+	if journal != "wal" || busy != 73 || synchronous != 1 || queryOnly != 0 {
+		t.Fatalf("writer pragmas changed: %q %d %d %d", journal, busy, synchronous, queryOnly)
+	}
+	if _, err := writer.Exec("BEGIN IMMEDIATE; ROLLBACK"); err != nil {
+		t.Fatalf("report retained writer-blocking resources: %v", err)
+	}
+	t.Logf("%d atomic two-table commits; commits overlapped reporting without mixed snapshots", commits.Load())
+}
 
 func TestQueryReadsCommittedHistoryWithoutFlushingOrRetainingWriter(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "private", "usage.db")

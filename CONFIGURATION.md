@@ -51,10 +51,11 @@ exit 1; complete reports (including empty reports) exit 0.
 | `--timeout <DURATION>` | `COPILOTD_TIMEOUT` | `timeout` | `15s` |
 | `--config <PATH>` | `COPILOTD_CONFIG` | — | No file |
 
-**Currently supported:** `--surface openai --period day --timezone UTC` with
-explicit `--since` (inclusive) and `--until` (exclusive) in strict `YYYY-MM-DD`.
-Dates must be between `1970-01-01` and `9999-01-01`, with since before until.
-Other periods/Surfaces/zones, omitted-date month defaults, terminal-local
+**Currently supported:** `--surface all` (the default), `anthropic`, or `openai`,
+with `--period day --timezone UTC` and explicit `--since` (inclusive) and `--until`
+(exclusive) in strict `YYYY-MM-DD`. Dates must be between `1970-01-01` and
+`9999-01-01`, with since before until.
+Other periods/zones, omitted-date month defaults, terminal-local
 timezone discovery, `--model`, `--details`, and `--json` are reserved for later
 slices and fail clearly today. Explicit empty timezone/model overrides are
 invalid, not omission. Final defaults remain day/all/current-month omissions and
@@ -71,14 +72,24 @@ are rejected. TLS verification and standard HTTP proxies remain enabled. No
 credentials, cookies, redirects, retries, daemon discovery, or local-file
 fallback are used. `--timeout` must be positive and bounds the request/read.
 
-The schema-version-1 HTTP response contains all six OpenAI native metrics,
-period/model rows, model totals, a section total, and effective selections.
+The schema-version-1 HTTP response contains all seven Anthropic and/or six
+OpenAI native metrics for the selected Surfaces, period/model rows, per-model
+and separate section totals, and effective selections. An omitted Surface
+selects both. Unselected sections are omitted; selected empty sections contain
+empty arrays, required zeros, and optional NULL sums. Anthropic input stays the
+uncached remainder, while OpenAI input stays complete input. Cache TTL and
+thinking/reasoning counts remain subsets of their native parent counts, never
+extra input/output or an inferred total. No cross-Surface token total is added.
 Counts/coverage are exact decimal strings (or null for an absent sum), never
 floating point. The client validates case-sensitive required fields, duplicate
 names, Unicode, integer ranges, and metric coverage before any output, while
 allowing additive fields. It does not reaggregate totals or reconstruct calendar
 rules. Text uses comma-separated exact counts, ASCII-escaped model identities,
 `—` for unreported metrics, and `*` plus coverage for partial optional metrics.
+Anthropic renders first with Turns, Uncached input, Output, Cache create, and
+Cache read; OpenAI follows with Turns, Input, Output, Cache write, and Cache read.
+A reported zero stays zero; an empty selection is explicitly labeled, not
+represented as proof of no consumption.
 
 The same listener serves exactly `GET`/`HEAD /usage/v1/report` without inference
 authentication or readiness/upstream work. A disabled meter returns
@@ -97,9 +108,12 @@ Turns; 10,000 period/Surface/model groups; 1 MiB per model before transfer and
 seconds for route-local response writing. Admission remains held through writes,
 but SQLite is released first. These caps do not isolate inference from shared
 CPU/disk or an internet flood, and cannot preempt arbitrary stuck filesystem I/O.
-Reports describe committed best-effort database history, not a freshness or
-completeness watermark. No writer flush, migration, extra index, or read worker
-is introduced. Live file/schema replacement remains unsupported.
+Both native sections share one committed snapshot and all row/group/model/body
+budgets apply across the whole request. A failure in either selected section
+fails the report, never returning the other as complete. Reports describe
+committed best-effort database history (including other writers/process runs),
+not a freshness or completeness watermark. No writer flush, migration, extra
+index, or read worker is introduced. Live file/schema replacement remains unsupported.
 
 ## `serve`
 
@@ -365,7 +379,7 @@ correlation stays empty. It does not store prompts, generated content, API keys,
 GitHub OAuth tokens, or Copilot tokens.
 
 The GitHub Copilot Surface, raw `/models`, provider/Codex Catalogs, and
-`/v1/messages/count_tokens` are not metered. Built-in daily OpenAI aggregation
+`/v1/messages/count_tokens` are not metered. Built-in daily native-Surface aggregation
 is available through [`usage`](#usage); pricing/billing reconciliation, automatic
 pruning, per-key attribution, and non-token usage projection remain out of scope.
 External SQLite tooling still supports either native table, for example:

@@ -33,8 +33,11 @@ func decodeReport(ctx context.Context, body []byte, q report.Query) (report.Repo
 			d.err = errProtocol
 		}
 	}
-	if r.SchemaVersion != 1 || r.Scope != "configured_database" || r.Collection != "best_effort" || r.Surface != "openai" || r.Timezone == "" || r.Since >= r.Until || !r.WindowStart.Before(r.WindowEnd) {
+	if r.SchemaVersion != 1 || r.Scope != "configured_database" || r.Collection != "best_effort" || (r.Surface != "all" && r.Surface != "anthropic" && r.Surface != "openai") || r.Timezone == "" || r.Since >= r.Until || !r.WindowStart.Before(r.WindowEnd) {
 		d.err = errProtocol
+	}
+	if q.Surface == "" {
+		q.Surface = "all"
 	}
 	for _, pair := range [][2]string{{q.Timezone, r.Timezone}, {q.Period, r.Period}, {q.Since, r.Since}, {q.Until, r.Until}, {q.Surface, r.Surface}} {
 		if pair[0] != "" && pair[0] != pair[1] {
@@ -70,40 +73,49 @@ func decodeReport(ctx context.Context, body []byte, q report.Query) (report.Repo
 	} else if !r.Buckets[0].RangeStart.Equal(r.WindowStart) || !r.Buckets[len(r.Buckets)-1].RangeEnd.Equal(r.WindowEnd) {
 		d.err = errProtocol
 	}
-	if _, present := root["anthropic"]; present {
-		d.err = errProtocol
-	}
-	section := d.object(d.member(root, "openai"))
-	s := report.Section{Rows: []report.Row{}, Models: []report.ModelTotal{}, Total: d.total(d.member(section, "total"), true)}
-	for _, raw := range d.array(section, "rows") {
-		o := d.object(raw)
-		row := report.Row{BucketStart: d.date(o, "bucket_start"), ModelTotal: report.ModelTotal{Model: d.text(o, "model"), Total: d.total(raw, false)}}
-		if !bucketNames[row.BucketStart] || r.Model != nil && row.Model != *r.Model {
-			d.err = errProtocol
-		}
-		if len(s.Rows) > 0 {
-			previous := s.Rows[len(s.Rows)-1]
-			if previous.BucketStart > row.BucketStart || previous.BucketStart == row.BucketStart && previous.Model >= row.Model {
+	for _, native := range []struct {
+		name    string
+		metrics []string
+		dest    **report.Section
+	}{{"anthropic", report.AnthropicMetrics(), &r.Anthropic}, {"openai", report.OpenAIMetrics(), &r.OpenAI}} {
+		if r.Surface != "all" && r.Surface != native.name {
+			if _, present := root[native.name]; present {
 				d.err = errProtocol
 			}
+			continue
 		}
-		s.Rows = append(s.Rows, row)
-	}
-	for _, raw := range d.array(section, "models") {
-		o := d.object(raw)
-		model := report.ModelTotal{Model: d.text(o, "model"), Total: d.total(raw, false)}
-		if r.Model != nil && model.Model != *r.Model {
+		section := d.object(d.member(root, native.name))
+		s := report.Section{Rows: []report.Row{}, Models: []report.ModelTotal{}, Total: d.total(d.member(section, "total"), true, native.metrics)}
+		for _, raw := range d.array(section, "rows") {
+			o := d.object(raw)
+			row := report.Row{BucketStart: d.date(o, "bucket_start"), ModelTotal: report.ModelTotal{Model: d.text(o, "model"), Total: d.total(raw, false, native.metrics)}}
+			if !bucketNames[row.BucketStart] || r.Model != nil && row.Model != *r.Model {
+				d.err = errProtocol
+			}
+			if len(s.Rows) > 0 {
+				previous := s.Rows[len(s.Rows)-1]
+				if previous.BucketStart > row.BucketStart || previous.BucketStart == row.BucketStart && previous.Model >= row.Model {
+					d.err = errProtocol
+				}
+			}
+			s.Rows = append(s.Rows, row)
+		}
+		for _, raw := range d.array(section, "models") {
+			o := d.object(raw)
+			model := report.ModelTotal{Model: d.text(o, "model"), Total: d.total(raw, false, native.metrics)}
+			if r.Model != nil && model.Model != *r.Model {
+				d.err = errProtocol
+			}
+			if len(s.Models) > 0 && s.Models[len(s.Models)-1].Model >= model.Model {
+				d.err = errProtocol
+			}
+			s.Models = append(s.Models, model)
+		}
+		if s.Total.Turns == 0 && (len(s.Rows) != 0 || len(s.Models) != 0) || s.Total.Turns > 0 && (len(s.Rows) == 0 || len(s.Models) == 0) {
 			d.err = errProtocol
 		}
-		if len(s.Models) > 0 && s.Models[len(s.Models)-1].Model >= model.Model {
-			d.err = errProtocol
-		}
-		s.Models = append(s.Models, model)
+		*native.dest = &s
 	}
-	if s.Total.Turns == 0 && (len(s.Rows) != 0 || len(s.Models) != 0) || s.Total.Turns > 0 && (len(s.Rows) == 0 || len(s.Models) == 0) {
-		d.err = errProtocol
-	}
-	r.OpenAI = &s
 	if d.err != nil {
 		return report.Report{}, d.err
 	}
@@ -202,14 +214,14 @@ func (d *wireDecoder) array(o object, key string) []json.RawMessage {
 	}
 	return values
 }
-func (d *wireDecoder) total(raw json.RawMessage, section bool) report.Total {
+func (d *wireDecoder) total(raw json.RawMessage, section bool, names []string) report.Total {
 	o := d.object(raw)
 	total := report.Total{Turns: d.count(o, "turns"), Usage: map[string]report.Metric{}}
 	if !section && total.Turns == 0 {
 		d.err = errProtocol
 	}
 	metrics := d.object(d.member(o, "usage"))
-	for _, name := range report.OpenAIMetrics() {
+	for _, name := range names {
 		m := d.object(d.member(metrics, name))
 		metric := report.Metric{ReportedTurns: d.count(m, "reported_turns")}
 		sum := d.member(m, "sum")

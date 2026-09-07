@@ -1,7 +1,8 @@
 # Usage reports over local HTTP with a terminal client
 
-**Status:** agreed design; #207 implements the first explicit OpenAI/day/UTC/date-bound
-slice with baseline safeguards. Later slices and release verification remain pending.
+**Status:** agreed design; #207–#208 implement native Anthropic/OpenAI and combined
+reports with daily UTC groups, explicit date bounds, and baseline safeguards.
+Later slices and release verification remain pending.
 **Date:** 2026-09-07
 **Related decision:** [ADR-0019](../adr/0019-serve-unauthenticated-usage-reports.md)
 **Tracking epic:** [#206](https://github.com/ningw42/copilotd/issues/206); slice ownership and dependencies are in section 12.

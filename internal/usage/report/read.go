@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -25,7 +26,7 @@ const (
 
 // Each call owns exactly one read-only connection and one snapshot, including
 // compatibility checks. No resource survives materialization, even on failure.
-func (r *Reporter) read(ctx context.Context, start, end time.Time) (_ *Section, err error) {
+func (r *Reporter) read(ctx context.Context, start, end time.Time, surface string) (_ map[string]*Section, err error) {
 	if !filepath.IsAbs(r.path) {
 		return nil, errors.New("database path is not absolute")
 	}
@@ -98,33 +99,65 @@ func (r *Reporter) read(ctx context.Context, start, end time.Time) (_ *Section, 
 			return nil, e
 		}
 	}
+	sections := map[string]*Section{}
+	budget := readBudget{identities: map[string]string{}}
+	for _, native := range []string{"anthropic", "openai"} {
+		if surface != "all" && surface != native {
+			continue
+		}
+		// Close each table's Rows before the next query, retaining the same
+		// transaction and request-wide budgets for both native sections.
+		sections[native], err = readSection(ctx, conn, start, end, native, &budget)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return sections, ctx.Err()
+}
+
+type readBudget struct {
+	identities                      map[string]string
+	retainedBytes, examined, groups int
+}
+
+func readSection(ctx context.Context, conn *sql.Conn, start, end time.Time, surface string, budget *readBudget) (_ *Section, err error) {
 	if err = capBusy(ctx, conn); err != nil {
 		return nil, err
 	}
-	rows, err := conn.QueryContext(ctx, `SELECT at_ms,octet_length(model),CASE WHEN octet_length(model)<=? THEN model ELSE NULL END,input_tokens,output_tokens,cached_tokens,cache_write_tokens,reasoning_tokens,total_tokens FROM openai_turn WHERE at_ms>=? AND at_ms<? ORDER BY at_ms`, MaxModelBytes, start.UnixMilli(), end.UnixMilli())
+	names, table := OpenAIMetrics(), "openai_turn"
+	if surface == "anthropic" {
+		names, table = AnthropicMetrics(), "anthropic_turn"
+	}
+	// Table and columns are exclusively the frozen native projection, never
+	// caller-provided SQL. Preserve timestamp-only indexed ordering and the
+	// lazy byte-length guard before transferring either Surface's identity.
+	rows, err := conn.QueryContext(ctx, `SELECT at_ms,octet_length(model),CASE WHEN octet_length(model)<=? THEN model ELSE NULL END,`+strings.Join(names, ",")+` FROM `+table+` WHERE at_ms>=? AND at_ms<? ORDER BY at_ms`, MaxModelBytes, start.UnixMilli(), end.UnixMilli())
 	if err != nil {
 		return nil, err
 	}
 	defer func() { err = errors.Join(err, rows.Close()) }()
-	section := Section{Rows: []Row{}, Models: []ModelTotal{}, Total: emptyTotal()}
+	section := Section{Rows: []Row{}, Models: []ModelTotal{}, Total: emptyTotal(names)}
 	models := map[string]*Total{}
 	type groupKey struct{ bucket, model string }
 	groups := map[groupKey]*Total{}
-	names := OpenAIMetrics()
-	identities := map[string]string{}
-	retainedBytes, examined := 0, 0
+	// Reuse scan storage for the section, not one destination allocation per
+	// Turn. Accumulation copies numeric values and interns model identities.
+	var at, modelBytes int64
+	var safeModel sql.NullString
+	counts := make([]sql.NullInt64, len(names))
+	dest := []any{&at, &modelBytes, &safeModel}
+	for i := range counts {
+		dest = append(dest, &counts[i])
+	}
 	for rows.Next() {
-		examined++
-		if examined > MaxRows {
+		budget.examined++
+		if budget.examined > MaxRows {
 			return nil, tooLarge()
 		}
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		var at, modelBytes int64
-		var safeModel sql.NullString
-		var counts [6]sql.NullInt64
-		if err := rows.Scan(&at, &modelBytes, &safeModel, &counts[0], &counts[1], &counts[2], &counts[3], &counts[4], &counts[5]); err != nil {
+		if err := rows.Scan(dest...); err != nil {
 			return nil, err
 		}
 		if modelBytes > MaxModelBytes {
@@ -141,25 +174,28 @@ func (r *Reporter) read(ctx context.Context, start, end time.Time) (_ *Section, 
 				return nil, errors.New("negative stored count")
 			}
 		}
-		model, interned := identities[safeModel.String]
+		model, interned := budget.identities[safeModel.String]
 		if !interned {
-			retainedBytes += len(safeModel.String)
-			if retainedBytes > MaxDistinctModelBytes {
+			budget.retainedBytes += len(safeModel.String)
+			if budget.retainedBytes > MaxDistinctModelBytes {
 				return nil, tooLarge()
 			}
 			model = safeModel.String
-			identities[model] = model
+			budget.identities[model] = model
 		}
 		key := groupKey{time.UnixMilli(at).UTC().Format(time.DateOnly), model}
 		if groups[key] == nil {
-			if len(groups) >= MaxGroups {
+			// Surface is implicit in this section's map, but its groups count
+			// against the one request-wide limit.
+			budget.groups++
+			if budget.groups > MaxGroups {
 				return nil, tooLarge()
 			}
-			total := emptyTotal()
+			total := emptyTotal(names)
 			groups[key] = &total
 		}
 		if models[model] == nil {
-			total := emptyTotal()
+			total := emptyTotal(names)
 			models[model] = &total
 		}
 		for _, total := range []*Total{groups[key], models[model], &section.Total} {

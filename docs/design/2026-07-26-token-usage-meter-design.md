@@ -9,9 +9,10 @@
 [Usage reporting design](2026-09-07-usage-reporting-design.md) and
 [ADR-0019](../adr/0019-serve-unauthenticated-usage-reports.md) replace this
 design's historical no-built-in-query non-goal with unauthenticated daemon-owned
-reports and a terminal HTTP client. #207 implements the first explicit
-OpenAI/day/UTC/date-bound slice; later capabilities remain pending. This does
-not revise the native projection or writer policies documented here.
+reports and a terminal HTTP client. #207–#208 implement native Anthropic/OpenAI
+and combined reports with daily UTC groups and explicit date bounds; later
+capabilities remain pending. This does not revise the native projection or writer
+policies documented here.
 
 Maintainer Ning Wang's [current approval](#maintainer-approval-2026-09-06)
 accepts the state-at-rest and Shim-observer exceptions documented in

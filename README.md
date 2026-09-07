@@ -67,30 +67,35 @@ API keys, missing CORS headers, and private database permissions do not protect
 this HTTP path; use bind/firewall/reverse-proxy policy. HTTP is plain TCP unless
 an operator supplies a TLS reverse proxy or tunnel.
 
-The first reporting slice supports explicit OpenAI, daily UTC groups, and both
-date bounds:
+Reports support Anthropic and OpenAI, separately or together (the default), with
+daily UTC groups and explicit date bounds:
 
 ```sh
-copilotd usage --surface openai --timezone UTC \
-  --since 2026-09-01 --until 2026-10-01
+copilotd usage --timezone UTC --since 2026-09-01 --until 2026-10-01
+# Optional: --surface anthropic or --surface openai (default: all)
 # Optional: --endpoint https://example.test/copilotd
 ```
 
 `--endpoint` defaults to `http://127.0.0.1:8080`; a path prefix is preserved when
 appending `/usage/v1/report`. The command is an HTTP client, never an offline
 SQLite reader. It shows exact native counts, stored-Turn coverage, per-model
-and section totals, without stacking cache/reasoning subsets onto their parent
-counts. Reports cover committed observations in the configured database,
+and section totals. Anthropic appears first with **Uncached input**, Output,
+Cache create, and Cache read; OpenAI retains complete Input, Output, Cache write,
+and Cache read. TTL/thinking/reasoning subsets are never stacked onto their
+parent counts, and there is no normalized input or cross-Surface token grand
+total. Both sections share one read snapshot and request-wide limits.
+Reports cover committed observations in the configured database,
 including other writers and previous daemon runs; they neither flush queued
 Turns nor guarantee freshness, completeness, consumption, or charges.
 
 Disabled metering returns an explicit error, not empty history. An enabled
 empty selection prints `No stored Turns in the selected range.` Read failures,
 unreachable daemons, invalid queries, and protocol errors remain failures.
-Anthropic/combined reports, other periods/zones, automatic local-timezone and
-month defaults, model filters, detailed tables, and CLI JSON output are not yet
-implemented; unsupported selections fail clearly. The final defaults are
-retained in configuration rather than silently changed for this initial slice.
+Unselected native sections are omitted; selected empty sections stay visible.
+Other periods/zones, automatic local-timezone and month defaults, model filters,
+detailed tables, and CLI JSON output are not yet implemented; unsupported
+selections fail clearly. The final defaults are retained in configuration rather
+than silently changed for this intermediate release.
 See [usage configuration](CONFIGURATION.md#usage) for limits and protocol details.
 
 ## Design principles

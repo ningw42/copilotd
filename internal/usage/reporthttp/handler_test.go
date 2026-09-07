@@ -50,6 +50,45 @@ func TestHandlerPanicRecoveryCanWriteUnderRouteDeadline(t *testing.T) {
 	}
 }
 
+func TestHandlerEncodingBudgetIsSharedBetweenNativeSections(t *testing.T) {
+	model := strings.Repeat("\x01", 1<<20)
+	section := &report.Section{Rows: []report.Row{}, Models: []report.ModelTotal{{Model: model}}}
+	handler := reporthttp.Handler(func(_ context.Context, q report.Query) (report.Report, error) {
+		r := report.Report{}
+		if q.Surface != "openai" {
+			r.Anthropic = section
+		}
+		if q.Surface != "anthropic" {
+			r.OpenAI = section
+		}
+		return r, nil
+	})
+	for _, surface := range []string{"anthropic", "openai", "all"} {
+		for _, method := range []string{"GET", "HEAD"} {
+			rr := httptest.NewRecorder()
+			handler.ServeHTTP(rr, httptest.NewRequest(method, reporthttp.Path+"?timezone=UTC&surface="+surface, nil))
+			wantStatus := 200
+			if surface == "all" {
+				wantStatus = 422
+			}
+			if rr.Code != wantStatus {
+				t.Fatalf("%s %s status=%d body bytes=%d", method, surface, rr.Code, rr.Body.Len())
+			}
+			if method == "HEAD" {
+				if rr.Body.Len() != 0 {
+					t.Fatal("HEAD body")
+				}
+			} else if surface == "all" {
+				if !strings.Contains(rr.Body.String(), "report_too_large") || strings.Contains(rr.Body.String(), `"models"`) {
+					t.Fatal("partial success escaped shared body budget")
+				}
+			} else if rr.Body.Len() < 6<<20 || rr.Body.Len() > 8<<20 {
+				t.Fatalf("single native section size=%d", rr.Body.Len())
+			}
+		}
+	}
+}
+
 func TestHandlerBoundsEncodingAndEveryWrite(t *testing.T) {
 	model := strings.Repeat("\x01", 1<<20)
 	handler := reporthttp.Handler(func(context.Context, report.Query) (report.Report, error) {

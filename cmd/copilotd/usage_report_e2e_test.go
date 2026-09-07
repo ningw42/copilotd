@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -9,10 +10,106 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ningw42/copilotd/internal/config"
-	"time"
+	"github.com/ningw42/copilotd/internal/usage/report"
+	"github.com/ningw42/copilotd/internal/usage/reporthttp"
 )
+
+func TestAnthropicAndCombinedUsageCommandThroughProductionListener(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "messages") {
+			_, _ = io.WriteString(w, `{"id":"repeated","type":"message","stop_reason":"end_turn","model":"claude-reported","usage":{"input_tokens":12,"output_tokens":9,"cache_creation_input_tokens":2000,"cache_read_input_tokens":6000,"cache_creation":{"ephemeral_5m_input_tokens":750,"ephemeral_1h_input_tokens":1250},"output_tokens_details":{"thinking_tokens":4}}}`)
+		} else {
+			_, _ = io.WriteString(w, `{"id":"repeated","status":"completed","model":"openai-reported","usage":{"input_tokens":8012,"output_tokens":9,"input_tokens_details":{"cached_tokens":6000,"cache_write_tokens":2000},"output_tokens_details":{"reasoning_tokens":4},"total_tokens":8021}}`)
+		}
+	}))
+	defer upstream.Close()
+	h := startUsageMeterServeHarness(t, upstream.URL, discardLogger(t), nil, nil)
+	now := time.Now().UTC()
+	since, until := now.Format(time.DateOnly), now.AddDate(0, 0, 1).Format(time.DateOnly)
+	base := []string{"usage", "--endpoint", h.baseURL, "--timezone", "UTC", "--since", since, "--until", until}
+	invoke := func(surface string) string {
+		t.Helper()
+		args := append([]string{}, base...)
+		if surface != "" {
+			args = append(args, "--surface", surface)
+		}
+		var stdout, stderr bytes.Buffer
+		if code := run(args, noEnv(), &stdout, &stderr); code != 0 || stderr.Len() != 0 {
+			t.Fatalf("surface=%q exit=%d stderr=%s", surface, code, stderr.String())
+		}
+		return stdout.String()
+	}
+	empty := invoke("")
+	if strings.Count(empty, "No stored Turns in the selected range.") != 2 || !strings.Contains(empty, "Anthropic\n") || !strings.Contains(empty, "OpenAI\n") {
+		t.Fatalf("selected empty sections: %s", empty)
+	}
+	for _, path := range []string{"/anthropic/v1/messages", "/openai/v1/responses"} {
+		request, _ := http.NewRequest("POST", h.baseURL+path, strings.NewReader(`{"model":"requested-alias"}`))
+		request.Header.Set("Authorization", "Bearer "+testAPIKey)
+		request.Header.Set("Content-Type", "application/json")
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = io.Copy(io.Discard, response.Body)
+		_ = response.Body.Close()
+		if response.StatusCode != 200 {
+			t.Fatalf("inference %s: %d", path, response.StatusCode)
+		}
+	}
+	client, _ := reporthttp.NewClient(h.baseURL)
+	deadline := time.Now().Add(4 * time.Second)
+	for {
+		// Normal asynchronous persistence, never a reporter-triggered flush.
+		result, err := client.Query(context.Background(), report.Query{Timezone: "UTC", Since: since, Until: until})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.Report.Anthropic.Total.Turns == 1 && result.Report.OpenAI.Total.Turns == 1 {
+			if *result.Report.Anthropic.Total.Usage["ephemeral_5m_input_tokens"].Sum != 750 || *result.Report.Anthropic.Total.Usage["ephemeral_1h_input_tokens"].Sum != 1250 || *result.Report.Anthropic.Total.Usage["thinking_tokens"].Sum != 4 {
+				t.Fatal("secondary native metrics lost in HTTP")
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("normal persistence not visible through production reports")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	for _, surface := range []string{"anthropic", "openai", "all", ""} {
+		text := invoke(surface)
+		if strings.Contains(text, "requested-alias") || strings.Contains(text, "Grand total") || strings.Contains(text, "No stored Turns") {
+			t.Fatalf("invented identity/total/empty data: %s", text)
+		}
+		if surface != "openai" {
+			for _, want := range []string{"Anthropic\n", "Uncached input", "Cache create", "claude-reported", "2,000", "6,000"} {
+				if !strings.Contains(text, want) {
+					t.Errorf("missing %q: %s", want, text)
+				}
+			}
+		} else if strings.Contains(text, "Anthropic\n") {
+			t.Fatal("unselected Anthropic section")
+		}
+		if surface != "anthropic" {
+			for _, want := range []string{"OpenAI\n", "Cache write", "openai-reported", "8,012"} {
+				if !strings.Contains(text, want) {
+					t.Errorf("missing %q: %s", want, text)
+				}
+			}
+		} else if strings.Contains(text, "OpenAI\n") || strings.Contains(text, "8,012") {
+			t.Fatal("unselected OpenAI or synthesized Anthropic input")
+		}
+		if surface == "" || surface == "all" {
+			if strings.Index(text, "Anthropic\n") > strings.Index(text, "OpenAI\n") || strings.Count(text, "Model totals") != 2 || strings.Count(text, "Section total") != 2 {
+				t.Fatalf("native section order/totals: %s", text)
+			}
+		}
+	}
+}
 
 func TestDailyOpenAIUsageCommandThroughProductionListener(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -111,6 +208,18 @@ func TestDisabledReportDoesNotOpenHistoryOrValidateTimezone(t *testing.T) {
 	args := []string{"usage", "--endpoint", h.baseURL, "--surface", "openai", "--timezone", "UTC", "--since", "2026-09-01", "--until", "2026-09-02"}
 	if code := run(args, noEnv(), &out, &stderr); code != 1 || out.Len() != 0 || !strings.Contains(stderr.String(), "usage_meter_disabled") {
 		t.Fatalf("disabled command: %d stdout=%s stderr=%s", code, out.String(), stderr.String())
+	}
+}
+
+func TestUsageHelpDescribesBothNativeSurfacesAndRemainingRestrictions(t *testing.T) {
+	help := runSuccessfully(t, "usage", "--help")
+	for _, want := range []string{"Anthropic and OpenAI Turns", "native Surface selection: all, anthropic, openai", "currently day only", "currently explicit UTC required", "not yet supported"} {
+		if !strings.Contains(help, want) {
+			t.Errorf("missing %q in usage help: %s", want, help)
+		}
+	}
+	if strings.Contains(help, "explicit openai required") {
+		t.Fatal("obsolete Surface restriction")
 	}
 }
 

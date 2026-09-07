@@ -19,9 +19,9 @@ the in-memory-only treatment of Copilot tokens or cached values.
 [ADR-0019](0019-serve-unauthenticated-usage-reports.md) and the
 [Usage reporting design](../design/2026-09-07-usage-reporting-design.md) extend
 the original external-query-only scope with daemon-owned reports and an HTTP
-terminal client. The first slice supports explicit daily OpenAI/UTC/date-bound
-reports; follow-on capabilities remain pending. The persistence, file, and
-finalization policies below remain unchanged.
+terminal client. Reports support Anthropic, OpenAI, or both, with daily UTC
+groups and explicit date bounds (#207–#208); follow-on capabilities remain
+pending. The persistence, file, and finalization policies below remain unchanged.
 
 ## Why SQLite
 

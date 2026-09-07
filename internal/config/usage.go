@@ -34,7 +34,7 @@ func RegisterUsage(fs *ff.FlagSet) *UsageFlags {
 		stringField("since", "", func(c *UsageConfig) *string { return &c.Since }, nil, "inclusive YYYY-MM-DD (currently required)"),
 		stringField("until", "", func(c *UsageConfig) *string { return &c.Until }, nil, "exclusive YYYY-MM-DD (currently required)"),
 		optionalStringField("timezone", func(c *UsageConfig) **string { return &c.Timezone }, "named timezone (currently explicit UTC required)"),
-		stringField("surface", "all", func(c *UsageConfig) *string { return &c.Surface }, oneOf([]string{"all", "anthropic", "openai"}), "native Surface selection (currently explicit openai required)"),
+		stringField("surface", "all", func(c *UsageConfig) *string { return &c.Surface }, oneOf([]string{"all", "anthropic", "openai"}), "native Surface selection: all, anthropic, openai"),
 		optionalStringField("model", func(c *UsageConfig) **string { return &c.Model }, "exact Reported model (not yet supported)"),
 		boolField("details", false, func(c *UsageConfig) *bool { return &c.Details }, "secondary native tables (not yet supported)"),
 		boolField("json", false, func(c *UsageConfig) *bool { return &c.JSON }, "validated JSON output (not yet supported)"),

@@ -9,7 +9,7 @@ import (
 )
 
 // Query selects daemon-owned calendar aggregation. This initial slice requires
-// OpenAI, UTC and both explicit bounds; empty Period selects day. Follow-on
+// UTC and both explicit bounds; empty Period selects day. Follow-on
 // selections fail explicitly, rather than producing invented empty sections.
 type Query struct {
 	Period   string
@@ -70,6 +70,7 @@ type Report struct {
 	Surface       string    `json:"surface"`
 	Model         *string   `json:"model"`
 	Buckets       []Bucket  `json:"buckets"`
+	Anthropic     *Section  `json:"anthropic,omitempty"`
 	OpenAI        *Section  `json:"openai,omitempty"`
 }
 
@@ -77,6 +78,12 @@ type Report struct {
 // their containing counts. The returned list is independent of internal state.
 func OpenAIMetrics() []string {
 	return []string{"input_tokens", "output_tokens", "cached_tokens", "cache_write_tokens", "reasoning_tokens", "total_tokens"}
+}
+
+// AnthropicMetrics names the frozen native projection. Input is the uncached
+// remainder; TTL counts are cache-creation subsets and thinking is inside output.
+func AnthropicMetrics() []string {
+	return []string{"input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens", "thinking_tokens"}
 }
 
 // Reporter captures only the daemon's absolute path. New does not touch files.
@@ -104,8 +111,11 @@ func (r *Reporter) Query(ctx context.Context, q Query) (result Report, err error
 	if q.Period == "" {
 		q.Period = "day"
 	}
-	if q.Surface != "openai" || q.Period != "day" || q.Timezone != "UTC" || q.Model != nil {
-		return Report{}, invalid("This release supports only --surface openai --period day --timezone UTC and no model filter.")
+	if q.Surface == "" {
+		q.Surface = "all"
+	}
+	if (q.Surface != "all" && q.Surface != "openai" && q.Surface != "anthropic") || q.Period != "day" || q.Timezone != "UTC" || q.Model != nil {
+		return Report{}, invalid("This release supports --surface all/anthropic/openai --period day --timezone UTC and no model filter.")
 	}
 	start, err := strictDate(q.Since)
 	if err != nil {
@@ -126,11 +136,11 @@ func (r *Reporter) Query(ctx context.Context, q Query) (result Report, err error
 		next := edge.AddDate(0, 0, 1)
 		result.Buckets = append(result.Buckets, Bucket{StartDate: edge.Format(time.DateOnly), UntilDate: next.Format(time.DateOnly), RangeStart: edge, RangeEnd: next, InProgress: !now.Before(edge) && now.Before(next)})
 	}
-	section, err := r.read(ctx, start, end)
+	sections, err := r.read(ctx, start, end, q.Surface)
 	if err != nil {
 		return Report{}, err
 	}
-	result.OpenAI = section
+	result.Anthropic, result.OpenAI = sections["anthropic"], sections["openai"]
 	return result, ctx.Err()
 }
 func strictDate(value string) (time.Time, error) {
@@ -141,9 +151,9 @@ func strictDate(value string) (time.Time, error) {
 	return date, nil
 }
 
-func emptyTotal() Total {
+func emptyTotal(names []string) Total {
 	total := Total{Usage: map[string]Metric{}}
-	for _, name := range OpenAIMetrics() {
+	for _, name := range names {
 		total.Usage[name] = Metric{}
 	}
 	for _, name := range []string{"input_tokens", "output_tokens"} {

@@ -16,8 +16,9 @@ func encodeReport(ctx context.Context, result report.Report) ([]byte, error) {
 	out := boundedJSON{ctx: ctx}
 	header, err := json.Marshal(struct {
 		*report.Report
-		Buckets *int `json:"buckets,omitempty"`
-		OpenAI  *int `json:"openai,omitempty"`
+		Buckets   *int `json:"buckets,omitempty"`
+		Anthropic *int `json:"anthropic,omitempty"`
+		OpenAI    *int `json:"openai,omitempty"`
 	}{Report: &result})
 	if err != nil {
 		return nil, err
@@ -31,23 +32,29 @@ func encodeReport(ctx context.Context, result report.Report) ([]byte, error) {
 		out.value(bucket)
 	}
 	out.append([]byte("]"))
-	if result.OpenAI != nil {
-		out.append([]byte(`,"openai":{"rows":[`))
-		for i, row := range result.OpenAI.Rows {
+	for _, native := range []struct {
+		name    string
+		section *report.Section
+	}{{"anthropic", result.Anthropic}, {"openai", result.OpenAI}} {
+		if native.section == nil {
+			continue
+		}
+		out.append([]byte(`,"` + native.name + `":{"rows":[`))
+		for i, row := range native.section.Rows {
 			if i > 0 {
 				out.append([]byte(","))
 			}
 			out.model(row.Model, row)
 		}
 		out.append([]byte(`],"models":[`))
-		for i, model := range result.OpenAI.Models {
+		for i, model := range native.section.Models {
 			if i > 0 {
 				out.append([]byte(","))
 			}
 			out.model(model.Model, model)
 		}
 		out.append([]byte(`],"total":`))
-		out.value(result.OpenAI.Total)
+		out.value(native.section.Total)
 		out.append([]byte("}"))
 	}
 	out.append([]byte("}"))

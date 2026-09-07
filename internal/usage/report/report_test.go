@@ -113,11 +113,50 @@ func TestQueryEnforcesWholeReportResourceLimits(t *testing.T) {
 			if !errors.As(err, &failure) || failure.Code != report.TooLarge || got.OpenAI != nil {
 				t.Fatalf("resource limit: report=%+v error=%v", got, err)
 			}
+			// Reuse this boundary fixture: split its rows across native tables.
+			// Each Surface is now below the fixed production limit, while the
+			// combined query must still fail atomically (including cancellation).
+			db, err = sql.Open("sqlite", sqlitestore.LiteralFileURL(path).String())
+			if err != nil {
+				t.Fatal(err)
+			}
+			cutoff, wantAnthropic, wantOpenAI := 1, int64(1), int64(1)
+			switch tc.name {
+			case "groups":
+				cutoff, wantAnthropic, wantOpenAI = 5000, 5000, 5001
+			case "examined Turns":
+				cutoff, wantAnthropic, wantOpenAI = 500000, 500000, 500001
+			}
+			if _, err = db.Exec(`INSERT INTO anthropic_turn(at_ms,request_id,message_id,turn_index,model,transport,input_tokens,output_tokens) SELECT at_ms,request_id,response_id,turn_index,model,transport,input_tokens,output_tokens FROM openai_turn WHERE rowid<=?`, cutoff); err != nil {
+				t.Fatal(err)
+			}
+			if _, err = db.Exec(`DELETE FROM openai_turn WHERE rowid<=?`, cutoff); err != nil {
+				t.Fatal(err)
+			}
+			if err = db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			q := selection()
+			q.Surface = "anthropic"
+			a, err := report.New(path).Query(context.Background(), q)
+			if err != nil || a.Anthropic == nil || a.Anthropic.Total.Turns != wantAnthropic {
+				t.Fatalf("Anthropic alone should fit: %+v %v", a, err)
+			}
+			q.Surface = "openai"
+			o, err := report.New(path).Query(context.Background(), q)
+			if err != nil || o.OpenAI == nil || o.OpenAI.Total.Turns != wantOpenAI {
+				t.Fatalf("OpenAI alone should fit: %+v %v", o, err)
+			}
+			q.Surface = "all"
+			got, err = report.New(path).Query(context.Background(), q)
+			if !errors.As(err, &failure) || failure.Code != report.TooLarge || got.OpenAI != nil || got.Anthropic != nil {
+				t.Fatalf("request-wide limit: report=%+v error=%v", got, err)
+			}
 			if tc.name == "examined Turns" {
 				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
 				defer cancel()
-				got, err = report.New(path).Query(ctx, selection())
-				if !errors.Is(err, context.DeadlineExceeded) || !errors.As(err, &failure) || failure.Code != report.Timeout || got.OpenAI != nil {
+				got, err = report.New(path).Query(ctx, q)
+				if !errors.Is(err, context.DeadlineExceeded) || !errors.As(err, &failure) || failure.Code != report.Timeout || got.OpenAI != nil || got.Anthropic != nil {
 					t.Fatalf("interrupted scan returned partial report: %+v %v", got, err)
 				}
 			}
@@ -181,7 +220,7 @@ func TestQueryFailsWholeReportOnUnavailableOrExcessiveData(t *testing.T) {
 func TestQueryRejectsUnsupportedSelectionsBeforeOpeningFiles(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "absent", "usage.db")
 	for _, change := range []func(*report.Query){
-		func(q *report.Query) { q.Surface = "all" }, func(q *report.Query) { q.Surface = "anthropic" },
+		func(q *report.Query) { q.Surface = "invalid" },
 		func(q *report.Query) { q.Period = "week" }, func(q *report.Query) { q.Timezone = "Europe/Berlin" },
 		func(q *report.Query) { q.Timezone = "" }, func(q *report.Query) { q.Since = "2026-9-01" },
 		func(q *report.Query) { q.Since = "2026-02-30" }, func(q *report.Query) { q.Until = q.Since },
