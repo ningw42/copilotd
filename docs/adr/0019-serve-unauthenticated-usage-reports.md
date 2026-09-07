@@ -1,8 +1,9 @@
 # Serve daemon-owned Usage reports without authentication on the existing listener
 
-**Status:** maintainer-approved direction on 2026-09-07; daily native Anthropic,
-OpenAI, and combined reports with explicit UTC/date bounds implemented in #207–#208.
-Remaining capabilities and release verification are pending. Protocol details
+**Status:** maintainer-approved direction on 2026-09-07; native Anthropic, OpenAI,
+and combined reports with all calendar periods, explicit named zones, and month
+range defaults implemented in #207–#209. Remaining capabilities and release
+verification are pending. Protocol details
 and verification gates live in the
 [Usage reporting design](../design/2026-09-07-usage-reporting-design.md).
 
@@ -58,8 +59,9 @@ not an inference-authentication exemption accidentally inherited from probes.
   error dialect, and introduces no change to forwarded Copilot responses.
 
 The implementation serves Anthropic, OpenAI, or both (the default) with daily
-UTC groups, explicit date bounds, and compact native terminal sections. Both
-selected histories share one snapshot and request-wide limits. Other calendars,
-local timezone discovery, filters, details, and CLI JSON output remain planned;
+groups by default, all four calendar periods, explicit named zones, independent
+current-month date defaults, and compact native terminal sections. Both selected
+histories share one snapshot and request-wide limits. Local timezone discovery,
+filters, details, and CLI JSON output remain planned;
 their final defaults are not silently substituted. External SQLite inspection remains
 supported alongside the new bounded HTTP path.

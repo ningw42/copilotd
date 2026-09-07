@@ -189,13 +189,19 @@ func TestQueryFailsWholeReportOnUnavailableOrExcessiveData(t *testing.T) {
 			if err = db.Close(); err != nil {
 				t.Fatal(err)
 			}
-			got, err := report.New(path).Query(context.Background(), selection())
-			var failure *report.Error
-			if !errors.As(err, &failure) || failure.Code != tc.code || got.OpenAI != nil {
-				t.Fatalf("got report=%+v err=%v; want %s, no partial report", got, err, tc.code)
-			}
-			if strings.Contains(err.Error(), path) || strings.Contains(err.Error(), "SELECT") {
-				t.Fatal("private diagnostic escaped")
+			for _, period := range []string{"day", "week", "month", "year"} {
+				for _, zone := range []string{"UTC", "Europe/Berlin"} {
+					q := selection()
+					q.Period, q.Timezone = period, zone
+					got, err := report.New(path).Query(context.Background(), q)
+					var failure *report.Error
+					if !errors.As(err, &failure) || failure.Code != tc.code || got.OpenAI != nil {
+						t.Fatalf("%s/%s: report=%+v err=%v; want %s, no partial report", period, zone, got, err, tc.code)
+					}
+					if strings.Contains(err.Error(), path) || strings.Contains(err.Error(), "SELECT") {
+						t.Fatal("private diagnostic escaped")
+					}
+				}
 			}
 		})
 	}
@@ -221,11 +227,11 @@ func TestQueryRejectsUnsupportedSelectionsBeforeOpeningFiles(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "absent", "usage.db")
 	for _, change := range []func(*report.Query){
 		func(q *report.Query) { q.Surface = "invalid" },
-		func(q *report.Query) { q.Period = "week" }, func(q *report.Query) { q.Timezone = "Europe/Berlin" },
+		func(q *report.Query) { q.Period = "fortnight" }, func(q *report.Query) { q.Timezone = "NoSuch/Zone" },
 		func(q *report.Query) { q.Timezone = "" }, func(q *report.Query) { q.Since = "2026-9-01" },
 		func(q *report.Query) { q.Since = "2026-02-30" }, func(q *report.Query) { q.Until = q.Since },
 		func(q *report.Query) { q.Since = "1969-12-31" }, func(q *report.Query) { q.Until = "9999-01-02" },
-		func(q *report.Query) { q.Since = "" }, func(q *report.Query) { v := "x"; q.Model = &v },
+		func(q *report.Query) { q.Until = "2026-09-31" }, func(q *report.Query) { v := "x"; q.Model = &v },
 	} {
 		q := selection()
 		change(&q)

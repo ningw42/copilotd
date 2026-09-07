@@ -30,10 +30,10 @@ func RegisterUsage(fs *ff.FlagSet) *UsageFlags {
 	path := &configPathField[UsageConfig]{}
 	specs := []spec[UsageConfig]{
 		stringField("endpoint", "http://127.0.0.1:8080", func(c *UsageConfig) *string { return &c.Endpoint }, required, "daemon HTTP(S) base URL (path prefix preserved)"),
-		stringField("period", "day", func(c *UsageConfig) *string { return &c.Period }, oneOf([]string{"day", "week", "month", "year"}), "calendar period (currently day only)"),
-		stringField("since", "", func(c *UsageConfig) *string { return &c.Since }, nil, "inclusive YYYY-MM-DD (currently required)"),
-		stringField("until", "", func(c *UsageConfig) *string { return &c.Until }, nil, "exclusive YYYY-MM-DD (currently required)"),
-		optionalStringField("timezone", func(c *UsageConfig) **string { return &c.Timezone }, "named timezone (currently explicit UTC required)"),
+		stringField("period", "day", func(c *UsageConfig) *string { return &c.Period }, oneOf([]string{"day", "week", "month", "year"}), "calendar grouping: day, week, month, year (does not change range)"),
+		stringField("since", "", func(c *UsageConfig) *string { return &c.Since }, nil, "inclusive YYYY-MM-DD (omitted: current month's first day in requested zone)"),
+		stringField("until", "", func(c *UsageConfig) *string { return &c.Until }, nil, "exclusive YYYY-MM-DD (omitted: next month's first day in requested zone)"),
+		optionalStringField("timezone", func(c *UsageConfig) **string { return &c.Timezone }, "named timezone (currently explicit Area/City or UTC required; no local discovery)"),
 		stringField("surface", "all", func(c *UsageConfig) *string { return &c.Surface }, oneOf([]string{"all", "anthropic", "openai"}), "native Surface selection: all, anthropic, openai"),
 		optionalStringField("model", func(c *UsageConfig) **string { return &c.Model }, "exact Reported model (not yet supported)"),
 		boolField("details", false, func(c *UsageConfig) *bool { return &c.Details }, "secondary native tables (not yet supported)"),

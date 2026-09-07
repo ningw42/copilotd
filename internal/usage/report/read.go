@@ -26,7 +26,7 @@ const (
 
 // Each call owns exactly one read-only connection and one snapshot, including
 // compatibility checks. No resource survives materialization, even on failure.
-func (r *Reporter) read(ctx context.Context, start, end time.Time, surface string) (_ map[string]*Section, err error) {
+func (r *Reporter) read(ctx context.Context, buckets []Bucket, surface string) (_ map[string]*Section, err error) {
 	if !filepath.IsAbs(r.path) {
 		return nil, errors.New("database path is not absolute")
 	}
@@ -107,7 +107,7 @@ func (r *Reporter) read(ctx context.Context, start, end time.Time, surface strin
 		}
 		// Close each table's Rows before the next query, retaining the same
 		// transaction and request-wide budgets for both native sections.
-		sections[native], err = readSection(ctx, conn, start, end, native, &budget)
+		sections[native], err = readSection(ctx, conn, buckets, native, &budget)
 		if err != nil {
 			return nil, err
 		}
@@ -120,7 +120,7 @@ type readBudget struct {
 	retainedBytes, examined, groups int
 }
 
-func readSection(ctx context.Context, conn *sql.Conn, start, end time.Time, surface string, budget *readBudget) (_ *Section, err error) {
+func readSection(ctx context.Context, conn *sql.Conn, buckets []Bucket, surface string, budget *readBudget) (_ *Section, err error) {
 	if err = capBusy(ctx, conn); err != nil {
 		return nil, err
 	}
@@ -131,7 +131,7 @@ func readSection(ctx context.Context, conn *sql.Conn, start, end time.Time, surf
 	// Table and columns are exclusively the frozen native projection, never
 	// caller-provided SQL. Preserve timestamp-only indexed ordering and the
 	// lazy byte-length guard before transferring either Surface's identity.
-	rows, err := conn.QueryContext(ctx, `SELECT at_ms,octet_length(model),CASE WHEN octet_length(model)<=? THEN model ELSE NULL END,`+strings.Join(names, ",")+` FROM `+table+` WHERE at_ms>=? AND at_ms<? ORDER BY at_ms`, MaxModelBytes, start.UnixMilli(), end.UnixMilli())
+	rows, err := conn.QueryContext(ctx, `SELECT at_ms,octet_length(model),CASE WHEN octet_length(model)<=? THEN model ELSE NULL END,`+strings.Join(names, ",")+` FROM `+table+` WHERE at_ms>=? AND at_ms<? ORDER BY at_ms`, MaxModelBytes, buckets[0].RangeStart.UnixMilli(), buckets[len(buckets)-1].RangeEnd.UnixMilli())
 	if err != nil {
 		return nil, err
 	}
@@ -149,6 +149,7 @@ func readSection(ctx context.Context, conn *sql.Conn, start, end time.Time, surf
 	for i := range counts {
 		dest = append(dest, &counts[i])
 	}
+	bucket := 0
 	for rows.Next() {
 		budget.examined++
 		if budget.examined > MaxRows {
@@ -183,7 +184,15 @@ func readSection(ctx context.Context, conn *sql.Conn, start, end time.Time, surf
 			model = safeModel.String
 			budget.identities[model] = model
 		}
-		key := groupKey{time.UnixMilli(at).UTC().Format(time.DateOnly), model}
+		// Timestamp-ordered rows belong to the authoritative half-open UTC
+		// intervals, even when a historical clock reversal displays yesterday.
+		for bucket < len(buckets) && at >= buckets[bucket].RangeEnd.UnixMilli() {
+			bucket++
+		}
+		if bucket == len(buckets) || at < buckets[bucket].RangeStart.UnixMilli() {
+			return nil, errors.New("timestamp outside report intervals")
+		}
+		key := groupKey{buckets[bucket].StartDate, model}
 		if groups[key] == nil {
 			// Surface is implicit in this section's map, but its groups count
 			// against the one request-wide limit.

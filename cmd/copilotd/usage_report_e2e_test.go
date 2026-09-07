@@ -211,9 +211,35 @@ func TestDisabledReportDoesNotOpenHistoryOrValidateTimezone(t *testing.T) {
 	}
 }
 
+func TestUsageCalendarConfigurationThroughProductionListener(t *testing.T) {
+	h := startUsageMeterServeHarness(t, "http://127.0.0.1:1", discardLogger(t), nil, nil)
+	path := filepath.Join(t.TempDir(), "usage.toml")
+	if err := os.WriteFile(path, []byte("timezone = 'Europe/Berlin'\nperiod = 'week'\nsince = '2020-12-31'\nuntil = '2021-01-05'\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		flags        []string
+		env          map[string]string
+		zone, period string
+	}{
+		{nil, nil, "Europe/Berlin", "week"},
+		{nil, map[string]string{"COPILOTD_TIMEZONE": "US/Eastern", "COPILOTD_PERIOD": "month"}, "US/Eastern", "month"},
+		{[]string{"--timezone", "Etc/UTC", "--period", "year"}, map[string]string{"COPILOTD_TIMEZONE": "US/Eastern", "COPILOTD_PERIOD": "month"}, "Etc/UTC", "year"},
+		{[]string{"--timezone", "Asia/Tokyo", "--period", "day"}, nil, "Asia/Tokyo", "day"},
+	} {
+		args := append([]string{"usage", "--endpoint", h.baseURL, "--config", path}, tc.flags...)
+		lookup := func(key string) (string, bool) { value, ok := tc.env[key]; return value, ok }
+		var stdout, stderr bytes.Buffer
+		code := run(args, lookup, &stdout, &stderr)
+		if code != 0 || stderr.Len() != 0 || !strings.Contains(stdout.String(), `Timezone: "`+tc.zone+`"`) || !strings.Contains(stdout.String(), "Period: "+tc.period) || !strings.Contains(stdout.String(), "Range: 2020-12-31 to 2021-01-05 (exclusive)") || strings.Count(stdout.String(), "No stored Turns in the selected range.") != 2 {
+			t.Fatalf("calendar configuration %s/%s: exit=%d stdout=%s stderr=%s", tc.zone, tc.period, code, stdout.String(), stderr.String())
+		}
+	}
+}
+
 func TestUsageHelpDescribesBothNativeSurfacesAndRemainingRestrictions(t *testing.T) {
 	help := runSuccessfully(t, "usage", "--help")
-	for _, want := range []string{"Anthropic and OpenAI Turns", "native Surface selection: all, anthropic, openai", "currently day only", "currently explicit UTC required", "not yet supported"} {
+	for _, want := range []string{"Anthropic and OpenAI Turns", "native Surface selection: all, anthropic, openai", "day, week, month, year", "current month's first day", "next month's first day", "explicit Area/City or UTC required", "not yet supported"} {
 		if !strings.Contains(help, want) {
 			t.Errorf("missing %q in usage help: %s", want, help)
 		}

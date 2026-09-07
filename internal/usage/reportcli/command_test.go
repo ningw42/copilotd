@@ -24,6 +24,38 @@ func commandReport() report.Report {
 	model := report.ModelTotal{Model: "evil\x1b[31m\n\u202e", Total: total}
 	return report.Report{SchemaVersion: 1, GeneratedAt: start, Timezone: "UTC", Period: "day", Since: "2026-09-01", Until: "2026-09-02", WindowStart: start, WindowEnd: end, Scope: "configured_database", Collection: "best_effort", Surface: "openai", Buckets: []report.Bucket{{StartDate: "2026-09-01", UntilDate: "2026-09-02", RangeStart: start, RangeEnd: end}}, OpenAI: &report.Section{Rows: []report.Row{{BucketStart: "2026-09-01", ModelTotal: model}}, Models: []report.ModelTotal{model}, Total: total}}
 }
+func TestCommandValidatesExplicitNamedZonesBeforeHTTP(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(reporthttp.Handler(func(_ context.Context, q report.Query) (report.Report, error) {
+		calls.Add(1)
+		r := commandReport()
+		r.Timezone = q.Timezone
+		return r, nil
+	}))
+	defer server.Close()
+	client, _ := reporthttp.NewClient(server.URL)
+	for _, zone := range []string{"", "Local", "local", "GMT", "CET", "Japan", "EST5EDT", "+05:00", "UTC+5", "EST5EDT,M3.2.0,M11.1.0", "/Europe/Berlin", "Europe/Berlin/", "Europe//Berlin", "Europe/./Berlin", "Europe/../Berlin", `Europe\Berlin`, "Europe/Ber lin", "Europe/Berlín", "Europe/Berlin\x00", "NoSuch/Zone", ":Europe/Berlin"} {
+		options := reportcli.Options{Endpoint: server.URL, Timezone: &zone, Query: report.Query{Surface: "openai", Since: "2026-09-01", Until: "2026-09-02"}, Timeout: time.Second}
+		var out bytes.Buffer
+		if err := reportcli.Run(context.Background(), client, options, &out); err == nil || out.Len() != 0 {
+			t.Errorf("invalid zone %q: %v stdout=%s", zone, err, out.String())
+		}
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("invalid named zones sent %d requests", calls.Load())
+	}
+	for _, zone := range []string{"UTC", "US/Eastern", "Etc/UTC", "Etc/GMT+5", "Europe/Berlin"} {
+		options := reportcli.Options{Endpoint: server.URL, Timezone: &zone, Query: report.Query{Surface: "openai", Since: "2026-09-01", Until: "2026-09-02"}, Timeout: time.Second}
+		var out bytes.Buffer
+		if err := reportcli.Run(context.Background(), client, options, &out); err != nil || !strings.Contains(out.String(), zone) {
+			t.Errorf("accepted name %q: %v stdout=%s", zone, err, out.String())
+		}
+	}
+	if calls.Load() != 5 {
+		t.Fatalf("accepted names sent %d requests", calls.Load())
+	}
+}
+
 func TestCommandRejectsUnfinishedSelectionsBeforeHTTP(t *testing.T) {
 	var calls atomic.Int32
 	server := httptest.NewServer(reporthttp.Handler(func(context.Context, report.Query) (report.Report, error) { calls.Add(1); return commandReport(), nil }))

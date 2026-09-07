@@ -52,17 +52,46 @@ exit 1; complete reports (including empty reports) exit 0.
 | `--config <PATH>` | `COPILOTD_CONFIG` | — | No file |
 
 **Currently supported:** `--surface all` (the default), `anthropic`, or `openai`,
-with `--period day --timezone UTC` and explicit `--since` (inclusive) and `--until`
-(exclusive) in strict `YYYY-MM-DD`. Dates must be between `1970-01-01` and
-`9999-01-01`, with since before until.
-Other periods/zones, omitted-date month defaults, terminal-local
-timezone discovery, `--model`, `--details`, and `--json` are reserved for later
-slices and fail clearly today. Explicit empty timezone/model overrides are
-invalid, not omission. Final defaults remain day/all/current-month omissions and
-terminal-local omission; they are not silently changed to make this slice work.
-Native Windows will require an explicit timezone even after Unix discovery is
-implemented; terminal-local means the CLI process's environment, not a remote
-physical workstation. This release requires explicit UTC on every platform.
+with `--period day|week|month|year` and an explicit named `--timezone`.
+`--since` (inclusive) and `--until` (exclusive) are strict `YYYY-MM-DD`, between
+`1970-01-01` and `9999-01-01`, with since before until. Each omitted bound
+**independently** selects the current month's first day or the next month's first
+day from one daemon clock capture expressed in the requested zone. Period changes
+grouping only. A historical until alone can precede the default since and is
+invalid: provide both bounds, rather than expecting a rolling range.
+
+Accept `UTC` or loadable slash-style names/aliases, for example `Europe/Berlin`,
+`US/Eastern`, `Etc/UTC`, and `Etc/GMT+5`. Slash segments must be nonempty ASCII
+letters/digits/`_`/`-`/`+`/`.` and cannot be `.` or `..`. Empty overrides, `Local`,
+bare abbreviations/legacy names, offsets, absolute/backslash paths, unknown names,
+and POSIX rule expressions are invalid and never silently become UTC. Client and
+daemon share name validation. The executable embeds fallback timezone data,
+including with CGO disabled; no companion asset is required. Go can prefer
+operator `ZONEINFO` or platform data. The daemon's loaded rules are authoritative;
+equal names do not certify pristine IANA data or equal tzdata revisions.
+
+Weeks start Monday and use that Monday's date even across December/January;
+months and years use first-of-month and January 1 labels. Edges use the earliest
+instant of a date: first repeated midnight, or first valid instant after a skipped
+midnight. A skipped whole date is invalid as an explicit bound; internal skipped
+edges advance, omitting coincident daily buckets while retaining larger-period
+nominal labels. Unsupported/non-monotonic transition behavior fails rather than
+fabricating an interval; calendar traversal is context-checked and bounded for
+custom operator data. UTC half-open intervals govern both selection and grouping,
+even if a historical clock reversal later displays yesterday. The terminal uses
+server-computed `[clipped]` and `[in progress]` flags; the latter tests the captured
+instant against the unclipped interval. Empty/future buckets invent no model rows,
+and future-dated stored Turns are not filtered out by generation time.
+
+Terminal-local timezone discovery, `--model`, `--details`, and `--json` remain
+reserved for later slices and fail clearly today. Explicit empty timezone/model
+overrides are invalid, not omission. Final defaults remain day/all/current-month
+omissions and terminal-local omission; they are not silently changed for this
+slice. This release requires an explicit named zone on every platform. Native
+Windows will still require one after Unix discovery is implemented; terminal-local
+means the CLI process's environment, not a remote physical workstation. Native
+Linux static-executable timezone isolation is tested; native macOS and Windows
+runtime release verification remains pending.
 
 The endpoint is an absolute HTTP(S) base URL. Its optional path prefix is
 preserved: `https://host/copilotd/` becomes
@@ -379,7 +408,7 @@ correlation stays empty. It does not store prompts, generated content, API keys,
 GitHub OAuth tokens, or Copilot tokens.
 
 The GitHub Copilot Surface, raw `/models`, provider/Codex Catalogs, and
-`/v1/messages/count_tokens` are not metered. Built-in daily native-Surface aggregation
+`/v1/messages/count_tokens` are not metered. Built-in calendar native-Surface aggregation
 is available through [`usage`](#usage); pricing/billing reconciliation, automatic
 pruning, per-key attribution, and non-token usage projection remain out of scope.
 External SQLite tooling still supports either native table, for example:

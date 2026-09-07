@@ -68,10 +68,11 @@ this HTTP path; use bind/firewall/reverse-proxy policy. HTTP is plain TCP unless
 an operator supplies a TLS reverse proxy or tunnel.
 
 Reports support Anthropic and OpenAI, separately or together (the default), with
-daily UTC groups and explicit date bounds:
+daily, Monday-weekly, monthly, or yearly groups in an explicit named timezone:
 
 ```sh
-copilotd usage --timezone UTC --since 2026-09-01 --until 2026-10-01
+copilotd usage --timezone Europe/Berlin # Current month, daily groups
+copilotd usage --period week --timezone US/Eastern --since 2026-09-01 --until 2026-10-01
 # Optional: --surface anthropic or --surface openai (default: all)
 # Optional: --endpoint https://example.test/copilotd
 ```
@@ -92,9 +93,14 @@ Disabled metering returns an explicit error, not empty history. An enabled
 empty selection prints `No stored Turns in the selected range.` Read failures,
 unreachable daemons, invalid queries, and protocol errors remain failures.
 Unselected native sections are omitted; selected empty sections stay visible.
-Other periods/zones, automatic local-timezone and month defaults, model filters,
-detailed tables, and CLI JSON output are not yet implemented; unsupported
-selections fail clearly. The final defaults are retained in configuration rather
+Each omitted date bound independently uses the requested zone's current-month
+start or next-month start from one daemon clock capture; period changes grouping
+only. Date edges use actual timezone transitions, not fixed 24-hour durations.
+The server supplies clipped/in-progress annotations and the effective range.
+Named zones use embedded fallback data without a companion timezone asset;
+operator/platform data can take precedence, and daemon rules are authoritative.
+Automatic local-timezone discovery, model filters, detailed tables, and CLI JSON
+output are not yet implemented; unsupported selections fail clearly. The final defaults are retained in configuration rather
 than silently changed for this intermediate release.
 See [usage configuration](CONFIGURATION.md#usage) for limits and protocol details.
 

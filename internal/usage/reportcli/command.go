@@ -25,8 +25,11 @@ type Options struct {
 }
 
 func Run(ctx context.Context, client *reporthttp.Client, options Options, stdout io.Writer) error {
-	if options.Timezone == nil || *options.Timezone != "UTC" {
-		return fmt.Errorf("this release requires explicit --timezone UTC; terminal-local discovery and named zones are not yet supported")
+	if options.Timezone == nil {
+		return fmt.Errorf("this release requires explicit --timezone Area/City (or UTC); terminal-local discovery is not yet supported")
+	}
+	if _, err := report.LoadTimezone(*options.Timezone); err != nil {
+		return err
 	}
 	if options.Details || options.JSON || options.Query.Model != nil {
 		return fmt.Errorf("--details, --json, and --model are not yet supported")

@@ -1,8 +1,9 @@
 # Usage reports over local HTTP with a terminal client
 
-**Status:** agreed design; #207–#208 implement native Anthropic/OpenAI and combined
-reports with daily UTC groups, explicit date bounds, and baseline safeguards.
-Later slices and release verification remain pending.
+**Status:** agreed design; #207–#209 implement native Anthropic/OpenAI and combined
+reports with all four calendar periods, explicit named zones, independent month
+defaults, and baseline safeguards. Local discovery, filters/details/CLI JSON,
+and remaining integration/native-platform release verification are pending.
 **Date:** 2026-09-07
 **Related decision:** [ADR-0019](../adr/0019-serve-unauthenticated-usage-reports.md)
 **Tracking epic:** [#206](https://github.com/ningw42/copilotd/issues/206); slice ownership and dependencies are in section 12.

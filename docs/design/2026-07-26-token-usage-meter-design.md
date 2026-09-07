@@ -9,9 +9,9 @@
 [Usage reporting design](2026-09-07-usage-reporting-design.md) and
 [ADR-0019](../adr/0019-serve-unauthenticated-usage-reports.md) replace this
 design's historical no-built-in-query non-goal with unauthenticated daemon-owned
-reports and a terminal HTTP client. #207–#208 implement native Anthropic/OpenAI
-and combined reports with daily UTC groups and explicit date bounds; later
-capabilities remain pending. This does not revise the native projection or writer
+reports and a terminal HTTP client. #207–#209 implement native Anthropic/OpenAI
+and combined reports with all calendar periods, explicit named zones, and
+independent month defaults; later capabilities remain pending. This does not revise the native projection or writer
 policies documented here.
 
 Maintainer Ning Wang's [current approval](#maintainer-approval-2026-09-06)

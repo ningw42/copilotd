@@ -8,9 +8,8 @@ import (
 	"time"
 )
 
-// Query selects daemon-owned calendar aggregation. This initial slice requires
-// UTC and both explicit bounds; empty Period selects day. Follow-on
-// selections fail explicitly, rather than producing invented empty sections.
+// Query selects daemon-owned calendar aggregation in a named timezone.
+// Empty Period selects day. Model filters remain a follow-on capability.
 type Query struct {
 	Period   string
 	Since    string
@@ -114,29 +113,15 @@ func (r *Reporter) Query(ctx context.Context, q Query) (result Report, err error
 	if q.Surface == "" {
 		q.Surface = "all"
 	}
-	if (q.Surface != "all" && q.Surface != "openai" && q.Surface != "anthropic") || q.Period != "day" || q.Timezone != "UTC" || q.Model != nil {
-		return Report{}, invalid("This release supports --surface all/anthropic/openai --period day --timezone UTC and no model filter.")
+	if (q.Surface != "all" && q.Surface != "openai" && q.Surface != "anthropic") || (q.Period != "day" && q.Period != "week" && q.Period != "month" && q.Period != "year") || q.Model != nil {
+		return Report{}, invalid("Select a supported Surface and day/week/month/year period; model filters are not yet supported.")
 	}
-	start, err := strictDate(q.Since)
+	buckets, start, end, err := calendar(ctx, &q, now)
 	if err != nil {
 		return Report{}, err
 	}
-	end, err := strictDate(q.Until)
-	if err != nil {
-		return Report{}, err
-	}
-	if !start.Before(end) {
-		return Report{}, invalid("since must precede until.")
-	}
-	if end.Sub(start)/(24*time.Hour) > MaxDates {
-		return Report{}, tooLarge()
-	}
-	result = Report{SchemaVersion: 1, GeneratedAt: now, Timezone: q.Timezone, Period: q.Period, Since: q.Since, Until: q.Until, Surface: q.Surface, Model: q.Model, WindowStart: start, WindowEnd: end, Scope: "configured_database", Collection: "best_effort", Buckets: []Bucket{}}
-	for edge := start; edge.Before(end); edge = edge.AddDate(0, 0, 1) {
-		next := edge.AddDate(0, 0, 1)
-		result.Buckets = append(result.Buckets, Bucket{StartDate: edge.Format(time.DateOnly), UntilDate: next.Format(time.DateOnly), RangeStart: edge, RangeEnd: next, InProgress: !now.Before(edge) && now.Before(next)})
-	}
-	sections, err := r.read(ctx, start, end, q.Surface)
+	result = Report{SchemaVersion: 1, GeneratedAt: now, Timezone: q.Timezone, Period: q.Period, Since: q.Since, Until: q.Until, Surface: q.Surface, Model: q.Model, WindowStart: start, WindowEnd: end, Scope: "configured_database", Collection: "best_effort", Buckets: buckets}
+	sections, err := r.read(ctx, result.Buckets, q.Surface)
 	if err != nil {
 		return Report{}, err
 	}
@@ -146,7 +131,7 @@ func (r *Reporter) Query(ctx context.Context, q Query) (result Report, err error
 func strictDate(value string) (time.Time, error) {
 	date, err := time.Parse(time.DateOnly, value)
 	if err != nil || date.Format(time.DateOnly) != value || value < "1970-01-01" || value > "9999-01-01" {
-		return time.Time{}, invalid("Supply explicit since/until dates as YYYY-MM-DD in 1970-01-01 through 9999-01-01.")
+		return time.Time{}, invalid("Supply since/until dates as YYYY-MM-DD in 1970-01-01 through 9999-01-01.")
 	}
 	return date, nil
 }
