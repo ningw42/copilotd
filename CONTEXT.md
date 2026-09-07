@@ -11,8 +11,8 @@ project's chief hazard.
 
 **API key**:
 The inbound secret an operator invents and clients present to copilotd (as
-`Authorization: Bearer` or `x-api-key`). Gates copilotd's own front door; never
-sent upstream.
+`Authorization: Bearer` or `x-api-key`). Gates copilotd's forwarded and Catalog
+Endpoints; never sent upstream.
 _Avoid_: managed token, token (unqualified)
 
 **GitHub OAuth token**:
@@ -170,6 +170,12 @@ _Avoid_: using shim instance for the registry entry
 The opt-in read-only Shim that records Surface-native token counts from observed
 successful inference completions.
 _Avoid_: billing meter, usage tracker
+
+**Usage report**:
+A calendar aggregation of persisted Turns by Surface and Reported model, retaining
+the native counts and their reporting coverage. It describes observed history,
+not billing, complete consumption, or per-process attribution.
+_Avoid_: billing report, request totals (for Turn counts)
 
 **Requested model**:
 The explicit model string in the upstream-bound HTTP inference request after

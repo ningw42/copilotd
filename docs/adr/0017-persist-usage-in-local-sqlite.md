@@ -14,6 +14,14 @@ matching `modernc.org/libc v1.75.6`. The meter remains off by default, creates n
 usage files while disabled, requires no companion service, and does not change
 the in-memory-only treatment of Copilot tokens or cached values.
 
+## Reporting extension under design
+
+[ADR-0019](0019-serve-unauthenticated-usage-reports.md) and the
+[Usage reporting design](../design/2026-09-07-usage-reporting-design.md) propose
+extending the original external-query-only scope with daemon-owned reports and
+an HTTP terminal client. That direction is agreed but not implemented; the
+persistence, file, and finalization policies below remain unchanged.
+
 ## Why SQLite
 
 The database is an external-query boundary: operators can inspect native

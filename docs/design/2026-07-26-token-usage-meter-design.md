@@ -5,6 +5,13 @@
 **Current acceptance:** 2026-09-06; historical pre-implementation approval unverified
 **Repository baseline:** reviewed against `91e635c` plus the #194–#195 evidence commits
 
+**Reporting follow-up (2026-09-07):** the
+[Usage reporting design](2026-09-07-usage-reporting-design.md) and
+[ADR-0019](../adr/0019-serve-unauthenticated-usage-reports.md) propose replacing
+this design's no-built-in-query non-goal with unauthenticated daemon-owned
+reports and a terminal HTTP client. This follow-up is not implemented; it does
+not revise the native projection or writer policies documented here.
+
 Maintainer Ning Wang's [current approval](#maintainer-approval-2026-09-06)
 accepts the state-at-rest and Shim-observer exceptions documented in
 [ADR-0017](../adr/0017-persist-usage-in-local-sqlite.md) and
