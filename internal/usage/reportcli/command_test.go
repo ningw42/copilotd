@@ -63,7 +63,7 @@ func TestCommandRejectsUnfinishedSelectionsBeforeHTTP(t *testing.T) {
 	client, _ := reporthttp.NewClient(server.URL)
 	utc := "UTC"
 	base := reportcli.Options{Endpoint: server.URL, Timezone: &utc, Query: report.Query{Surface: "openai", Period: "day", Since: "2026-09-01", Until: "2026-09-02"}, Timeout: time.Second}
-	for _, change := range []func(*reportcli.Options){func(o *reportcli.Options) { o.Timezone = nil }, func(o *reportcli.Options) { empty := ""; o.Timezone = &empty }, func(o *reportcli.Options) { o.Details = true }, func(o *reportcli.Options) { o.JSON = true }, func(o *reportcli.Options) { v := "x"; o.Query.Model = &v }} {
+	for _, change := range []func(*reportcli.Options){func(o *reportcli.Options) { empty := ""; o.Timezone = &empty }, func(o *reportcli.Options) { o.Details = true }, func(o *reportcli.Options) { o.JSON = true }, func(o *reportcli.Options) { v := "x"; o.Query.Model = &v }} {
 		options := base
 		change(&options)
 		if err := reportcli.Run(context.Background(), client, options, io.Discard); err == nil {

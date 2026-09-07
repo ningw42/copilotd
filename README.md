@@ -68,10 +68,11 @@ this HTTP path; use bind/firewall/reverse-proxy policy. HTTP is plain TCP unless
 an operator supplies a TLS reverse proxy or tunnel.
 
 Reports support Anthropic and OpenAI, separately or together (the default), with
-daily, Monday-weekly, monthly, or yearly groups in an explicit named timezone:
+daily, Monday-weekly, monthly, or yearly groups in a named timezone:
 
 ```sh
-copilotd usage --timezone Europe/Berlin # Current month, daily groups
+copilotd usage # Current month, daily groups, supported Unix terminal-local zone
+copilotd usage --timezone Europe/Berlin # Explicit override on every platform
 copilotd usage --period week --timezone US/Eastern --since 2026-09-01 --until 2026-10-01
 # Optional: --surface anthropic or --surface openai (default: all)
 # Optional: --endpoint https://example.test/copilotd
@@ -99,9 +100,18 @@ only. Date edges use actual timezone transitions, not fixed 24-hour durations.
 The server supplies clipped/in-progress annotations and the effective range.
 Named zones use embedded fallback data without a companion timezone asset;
 operator/platform data can take precedence, and daemon rules are authoritative.
-Automatic local-timezone discovery, model filters, detailed tables, and CLI JSON
-output are not yet implemented; unsupported selections fail clearly. The final defaults are retained in configuration rather
-than silently changed for this intermediate release.
+When `--timezone` is omitted, Linux/macOS use the CLI process's named `TZ` or a
+verified system timezone symlink. Exactly empty OS `TZ` means configured UTC;
+empty report-timezone overrides are errors. SSH, containers, and WSL use their
+own process-visible configuration, not a physical workstation or remote daemon.
+Copied/custom files, ambiguous names, unsupported rules, and nonempty `TZDIR` or
+`ZONEINFO` cannot be discovered: pass `--timezone Area/City` (or `--timezone UTC`).
+Native Windows always requires an explicit timezone, also settable through
+`COPILOTD_TIMEZONE` or selected TOML. Explicit choices bypass discovery, not name
+validation. Native Linux executable discovery and embedded fallback are tested;
+native macOS/Windows release verification remains pending.
+Model filters, detailed tables, and CLI JSON output are not yet implemented;
+unsupported selections fail clearly.
 See [usage configuration](CONFIGURATION.md#usage) for limits and protocol details.
 
 ## Design principles

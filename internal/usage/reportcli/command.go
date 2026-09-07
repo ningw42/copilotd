@@ -22,13 +22,24 @@ type Options struct {
 	Details  bool
 	JSON     bool
 	Timeout  time.Duration
+
+	localSystem *localTimezoneSystem
 }
 
 func Run(ctx context.Context, client *reporthttp.Client, options Options, stdout io.Writer) error {
-	if options.Timezone == nil {
-		return fmt.Errorf("this release requires explicit --timezone Area/City (or UTC); terminal-local discovery is not yet supported")
+	zone := options.Timezone
+	if zone == nil {
+		system := options.localSystem
+		if system == nil {
+			system = processTimezoneSystem()
+		}
+		name, err := system.discover()
+		if err != nil {
+			return err
+		}
+		zone = &name
 	}
-	if _, err := report.LoadTimezone(*options.Timezone); err != nil {
+	if _, err := report.LoadTimezone(*zone); err != nil {
 		return err
 	}
 	if options.Details || options.JSON || options.Query.Model != nil {
@@ -38,7 +49,7 @@ func Run(ctx context.Context, client *reporthttp.Client, options Options, stdout
 		return fmt.Errorf("report timeout must be positive")
 	}
 	q := options.Query
-	q.Timezone = *options.Timezone
+	q.Timezone = *zone
 	ctx, cancel := context.WithTimeout(ctx, options.Timeout)
 	defer cancel()
 	result, err := client.Query(ctx, q)

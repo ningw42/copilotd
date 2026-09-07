@@ -52,7 +52,9 @@ exit 1; complete reports (including empty reports) exit 0.
 | `--config <PATH>` | `COPILOTD_CONFIG` | — | No file |
 
 **Currently supported:** `--surface all` (the default), `anthropic`, or `openai`,
-with `--period day|week|month|year` and an explicit named `--timezone`.
+with `--period day|week|month|year` and a named timezone. Omitted `--timezone`
+selects supported terminal-local configuration on Linux/macOS; native Windows
+requires an explicit override.
 `--since` (inclusive) and `--until` (exclusive) are strict `YYYY-MM-DD`, between
 `1970-01-01` and `9999-01-01`, with since before until. Each omitted bound
 **independently** selects the current month's first day or the next month's first
@@ -83,15 +85,47 @@ server-computed `[clipped]` and `[in progress]` flags; the latter tests the capt
 instant against the unclipped interval. Empty/future buckets invent no model rows,
 and future-dated stored Turns are not filtered out by generation time.
 
-Terminal-local timezone discovery, `--model`, `--details`, and `--json` remain
-reserved for later slices and fail clearly today. Explicit empty timezone/model
-overrides are invalid, not omission. Final defaults remain day/all/current-month
-omissions and terminal-local omission; they are not silently changed for this
-slice. This release requires an explicit named zone on every platform. Native
-Windows will still require one after Unix discovery is implemented; terminal-local
-means the CLI process's environment, not a remote physical workstation. Native
-Linux static-executable timezone isolation is tested; native macOS and Windows
-runtime release verification remains pending.
+**Terminal-local timezone:** the configuration visible to the CLI process,
+including inside SSH, containers, and WSL, not the remote daemon or physical
+workstation outside that environment. Flags > environment > selected TOML >
+defaults still apply; explicitly empty report-timezone/model settings are errors,
+not omission. Valid explicit timezone overrides bypass discovery but still use
+shared name validation. Discovery never rereads `COPILOTD_TIMEZONE` to invent a
+second precedence order.
+
+- On Linux/macOS, nonempty OS `TZDIR` or `ZONEINFO` makes automatic discovery
+  unsupported. Set an explicit report timezone instead.
+- With OS `TZ` present, exactly empty means configured `UTC`. Otherwise at most
+  one leading colon is removed; a named value must validate/load unchanged, or
+  an absolute zone-file path must establish a supported name. Invalid/rule/custom
+  values error without falling back to `/etc/localtime`.
+- With OS `TZ` absent, inspect `/etc/localtime`. A name-bearing symlink must lead
+  to a readable TZif file. Relative links and directory/root aliases share a
+  fixed 40-hop traversal bound. Linux recognizes `/usr/share/zoneinfo`,
+  `/usr/share/lib/zoneinfo`, `/usr/lib/locale/TZ`, `/etc/zoneinfo`, and their
+  verified resolved roots (including NixOS store layouts), not arbitrary paths
+  containing `zoneinfo`. macOS additionally recognizes Apple's final `zoneinfo`
+  directory component in versioned/resolved layouts. Preserve the name suffix;
+  distinct candidate names are ambiguous rather than silently canonicalized.
+- Reject `right/` and `posix/` subtrees, loops, missing/unreadable targets, ordinary
+  copied/custom files, and changed path observations. Read at most 1 MiB of TZif
+  evidence and recheck path/file identity; do not reverse-match bytes, current
+  offsets/abbreviations, `time.Local`, or stale `/etc/timezone` metadata.
+- Native Windows always requires `--timezone`, `COPILOTD_TIMEZONE`, or selected
+  TOML `timezone`. No registry/CLDR mapping or Windows `TZ` inference is used.
+  WSL follows Linux. Explicit named loading retains the embedded fallback on
+  every supported target; no generated name allowlist is introduced.
+
+Failure exits 1 before HTTP with bounded guidance such as
+`cannot determine a named local timezone (unidentifiable or ambiguous zone file); pass --timezone Area/City (or --timezone UTC)`.
+There is no silent UTC or daemon-local fallback. Every successful invocation
+transmits the accepted name; raw HTTP still requires `timezone` (missing is
+400). Traversal/read bounds cover normal filesystem work, not arbitrary stuck
+I/O or an atomic guarantee against concurrent OS reconfiguration.
+Native Linux static-executable isolation covers discovery and embedded loading;
+macOS/Windows policy fixtures are not native runtime certification, which remains
+pending for release verification. `--model`, `--details`, and `--json` remain
+reserved for later slices and fail clearly today.
 
 The endpoint is an absolute HTTP(S) base URL. Its optional path prefix is
 preserved: `https://host/copilotd/` becomes

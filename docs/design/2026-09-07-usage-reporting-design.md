@@ -1,9 +1,10 @@
 # Usage reports over local HTTP with a terminal client
 
-**Status:** agreed design; #207–#209 implement native Anthropic/OpenAI and combined
-reports with all four calendar periods, explicit named zones, independent month
-defaults, and baseline safeguards. Local discovery, filters/details/CLI JSON,
-and remaining integration/native-platform release verification are pending.
+**Status:** agreed design; #207–#210 implement native Anthropic/OpenAI and combined
+reports with all four calendar periods, named zones, independent month defaults,
+baseline safeguards, and conservative Unix terminal-local timezone discovery
+(native Windows explicit-only). Filters/details/CLI JSON and remaining
+integration/native-platform release verification are pending.
 **Date:** 2026-09-07
 **Related decision:** [ADR-0019](../adr/0019-serve-unauthenticated-usage-reports.md)
 **Tracking epic:** [#206](https://github.com/ningw42/copilotd/issues/206); slice ownership and dependencies are in section 12.
@@ -331,8 +332,12 @@ identifier and daemon-owned rules, not certification that operator-supplied
 rules snapshot would add build/data ownership without guaranteeing that a
 terminal's custom rules match the daemon. Custom automatic-discovery inputs are
 rejected instead. Newer-than-bundled names may require a newer daemon; never
-mislabel that error as UTC. Native macOS/Windows execution and the proposed Unix
-discovery implementation remain release-verification obligations.
+mislabel that error as UTC. #210 implements the Unix discovery procedure with
+40-hop component-aware traversal, bounded TZif verification (at most 1 MiB), and
+path/file observation rechecks. Public-command fixtures cover Linux/macOS layouts
+and Windows explicit-only behavior; Linux static-executable isolation also covers
+system discovery and embedded loading. Native macOS/Windows execution remains a
+release-verification obligation; deterministic fixtures are not certification.
 
 ### Range and buckets
 

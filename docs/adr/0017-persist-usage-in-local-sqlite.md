@@ -20,8 +20,10 @@ the in-memory-only treatment of Copilot tokens or cached values.
 [Usage reporting design](../design/2026-09-07-usage-reporting-design.md) extend
 the original external-query-only scope with daemon-owned reports and an HTTP
 terminal client. Reports support Anthropic, OpenAI, or both, with all calendar
-periods, explicit named zones, and independent month defaults (#207–#209);
-follow-on capabilities remain pending. The persistence, file, and finalization policies below remain unchanged.
+periods, named zones, and independent month defaults (#207–#209). #210 adds
+conservative terminal-local discovery on supported Unix configurations, with
+native Windows explicit-only. Follow-on capabilities and native release gates
+remain pending. The persistence, file, and finalization policies below remain unchanged.
 
 ## Why SQLite
 

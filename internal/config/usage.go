@@ -33,7 +33,7 @@ func RegisterUsage(fs *ff.FlagSet) *UsageFlags {
 		stringField("period", "day", func(c *UsageConfig) *string { return &c.Period }, oneOf([]string{"day", "week", "month", "year"}), "calendar grouping: day, week, month, year (does not change range)"),
 		stringField("since", "", func(c *UsageConfig) *string { return &c.Since }, nil, "inclusive YYYY-MM-DD (omitted: current month's first day in requested zone)"),
 		stringField("until", "", func(c *UsageConfig) *string { return &c.Until }, nil, "exclusive YYYY-MM-DD (omitted: next month's first day in requested zone)"),
-		optionalStringField("timezone", func(c *UsageConfig) **string { return &c.Timezone }, "named timezone (currently explicit Area/City or UTC required; no local discovery)"),
+		optionalStringField("timezone", func(c *UsageConfig) **string { return &c.Timezone }, "named Area/City or UTC (omitted: terminal-local on supported Unix; native Windows requires explicit)"),
 		stringField("surface", "all", func(c *UsageConfig) *string { return &c.Surface }, oneOf([]string{"all", "anthropic", "openai"}), "native Surface selection: all, anthropic, openai"),
 		optionalStringField("model", func(c *UsageConfig) **string { return &c.Model }, "exact Reported model (not yet supported)"),
 		boolField("details", false, func(c *UsageConfig) *bool { return &c.Details }, "secondary native tables (not yet supported)"),

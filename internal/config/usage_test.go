@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -18,6 +19,49 @@ func loadUsage(args []string, env map[string]string) (UsageConfig, error) {
 	}
 	return flags.Resolve(envFunc(env))
 }
+func TestUsageTimezonePresencePrecedenceAndEagerParsing(t *testing.T) {
+	for _, tc := range []struct {
+		name, toml    string
+		flags         []string
+		env           map[string]string
+		want          *string
+		errorContains string
+	}{
+		{name: "omission remains nil even with OS TZ", env: map[string]string{"TZ": "Europe/Berlin"}},
+		{name: "file timezone", toml: "timezone = 'Europe/Berlin'", want: timezoneValue("Europe/Berlin")},
+		{name: "environment over file", toml: "timezone = 'Europe/Berlin'", env: map[string]string{"COPILOTD_TIMEZONE": "US/Eastern"}, want: timezoneValue("US/Eastern")},
+		{name: "flag over environment and file", toml: "timezone = 'Europe/Berlin'", env: map[string]string{"COPILOTD_TIMEZONE": "US/Eastern"}, flags: []string{"--timezone", "UTC"}, want: timezoneValue("UTC")},
+		{name: "empty file is present", toml: "timezone = ''", errorContains: "timezone must not be explicitly empty"},
+		{name: "empty environment overrides file", toml: "timezone = 'Europe/Berlin'", env: map[string]string{"COPILOTD_TIMEZONE": ""}, errorContains: "timezone must not be explicitly empty"},
+		{name: "empty flag overrides environment", env: map[string]string{"COPILOTD_TIMEZONE": "UTC"}, flags: []string{"--timezone", ""}, errorContains: "timezone must not be explicitly empty"},
+		// Empty strings parse normally; the engine validates the resolved value.
+		{name: "valid flag replaces parsed empty lower values", toml: "timezone = ''", env: map[string]string{"COPILOTD_TIMEZONE": ""}, flags: []string{"--timezone", "Etc/UTC"}, want: timezoneValue("Etc/UTC")},
+		{name: "malformed TOML cannot be masked", toml: "timezone = '", flags: []string{"--timezone", "UTC"}, errorContains: "config"},
+		{name: "malformed lower file duration", toml: "timeout = 'bad'", flags: []string{"--timeout", "2s", "--timezone", "UTC"}, errorContains: "from config file"},
+		{name: "malformed lower environment duration", env: map[string]string{"COPILOTD_TIMEOUT": "bad"}, flags: []string{"--timeout", "2s", "--timezone", "UTC"}, errorContains: "from env"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			args := append([]string{}, tc.flags...)
+			if tc.toml != "" {
+				path := filepath.Join(t.TempDir(), "usage.toml")
+				if err := os.WriteFile(path, []byte(tc.toml), 0600); err != nil {
+					t.Fatal(err)
+				}
+				args = append(args, "--config", path)
+			}
+			got, err := loadUsage(args, tc.env)
+			if tc.errorContains != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.errorContains) {
+					t.Fatalf("error=%v, want %s", err, tc.errorContains)
+				}
+			} else if err != nil || !reflect.DeepEqual(got.Timezone, tc.want) {
+				t.Fatalf("timezone=%v error=%v, want %v", got.Timezone, err, tc.want)
+			}
+		})
+	}
+}
+func timezoneValue(value string) *string { return &value }
+
 func TestUsageConfigurationIsIsolatedAndPresenceAware(t *testing.T) {
 	got, err := loadUsage(nil, nil)
 	if err != nil {

@@ -2,8 +2,9 @@
 
 **Status:** maintainer-approved direction on 2026-09-07; native Anthropic, OpenAI,
 and combined reports with all calendar periods, explicit named zones, and month
-range defaults implemented in #207–#209. Remaining capabilities and release
-verification are pending. Protocol details
+range defaults implemented in #207–#209; #210 adds conservative Unix terminal-local
+timezone discovery and the native Windows explicit-only policy. Remaining
+capabilities and native release verification are pending. Protocol details
 and verification gates live in the
 [Usage reporting design](../design/2026-09-07-usage-reporting-design.md).
 
@@ -61,7 +62,12 @@ not an inference-authentication exemption accidentally inherited from probes.
 The implementation serves Anthropic, OpenAI, or both (the default) with daily
 groups by default, all four calendar periods, explicit named zones, independent
 current-month date defaults, and compact native terminal sections. Both selected
-histories share one snapshot and request-wide limits. Local timezone discovery,
-filters, details, and CLI JSON output remain planned;
+histories share one snapshot and request-wide limits. Omitted report timezones
+now use supported configuration visible to the CLI process on Linux/macOS;
+SSH/container/WSL execution does not discover a physical workstation outside it.
+Native Windows and unsupported/ambiguous configurations require an explicit name,
+not an offset, registry mapping, copied-file guess, or silent UTC fallback.
+Native Linux executable evidence is retained; macOS/Windows native release gates
+remain pending. Filters, details, and CLI JSON output remain planned;
 their final defaults are not silently substituted. External SQLite inspection remains
 supported alongside the new bounded HTTP path.

@@ -184,7 +184,7 @@ func buildCommand(lookupEnv func(string) (string, bool), stdout, stderr io.Write
 
 	usageCmd := &ff.Command{
 		Name: "usage", Usage: "copilotd usage [FLAGS]",
-		ShortHelp: "report persisted Anthropic and OpenAI Turns (explicit named timezone)", Flags: usageFlags,
+		ShortHelp: "report persisted Anthropic and OpenAI Turns", Flags: usageFlags,
 		Exec: func(ctx context.Context, args []string) error {
 			if err := rejectSurplusOperands("usage", args, 0); err != nil {
 				return err

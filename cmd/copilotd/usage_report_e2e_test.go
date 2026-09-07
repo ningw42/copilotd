@@ -212,6 +212,10 @@ func TestDisabledReportDoesNotOpenHistoryOrValidateTimezone(t *testing.T) {
 }
 
 func TestUsageCalendarConfigurationThroughProductionListener(t *testing.T) {
+	// Every explicit source bypasses unsupported process-local discovery inputs.
+	t.Setenv("TZ", "invalid/rules")
+	t.Setenv("TZDIR", "/unsupported")
+	t.Setenv("ZONEINFO", "/absent")
 	h := startUsageMeterServeHarness(t, "http://127.0.0.1:1", discardLogger(t), nil, nil)
 	path := filepath.Join(t.TempDir(), "usage.toml")
 	if err := os.WriteFile(path, []byte("timezone = 'Europe/Berlin'\nperiod = 'week'\nsince = '2020-12-31'\nuntil = '2021-01-05'\n"), 0600); err != nil {
@@ -239,13 +243,13 @@ func TestUsageCalendarConfigurationThroughProductionListener(t *testing.T) {
 
 func TestUsageHelpDescribesBothNativeSurfacesAndRemainingRestrictions(t *testing.T) {
 	help := runSuccessfully(t, "usage", "--help")
-	for _, want := range []string{"Anthropic and OpenAI Turns", "native Surface selection: all, anthropic, openai", "day, week, month, year", "current month's first day", "next month's first day", "explicit Area/City or UTC required", "not yet supported"} {
+	for _, want := range []string{"Anthropic and OpenAI Turns", "native Surface selection: all, anthropic, openai", "day, week, month, year", "current month's first day", "next month's first day", "terminal-local on supported Unix", "native Windows requires explicit", "not yet supported"} {
 		if !strings.Contains(help, want) {
 			t.Errorf("missing %q in usage help: %s", want, help)
 		}
 	}
-	if strings.Contains(help, "explicit openai required") {
-		t.Fatal("obsolete Surface restriction")
+	if strings.Contains(help, "explicit openai required") || strings.Contains(help, "no local discovery") || strings.Contains(help, "explicit named timezone)") {
+		t.Fatal("obsolete rollout restriction")
 	}
 }
 
