@@ -14,6 +14,11 @@ const MaxBodyBytes = 8 << 20
 // identity; repeated identities cannot cause a whole-report allocation.
 func encodeReport(ctx context.Context, result report.Report) ([]byte, error) {
 	out := boundedJSON{ctx: ctx}
+	// The effective filter is also an identity-bearing fragment. Check before
+	// Marshal, including when a direct Query provider bypasses raw HTTP limits.
+	if result.Model != nil && len(*result.Model) > report.MaxModelBytes {
+		return nil, &report.Error{Code: report.TooLarge, Message: "Model exceeds the report size limit."}
+	}
 	header, err := json.Marshal(struct {
 		*report.Report
 		Buckets   *int `json:"buckets,omitempty"`

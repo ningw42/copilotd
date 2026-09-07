@@ -35,9 +35,9 @@ func RegisterUsage(fs *ff.FlagSet) *UsageFlags {
 		stringField("until", "", func(c *UsageConfig) *string { return &c.Until }, nil, "exclusive YYYY-MM-DD (omitted: next month's first day in requested zone)"),
 		optionalStringField("timezone", func(c *UsageConfig) **string { return &c.Timezone }, "named Area/City or UTC (omitted: terminal-local on supported Unix; native Windows requires explicit)"),
 		stringField("surface", "all", func(c *UsageConfig) *string { return &c.Surface }, oneOf([]string{"all", "anthropic", "openai"}), "native Surface selection: all, anthropic, openai"),
-		optionalStringField("model", func(c *UsageConfig) **string { return &c.Model }, "exact Reported model (not yet supported)"),
-		boolField("details", false, func(c *UsageConfig) *bool { return &c.Details }, "secondary native tables (not yet supported)"),
-		boolField("json", false, func(c *UsageConfig) *bool { return &c.JSON }, "validated JSON output (not yet supported)"),
+		optionalStringField("model", func(c *UsageConfig) **string { return &c.Model }, "exact non-empty UTF-8 Reported model (case/whitespace preserved; no aliases)"),
+		boolField("details", false, func(c *UsageConfig) *bool { return &c.Details }, "secondary native tables for period rows and range totals"),
+		boolField("json", false, func(c *UsageConfig) *bool { return &c.JSON }, "original validated JSON plus newline (complete report; unaffected by --details)"),
 		durationField("timeout", 15*time.Second, inSeconds, func(c *UsageConfig) *time.Duration { return &c.Timeout }, positive, "overall HTTP request/read timeout"),
 		path,
 	}

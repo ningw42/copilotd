@@ -74,6 +74,8 @@ daily, Monday-weekly, monthly, or yearly groups in a named timezone:
 copilotd usage # Current month, daily groups, supported Unix terminal-local zone
 copilotd usage --timezone Europe/Berlin # Explicit override on every platform
 copilotd usage --period week --timezone US/Eastern --since 2026-09-01 --until 2026-10-01
+copilotd usage --timezone UTC --surface openai --model gpt-example --details
+copilotd usage --timezone UTC --period month --since 2026-01-01 --json
 # Optional: --surface anthropic or --surface openai (default: all)
 # Optional: --endpoint https://example.test/copilotd
 ```
@@ -110,8 +112,19 @@ Native Windows always requires an explicit timezone, also settable through
 `COPILOTD_TIMEZONE` or selected TOML. Explicit choices bypass discovery, not name
 validation. Native Linux executable discovery and embedded fallback are tested;
 native macOS/Windows release verification remains pending.
-Model filters, detailed tables, and CLI JSON output are not yet implemented;
-unsupported selections fail clearly.
+
+`--model` selects an exact non-empty valid UTF-8 **Reported model**, preserving
+case, whitespace, and Unicode without Catalog alias expansion or Requested-model
+substitution. Unknown identities succeed empty. `--details` adds native reasoning
+and reported-total counts for OpenAI, and thinking/cache-TTL counts for Anthropic,
+for period rows and both range-total levels. Text safely quotes model identities;
+`—` means unreported, `0` means reported zero, and `*` shows partial stored-Turn
+coverage independently of `[clipped]` and `[in progress]` period annotations.
+`--json` emits the complete validated original response plus a newline, preserving
+exact decimal count strings, Unicode, and additive fields. `--details` does not
+change JSON or make another request. There is no pricing, raw-Turn export, or
+chart output. Remaining contention/lifecycle integration and native-platform
+release gates are still pending.
 See [usage configuration](CONFIGURATION.md#usage) for limits and protocol details.
 
 ## Design principles

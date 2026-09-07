@@ -12,9 +12,10 @@ design's historical no-built-in-query non-goal with unauthenticated daemon-owned
 reports and a terminal HTTP client. #207–#209 implement native Anthropic/OpenAI
 and combined reports with all calendar periods, named zones, and independent
 month defaults; #210 adds supported Unix terminal-local discovery and native
-Windows explicit-only behavior. Later capabilities and native release gates
-remain pending. This does not revise the native projection or writer policies
-documented here.
+Windows explicit-only behavior. #211 adds exact Reported-model filters, detailed
+native tables, and validated original-byte JSON. Remaining integration and native
+release gates are pending. This does not revise the native projection or writer
+policies documented here.
 
 Maintainer Ning Wang's [current approval](#maintainer-approval-2026-09-06)
 accepts the state-at-rest and Shim-observer exceptions documented in

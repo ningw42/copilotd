@@ -22,8 +22,10 @@ the original external-query-only scope with daemon-owned reports and an HTTP
 terminal client. Reports support Anthropic, OpenAI, or both, with all calendar
 periods, named zones, and independent month defaults (#207–#209). #210 adds
 conservative terminal-local discovery on supported Unix configurations, with
-native Windows explicit-only. Follow-on capabilities and native release gates
-remain pending. The persistence, file, and finalization policies below remain unchanged.
+native Windows explicit-only. #211 adds exact Reported-model filters, detailed
+native tables, and validated original-byte JSON. Remaining integration and native
+release gates are pending. The persistence, file, and finalization policies below
+remain unchanged.
 
 ## Why SQLite
 

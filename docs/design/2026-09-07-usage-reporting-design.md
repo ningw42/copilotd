@@ -3,8 +3,10 @@
 **Status:** agreed design; #207–#210 implement native Anthropic/OpenAI and combined
 reports with all four calendar periods, named zones, independent month defaults,
 baseline safeguards, and conservative Unix terminal-local timezone discovery
-(native Windows explicit-only). Filters/details/CLI JSON and remaining
-integration/native-platform release verification are pending.
+(native Windows explicit-only). #211 adds exact UTF-8 Reported-model filters,
+detailed native tables, and validated original-byte CLI JSON. Remaining
+contention/lifecycle integration (#212) and native-platform release verification
+(#213) are pending.
 **Date:** 2026-09-07
 **Related decision:** [ADR-0019](../adr/0019-serve-unauthenticated-usage-reports.md)
 **Tracking epic:** [#206](https://github.com/ningw42/copilotd/issues/206); slice ownership and dependencies are in section 12.

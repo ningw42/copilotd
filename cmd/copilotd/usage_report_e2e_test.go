@@ -241,14 +241,14 @@ func TestUsageCalendarConfigurationThroughProductionListener(t *testing.T) {
 	}
 }
 
-func TestUsageHelpDescribesBothNativeSurfacesAndRemainingRestrictions(t *testing.T) {
+func TestUsageHelpDescribesNativeSelectionAndPresentation(t *testing.T) {
 	help := runSuccessfully(t, "usage", "--help")
-	for _, want := range []string{"Anthropic and OpenAI Turns", "native Surface selection: all, anthropic, openai", "day, week, month, year", "current month's first day", "next month's first day", "terminal-local on supported Unix", "native Windows requires explicit", "not yet supported"} {
+	for _, want := range []string{"Anthropic and OpenAI Turns", "native Surface selection: all, anthropic, openai", "day, week, month, year", "current month's first day", "next month's first day", "terminal-local on supported Unix", "native Windows requires explicit", "exact non-empty UTF-8 Reported model", "secondary native tables for period rows and range totals", "original validated JSON plus newline"} {
 		if !strings.Contains(help, want) {
 			t.Errorf("missing %q in usage help: %s", want, help)
 		}
 	}
-	if strings.Contains(help, "explicit openai required") || strings.Contains(help, "no local discovery") || strings.Contains(help, "explicit named timezone)") {
+	if strings.Contains(help, "explicit openai required") || strings.Contains(help, "no local discovery") || strings.Contains(help, "explicit named timezone)") || strings.Contains(help, "not yet supported") {
 		t.Fatal("obsolete rollout restriction")
 	}
 }

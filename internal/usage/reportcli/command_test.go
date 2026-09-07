@@ -56,18 +56,18 @@ func TestCommandValidatesExplicitNamedZonesBeforeHTTP(t *testing.T) {
 	}
 }
 
-func TestCommandRejectsUnfinishedSelectionsBeforeHTTP(t *testing.T) {
+func TestCommandRejectsInvalidSelectionsBeforeHTTP(t *testing.T) {
 	var calls atomic.Int32
 	server := httptest.NewServer(reporthttp.Handler(func(context.Context, report.Query) (report.Report, error) { calls.Add(1); return commandReport(), nil }))
 	defer server.Close()
 	client, _ := reporthttp.NewClient(server.URL)
 	utc := "UTC"
 	base := reportcli.Options{Endpoint: server.URL, Timezone: &utc, Query: report.Query{Surface: "openai", Period: "day", Since: "2026-09-01", Until: "2026-09-02"}, Timeout: time.Second}
-	for _, change := range []func(*reportcli.Options){func(o *reportcli.Options) { empty := ""; o.Timezone = &empty }, func(o *reportcli.Options) { o.Details = true }, func(o *reportcli.Options) { o.JSON = true }, func(o *reportcli.Options) { v := "x"; o.Query.Model = &v }} {
+	for _, change := range []func(*reportcli.Options){func(o *reportcli.Options) { empty := ""; o.Timezone = &empty }, func(o *reportcli.Options) { v := ""; o.Query.Model = &v }, func(o *reportcli.Options) { v := "invalid\xff"; o.Query.Model = &v }, func(o *reportcli.Options) { o.Timeout = 0 }} {
 		options := base
 		change(&options)
 		if err := reportcli.Run(context.Background(), client, options, io.Discard); err == nil {
-			t.Errorf("unfinished selection succeeded: %+v", options)
+			t.Errorf("invalid selection succeeded: %+v", options)
 		}
 	}
 	if calls.Load() != 0 {

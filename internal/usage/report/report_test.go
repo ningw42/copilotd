@@ -231,7 +231,9 @@ func TestQueryRejectsUnsupportedSelectionsBeforeOpeningFiles(t *testing.T) {
 		func(q *report.Query) { q.Timezone = "" }, func(q *report.Query) { q.Since = "2026-9-01" },
 		func(q *report.Query) { q.Since = "2026-02-30" }, func(q *report.Query) { q.Until = q.Since },
 		func(q *report.Query) { q.Since = "1969-12-31" }, func(q *report.Query) { q.Until = "9999-01-02" },
-		func(q *report.Query) { q.Until = "2026-09-31" }, func(q *report.Query) { v := "x"; q.Model = &v },
+		func(q *report.Query) { q.Until = "2026-09-31" },
+		func(q *report.Query) { v := ""; q.Model = &v },
+		func(q *report.Query) { v := "invalid\xff"; q.Model = &v },
 	} {
 		q := selection()
 		change(&q)

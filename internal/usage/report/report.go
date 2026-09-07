@@ -6,10 +6,11 @@ import (
 	"context"
 	"database/sql"
 	"time"
+	"unicode/utf8"
 )
 
 // Query selects daemon-owned calendar aggregation in a named timezone.
-// Empty Period selects day. Model filters remain a follow-on capability.
+// Empty Period selects day. Model selects an exact Reported model; nil selects all.
 type Query struct {
 	Period   string
 	Since    string
@@ -113,15 +114,23 @@ func (r *Reporter) Query(ctx context.Context, q Query) (result Report, err error
 	if q.Surface == "" {
 		q.Surface = "all"
 	}
-	if (q.Surface != "all" && q.Surface != "openai" && q.Surface != "anthropic") || (q.Period != "day" && q.Period != "week" && q.Period != "month" && q.Period != "year") || q.Model != nil {
-		return Report{}, invalid("Select a supported Surface and day/week/month/year period; model filters are not yet supported.")
+	if (q.Surface != "all" && q.Surface != "openai" && q.Surface != "anthropic") || (q.Period != "day" && q.Period != "week" && q.Period != "month" && q.Period != "year") {
+		return Report{}, invalid("Select a supported Surface and day/week/month/year period.")
+	}
+	if q.Model != nil && (*q.Model == "" || !utf8.ValidString(*q.Model)) {
+		return Report{}, invalid("Supply a non-empty valid UTF-8 Reported model.")
+	}
+	// Direct callers do not have the HTTP adapter's raw-query cap. Bounding the
+	// filter also ensures the lazy equality predicate cannot read a larger model.
+	if q.Model != nil && len(*q.Model) > MaxModelBytes {
+		return Report{}, tooLarge()
 	}
 	buckets, start, end, err := calendar(ctx, &q, now)
 	if err != nil {
 		return Report{}, err
 	}
 	result = Report{SchemaVersion: 1, GeneratedAt: now, Timezone: q.Timezone, Period: q.Period, Since: q.Since, Until: q.Until, Surface: q.Surface, Model: q.Model, WindowStart: start, WindowEnd: end, Scope: "configured_database", Collection: "best_effort", Buckets: buckets}
-	sections, err := r.read(ctx, result.Buckets, q.Surface)
+	sections, err := r.read(ctx, result.Buckets, q.Surface, q.Model)
 	if err != nil {
 		return Report{}, err
 	}

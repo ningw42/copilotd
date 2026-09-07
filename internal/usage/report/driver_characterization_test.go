@@ -21,7 +21,7 @@ func TestPinnedDriverReadOnlyGuardAndInterruptCleanup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = db.Exec(`CREATE TABLE example(model TEXT); INSERT INTO example VALUES(printf('%.*c',1048577,'x')),('kept')`); err != nil {
+	if _, err = db.Exec(`CREATE TABLE example(model TEXT); INSERT INTO example VALUES(printf('%.*c',1048577,'x')),('模型'),('模型 ') ,('KEPT')`); err != nil {
 		t.Fatal(err)
 	}
 	if err = db.Close(); err != nil {
@@ -64,7 +64,7 @@ func TestPinnedDriverReadOnlyGuardAndInterruptCleanup(t *testing.T) {
 			t.Fatalf("oversized identity transferred: bytes=%d valid=%v", bytes, identity.Valid)
 		}
 		var selected string
-		if err = conn.QueryRowContext(context.Background(), `SELECT model FROM example WHERE CASE WHEN octet_length(model)=4 THEN model='kept' COLLATE BINARY ELSE 0 END`).Scan(&selected); err != nil || selected != "kept" {
+		if err = conn.QueryRowContext(context.Background(), `SELECT CASE WHEN octet_length(model)<=? THEN model ELSE NULL END FROM example WHERE CASE WHEN octet_length(model)=? THEN model=? COLLATE BINARY ELSE 0 END`, 1048576, 6, "模型").Scan(&selected); err != nil || selected != "模型" {
 			t.Fatalf("guarded exact predicate: %q %v", selected, err)
 		}
 		if _, err = conn.ExecContext(context.Background(), "DELETE FROM example"); err == nil {

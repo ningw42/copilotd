@@ -124,8 +124,25 @@ transmits the accepted name; raw HTTP still requires `timezone` (missing is
 I/O or an atomic guarantee against concurrent OS reconfiguration.
 Native Linux static-executable isolation covers discovery and embedded loading;
 macOS/Windows policy fixtures are not native runtime certification, which remains
-pending for release verification. `--model`, `--details`, and `--json` remain
-reserved for later slices and fail clearly today.
+pending for release verification.
+
+`--model` is an exact, case-sensitive **Reported model** filter, independent of
+Requested model and Catalog aliases. Its value must be non-empty valid UTF-8;
+whitespace and Unicode are preserved without trimming, normalization, or repair.
+Omission selects all identities, while an explicitly empty winning flag/env/TOML
+value is invalid rather than clearing a lower-precedence selection. Invalid
+resolved CLI values fail before HTTP. The raw route rejects invalid UTF-8 as
+`400 invalid_query` during admitted semantic validation, before SQL. Unknown
+identities succeed with selected empty sections. A guarded bound binary SQLite
+predicate excludes unrelated oversized identities before full identity transfer;
+unfiltered oversized identities fail rather than being truncated or hidden.
+
+```sh
+# Model names are examples, not a promise of Catalog contents.
+copilotd usage --timezone UTC --surface anthropic --model claude-example --details
+copilotd usage --timezone UTC --surface openai --model gpt-example --json
+copilotd usage --timezone UTC --model 'exact model with spaces' --details --json
+```
 
 The endpoint is an absolute HTTP(S) base URL. Its optional path prefix is
 preserved: `https://host/copilotd/` becomes
@@ -153,6 +170,29 @@ Anthropic renders first with Turns, Uncached input, Output, Cache create, and
 Cache read; OpenAI follows with Turns, Input, Output, Cache write, and Cache read.
 A reported zero stays zero; an empty selection is explicitly labeled, not
 represented as proof of no consumption.
+
+`--details` adds secondary native tables for period rows, per-model range totals,
+and section totals: OpenAI **Reasoning** (`reasoning_tokens`) and **Reported
+total** (`total_tokens`, never inferred); Anthropic **Thinking** (`thinking_tokens`),
+**Cache create 5m** (`ephemeral_5m_input_tokens`), and **Cache create 1h**
+(`ephemeral_1h_input_tokens`). All retain NULL/zero and reporting coverage, without
+normalizing or adding subsets to their parent counts. `[clipped]` and
+`[in progress]` are independent of optional-count `*` coverage, not completeness
+claims. Identities are ASCII-quoted without truncation to prevent terminal control
+or bidi injection.
+
+`--json` validates the same bounded complete response as text, then writes its
+original bytes plus a final newline. Whitespace, valid Unicode, exact decimal
+counts, and additive fields survive unchanged. JSON always includes every native
+metric; `--details` has no effect on it. Neither switch changes report selection
+or adds HTTP parameters, requests, or client aggregation. Case variants cannot
+replace required member names, duplicate names after unescaping are rejected at
+every level, and invalid UTF-8/unpaired surrogates are errors rather than repaired
+identities. Schema, effective selections, native metric presence, arrays, int64
+counts, and sum/coverage relationships (including empty sections) must validate
+before any stdout output. Errors use stderr and exit 1, including partial/short
+writes or failure to write the final newline; success, including empty, exits 0.
+No pricing, raw-Turn export, HTML, or charts are provided.
 
 The same listener serves exactly `GET`/`HEAD /usage/v1/report` without inference
 authentication or readiness/upstream work. A disabled meter returns
@@ -341,7 +381,7 @@ private SQLite files are HTTP access controls. Other local users, DNS rebinding,
 and reachable browser/local-network actors remain part of this deliberate
 exposure. Protect the listener/path with binding, firewall, or reverse-proxy
 policy; inference-only reverse-proxy authentication does not automatically
-protect reports. See [`usage`](#usage) for the first supported selection.
+protect reports. See [`usage`](#usage) for supported selections and presentations.
 
 **Implemented coverage is all five supported paths: buffered and SSE Anthropic
 Messages plus buffered, SSE, and WebSocket OpenAI Responses.** Requested-model
