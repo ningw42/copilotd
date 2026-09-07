@@ -54,6 +54,8 @@ func TestUsageMeterRequestedModelNullableSemantics(t *testing.T) {
 				{name: "array value", body: `{"model":["x"]}`},
 				{name: "object value", body: `{"model":{"model":"x"}}`},
 				{name: "malformed", body: `{"model":"x",`},
+				{name: "invalid UTF-8 model", body: "{\"model\":\"gpt-\xff\"}"},
+				{name: "invalid UTF-8 unrelated field", body: "{\"model\":\"exact\",\"input\":\"\xff\"}"},
 				{name: "trailing garbage", body: `{"model":"x"} invalid`},
 				{name: "trailing object", body: `{"model":"x"}{}`},
 				{name: "non object", body: `[ {"model":"x"} ]`},

@@ -46,6 +46,8 @@ func TestRunBoundServeRequestedModelFourHTTPPathsAndRequestIsolation(t *testing.
 					{body: `{"model":42}`},
 					{body: `{"model":"ambiguous","model":"last"}`},
 					{body: `{"model":"malformed",`},
+					{body: "{\"model\":\"gpt-\xff\"}"},
+					{body: "{\"model\":\"exact\",\"input\":\"\xff\"}"},
 					{body: `[{"model":"not-an-object"}]`},
 					{body: `{"input":{"model":"nested"},"Model":"cased"}`},
 				}

@@ -458,8 +458,8 @@ The source is the exact, case-sensitive top-level `model` property of a valid
 JSON object, decoded as a string. Preserve its contents without trimming,
 case-folding, model-name normalization, Catalog lookup, or Codex alias/metadata
 resolution. Explicit `""` remains an empty string. Missing/null/wrong-typed values,
-malformed or non-object JSON, and duplicate top-level `model` members yield
-unknown attribution (`nil` / SQL `NULL`). Nested and differently cased keys are
+malformed or non-object JSON (including invalid UTF-8), and duplicate top-level
+`model` members yield unknown attribution (`nil` / SQL `NULL`). Nested and differently cased keys are
 not sources. An escaped key that decodes to `model` is that same property,
 including when checking duplicates.
 

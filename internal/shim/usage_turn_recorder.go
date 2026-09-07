@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"time"
+	"unicode/utf8"
 
 	"github.com/ningw42/copilotd/internal/logging"
 	"github.com/ningw42/copilotd/internal/usage"
@@ -33,6 +34,11 @@ func (r *turnRecorder) observeRequest(body []byte) {
 }
 
 func requestedModelFrom(body []byte) *string {
+	// encoding/json replaces malformed UTF-8 in strings. Such a request has
+	// unknown attribution, not a replacement-derived model name.
+	if !utf8.Valid(body) {
+		return nil
+	}
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	if token, err := decoder.Token(); err != nil || token != json.Delim('{') {
 		return nil
