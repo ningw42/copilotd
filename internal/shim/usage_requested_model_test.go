@@ -102,14 +102,15 @@ func TestUsageMeterRequestedModelNullableSemantics(t *testing.T) {
 	}
 }
 
-func TestUsageMeterWebSocketIgnoresHandshakeAttributionAndHasNoClientHook(t *testing.T) {
+func TestUsageMeterWebSocketIgnoresSyntheticRequestMetadataAndHasNoClientHook(t *testing.T) {
 	ctx := context.Background()
 	sink := &memoryUsageSink{}
 	registry := CanonicalRegistry(sink)
 	registry[len(registry)-1].Enabled = true
 	chain := registry.NewChain(ctx, endpoint.OpenAI, endpoint.RouteOpenAIResponses)
-	// An earlier request Shim could put a model in a handshake body. That is
-	// still not a source for any self-contained WebSocket completion.
+	// Explicitly invoke the HTTP request hook to populate metadata. Production
+	// WebSocket forwarding does not run this hook; the synthetic setup tests
+	// defensive nil attribution, not actual handshake wiring.
 	if _, _, err := chain.RunRequest(ctx, "", nil, []byte(`{"model":"not-websocket-attribution"}`)); err != nil {
 		t.Fatal(err)
 	}

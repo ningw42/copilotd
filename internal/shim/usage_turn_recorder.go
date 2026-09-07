@@ -74,8 +74,9 @@ func requestedModelFrom(body []byte) *string {
 
 func (r *turnRecorder) record(responseID, model string, transport usage.Transport, native usage.Usage) {
 	requestedModel := r.requestedModel
-	// The request hook also runs for WebSocket handshakes. Neither handshake
-	// bodies nor client Messages attribute self-contained WebSocket Turns.
+	// WebSocket forwarding does not invoke the HTTP request hook. Keep this
+	// boundary defensive: even if an internal caller populated request metadata,
+	// self-contained WebSocket Turns remain unattributed.
 	if transport == usage.TransportWebSocket {
 		requestedModel = nil
 	}
