@@ -3,6 +3,7 @@
 **Status:** proposed design; agreed product direction, not implemented.
 **Date:** 2026-09-07
 **Related decision:** [ADR-0019](../adr/0019-serve-unauthenticated-usage-reports.md)
+**Tracking epic:** [#206](https://github.com/ningw42/copilotd/issues/206); slice ownership and dependencies are in section 12.
 
 ## 1. Outcome and agreed scope
 
@@ -184,6 +185,12 @@ it must not trigger autodetection or remove a filter. Keep any typed optional
 field constructor inside the existing descriptor engine, not a second overlay
 pass in the command.
 
+A supplied model filter must be non-empty valid UTF-8. Preserve its exact bytes,
+including whitespace, case, and valid Unicode; do not trim or normalize it.
+Reject an invalid resolved CLI filter before HTTP; the raw HTTP route rejects
+invalid model UTF-8 during admitted semantic validation, before SQL, as
+`invalid_query`. Never repair an identity with replacement characters.
+
 No `--usage-db-path`, API key, GitHub OAuth token, logging-file settings, or
 inference settings belong to `usage`. Do not pull in the existing shared
 operational descriptor block if that would expose those irrelevant flags.
@@ -221,6 +228,15 @@ before decoding, including chunked or decompressed bodies, irrespective of
 such as charset are permitted). Treat an invalid success schema, missing required fields,
 unsupported `schema_version`, invalid decimal counts, or trailing JSON as a
 protocol error. Ignore additive unknown object fields within schema version 1.
+JSON member names are case-sensitive: case variants are unknown fields, not
+substitutes for required names. Reject duplicate member names after JSON
+unescaping, invalid UTF-8 JSON, and unpaired surrogate escapes rather than
+silently choosing or repairing a value. Validate effective filters against
+explicit request selections, selected-section and native-metric presence,
+non-NULL arrays, int64 ranges, and the metric sum/coverage relationships in
+section 6, including its empty-section exception. This is report validation,
+not client-side reaggregation or calendar reconstruction.
+
 On non-2xx, prefer the bounded structured error code/message; handle an older
 daemon's HTML/plain 404 or a proxy's response without dumping its body into the
 terminal. Include status and request ID when available. Escape and bound any
@@ -251,7 +267,10 @@ digits, `_`, `-`, `+`, or `.` within a segment. Reject empty explicit values,
 path components, fixed-offset strings, and POSIX rule expressions. An explicit
 `Etc/GMT+5` name is allowed; never manufacture it by observing the current offset.
 Both client and daemon validate names with this grammar and `time.LoadLocation`.
-An unrecognized zone errors rather than selecting another zone.
+Keep that validator in `internal/usage/report` and reuse it from the CLI;
+filesystem discovery remains private to `reportcli`, and calendar construction
+remains daemon-owned. An unrecognized zone errors rather than selecting another
+zone.
 
 Import embedded Go `time/tzdata` in the executable so named-zone loading works
 without an installed timezone database and with CGO disabled. This is a fallback,
@@ -793,7 +812,12 @@ Unexpected storage/encoding failures may add a request-correlated diagnostic
 owned by the emitting report module, using ordinary `slog` and existing governed
 keys; never relabel it as the writer's loss report. Public errors stay generic
 and path-free. Any new structured key requires the existing key inventory and
-structure-test review, not inline string literals.
+structure-test review, not inline string literals. A module that emits these
+diagnostics takes its `*slog.Logger` as a required positional constructor/factory
+argument, derived with `logging.ForComponent` for that emitting package
+(ADR-0015). Do not add unused logger dependencies to modules that only return
+errors; the illustrative report constructor in section 3 is logger-free unless
+that module becomes an emitter.
 
 At implementation time update README, CONFIGURATION, generated/help assertions,
 and relevant old design status notes together. State prominently that enabling
@@ -865,27 +889,45 @@ literal expected reports, not tests coupled to private SQL strings.
 - Both terminal layouts, details/coverage/partial annotations, exact numbers,
   malicious model/error strings, empty report, JSON-only stdout, stderr errors,
   protocol version skew, additive fields, and failing output writers.
+- Exact case-sensitive JSON member matching, duplicate members (including
+  escaped spellings), invalid UTF-8/unpaired surrogates, contradictory
+  filter/section/metric coverage, and valid additive fields. Reject invalid
+  model-filter UTF-8 before HTTP or SQL as applicable; preserve valid Unicode
+  without normalization. The client validates but never recomputes totals.
 
 ## 12. Implementation sequence and release gates
 
-1. **Protocol and calendar slice:** add report values and query validation with
-   literal fixtures; pin range/default/coverage/decimal-wire behavior. Implement
-   named-zone loading and the conservative client resolver. Land no HTTP route
-   that claims to serve data before its reader exists.
-2. **Read-only reporting slice:** implement the real SQLite reader and report
-   aggregation through its interface; characterize read-only WAL, cancellation,
-   limits, and cleanup against the pinned driver. Share existing literal-path
-   and schema facts without changing writer behavior.
-3. **HTTP slice:** add the same-listener handler, strict envelope, bounded
-   admission/materialization/writing, and disabled behavior. Pass an explicit
-   handler dependency from the composition root; preserve inference and shutdown
-   contracts. Update exposure documentation with the first exposed route.
-4. **Terminal slice:** register/configure `usage`, add the HTTP client and safe
-   renderer, and verify it end to end against the production mux and a temporary
-   database. Terminal and JSON use the same report; no local fallback is added.
-5. **Release verification:** run focused tests and `go vet` through `nix develop`,
-   then `nix develop -c go test -race ./... -count=1`, `nix fmt`, and
-   `nix flake check`. Exercise the existing CGO-disabled four-target build matrix.
+The [epic](https://github.com/ningw42/copilotd/issues/206) anchors this design;
+its seven native sub-issues are vertical implementation and verification slices,
+not replacement specifications. The following ownership map replaces the initial
+layer-by-layer rollout order. A section can have several consumers, but its
+policy stays in the owning module, not duplicated across tickets or renderers.
+
+| Slice | Requirements and acceptance ownership | Blocked by |
+|---|---|---|
+| [#207](https://github.com/ningw42/copilotd/issues/207) — daily OpenAI end to end | Sections 2–4 and 6–11 for explicit OpenAI/day/UTC/date bounds: report value, real schema-v2 reader, all baseline safeguards, report-specific errors, local HTTP handler, client validation, isolated config, compact output, and exposure docs | None |
+| [#208](https://github.com/ningw42/copilotd/issues/208) — Anthropic and combined reports | Sections 6, 8, 9, 11: native Anthropic counts, combined snapshot, attribution, empty/unselected sections, and whole-request budgets | #207 |
+| [#209](https://github.com/ningw42/copilotd/issues/209) — periods and explicit named zones | Sections 4–5 and 11: all periods, default bounds, named-zone validation/loading, calendar edges and regression cases | #207 |
+| [#210](https://github.com/ningw42/copilotd/issues/210) — terminal-local timezone default | Sections 4–5 and 11: presence-aware overrides, conservative platform discovery, failure guidance, and resolver tests | #209 |
+| [#211](https://github.com/ningw42/copilotd/issues/211) — filters, details, JSON | Sections 4, 6, 8–9, 11: exact UTF-8 model filters and guarded predicates, detailed native tables, validated original-byte JSON, and output-error tests | #208 |
+| [#212](https://github.com/ningw42/copilotd/issues/212) — concurrent inference and shutdown | Sections 7–8, 10–11: integrated contention/admission/cancellation/slow-reader/shutdown evidence and pinned-driver characterization | #208 |
+| [#213](https://github.com/ningw42/copilotd/issues/213) — release verification | Sections 10–12: complete executable acceptance, documentation/status agreement, retained native-platform evidence, and the full verification suite | #210, #211, #212 |
+
+Every slice inherits section 1's scope and the preserved contracts in section 2.
+All section 7 safeguards must land with the first exposed data route in #207;
+#212 adds concurrent evidence, not deferred safety. No route claims to serve
+history before its reader exists. Intermediate unsupported selections fail
+clearly without inventing empty data, changing final defaults, or advertising
+unfinished capabilities. #209 and #211 can proceed independently with explicit
+selections; #213 verifies their combined behavior and the final default command.
+No additional feature ticket or generic framework is needed.
+
+Release verification runs focused tests and `go vet` through `nix develop`, then
+`nix develop -c go test -race ./... -count=1`, `nix fmt`, and `nix flake check`.
+Exercise the existing CGO-disabled four-target build matrix. For each covered
+requirement, retain the implementation revision and concrete test/evidence
+location on its owning child; references to the design alone are not evidence
+that the feature has shipped.
 
 Before shipping, retain evidence for timezone discovery on each claimed native
 platform and for the pinned driver's read-only WAL/interrupt/cleanup behavior.
