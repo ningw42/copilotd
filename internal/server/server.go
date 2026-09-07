@@ -59,12 +59,14 @@ type websocketDrainer interface {
 // outbound Copilot credential and local readiness, observers supply non-secret
 // readiness details, fwd drives forwarding endpoints, source supplies bounded
 // Catalog bytes, and streamOutcomes receives the bounded stream terminal-outcome
-// metric. The listener is supplied later to Run, so main owns bind and the
+// metric. reportHandler is the explicit local Usage reporting handler (including
+// its disabled variant), independent of inference dependencies. The listener is
+// supplied later to Run, so main owns bind and the
 // server owns serve/shutdown.
 // Invariant: catalog settings cross the render seam only through catalogs, never through cfg.
-func New(cfg config.ServeConfig, logger, catalogLogger *slog.Logger, dependencyErrorLog *log.Logger, provider identity.Provider, observers ReadyObservers, fwd *forward.Forwarder, source catalog.Source, wsProxy *wsforward.Proxy, streamOutcomes StreamOutcomeObserver, catalogs catalog.RenderDescriptors) *Server {
+func New(cfg config.ServeConfig, logger, catalogLogger *slog.Logger, dependencyErrorLog *log.Logger, provider identity.Provider, observers ReadyObservers, fwd *forward.Forwarder, source catalog.Source, wsProxy *wsforward.Proxy, streamOutcomes StreamOutcomeObserver, catalogs catalog.RenderDescriptors, reportHandler http.Handler) *Server {
 	httpServer := &http.Server{
-		Handler:           newHandler(cfg.APIKey, provider, observers, fwd, source, logger, catalogLogger, streamOutcomes, catalogs, wsProxy),
+		Handler:           newHandler(cfg.APIKey, provider, observers, fwd, source, logger, catalogLogger, streamOutcomes, catalogs, wsProxy, reportHandler),
 		ReadHeaderTimeout: readHeaderTimeout,
 		ReadTimeout:       readTimeout,
 		WriteTimeout:      writeTimeout,

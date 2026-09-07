@@ -58,6 +58,41 @@ clients cannot retrieve through copilotd.
 and non-secret runtime observations. Readiness is not a guarantee that GitHub or
 Copilot is reachable.
 
+## Usage reports
+
+**Enabling `serve --shim-usage-meter-enabled` also exposes aggregate history
+without authentication on the existing `--addr` listener.** Anyone who can reach
+`GET /usage/v1/report` can read model identities and activity patterns. Inference
+API keys, missing CORS headers, and private database permissions do not protect
+this HTTP path; use bind/firewall/reverse-proxy policy. HTTP is plain TCP unless
+an operator supplies a TLS reverse proxy or tunnel.
+
+The first reporting slice supports explicit OpenAI, daily UTC groups, and both
+date bounds:
+
+```sh
+copilotd usage --surface openai --timezone UTC \
+  --since 2026-09-01 --until 2026-10-01
+# Optional: --endpoint https://example.test/copilotd
+```
+
+`--endpoint` defaults to `http://127.0.0.1:8080`; a path prefix is preserved when
+appending `/usage/v1/report`. The command is an HTTP client, never an offline
+SQLite reader. It shows exact native counts, stored-Turn coverage, per-model
+and section totals, without stacking cache/reasoning subsets onto their parent
+counts. Reports cover committed observations in the configured database,
+including other writers and previous daemon runs; they neither flush queued
+Turns nor guarantee freshness, completeness, consumption, or charges.
+
+Disabled metering returns an explicit error, not empty history. An enabled
+empty selection prints `No stored Turns in the selected range.` Read failures,
+unreachable daemons, invalid queries, and protocol errors remain failures.
+Anthropic/combined reports, other periods/zones, automatic local-timezone and
+month defaults, model filters, detailed tables, and CLI JSON output are not yet
+implemented; unsupported selections fail clearly. The final defaults are
+retained in configuration rather than silently changed for this initial slice.
+See [usage configuration](CONFIGURATION.md#usage) for limits and protocol details.
+
 ## Design principles
 
 - **Raw passthrough first.** Forward request and response bodies with minimal
@@ -127,6 +162,7 @@ handlers instead fetch support data and render their own representations.
 | Forwarding and streaming | `internal/forward`, `internal/sse`, `internal/wsforward` | Raw HTTP/WebSocket forwarding, SSE framing and terminal handling, OpenAI SSE keepalives, cancellation |
 | Inference shims | `internal/shim` | Ordered hook contract for opt-in parity transforms and read-only observers, including the Responses item-id stabilizer and Usage meter completion observation on all five supported Surface/transport paths |
 | Usage persistence | `internal/usage`, `internal/usage/sqlitestore` | Standard-library usage contract plus private local SQLite writer, migrations, bounded loss reporting, and finalization |
+| Usage reporting | `internal/usage/report`, `internal/usage/reporthttp`, `internal/usage/reportcli` | Bounded snapshot aggregation, local HTTP contract and strict client validation, safe terminal presentation |
 | Catalogs | `internal/catalog` | Provider-shaped and Codex model catalogs |
 | Observability | `internal/logging`, `internal/requestsummary`, component-owned counters | Structured logs, request correlation, terminal summaries, metric scaffolding |
 | Build and distribution | `flake.nix`, `.github/workflows/` | Reproducible builds, verification, release archives and checksums |

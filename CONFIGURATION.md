@@ -4,7 +4,7 @@ Configuration precedence is shown from left to right in the tables below: an
 explicit command-line flag overrides an environment variable, which overrides
 the selected TOML file, which overrides the built-in default.
 
-Flags must follow `copilotd serve` or `copilotd login`. No configuration file is
+Flags must follow `copilotd serve`, `copilotd login`, or `copilotd usage`. No configuration file is
 loaded automatically; select one with `--config` or `COPILOTD_CONFIG`. The file
 uses the flat TOML keys shown below. Durations use Go duration syntax such as
 `500ms`, `30s`, or `24h`; quote duration and other string values in TOML.
@@ -27,6 +27,79 @@ form is accepted as input, so `--stream-idle-timeout 5m` and
 | [`--github-oauth-token-file <PATH>`](#--github-oauth-token-file) | `COPILOTD_GITHUB_OAUTH_TOKEN_FILE` | `github-oauth-token-file` | `<user config dir>/copilotd/github-oauth-token` |
 | [`--github-client-id <ID>`](#--github-client-id) | `COPILOTD_GITHUB_CLIENT_ID` | `github-client-id` | `Iv1.b507a08c87ecfe98` |
 | [`--github-scope <SCOPE>`](#--github-scope) | `COPILOTD_GITHUB_SCOPE` | `github-scope` | `read:user` |
+
+## `usage`
+
+This one-shot HTTP client has an isolated flag set: no API key, GitHub OAuth
+token, database-path, logging, or inference settings. Shared TOML files may have
+unrelated keys; only these descriptors are resolved. Help/root/version do not
+load a configuration file, discover a timezone, open SQLite, or use the network.
+No positional operands are accepted. Errors, cancellation, and output failures
+exit 1; complete reports (including empty reports) exit 0.
+
+| CLI flag | Environment variable | TOML key | Default |
+| --- | --- | --- | --- |
+| `--endpoint <URL>` | `COPILOTD_ENDPOINT` | `endpoint` | `http://127.0.0.1:8080` |
+| `--period <PERIOD>` | `COPILOTD_PERIOD` | `period` | `day` |
+| `--since <DATE>` | `COPILOTD_SINCE` | `since` | Omitted |
+| `--until <DATE>` | `COPILOTD_UNTIL` | `until` | Omitted |
+| `--timezone <NAME>` | `COPILOTD_TIMEZONE` | `timezone` | Omitted |
+| `--surface <SURFACE>` | `COPILOTD_SURFACE` | `surface` | `all` |
+| `--model <MODEL>` | `COPILOTD_MODEL` | `model` | Omitted |
+| `--details=<BOOL>` | `COPILOTD_DETAILS` | `details` | `false` |
+| `--json=<BOOL>` | `COPILOTD_JSON` | `json` | `false` |
+| `--timeout <DURATION>` | `COPILOTD_TIMEOUT` | `timeout` | `15s` |
+| `--config <PATH>` | `COPILOTD_CONFIG` | — | No file |
+
+**Currently supported:** `--surface openai --period day --timezone UTC` with
+explicit `--since` (inclusive) and `--until` (exclusive) in strict `YYYY-MM-DD`.
+Dates must be between `1970-01-01` and `9999-01-01`, with since before until.
+Other periods/Surfaces/zones, omitted-date month defaults, terminal-local
+timezone discovery, `--model`, `--details`, and `--json` are reserved for later
+slices and fail clearly today. Explicit empty timezone/model overrides are
+invalid, not omission. Final defaults remain day/all/current-month omissions and
+terminal-local omission; they are not silently changed to make this slice work.
+Native Windows will require an explicit timezone even after Unix discovery is
+implemented; terminal-local means the CLI process's environment, not a remote
+physical workstation. This release requires explicit UTC on every platform.
+
+The endpoint is an absolute HTTP(S) base URL. Its optional path prefix is
+preserved: `https://host/copilotd/` becomes
+`https://host/copilotd/usage/v1/report`. Set it explicitly when `serve --addr`
+changes. Userinfo, query strings, fragments, non-HTTP schemes, and invalid ports
+are rejected. TLS verification and standard HTTP proxies remain enabled. No
+credentials, cookies, redirects, retries, daemon discovery, or local-file
+fallback are used. `--timeout` must be positive and bounds the request/read.
+
+The schema-version-1 HTTP response contains all six OpenAI native metrics,
+period/model rows, model totals, a section total, and effective selections.
+Counts/coverage are exact decimal strings (or null for an absent sum), never
+floating point. The client validates case-sensitive required fields, duplicate
+names, Unicode, integer ranges, and metric coverage before any output, while
+allowing additive fields. It does not reaggregate totals or reconstruct calendar
+rules. Text uses comma-separated exact counts, ASCII-escaped model identities,
+`—` for unreported metrics, and `*` plus coverage for partial optional metrics.
+
+The same listener serves exactly `GET`/`HEAD /usage/v1/report` without inference
+authentication or readiness/upstream work. A disabled meter returns
+`503 usage_meter_disabled`; an enabled empty report is successful, not disabled.
+Failures include `400 invalid_query`, `405 method_not_allowed`,
+`422 report_too_large`/`aggregation_overflow`, `429 report_busy`,
+`503 usage_unavailable`, and `504 report_timeout`. Responses are JSON with
+`Cache-Control: no-store`, `nosniff`, and the ordinary request ID. HEAD follows
+the same work/validation contract without a response body.
+
+Fixed safeguards are not flags: 16 KiB raw query; 3,660 selected dates; 4,096
+buckets; two admitted handlers with no queue; five seconds of report/encoding
+work; native lock waits capped at 100 ms and remaining work; 1,000,000 examined
+Turns; 10,000 period/Surface/model groups; 1 MiB per model before transfer and
+1 MiB retained distinct model bytes; 8 MiB encoded response/client read; five
+seconds for route-local response writing. Admission remains held through writes,
+but SQLite is released first. These caps do not isolate inference from shared
+CPU/disk or an internet flood, and cannot preempt arbitrary stuck filesystem I/O.
+Reports describe committed best-effort database history, not a freshness or
+completeness watermark. No writer flush, migration, extra index, or read worker
+is introduced. Live file/schema replacement remains unsupported.
 
 ## `serve`
 
@@ -183,6 +256,16 @@ by [`--usage-db-path`](#--usage-db-path). It is off by default: disabled `serve`
 and `login` do not open a database, create usage files, start a usage writer, or
 install a metering hook.
 
+**Enabling this flag also exposes unauthenticated aggregate Usage reports on
+`serve --addr`, including non-loopback/public bindings.** Anyone with network
+reachability can read models and activity history at `/usage/v1/report`.
+Inference API keys do not protect this local path, and neither missing CORS nor
+private SQLite files are HTTP access controls. Other local users, DNS rebinding,
+and reachable browser/local-network actors remain part of this deliberate
+exposure. Protect the listener/path with binding, firewall, or reverse-proxy
+policy; inference-only reverse-proxy authentication does not automatically
+protect reports. See [`usage`](#usage) for the first supported selection.
+
 **Implemented coverage is all five supported paths: buffered and SSE Anthropic
 Messages plus buffered, SSE, and WebSocket OpenAI Responses.** Requested-model
 attribution covers only the four HTTP buffered/SSE paths; WebSocket rows always
@@ -282,10 +365,10 @@ correlation stays empty. It does not store prompts, generated content, API keys,
 GitHub OAuth tokens, or Copilot tokens.
 
 The GitHub Copilot Surface, raw `/models`, provider/Codex Catalogs, and
-`/v1/messages/count_tokens` are not metered. There is no query API, CLI query
-subcommand, aggregation, pricing or billing reconciliation, automatic pruning,
-per-key attribution, or non-token usage projection. Query either native table
-with external SQLite tooling, for example:
+`/v1/messages/count_tokens` are not metered. Built-in daily OpenAI aggregation
+is available through [`usage`](#usage); pricing/billing reconciliation, automatic
+pruning, per-key attribution, and non-token usage projection remain out of scope.
+External SQLite tooling still supports either native table, for example:
 
 ```sh
 sqlite3 "$USAGE_DB" \

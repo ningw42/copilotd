@@ -21,6 +21,7 @@ import (
 	"github.com/ningw42/copilotd/internal/impersonation"
 	"github.com/ningw42/copilotd/internal/logging"
 	"github.com/ningw42/copilotd/internal/server"
+	"github.com/ningw42/copilotd/internal/usage/reporthttp"
 )
 
 func TestProductionDiscoveryEdgeUsesMicrosoftOriginsAndPlainDedicatedClient(t *testing.T) {
@@ -229,7 +230,7 @@ func TestServeLifecycleCarriesFallbackAndDiscoveredVersionsOnWire(t *testing.T) 
 			base := startTestServer(t, server.New(cfg, logging.ForComponent(logger, "internal/server"), logging.ForComponent(logger, "internal/catalog"), newTestDependencyErrorLog(), mgr, server.ReadyObservers{
 				Impersonation: imp,
 				Caches:        cacheRegistry,
-			}, fwd, newTestCatalogSource(mgr), newTestWSProxy(mgr), server.NewStreamOutcomeCounter(), catalog.RenderDescriptors{}))
+			}, fwd, newTestCatalogSource(mgr), newTestWSProxy(mgr), server.NewStreamOutcomeCounter(), catalog.RenderDescriptors{}, reporthttp.Handler(nil)))
 			assertReadyzImpersonation(t, base, tc.wantVSCode, tc.wantPlugin, tc.wantSource, tc.wantLastSuccess)
 			resp, _ := post(t, base+"/anthropic/v1/messages", `{"model":"test"}`)
 			_ = resp.Body.Close()

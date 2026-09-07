@@ -25,6 +25,7 @@ import (
 	"github.com/ningw42/copilotd/internal/logging"
 	"github.com/ningw42/copilotd/internal/server"
 	"github.com/ningw42/copilotd/internal/shim"
+	"github.com/ningw42/copilotd/internal/usage/reporthttp"
 )
 
 const testAPIKey = "test-api-key"
@@ -299,7 +300,7 @@ func startManagerBackedE2EServer(t *testing.T, cfg config.ServeConfig, logger *s
 	return startTestServer(t, server.New(cfg, logging.ForComponent(logger, "internal/server"), logging.ForComponent(logger, "internal/catalog"), newTestDependencyErrorLog(), mgr, server.ReadyObservers{
 		Impersonation: imp,
 		Caches:        cacheRegistry,
-	}, fwd, newTestCatalogSource(mgr), newTestWSProxy(mgr), server.NewStreamOutcomeCounter(), catalog.RenderDescriptors{}))
+	}, fwd, newTestCatalogSource(mgr), newTestWSProxy(mgr), server.NewStreamOutcomeCounter(), catalog.RenderDescriptors{}, reporthttp.Handler(nil)))
 }
 
 // TestServeFirstRealCallEndToEnd is Phase 1.5's outcome: the REAL identity.Manager
@@ -333,7 +334,7 @@ func TestServeFirstRealCallEndToEnd(t *testing.T) {
 	base := startTestServer(t, server.New(cfg, logging.ForComponent(logger, "internal/server"), logging.ForComponent(logger, "internal/catalog"), newTestDependencyErrorLog(), mgr, server.ReadyObservers{
 		Impersonation: imp,
 		Caches:        cacheRegistry,
-	}, fwd, newTestCatalogSource(mgr), newTestWSProxy(mgr), server.NewStreamOutcomeCounter(), catalog.RenderDescriptors{}))
+	}, fwd, newTestCatalogSource(mgr), newTestWSProxy(mgr), server.NewStreamOutcomeCounter(), catalog.RenderDescriptors{}, reporthttp.Handler(nil)))
 
 	assertImpersonation := func(t *testing.T) {
 		t.Helper()

@@ -1,7 +1,8 @@
 # Serve daemon-owned Usage reports without authentication on the existing listener
 
-**Status:** proposed; maintainer-approved direction on 2026-09-07, implementation
-pending. Protocol details and verification gates live in the
+**Status:** maintainer-approved direction on 2026-09-07; first explicit
+OpenAI/day/UTC/date-bound slice implemented in #207. Remaining capabilities and
+release verification are pending. Protocol details and verification gates live in the
 [Usage reporting design](../design/2026-09-07-usage-reporting-design.md).
 
 copilotd will expose calendar aggregates of its configured usage database through
@@ -55,6 +56,8 @@ not an inference-authentication exemption accidentally inherited from probes.
   Route, or Surface. It retains local errors instead of borrowing an inference
   error dialect, and introduces no change to forwarded Copilot responses.
 
-Until implemented, existing binaries still provide external SQLite inspection
-only. This proposed ADR records the chosen direction without describing an
-unshipped route as current behavior.
+The initial implementation serves only explicit OpenAI/day/UTC/date-bound
+reports and compact terminal output. Other Surfaces, calendars, local timezone
+discovery, filters, details, and CLI JSON output remain planned; their final
+defaults are not silently substituted. External SQLite inspection remains
+supported alongside the new bounded HTTP path.

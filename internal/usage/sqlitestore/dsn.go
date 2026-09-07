@@ -6,6 +6,14 @@ import (
 	"time"
 )
 
+// LiteralFileURL encodes an absolute filesystem path using the writer-owned
+// platform policy. Usage readers may add their own connection-local parameters;
+// filename punctuation never becomes a driver option.
+func LiteralFileURL(path string) *url.URL { return sqliteFileURL(path) }
+
+// SchemaVersion is the current writer-owned migration version.
+func SchemaVersion() int { return len(migrationNames) }
+
 // sqliteDSN encodes an already-resolved filesystem destination as a SQLite file
 // URI. Filename punctuation is escaped into the URI path; the query contains
 // only store-owned, driver-validated connection parameters.

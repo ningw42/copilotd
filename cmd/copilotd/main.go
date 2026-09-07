@@ -1,8 +1,9 @@
 // Command copilotd is the composition root for the copilotd proxy. It assembles
-// a git-style subcommand tree — serve, login, help, version — wiring the internal
+// a git-style subcommand tree — serve, login, usage, help, version — wiring the internal
 // packages together; it holds no business logic. `serve` runs the HTTP daemon
 // (config load → logger → bind → signal-aware graceful shutdown); the other verbs
-// provide discovery (help), build info (version), and GitHub OAuth device login.
+// provide discovery (help), build info (version), GitHub OAuth device login,
+// and HTTP-only Usage report presentation.
 package main
 
 import (
@@ -15,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -31,6 +33,9 @@ import (
 	"github.com/ningw42/copilotd/internal/shim"
 	"github.com/ningw42/copilotd/internal/upstream"
 	"github.com/ningw42/copilotd/internal/usage"
+	"github.com/ningw42/copilotd/internal/usage/report"
+	"github.com/ningw42/copilotd/internal/usage/reportcli"
+	"github.com/ningw42/copilotd/internal/usage/reporthttp"
 	"github.com/ningw42/copilotd/internal/usage/sqlitestore"
 	"github.com/ningw42/copilotd/internal/wsforward"
 	"github.com/peterbourgon/ff/v4"
@@ -132,13 +137,15 @@ func validateHelpRequest(args []string) error {
 }
 
 // buildCommand assembles the subcommand tree. Root and informational commands
-// have no operational flags; serve and login each own an independent flag set.
+// have no operational flags; serve, login, and usage own independent flag sets.
 func buildCommand(lookupEnv func(string) (string, bool), stdout, stderr io.Writer) *ff.Command {
 	rootFlags := ff.NewFlagSet("copilotd")
 	serveFlags := ff.NewFlagSet("serve")
 	serveCfg := config.RegisterServe(serveFlags)
 	loginFlags := ff.NewFlagSet("login")
 	loginCfg := config.RegisterLogin(loginFlags)
+	usageFlags := ff.NewFlagSet("usage")
+	usageCfg := config.RegisterUsage(usageFlags)
 
 	// root is assigned below and captured by the help/root closures so they can
 	// render the tree's help; ParseAndRun invokes those Execs after assignment.
@@ -171,6 +178,30 @@ func buildCommand(lookupEnv func(string) (string, bool), stdout, stderr io.Write
 				return err
 			}
 			return runLogin(ctx, loginCfg, lookupEnv, stdout)
+		},
+	}
+
+	usageCmd := &ff.Command{
+		Name: "usage", Usage: "copilotd usage [FLAGS]",
+		ShortHelp: "report persisted OpenAI Turns (explicit UTC/day/range)", Flags: usageFlags,
+		Exec: func(ctx context.Context, args []string) error {
+			if err := rejectSurplusOperands("usage", args, 0); err != nil {
+				return err
+			}
+			cfg, err := usageCfg.Resolve(lookupEnv)
+			if err != nil {
+				return err
+			}
+			client, err := reporthttp.NewClient(cfg.Endpoint)
+			if err != nil {
+				return err
+			}
+			ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+			defer stop()
+			return reportcli.Run(ctx, client, reportcli.Options{
+				Endpoint: cfg.Endpoint, Timezone: cfg.Timezone, Details: cfg.Details, JSON: cfg.JSON, Timeout: cfg.Timeout,
+				Query: report.Query{Period: cfg.Period, Since: cfg.Since, Until: cfg.Until, Surface: cfg.Surface, Model: cfg.Model},
+			}, stdout)
 		},
 	}
 
@@ -213,7 +244,7 @@ func buildCommand(lookupEnv func(string) (string, bool), stdout, stderr io.Write
 			return nil
 		},
 	}
-	root.Subcommands = []*ff.Command{versionCmd, helpCmd, serveCmd, loginCmd}
+	root.Subcommands = []*ff.Command{versionCmd, helpCmd, serveCmd, loginCmd, usageCmd}
 	return root
 }
 
@@ -315,7 +346,11 @@ func runServe(ctx context.Context, flags *config.ServeFlags, lookupEnv func(stri
 	var sink usage.Sink
 	if cfg.ShimUsageMeterEnabled {
 		var openErr error
-		usageStore, openErr = sqlitestore.Open(cfg.UsageDBPath, logging.ForComponent(base, "internal/usage/sqlitestore"))
+		// Resolve once; writer and reporter receive this same daemon-owned path.
+		cfg.UsageDBPath, openErr = filepath.Abs(cfg.UsageDBPath)
+		if openErr == nil {
+			usageStore, openErr = sqlitestore.Open(cfg.UsageDBPath, logging.ForComponent(base, "internal/usage/sqlitestore"))
+		}
 		if openErr != nil {
 			logger.Error("cannot start: opening usage database failed",
 				slog.String(logging.PathKey, cfg.UsageDBPath),
@@ -396,10 +431,15 @@ func runBoundServe(ctx context.Context, cfg config.ServeConfig, base *slog.Logge
 		})
 	streamOutcomes := server.NewStreamOutcomeCounter()
 
+	var reportQuery reporthttp.QueryFunc
+	if usageStore != nil {
+		reportQuery = report.New(cfg.UsageDBPath).Query
+	}
+	reportHandler := reporthttp.Handler(reportQuery)
 	serveErr := server.New(cfg, logging.ForComponent(base, "internal/server"), logging.ForComponent(base, "internal/catalog"), logging.DependencyErrorLog(base, slog.LevelWarn), mgr, server.ReadyObservers{
 		Impersonation: imp,
 		Caches:        cacheRegistry,
-	}, fwd, caller, wsProxy, streamOutcomes, catalogs).Run(ctx, ln)
+	}, fwd, caller, wsProxy, streamOutcomes, catalogs, reportHandler).Run(ctx, ln)
 	if usageStore != nil {
 		usageStore.StopAdmission()
 	}
