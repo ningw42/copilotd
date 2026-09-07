@@ -71,22 +71,14 @@ func TestUsageMeterRequestedModelNullableSemantics(t *testing.T) {
 				t.Run(tc.name, func(t *testing.T) {
 					ctx := context.Background()
 					sink := &memoryUsageSink{}
-					registry := CanonicalRegistry(sink)
-					registry[len(registry)-1].Enabled = true
-					route := endpoint.RouteOpenAIResponses
-					response := `{"id":"r","model":"reported","status":"completed","usage":{"input_tokens":1,"output_tokens":2}}`
-					if surface == endpoint.Anthropic {
-						route = endpoint.RouteAnthropicMessages
-						response = `{"id":"m","type":"message","model":"reported","stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":2}}`
-					}
-					chain := registry.NewChain(ctx, surface, route)
+					chain, response := enabledBufferedUsageFixture(ctx, surface, sink)
 					body := []byte(tc.body)
 					_, got, err := chain.RunRequest(ctx, "", nil, body)
 					if err != nil || string(got) != tc.body {
 						t.Fatalf("request changed or rejected: %q, %v", got, err)
 					}
 					clear(body)
-					if _, err := chain.RunBuffered(ctx, []byte(response)); err != nil {
+					if _, err := chain.RunBuffered(ctx, response); err != nil {
 						t.Fatal(err)
 					}
 					turns := sink.snapshot()
@@ -136,22 +128,14 @@ func TestUsageMeterRequestedModelNeverBackfillsCompletionRequirements(t *testing
 	for _, surface := range []endpoint.Surface{endpoint.OpenAI, endpoint.Anthropic} {
 		t.Run(surface.String(), func(t *testing.T) {
 			sink := &memoryUsageSink{}
-			registry := CanonicalRegistry(sink)
-			registry[len(registry)-1].Enabled = true
-			route := endpoint.RouteOpenAIResponses
-			response := `{"id":"r","model":"reported","status":"completed","usage":{"input_tokens":1,"output_tokens":2}}`
-			if surface == endpoint.Anthropic {
-				route = endpoint.RouteAnthropicMessages
-				response = `{"id":"m","type":"message","model":"reported","stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":2}}`
-			}
-			chain := registry.NewChain(ctx, surface, route)
+			chain, response := enabledBufferedUsageFixture(ctx, surface, sink)
 			if _, _, err := chain.RunRequest(ctx, "", nil, []byte(`{"model":"requested"}`)); err != nil {
 				t.Fatal(err)
 			}
 			for _, invalid := range [][]byte{
-				bytes.ReplaceAll([]byte(response), []byte(`"model":"reported",`), nil),
-				bytes.ReplaceAll([]byte(response), []byte(`"model":"reported"`), []byte(`"model":""`)),
-				bytes.ReplaceAll([]byte(response), []byte(`"input_tokens":1`), []byte(`"input_tokens":-1`)),
+				bytes.ReplaceAll(response, []byte(`"model":"reported",`), nil),
+				bytes.ReplaceAll(response, []byte(`"model":"reported"`), []byte(`"model":""`)),
+				bytes.ReplaceAll(response, []byte(`"input_tokens":1`), []byte(`"input_tokens":-1`)),
 			} {
 				if _, err := chain.RunBuffered(ctx, invalid); err != nil {
 					t.Fatal(err)
@@ -162,6 +146,18 @@ func TestUsageMeterRequestedModelNeverBackfillsCompletionRequirements(t *testing
 			}
 		})
 	}
+}
+
+func enabledBufferedUsageFixture(ctx context.Context, surface endpoint.Surface, sink *memoryUsageSink) (*Chain, []byte) {
+	registry := CanonicalRegistry(sink)
+	registry[len(registry)-1].Enabled = true
+	route := endpoint.RouteOpenAIResponses
+	response := `{"id":"r","model":"reported","status":"completed","usage":{"input_tokens":1,"output_tokens":2}}`
+	if surface == endpoint.Anthropic {
+		route = endpoint.RouteAnthropicMessages
+		response = `{"id":"m","type":"message","model":"reported","stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":2}}`
+	}
+	return registry.NewChain(ctx, surface, route), []byte(response)
 }
 
 func stringPointer(value string) *string { return &value }
