@@ -184,7 +184,27 @@ and `login` do not open a database, create usage files, start a usage writer, or
 install a metering hook.
 
 **Implemented coverage is all five supported paths: buffered and SSE Anthropic
-Messages plus buffered, SSE, and WebSocket OpenAI Responses.**
+Messages plus buffered, SSE, and WebSocket OpenAI Responses.** Requested-model
+attribution covers only the four HTTP buffered/SSE paths; WebSocket rows always
+have `requested_model IS NULL`.
+
+Both native tables keep `model` as the unchanged **Reported model** from the
+upstream completion. The nullable `requested_model` is the **Requested model**:
+the exact decoded string in the top-level, case-sensitive `model` property of
+the final upstream-bound HTTP request, after earlier request-side Shims. It is
+not necessarily the original client selection and is not proof of upstream
+receipt or acceptance. For example, a request for `gpt-5.6-sol-fast` can complete
+with reported `model = 'gpt-5.6-sol'`; both names are retained independently.
+
+Strings are not trimmed, case-folded, normalized, or resolved through Catalogs,
+Codex aliases, or metadata sources. An explicit `""` is stored as an empty string,
+not SQL `NULL`. Missing, null, wrong-typed, malformed/non-object requests, and
+ambiguous duplicate top-level `model` members yield `NULL`; nested or differently
+cased keys are not sources. Unknown attribution does not reject the request,
+backfill a required response field, or prevent an otherwise-eligible row. The
+meter observes once and retains only the optional model string, never the prompt
+or full request body. Every qualifying observation for that HTTP request shares
+that metadata, without inheriting from another request.
 
 A buffered Anthropic row requires one self-contained object whose `type` is
 `"message"`, with its own non-empty `id` and reported `model`, a non-empty string
@@ -268,9 +288,12 @@ with external SQLite tooling, for example:
 
 ```sh
 sqlite3 "$USAGE_DB" \
-  'SELECT at_utc, model, input_tokens, output_tokens FROM anthropic_turn ORDER BY at_ms DESC;
-   SELECT at_utc, model, input_tokens, output_tokens FROM openai_turn ORDER BY at_ms DESC;'
+  'SELECT at_utc, quote(requested_model) AS requested_model, model, input_tokens, output_tokens FROM anthropic_turn ORDER BY at_ms DESC;
+   SELECT at_utc, quote(requested_model) AS requested_model, model, input_tokens, output_tokens FROM openai_turn ORDER BY at_ms DESC;'
 ```
+
+`quote(requested_model)` makes SQL `NULL` visibly different from the empty string
+`''` in SQLite's text output.
 
 Enabling this setting changes non-SSE forwarding even when a body is an error or
 is not JSON: every non-SSE response with no `Content-Encoding`, or exactly one
@@ -318,6 +341,13 @@ such as `?`, `%`, or `file:` cannot introduce SQLite query parameters.
 
 When metering is enabled, startup validates the destination and migrates before
 binding. Failure is fatal rather than silently disabling requested recording.
+Schema version 2 appends nullable `requested_model TEXT` to both existing STRICT
+native tables without changing their earlier columns or indexes. Historical rows
+keep all values and acquire `NULL`; fresh databases reach the same schema as
+upgraded ones, and reopening is a no-op. All pending DDL and the version bump
+commit atomically or roll back together. **Stop all existing writers before
+starting a binary that upgrades the schema**; mixed-version online upgrades are
+not supported. An older binary refuses a newer schema rather than writing to it.
 On Unix, a missing final parent is created at `0700`, a missing main file is
 exclusively pre-created at `0600`, and existing shared parents, permissive main
 files, symlinks, and non-regular destinations are refused without chmod or

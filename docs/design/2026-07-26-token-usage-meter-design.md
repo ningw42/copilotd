@@ -41,10 +41,11 @@ configured local usage database (OS-specific default in §10). Both final Routes
 support buffered JSON and SSE; only OpenAI Responses supports WebSocket. The
 GitHub Copilot Surface and the Catalogs are not metered.
 
-_Current implementation (#201):_ qualifying buffered and SSE Anthropic Messages,
+_Current implementation (#203):_ qualifying buffered and SSE Anthropic Messages,
 buffered OpenAI Responses objects, self-contained OpenAI `response.completed`
-SSE events, and qualifying OpenAI WebSocket server Messages submit rows. The
-store carries the frozen two-table migration unchanged.
+SSE events, and qualifying OpenAI WebSocket server Messages submit rows. Migration
+1's native counts remain unchanged; migration 2 adds nullable Requested-model
+metadata to both tables. Attribution covers the four HTTP paths only (§6.4).
 
 An eligible completion contains the required usage fields, identity, and model
 reported upstream (§6). This is best-effort observation, not an exactly-once
@@ -59,7 +60,7 @@ Requested information:
 | Asked for | Delivered as |
 | --- | --- |
 | (a) completion observation time | `at_ms` + generated `at_utc`; not request start time or duration; `turn_index` orders submissions within a WebSocket session |
-| (b) model id | `model`, as reported upstream |
+| (b) model identity | `model`, as reported upstream; separate nullable `requested_model` from the upstream-bound HTTP request (§6.4) |
 | (c) input token | `input_tokens` — **per-Surface semantics, see §7.1** |
 | (d) output token | `output_tokens` |
 | (e) cache create | `cache_creation_input_tokens` (+ TTL split) / `cache_write_tokens`, with native nesting (§5) |
@@ -174,13 +175,14 @@ Alteration row. The old rationale that there is no wire departure does not hold.
 
 ### 4.3 Hooks
 
-Three hooks. `StreamFinalizer` is unnecessary: `Chain.StreamAdapter` includes
+Four hooks including HTTP request observation. `StreamFinalizer` is unnecessary: `Chain.StreamAdapter` includes
 an instance that implements `EventTransformer` *or* `StreamFinalizer`, and the
 meter holds no frames. Finalization must not turn an interrupted response or a
 synthesized terminal into a successful usage row.
 
 | Transport | Hook | Record fires |
 | --- | --- | --- |
+| HTTP request | `RequestTransformer` | no submission; capture optional Requested model once (§6.4) |
 | Buffered JSON | `BufferedTransformer` | once, if the body is a successful inference response with valid usage |
 | SSE | `EventTransformer` | on `message_stop` / `response.completed` |
 | WebSocket | `ServerMessageTransformer` | on each qualifying `response.completed` |
@@ -190,7 +192,7 @@ Eligibility is **payload-based**, not an HTTP status/content-type filter:
 must recognize the Messages response shape or a Responses object with completed
 status and valid usage; an error object or incomplete response is not eligible.
 A separate requirement to gate on HTTP status/headers would need an unchanged
-`PreludeTransformer` as a fourth hook. This design does not add that policy.
+`PreludeTransformer` as an additional hook. This design does not add that policy.
 
 The current adapters are `Chain.StreamAdapter(logCtx, monitor)` and
 `Chain.WSServerAdapter(logCtx, monitor)`. Their transport-owned monitor will
@@ -207,7 +209,9 @@ Registration order is onion order, and response-side folds run in reverse —
 the innermost shim to the outermost." **Last-registered is innermost**, closest to
 upstream. The meter belongs there: it records what Copilot reported, not what an
 outer shim reshaped. No shipped shim touches usage fields, so this is
-unobservable today; the ordering encodes the intent before it can become a bug.
+unobservable for native usage today; the ordering encodes the intent before it
+can become a bug. Request-side hooks run in registration order, so the same
+position observes the final upstream-bound Requested model after earlier Shims.
 
 ---
 
@@ -254,6 +258,7 @@ type Turn struct {
 	RequestID  string    // inbound HTTP correlation; empty if unavailable
 	ResponseID string    // upstream message.id / response.id, not an HTTP request ID
 	Model      string    // as reported upstream, never the client's requested name
+	RequestedModel *string // explicit upstream-bound HTTP model; nil unknown, "" explicit empty
 	Transport  Transport
 	TurnIndex  int       // submission ordinal within the shim instance
 	Usage      Usage
@@ -440,6 +445,47 @@ reviving shared-slot accumulation is not the fallback.
 
 ---
 
+### 6.4 HTTP Requested model, separate from Reported model
+
+Issue [#203's Agent Brief](https://github.com/ningw42/copilotd/issues/203#issuecomment-5565526634)
+authorizes attribution only for Anthropic and OpenAI buffered/SSE HTTP requests.
+The existing innermost `RequestTransformer` observes the already-capped request
+once, after earlier request-transforming Shims. It returns the request unchanged
+and no error, even when extraction fails. No new transport buffering, setting,
+hook-side I/O/logging, or SSE lifecycle state is introduced.
+
+The source is the exact, case-sensitive top-level `model` property of a valid
+JSON object, decoded as a string. Preserve its contents without trimming,
+case-folding, model-name normalization, Catalog lookup, or Codex alias/metadata
+resolution. Explicit `""` remains an empty string. Missing/null/wrong-typed values,
+malformed or non-object JSON, and duplicate top-level `model` members yield
+unknown attribution (`nil` / SQL `NULL`). Nested and differently cased keys are
+not sources. An escaped key that decodes to `model` is that same property,
+including when checking duplicates.
+
+The shared `turnRecorder` retains only this optional string, independently of
+Anthropic's response accumulator. It is immutable request metadata reused for
+every qualifying buffered/SSE observation, including repeated completions and
+later candidates after accumulator reset. Construction is per request, never
+keyed by the reusable inbound request ID. The request bytes, prompts, and
+generated content are not retained or persisted. Observation does not establish
+upstream receipt or acceptance, and the final upstream-bound value need not be
+the original client selection.
+
+`model` remains the unchanged upstream Reported model, required by existing
+completion validation. Requested model never supplies missing response identity,
+model, or usage, and unknown attribution never disqualifies an otherwise valid
+completion. Native counts, duplicate behavior, submission ordinals, and
+observation-before-delivery semantics are unchanged.
+
+All WebSocket submissions have `requested_model IS NULL`, regardless of any
+handshake body or client Messages. There is no client-message hook, lane map,
+pending queue, warmup/error correlation, or in-session attribution recovery.
+The existing self-contained, response-derived WebSocket usage observer remains
+unchanged: usage recording covers five paths, attribution only four.
+
+---
+
 ## 7. Schema
 
 Two independent tables. **The table name is the Surface column** — there is no
@@ -537,6 +583,26 @@ reported value remain `NULL`; migrations never invent zero.
 
 ---
 
+### 7.4 Requested-model metadata (migration 2)
+
+Migration 1 above is historical and remains byte-unchanged. The next append-only
+migration is:
+
+```sql
+ALTER TABLE anthropic_turn ADD COLUMN requested_model TEXT;
+ALTER TABLE openai_turn ADD COLUMN requested_model TEXT;
+```
+
+Both tables remain STRICT with all previous columns, constraints, and indexes.
+Historical rows retain every value and acquire SQL `NULL` for unknown Requested
+model; there is no backfill from `model`. New HTTP rows use §6.4's optional string,
+while WebSocket rows always use `NULL`. Fresh and upgraded databases reach the
+same schema and `user_version=2`; reopening is a no-op. Both ALTERs and the version
+bump use the existing all-pending-migrations transaction (§8.1). Stop existing
+writers before upgrading (§8.3).
+
+---
+
 ## 8. Migrations and failure policy
 
 ### 8.1 Mechanism
@@ -547,7 +613,7 @@ the DDL, so a half-applied migration is impossible.
 
 ```go
 // Ordered, append-only, embedded in the binary. Index+1 == user_version.
-var migrations = []string{ /* 1: initial schema */ }
+var migrations = []string{ /* 1: initial schema, 2: requested_model */ }
 ```
 
 Open sequence on the configured connection (§9): acquire `BEGIN IMMEDIATE`, then
@@ -879,7 +945,8 @@ no provider billing behavior is inferred from these native counts.
 
 ### `internal/usage/sqlitestore`
 
-- Migration ladder: empty → v1 sets `user_version`; reopen is a no-op;
+- Migration ladder: empty → v2 and historical v1 → v2 preserve the same schema;
+  old rows acquire only a NULL Requested model; reopen is a no-op;
   `user_version > len(migrations)` refuses to open and names both numbers.
   Concurrent same-version fresh openers handle WAL-activation contention as well
   as serializing the version check and migrations. Exercise native immediate
@@ -909,6 +976,12 @@ no provider billing behavior is inferred from these native counts.
 
 Use dedicated usage fixtures (§11.3) and an in-memory sink:
 
+- HTTP request observation preserves bytes and optional string contents, including
+  empty strings; ambiguous/invalid attribution stays absent without affecting
+  completion eligibility. Earlier request Shims determine the observed name.
+  Sequential/concurrent requests with reused IDs remain isolated; repeated
+  completions keep immutable request metadata and existing ordinals. WebSocket
+  Turns stay unattributed even if a handshake body contains a model.
 - Multiple Anthropic deltas use the **last reported value per field**, never a
   sum; omitted fields and explicit null updates preserve start values. Missing
   core counts differ from reported zero. Missing start usage may be completed by
@@ -973,8 +1046,9 @@ all four cgo-free release targets with the chosen SQLite driver (§13).
 ### Reconciled implementation docs
 
 `CONTEXT.md` defines Shim, Usage meter, and Turn without embedding this
-implementation plan. As of #201, README and `CONFIGURATION.md` describe the
+implementation plan. As of #203, README and `CONFIGURATION.md` describe the
 available opt-in database and settings, all five implemented recording paths,
+four-path HTTP Requested-model attribution, the version-2 migration,
 and the durability, filesystem, buffering, retention, backup, external-query,
 and shutdown consequences. The existing
 `docs/divergence-ledger.md` copilotd-originated error row already covers the
@@ -1054,4 +1128,6 @@ Anthropic hook without changing migration 1; issue #199 adds self-contained
 OpenAI SSE completion observation;
 issue #200 adds the same self-contained observation to OpenAI WebSocket server
 Messages; and issue #201 adds request-scoped Anthropic SSE accumulation. The
-five recording paths are now implemented without changing the frozen schema.
+five recording paths landed without changing migration 1. Issue #203 subsequently
+adds the separately approved HTTP Requested-model metadata and migration 2 (§6.4,
+§7.4), without changing the native token-count projection.

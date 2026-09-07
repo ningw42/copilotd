@@ -15,6 +15,7 @@ type openAIUsageMeter struct {
 }
 
 var (
+	_ RequestTransformer       = (*openAIUsageMeter)(nil)
 	_ BufferedTransformer      = (*openAIUsageMeter)(nil)
 	_ EventTransformer         = (*openAIUsageMeter)(nil)
 	_ ServerMessageTransformer = (*openAIUsageMeter)(nil)
@@ -22,6 +23,13 @@ var (
 
 func newOpenAIUsageMeter(ctx context.Context, sink usage.Sink) *openAIUsageMeter {
 	return &openAIUsageMeter{recorder: newTurnRecorder(ctx, sink)}
+}
+
+// TransformRequest observes optional HTTP attribution without validating or
+// changing the request. Unknown attribution never prevents completion recording.
+func (m *openAIUsageMeter) TransformRequest(_ context.Context, request *Request) error {
+	m.recorder.observeRequest(request.Body)
+	return nil
 }
 
 // TransformBuffered observes only self-contained completed Responses objects.
