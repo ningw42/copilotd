@@ -37,12 +37,20 @@ type anthropicReportedCount struct {
 }
 
 var (
+	_ RequestTransformer  = (*anthropicUsageMeter)(nil)
 	_ BufferedTransformer = (*anthropicUsageMeter)(nil)
 	_ EventTransformer    = (*anthropicUsageMeter)(nil)
 )
 
 func newAnthropicUsageMeter(ctx context.Context, sink usage.Sink) *anthropicUsageMeter {
 	return &anthropicUsageMeter{recorder: newTurnRecorder(ctx, sink)}
+}
+
+// TransformRequest observes optional HTTP attribution independently of the
+// response accumulator. Invalid attribution leaves the request unchanged.
+func (m *anthropicUsageMeter) TransformRequest(_ context.Context, request *Request) error {
+	m.recorder.observeRequest(request.Body)
+	return nil
 }
 
 // TransformBuffered observes only self-contained completed Messages objects.

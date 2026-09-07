@@ -22,7 +22,7 @@ func TestRunServeUsageSchemaFailurePrecedesBind(t *testing.T) {
 		pragma  string
 		wantErr []string
 	}{
-		{name: "future version", version: 2, pragma: "PRAGMA user_version=2", wantErr: []string{"schema version 2", "supported version 1"}},
+		{name: "future version", version: 3, pragma: "PRAGMA user_version=3", wantErr: []string{"schema version 3", "supported version 2"}},
 		{name: "conflicting migration", version: 0, pragma: "PRAGMA user_version=0", wantErr: []string{"migration 1", "openai_turn"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

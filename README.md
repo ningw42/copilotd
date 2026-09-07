@@ -95,7 +95,9 @@ local SQLite main/WAL/SHM file set for best-effort Turn history
 ([ADR-0017](docs/adr/0017-persist-usage-in-local-sqlite.md)). The implementation
 records qualifying **buffered and SSE Anthropic Messages plus buffered, SSE, and
 WebSocket OpenAI Responses** completions: all five supported Surface/transport
-paths. With the flag off,
+paths. HTTP buffered/SSE rows also record the explicit upstream-bound
+**Requested model** separately from the unchanged upstream **Reported model**;
+WebSocket requested-model attribution remains absent. With the flag off,
 `serve` creates no usage files or writer and installs no metering hook. See the
 [complete meter configuration and operating contract](CONFIGURATION.md#--shim-usage-meter-enabled).
 

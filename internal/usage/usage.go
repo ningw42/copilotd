@@ -30,9 +30,13 @@ type Turn struct {
 	RequestID  string // inbound HTTP correlation; empty if unavailable
 	ResponseID string // upstream message.id / response.id, not an HTTP request ID
 	Model      string // as reported upstream, never the client's requested name
-	Transport  Transport
-	TurnIndex  int // submission-attempt ordinal within the Shim instance
-	Usage      Usage
+	// RequestedModel is the explicit model string in the upstream-bound HTTP
+	// request after earlier Shims. Nil means unknown (always for WebSocket);
+	// a pointer to "" means explicitly empty. It never supplies Model.
+	RequestedModel *string
+	Transport      Transport
+	TurnIndex      int // submission-attempt ordinal within the Shim instance
+	Usage          Usage
 }
 
 // Usage is a closed sum: only the two Surface-native records satisfy it.

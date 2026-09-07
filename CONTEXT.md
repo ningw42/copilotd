@@ -171,6 +171,17 @@ The opt-in read-only Shim that records Surface-native token counts from observed
 successful inference completions.
 _Avoid_: billing meter, usage tracker
 
+**Requested model**:
+The explicit model string in the upstream-bound HTTP inference request after
+request-side Shims, not necessarily the original client selection or proof of
+upstream receipt or acceptance.
+_Avoid_: client model, resolved model, effective model
+
+**Reported model**:
+The model identity reported by the upstream inference completion, independent of
+the Requested model; neither identity is a Catalog display name or metadata source.
+_Avoid_: actual model, normalized model
+
 **Turn**:
 One qualifying successful inference completion observed by the Usage meter; one
 WebSocket session can contain multiple Turns.

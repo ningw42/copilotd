@@ -496,6 +496,10 @@ func TestRunBoundServeMetersOpenAIWebSocketCompletionsWithoutChangingMessages(t 
 
 	db, report := externalUsageDB(t, harness)
 	assertCleanUsageReport(t, report)
+	var attributedWebSocketRows int
+	if err := db.QueryRow(`SELECT count(*) FROM openai_turn WHERE transport='websocket' AND requested_model IS NOT NULL`).Scan(&attributedWebSocketRows); err != nil || attributedWebSocketRows != 0 {
+		t.Errorf("WebSocket requested-model rows = %d, %v; want zero", attributedWebSocketRows, err)
+	}
 	var httpRequestID, httpResponseID, httpModel, httpTransport string
 	var httpTurnIndex int
 	if err := db.QueryRow(`SELECT request_id, response_id, turn_index, model, transport FROM openai_turn WHERE transport = 'buffered'`).Scan(

@@ -610,6 +610,9 @@ func TestCanonicalRegistryKeepsUsageMeterExactLastWithOpenAIStreamingHooksActive
 	}
 	for _, instance := range instances {
 		t.Run(instance.name, func(t *testing.T) {
+			if _, ok := instance.value.(RequestTransformer); !ok {
+				t.Fatalf("usage-meter instance = %T, want RequestTransformer", instance.value)
+			}
 			if _, ok := instance.value.(BufferedTransformer); !ok {
 				t.Fatalf("usage-meter instance = %T, want BufferedTransformer", instance.value)
 			}

@@ -5,18 +5,19 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
-	"runtime"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/ningw42/copilotd/internal/logging"
 	"github.com/ningw42/copilotd/internal/usage"
 	"github.com/ningw42/copilotd/internal/usage/sqlitestore"
 )
 
 type observedStoreLog struct {
-	level slog.Level
-	msg   string
+	level            slog.Level
+	msg              string
+	cleanupCompleted *bool
 }
 
 type storeLogHandler struct {
@@ -36,8 +37,16 @@ func (h *storeLogHandler) Handle(_ context.Context, record slog.Record) error {
 		h.enteredOnce.Do(func() { close(h.runtimeEntered) })
 		<-h.releaseRuntime
 	}
+	observed := observedStoreLog{level: record.Level, msg: record.Message}
+	record.Attrs(func(attr slog.Attr) bool {
+		if attr.Key == logging.DriverCleanupCompletedKey && attr.Value.Kind() == slog.KindBool {
+			completed := attr.Value.Bool()
+			observed.cleanupCompleted = &completed
+		}
+		return true
+	})
 	h.mu.Lock()
-	h.records = append(h.records, observedStoreLog{level: record.Level, msg: record.Message})
+	h.records = append(h.records, observed)
 	h.mu.Unlock()
 	return nil
 }
@@ -141,8 +150,11 @@ func TestStoreRecoveredWriteFailureDoesNotPoisonLaterOrFinalLevels(t *testing.T)
 	}
 	records := handler.snapshot()
 	final := records[len(records)-1]
-	if final.msg != "usage store finalized" || final.level == slog.LevelError {
-		t.Errorf("recovered final log = %+v, want terminal non-ERROR aggregate", final)
+	if final.msg != "usage store finalized" || final.level != slog.LevelWarn {
+		t.Errorf("recovered final log = %+v, want terminal WARN aggregate for historical loss", final)
+	}
+	if final.cleanupCompleted == nil || !*final.cleanupCompleted {
+		t.Errorf("recovered final log cleanup = %v, want confirmed completed cleanup", final.cleanupCompleted)
 	}
 }
 
@@ -166,8 +178,6 @@ func TestStoreRepeatedWriteFailuresEscalateCurrentPersistentState(t *testing.T) 
 }
 
 func TestStoreFinalLogWaitsForInProgressRuntimeLogAndRemainsTerminal(t *testing.T) {
-	previousProcs := runtime.GOMAXPROCS(1)
-	defer runtime.GOMAXPROCS(previousProcs)
 	handler := &storeLogHandler{
 		delayRuntime:   true,
 		runtimeEntered: make(chan struct{}),
@@ -215,15 +225,27 @@ func TestStoreFinalLogWaitsForInProgressRuntimeLogAndRemainsTerminal(t *testing.
 	if report.LateAfterCutoffDrops != 1 {
 		t.Errorf("final report late_after_cutoff = %d, want call completed before publication", report.LateAfterCutoffDrops)
 	}
-	if !report.DriverCleanupCompleted {
-		t.Error("cleanup completed while final logging waited, but final snapshot reported it unconfirmed")
+	if report.RuntimeWriteLosses != 128 || report.QueueFullDrops != 0 || report.FinalFlushLosses != 0 {
+		t.Errorf("final losses = %+v, want only the rejected batch and late call", report)
 	}
 	records := handler.snapshot()
 	if len(records) < 2 || records[len(records)-1].msg != "usage store finalized" {
 		t.Fatalf("log order = %+v, want final aggregate as terminal record", records)
 	}
-	if records[len(records)-1].level == slog.LevelError {
-		t.Errorf("completed cleanup final level = %s, want historical loss without stale cleanup ERROR", records[len(records)-1].level)
+	final := records[len(records)-1]
+	if final.cleanupCompleted == nil || *final.cleanupCompleted != report.DriverCleanupCompleted {
+		t.Errorf("final log cleanup = %v, want returned snapshot %t", final.cleanupCompleted, report.DriverCleanupCompleted)
+	}
+	// Releasing the runtime log lets the writer begin cleanup, but the native
+	// wait has already expired. Cleanup and final publication may finish in
+	// either order; GOMAXPROCS does not establish a happens-before relationship.
+	// The final level must describe the snapshot, not eventual native cleanup.
+	wantLevel := slog.LevelWarn
+	if !report.DriverCleanupCompleted {
+		wantLevel = slog.LevelError
+	}
+	if final.level != wantLevel {
+		t.Errorf("final level = %s, want %s for cleanup_completed=%t", final.level, wantLevel, report.DriverCleanupCompleted)
 	}
 	for index, record := range records[:len(records)-1] {
 		if record.msg == "usage store finalized" {

@@ -35,7 +35,7 @@ func TestAdmissionConfiguresActualDedicatedConnection(t *testing.T) {
 		{"PRAGMA journal_mode", "wal"},
 		{"PRAGMA synchronous", "1"},     // NORMAL, not the external connection's default.
 		{"PRAGMA busy_timeout", "5000"}, // Full runtime policy, not the last startup remainder.
-		{"PRAGMA user_version", "1"},
+		{"PRAGMA user_version", "2"},
 		// Upgrade-sensitive identity check for the driver selected in root go.mod.
 		{"SELECT sqlite_version()", "3.53.4"},
 	} {

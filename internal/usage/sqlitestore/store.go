@@ -34,7 +34,7 @@ const (
 var (
 	//go:embed migrations/*.sql
 	migrationFiles embed.FS
-	migrationNames = []string{"migrations/001_initial.sql"}
+	migrationNames = []string{"migrations/001_initial.sql", "migrations/002_requested_model.sql"}
 )
 
 // Report is the bounded loss and cleanup result observed through Close's final
@@ -324,12 +324,12 @@ func insertTurn(ctx context.Context, conn *sql.Conn, turn usage.Turn) error {
 	switch native := turn.Usage.(type) {
 	case usage.AnthropicUsage:
 		_, err := conn.ExecContext(ctx, `INSERT INTO anthropic_turn (
-			at_ms, request_id, message_id, turn_index, model, transport,
+			at_ms, request_id, message_id, turn_index, model, requested_model, transport,
 			input_tokens, output_tokens, cache_creation_input_tokens,
 			cache_read_input_tokens, ephemeral_5m_input_tokens,
 			ephemeral_1h_input_tokens, thinking_tokens
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			atMS, turn.RequestID, turn.ResponseID, turn.TurnIndex, turn.Model, string(turn.Transport),
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			atMS, turn.RequestID, turn.ResponseID, turn.TurnIndex, turn.Model, turn.RequestedModel, string(turn.Transport),
 			native.InputTokens, native.OutputTokens, nullable(native.CacheCreationInputTokens),
 			nullable(native.CacheReadInputTokens), nullable(native.Ephemeral5mInputTokens),
 			nullable(native.Ephemeral1hInputTokens), nullable(native.ThinkingTokens),
@@ -339,11 +339,11 @@ func insertTurn(ctx context.Context, conn *sql.Conn, turn usage.Turn) error {
 		}
 	case usage.OpenAIUsage:
 		_, err := conn.ExecContext(ctx, `INSERT INTO openai_turn (
-			at_ms, request_id, response_id, turn_index, model, transport,
+			at_ms, request_id, response_id, turn_index, model, requested_model, transport,
 			input_tokens, cached_tokens, cache_write_tokens, output_tokens,
 			reasoning_tokens, total_tokens
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			atMS, turn.RequestID, turn.ResponseID, turn.TurnIndex, turn.Model, string(turn.Transport),
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			atMS, turn.RequestID, turn.ResponseID, turn.TurnIndex, turn.Model, turn.RequestedModel, string(turn.Transport),
 			native.InputTokens, nullable(native.CachedTokens), nullable(native.CacheWriteTokens),
 			native.OutputTokens, nullable(native.ReasoningTokens), nullable(native.TotalTokens),
 		)

@@ -56,7 +56,7 @@ func openExternal(t *testing.T, path string) *sql.DB {
 
 func ptr(value int64) *int64 { return &value }
 
-func TestStoreCreatesMigrationOneAndRoundTripsBothNativeTables(t *testing.T) {
+func TestStoreCreatesCurrentSchemaAndRoundTripsBothNativeTables(t *testing.T) {
 	path, store := openStore(t, io.Discard)
 	at := time.UnixMilli(1_700_000_000_123)
 	store.Record(usage.Turn{
@@ -89,8 +89,8 @@ func TestStoreCreatesMigrationOneAndRoundTripsBothNativeTables(t *testing.T) {
 	}
 	db := openExternal(t, path)
 	var version int
-	if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 1 {
-		t.Fatalf("user_version = %d, %v; want 1", version, err)
+	if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 2 {
+		t.Fatalf("user_version = %d, %v; want 2", version, err)
 	}
 	var journal string
 	if err := db.QueryRow("PRAGMA journal_mode").Scan(&journal); err != nil || !strings.EqualFold(journal, "wal") {
@@ -151,7 +151,7 @@ func TestStoreCreatesMigrationOneAndRoundTripsBothNativeTables(t *testing.T) {
 	}
 }
 
-func TestStoreMigrationOneSchemaMatchesFrozenPublicContract(t *testing.T) {
+func TestStoreCurrentSchemaPreservesNativeContractAndAddsRequestedModel(t *testing.T) {
 	path, store := openStore(t, io.Discard)
 	if report := closeStore(t, store); !report.DriverCleanupCompleted {
 		t.Fatalf("Close report = %+v", report)
@@ -193,7 +193,7 @@ func TestStoreMigrationOneSchemaMatchesFrozenPublicContract(t *testing.T) {
 		{name: "input_tokens", typ: "INTEGER", notNull: 1}, {name: "output_tokens", typ: "INTEGER", notNull: 1},
 		{name: "cache_creation_input_tokens", typ: "INTEGER"}, {name: "cache_read_input_tokens", typ: "INTEGER"},
 		{name: "ephemeral_5m_input_tokens", typ: "INTEGER"}, {name: "ephemeral_1h_input_tokens", typ: "INTEGER"},
-		{name: "thinking_tokens", typ: "INTEGER"},
+		{name: "thinking_tokens", typ: "INTEGER"}, {name: "requested_model", typ: "TEXT"},
 	})
 	assertColumns("openai_turn", []column{
 		{name: "id", typ: "INTEGER"}, {name: "at_ms", typ: "INTEGER", notNull: 1},
@@ -203,6 +203,7 @@ func TestStoreMigrationOneSchemaMatchesFrozenPublicContract(t *testing.T) {
 		{name: "input_tokens", typ: "INTEGER", notNull: 1}, {name: "cached_tokens", typ: "INTEGER"},
 		{name: "cache_write_tokens", typ: "INTEGER"}, {name: "output_tokens", typ: "INTEGER", notNull: 1},
 		{name: "reasoning_tokens", typ: "INTEGER"}, {name: "total_tokens", typ: "INTEGER"},
+		{name: "requested_model", typ: "TEXT"},
 	})
 
 	for table, fragments := range map[string][]string{
@@ -278,8 +279,8 @@ func TestStoreConcurrentFreshOpenersShareOneMigratedDatabase(t *testing.T) {
 	var version, count int
 	_ = db.QueryRow("PRAGMA user_version").Scan(&version)
 	_ = db.QueryRow("SELECT count(*) FROM openai_turn").Scan(&count)
-	if version != 1 || count != 2 {
-		t.Errorf("shared database version/count = %d/%d, want 1/2", version, count)
+	if version != 2 || count != 2 {
+		t.Errorf("shared database version/count = %d/%d, want 2/2", version, count)
 	}
 }
 
@@ -385,7 +386,7 @@ func TestStoreReopenIsNoOpAndFutureSchemaFailsClosed(t *testing.T) {
 	}
 	second, err := sqlitestore.Open(path, testStoreLogger(io.Discard))
 	if err != nil {
-		t.Fatalf("reopen v1: %v", err)
+		t.Fatalf("reopen current schema: %v", err)
 	}
 	if report := closeStore(t, second); !report.DriverCleanupCompleted {
 		t.Fatal(report)
@@ -395,13 +396,13 @@ func TestStoreReopenIsNoOpAndFutureSchemaFailsClosed(t *testing.T) {
 	if err := db.QueryRow(`SELECT count(*) FROM openai_turn WHERE response_id='preserved'`).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("preserved rows = %d, %v; want 1", count, err)
 	}
-	if _, err := db.Exec("PRAGMA user_version=2"); err != nil {
+	if _, err := db.Exec("PRAGMA user_version=3"); err != nil {
 		t.Fatal(err)
 	}
 	_ = db.Close()
 
 	_, err = sqlitestore.Open(path, testStoreLogger(io.Discard))
-	if err == nil || !strings.Contains(err.Error(), "schema version 2") || !strings.Contains(err.Error(), "supported version 1") {
+	if err == nil || !strings.Contains(err.Error(), "schema version 3") || !strings.Contains(err.Error(), "supported version 2") {
 		t.Fatalf("future-version Open error = %v, want both versions", err)
 	}
 }
