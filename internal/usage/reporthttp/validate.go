@@ -33,7 +33,7 @@ func decodeReport(ctx context.Context, body []byte, q report.Query) (report.Repo
 			d.err = errProtocol
 		}
 	}
-	if r.SchemaVersion != 1 || r.Scope != "configured_database" || r.Collection != "best_effort" || (r.Surface != "all" && r.Surface != "anthropic" && r.Surface != "openai") || r.Timezone == "" || r.Since >= r.Until || !r.WindowStart.Before(r.WindowEnd) {
+	if r.SchemaVersion != 1 || r.Scope != "configured_database" || r.Collection != "best_effort" || (r.Surface != "all" && r.Surface != "anthropic" && r.Surface != "openai") || r.Timezone == "" || r.Since < "1970-01-01" || r.Until > "9999-01-01" || r.Since >= r.Until || !r.WindowStart.Before(r.WindowEnd) {
 		d.err = errProtocol
 	}
 	if q.Surface == "" {
@@ -193,7 +193,7 @@ func (d *wireDecoder) instant(o object, key string) time.Time {
 	value := d.text(o, key)
 	t, err := time.Parse(time.RFC3339Nano, value)
 	_, offset := t.Zone()
-	if err != nil || offset != 0 {
+	if err != nil || offset != 0 || len(value) < len("2006-01-02T15:04:05Z") || value[len("2006-01-02T15")] != ':' || value[len("2006-01-02T15:04:05")] == ',' {
 		d.err = errProtocol
 	}
 	return t

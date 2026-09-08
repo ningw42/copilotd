@@ -80,9 +80,15 @@ func (c *Client) Query(ctx context.Context, q report.Query) (Result, error) {
 	body, readErr := io.ReadAll(io.LimitReader(response.Body, MaxBodyBytes+1))
 	closeErr := response.Body.Close()
 	if readErr != nil || closeErr != nil {
+		if response.StatusCode < 200 || response.StatusCode >= 300 {
+			return Result{}, formatResponseFailure(response, "report response read failed or was canceled")
+		}
 		return Result{}, fmt.Errorf("report response read failed or was canceled")
 	}
 	if len(body) > MaxBodyBytes {
+		if response.StatusCode < 200 || response.StatusCode >= 300 {
+			return Result{}, formatResponseFailure(response, "report response exceeds 8 MiB")
+		}
 		return Result{}, fmt.Errorf("report response exceeds 8 MiB")
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
@@ -106,10 +112,7 @@ func diagnostic(value string) string {
 	return strconv.QuoteToASCII(value)
 }
 func responseError(ctx context.Context, response *http.Response, body []byte) error {
-	message := fmt.Sprintf("report HTTP status %d", response.StatusCode)
-	if response.StatusCode >= 300 && response.StatusCode < 400 {
-		message += " (redirect refused; check the endpoint base URL or proxy)"
-	}
+	trustedDetail := ""
 	if unambiguousJSON(ctx, body) == nil {
 		var root map[string]json.RawMessage
 		if json.Unmarshal(body, &root) == nil {
@@ -119,9 +122,20 @@ func responseError(ctx context.Context, response *http.Response, body []byte) er
 			code := d.text(problem, "code")
 			detail := d.text(problem, "message")
 			if d.err == nil && version == 1 {
-				message += ": " + diagnostic(code) + " " + diagnostic(detail)
+				trustedDetail = diagnostic(code) + " " + diagnostic(detail)
 			}
 		}
+	}
+	return formatResponseFailure(response, trustedDetail)
+}
+
+func formatResponseFailure(response *http.Response, trustedDetail string) error {
+	message := fmt.Sprintf("report HTTP status %d", response.StatusCode)
+	if response.StatusCode >= 300 && response.StatusCode < 400 {
+		message += " (redirect refused; check the endpoint base URL or proxy)"
+	}
+	if trustedDetail != "" {
+		message += ": " + trustedDetail
 	}
 	if id := response.Header.Get("X-Request-Id"); id != "" {
 		message += " (request ID " + diagnostic(id) + ")"
