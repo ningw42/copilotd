@@ -176,37 +176,88 @@ func (w *timezoneWalk) walk(name string) (string, []string, error) {
 	return resolved, append(paths, resolved), nil
 }
 
+type timezoneRootRecord struct {
+	original  string
+	resolved  string
+	paths     []string
+	forbidden bool
+}
+
+// Classify retained root-walk snapshots component by component. Returning as
+// soon as a reserved boundary is crossed preserves that evidence even when a
+// later .. component leaves the subtree.
+func forbiddenTimezoneRootPath(name string, boundaries map[string]bool) bool {
+	prefix := "/"
+	for _, part := range strings.Split(name, "/") {
+		switch part {
+		case "", ".":
+			continue
+		case "..":
+			prefix = path.Dir(prefix)
+			continue
+		}
+		parent := prefix
+		prefix = path.Join(prefix, part)
+		if (part == "right" || part == "posix") && (boundaries[parent] || path.Base(parent) == "zoneinfo") {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *localTimezoneSystem) fileTimezone(filename string) (string, error) {
 	walk := timezoneWalk{system: s, observations: map[string]timezoneObservation{}}
 	target, paths, err := walk.walk(filename)
 	if err != nil {
 		return "", err
 	}
-	roots := []string{"/usr/share/zoneinfo", "/usr/share/lib/zoneinfo", "/usr/lib/locale/TZ", "/etc/zoneinfo"}
+	rootSeeds := []string{"/usr/share/zoneinfo", "/usr/share/lib/zoneinfo", "/usr/lib/locale/TZ", "/etc/zoneinfo"}
 	if s.goos == "darwin" {
-		roots = []string{"/var/db/timezone/zoneinfo", "/usr/share/zoneinfo"}
+		rootSeeds = []string{"/var/db/timezone/zoneinfo", "/usr/share/zoneinfo"}
 		// Apple's documented prefix ends in zoneinfo, including versioned
 		// layouts. This heuristic is intentionally never used on Linux.
 		for _, observed := range paths {
 			if index := strings.LastIndex(observed, "/zoneinfo/"); index >= 0 {
-				roots = append(roots, observed[:index+len("/zoneinfo")])
+				rootSeeds = append(rootSeeds, observed[:index+len("/zoneinfo")])
 			}
 		}
 	}
-	for _, root := range roots {
-		if resolved, _, err := walk.walk(root); err == nil {
-			roots = append(roots, resolved)
+	boundaries := make(map[string]bool, len(rootSeeds)*2)
+	for _, root := range rootSeeds {
+		boundaries[path.Clean(root)] = true
+	}
+	records := make([]timezoneRootRecord, 0, len(rootSeeds))
+	for _, root := range rootSeeds {
+		record := timezoneRootRecord{original: root}
+		if resolved, rootPaths, err := walk.walk(root); err == nil {
+			record.resolved = resolved
+			record.paths = rootPaths
+			boundaries[path.Clean(resolved)] = true
+		}
+		records = append(records, record)
+	}
+	for index := range records {
+		for _, rootPath := range records[index].paths {
+			if forbiddenTimezoneRootPath(rootPath, boundaries) {
+				records[index].forbidden = true
+				break
+			}
 		}
 	}
 	candidates := map[string]bool{}
 	for _, observed := range paths {
-		for _, root := range roots {
-			if name, found := strings.CutPrefix(observed, root+"/"); found {
-				if strings.HasPrefix(name, "right/") || strings.HasPrefix(name, "posix/") {
-					return "", localTimezoneError("unsupported right/posix zoneinfo subtree")
+		for _, record := range records {
+			for _, root := range []string{record.original, record.resolved} {
+				if root == "" {
+					continue
 				}
-				if _, err := report.LoadTimezone(name); err == nil {
-					candidates[name] = true
+				if name, found := strings.CutPrefix(observed, root+"/"); found {
+					if record.forbidden || strings.HasPrefix(name, "right/") || strings.HasPrefix(name, "posix/") {
+						return "", localTimezoneError("unsupported right/posix zoneinfo subtree")
+					}
+					if _, err := report.LoadTimezone(name); err == nil {
+						candidates[name] = true
+					}
 				}
 			}
 		}
