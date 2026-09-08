@@ -64,9 +64,14 @@ func newTimezoneFiles(t *testing.T, goos string, env map[string]string) timezone
 	t.Helper()
 	f := timezoneFiles{t: t, root: t.TempDir()}
 	f.system = &localTimezoneSystem{goos: goos, lookupEnv: func(key string) (string, bool) { value, ok := env[key]; return value, ok },
-		readlink: func(name string) (string, error) { return os.Readlink(f.path(name)) },
-		lstat:    func(name string) (os.FileInfo, error) { return os.Lstat(f.path(name)) },
-		open:     func(name string) (*os.File, error) { return os.Open(f.path(name)) },
+		readlink: func(name string) (string, error) {
+			target, err := os.Readlink(f.path(name))
+			// The fixture models Unix names even on Windows, where os.Symlink
+			// converts authored slashes to native separators in the reparse data.
+			return filepath.ToSlash(target), err
+		},
+		lstat: func(name string) (os.FileInfo, error) { return os.Lstat(f.path(name)) },
+		open:  func(name string) (*os.File, error) { return os.Open(f.path(name)) },
 	}
 	return f
 }
@@ -117,6 +122,10 @@ func (f timezoneFiles) link(name, target string) {
 			f.t.Skipf("symlink fixture unavailable: %v", err)
 		}
 		f.t.Fatal(err)
+	}
+	actual, err := os.Readlink(f.path(name))
+	if err != nil || filepath.ToSlash(actual) != target {
+		f.t.Fatalf("Unix symlink fixture %q: native target=%q, authored=%q, err=%v", name, actual, target, err)
 	}
 }
 

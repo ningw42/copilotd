@@ -24,11 +24,31 @@ import (
 	"github.com/ningw42/copilotd/internal/usage/sqlitestore"
 )
 
+// Resolve host tools before sanitizing the CLI environment. No host PATH (or
+// companion executable) is available in the jailed process.
+func usageIsolationTools(t *testing.T) (unshare, chroot string) {
+	t.Helper()
+	resolve := func(name string) string {
+		t.Helper()
+		path, err := exec.LookPath(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		path, err = filepath.Abs(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	return resolve("unshare"), resolve("chroot")
+}
+
 func TestUsageExecutableDiscoversContainerSystemTimezone(t *testing.T) {
 	binaryPath := os.Getenv("COPILOTD_TEST_STATIC_BINARY")
 	if binaryPath == "" {
 		t.Skip("set COPILOTD_TEST_STATIC_BINARY to the CGO-disabled copilotd executable")
 	}
+	unshare, chroot := usageIsolationTools(t)
 	root := t.TempDir()
 	data, err := os.ReadFile(binaryPath)
 	if err != nil {
@@ -107,8 +127,8 @@ func TestUsageExecutableDiscoversContainerSystemTimezone(t *testing.T) {
 		{"custom data disables discovery", []string{"ZONEINFO=/absent"}, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			command := exec.Command("unshare", "-Ur", "chroot", root, "/copilotd", "usage", "--endpoint", server.URL, "--since", "2026-09-01", "--until", "2026-09-02")
-			command.Env = append([]string{"GOROOT=/absent"}, tc.env...)
+			command := exec.Command(unshare, "-Ur", chroot, root, "/copilotd", "usage", "--endpoint", server.URL, "--since", "2026-09-01", "--until", "2026-09-02")
+			command.Env = append([]string{"PATH=/absent", "GOROOT=/absent"}, tc.env...)
 			var stderr bytes.Buffer
 			command.Stderr = &stderr
 			stdout, err := command.Output()
@@ -150,6 +170,7 @@ func TestUsageExecutableEmbeddedTimezoneWithoutHostData(t *testing.T) {
 		}
 	}
 	_ = file.Close()
+	unshare, chroot := usageIsolationTools(t)
 	root := t.TempDir()
 	data, err := os.ReadFile(binaryPath)
 	if err != nil {
@@ -171,8 +192,8 @@ func TestUsageExecutableEmbeddedTimezoneWithoutHostData(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls.Add(1); handler.ServeHTTP(w, r) }))
 	defer server.Close()
 	invoke := func(args ...string) (string, error) {
-		command := exec.Command("unshare", append([]string{"-Ur", "chroot", root, "/copilotd"}, args...)...)
-		command.Env = []string{"ZONEINFO=/absent", "GOROOT=/absent", "TZ=invalid/rules", "COPILOTD_CONFIG=/absent/config"}
+		command := exec.Command(unshare, append([]string{"-Ur", chroot, root, "/copilotd"}, args...)...)
+		command.Env = []string{"PATH=/absent", "ZONEINFO=/absent", "GOROOT=/absent", "TZ=invalid/rules", "COPILOTD_CONFIG=/absent/config"}
 		output, err := command.CombinedOutput()
 		return string(output), err
 	}
@@ -187,8 +208,8 @@ func TestUsageExecutableEmbeddedTimezoneWithoutHostData(t *testing.T) {
 	}
 	for _, zone := range []string{"America/New_York", "Asia/Tokyo", "US/Eastern", "Etc/UTC", "Etc/GMT+5", "Europe/Berlin", "UTC"} {
 		// Override the intentionally invalid/missing configuration only for execution.
-		command := exec.Command("unshare", "-Ur", "chroot", root, "/copilotd", "usage", "--endpoint", server.URL, "--timezone", zone, "--period", "month", "--since", "2024-02-29", "--until", "2024-03-01")
-		command.Env = []string{"ZONEINFO=/absent", "GOROOT=/absent", "TZ=invalid/rules"}
+		command := exec.Command(unshare, "-Ur", chroot, root, "/copilotd", "usage", "--endpoint", server.URL, "--timezone", zone, "--period", "month", "--since", "2024-02-29", "--until", "2024-03-01")
+		command.Env = []string{"PATH=/absent", "ZONEINFO=/absent", "GOROOT=/absent", "TZ=invalid/rules"}
 		output, err := command.CombinedOutput()
 		if err != nil || !strings.Contains(string(output), `Timezone: "`+zone+`"`) || !strings.Contains(string(output), "No stored Turns in the selected range.") {
 			t.Fatalf("embedded %s: %v\n%s", zone, err, output)

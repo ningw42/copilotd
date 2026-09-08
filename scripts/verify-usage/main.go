@@ -95,6 +95,9 @@ func (v *verification) verify(target, runner string, ci bool) error {
 	if ci && (strings.TrimSpace(source) != os.Getenv("GITHUB_SHA") || strings.TrimSpace(status) != "") {
 		return errors.New("checked-out source is not the clean workflow source SHA")
 	}
+	if err := v.checkoutBytes(); err != nil {
+		return err
+	}
 	if runtime.GOOS == "windows" {
 		out, err := v.run("native-os", "pwsh", "-NoProfile", "-Command", "[System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant(); [System.Runtime.InteropServices.RuntimeInformation]::OSDescription")
 		want := map[string]string{"amd64": "x64", "arm64": "arm64"}[runtime.GOARCH]
@@ -207,6 +210,45 @@ func (v *verification) verify(target, runner string, ci bool) error {
 	return errors.Join(testErr, accountErr, systemErr)
 }
 
+// Compare the real working-tree payloads with their committed Git blobs, without
+// text conversion. A clean git status alone can hide core.autocrlf conversion.
+func (v *verification) checkoutBytes() error {
+	setting, err := v.run("checkout-autocrlf", "git", "config", "--default", "unspecified", "--get", "core.autocrlf")
+	if err != nil {
+		return err
+	}
+	if runtime.GOOS == "windows" && strings.TrimSpace(setting) != "false" {
+		return errors.New("Windows verification requires core.autocrlf=false before checkout")
+	}
+	var evidence []map[string]any
+	var mismatches []error
+	for i, path := range []string{
+		"internal/catalog/codexdata/models.json",
+		"internal/shim/testdata/usage/openai-responses-sse.recorded.sse",
+		"internal/shim/testdata/usage/anthropic-messages-sse-cumulative.synthetic.sse",
+	} {
+		blob, err := v.run(fmt.Sprintf("checkout-blob-%d", i), "git", "rev-parse", "HEAD:"+path)
+		if err != nil {
+			return err
+		}
+		actual, err := v.run(fmt.Sprintf("checkout-bytes-%d", i), "git", "hash-object", "--no-filters", path)
+		if err != nil {
+			return err
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		hash := sha256.Sum256(data)
+		matches := strings.TrimSpace(blob) == strings.TrimSpace(actual)
+		evidence = append(evidence, map[string]any{"path": path, "bytes": len(data), "lf": strings.Count(string(data), "\n"), "crlf": strings.Count(string(data), "\r\n"), "sha256": hex.EncodeToString(hash[:]), "git_blob": strings.TrimSpace(blob), "working_tree_blob": strings.TrimSpace(actual), "matches": matches})
+		if !matches {
+			mismatches = append(mismatches, fmt.Errorf("checkout changed Git blob bytes: %s", path))
+		}
+	}
+	return errors.Join(append(mismatches, v.json("checkout-bytes.json", evidence))...)
+}
+
 func (v *verification) controlledSystemTimezone() (err error) {
 	zone := "/usr/share/zoneinfo/Europe/Berlin"
 	if runtime.GOOS == "darwin" {
@@ -298,7 +340,7 @@ func (v *verification) account(log string, required []string) error {
 		}
 		if event.Action == "skip" {
 			skips = append(skips, event)
-			usageScope := strings.HasPrefix(pkg, "internal/usage") || (pkg == "cmd/copilotd" && (strings.Contains(event.Test, "Usage") || strings.Contains(event.Test, "Report")))
+			usageScope := strings.HasPrefix(pkg, "internal/usage") || ((pkg == "cmd/copilotd" || pkg == "internal/server") && (strings.Contains(event.Test, "Usage") || strings.Contains(event.Test, "Report")))
 			if usageScope && !allowedUsageSkip(runtime.GOOS, key) {
 				failures = append(failures, "unexpected mandatory-scope skip: "+key)
 			}
@@ -310,7 +352,7 @@ func (v *verification) account(log string, required []string) error {
 		}
 	}
 	sort.Strings(failures)
-	writeErr := v.json(log+"-accounting.json", map[string]any{"required": required, "states": states, "all_skips": skips, "failures": failures})
+	writeErr := v.json(log+"-accounting.json", map[string]any{"required": required, "states": states, "all_skips": skips, "not_applicable": nativeNotApplicable(runtime.GOOS), "failures": failures})
 	if len(failures) != 0 {
 		return errors.Join(errors.New(strings.Join(failures, "\n")), scanner.Err(), writeErr)
 	}
@@ -334,6 +376,16 @@ func allowedUsageSkip(goos, key string) bool {
 	return false
 }
 
+func nativeNotApplicable(goos string) map[string]string {
+	notes := map[string]string{}
+	if goos == "windows" {
+		for _, test := range []string{"TestUsageExecutableInformationalCommandsRetainSIGPIPE", "TestUsageExecutableCancellationUsesCLIErrorPath"} {
+			notes["cmd/copilotd:"+test] = "Unix-only signal behavior; excluded by unix build tag, not a Windows pass"
+		}
+	}
+	return notes
+}
+
 func mandatoryTests(goos string) []string {
 	var required []string
 	groups := map[string][]string{
@@ -343,7 +395,17 @@ func mandatoryTests(goos string) []string {
 			"TestQueryExactFilterExcludesOversizedUnrelatedIdentity", "TestQueryEnforcesWholeReportResourceLimits", "TestQueryIndexedStreamingNativeEvidence",
 			"TestRealSQLiteFailuresUseGenericHTTPResponsesAndReleaseAdmission", "TestInterruptedRealSQLiteScanUsesHTTPDeadlinePrecedenceAndReleasesAdmission",
 		},
+		"internal/server": {
+			"TestUsageIncompleteRequestBodiesReleaseReportSlotsWithinWriteBudget/content_length", "TestUsageIncompleteRequestBodiesReleaseReportSlotsWithinWriteBudget/chunked",
+			"TestReportIncompleteBodiesBoundFinalFlushAndRecovery/small_success", "TestReportIncompleteBodiesBoundFinalFlushAndRecovery/head",
+			"TestReportIncompleteBodiesBoundFinalFlushAndRecovery/method", "TestReportIncompleteBodiesBoundFinalFlushAndRecovery/disabled",
+			"TestReportIncompleteBodiesBoundFinalFlushAndRecovery/syntax", "TestReportIncompleteBodiesBoundFinalFlushAndRecovery/semantic", "TestReportIncompleteBodiesBoundFinalFlushAndRecovery/panic",
+		},
+		"internal/usage/sqlitestore": {"TestStoreRecoveredWriteFailureDoesNotPoisonLaterOrFinalLevels"},
+		"internal/wsforward":         {"TestProxyWriteTimeoutTearsDownSlowReaderSession"},
 		"cmd/copilotd": {
+			"TestUsageReportDeadlinesDoNotLeakIntoReusedInferenceConnections",
+			"TestUsageExecutableAcceptance/closed_stdout_pipe/compact", "TestUsageExecutableAcceptance/closed_stdout_pipe/--details", "TestUsageExecutableAcceptance/closed_stdout_pipe/--json",
 			"TestUsageNativeRuntime", "TestUsageExecutableAcceptance", "TestUsageExecutableAcceptance/process_timezone", "TestUsageExecutableAcceptance/system_timezone", "TestUsageExecutableAcceptance/observed_inference_to_executable",
 			"TestUsageReportsOverlapNativeInferenceAndAnotherCommittedWriter", "TestUsageSlowTCPReportsHoldSlotsReleaseSQLiteAndDoNotDeadlineSSE", "TestUsageForcedDrainCancelsRealSQLiteReadAndInference",
 			"TestUsageGracefulDrainFinishesReportAndInferenceBeforeWriterCutoff", "TestUsageStorageFailuresDoNotChangeInferenceReadinessOrWriterAdmission", "TestUsageEncodedLimitRejectsWholeRealReportAndReleasesSlots",
@@ -355,7 +417,9 @@ func mandatoryTests(goos string) []string {
 		groups["cmd/copilotd"] = append(groups["cmd/copilotd"], "TestUsageExecutableEmbeddedTimezoneWithoutHostData", "TestUsageExecutableDiscoversContainerSystemTimezone")
 	}
 	if goos == "windows" {
-		groups["internal/usage/sqlitestore"] = []string{"TestStoreWindowsPermissionsAreExplicitlyBestEffort"}
+		groups["internal/usage/sqlitestore"] = append(groups["internal/usage/sqlitestore"], "TestStoreWindowsPermissionsAreExplicitlyBestEffort")
+	} else {
+		groups["cmd/copilotd"] = append(groups["cmd/copilotd"], "TestUsageExecutableInformationalCommandsRetainSIGPIPE", "TestUsageExecutableCancellationUsesCLIErrorPath")
 	}
 	for pkg, tests := range groups {
 		for _, test := range tests {

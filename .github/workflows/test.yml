@@ -73,6 +73,12 @@ jobs:
       COPILOTD_WORKFLOW_SHA: ${{ github.workflow_sha }}
       COPILOTD_WORKFLOW_REF: ${{ github.workflow_ref }}
     steps:
+      # Preserve embedded/catalog and recorded SSE bytes before checkout. Do not
+      # normalize fixtures or override deliberately CRLF-authored test payloads.
+      - name: Preserve Git blob bytes on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: git config --global core.autocrlf false
       - name: Checkout
         uses: actions/checkout@v7
       - name: Set up native Go

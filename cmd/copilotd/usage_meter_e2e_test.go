@@ -61,7 +61,9 @@ type usageMeterServeHarness struct {
 	closeReport sqlitestore.Report
 }
 
-func startUsageMeterServeHarness(t *testing.T, upstreamURL string, base *slog.Logger, configure func(*config.ServeConfig), decorate func(shim.Registry) shim.Registry) *usageMeterServeHarness {
+// An optional real listener lets slow-client fixtures bound kernel send buffers
+// without replacing the production HTTP handler, encoder or connection writes.
+func startUsageMeterServeHarness(t *testing.T, upstreamURL string, base *slog.Logger, configure func(*config.ServeConfig), decorate func(shim.Registry) shim.Registry, listeners ...net.Listener) *usageMeterServeHarness {
 	t.Helper()
 	cfg := e2eConfig("gho-usage-meter-serve-harness")
 	cfg.ImpersonationRefreshInterval = 0
@@ -98,9 +100,14 @@ func startUsageMeterServeHarness(t *testing.T, upstreamURL string, base *slog.Lo
 	if registry[len(registry)-1].Name != "usage-meter" {
 		t.Fatalf("last registration = %q, want usage-meter innermost", registry[len(registry)-1].Name)
 	}
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
+	var ln net.Listener
+	if len(listeners) != 0 {
+		ln = listeners[0]
+	} else {
+		ln, err = net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("listen: %v", err)
+		}
 	}
 	t.Cleanup(func() { _ = ln.Close() })
 	harness.baseURL = "http://" + ln.Addr().String()
@@ -883,7 +890,7 @@ func TestRunBoundServeForcedWebSocketDrainAndFreshUsageFinalizationAreBounded(t 
 	base := discardLogger(t)
 	harness := startUsageMeterServeHarness(t, upstream.URL, base, func(cfg *config.ServeConfig) {
 		cfg.ShutdownTimeout = 75 * time.Millisecond
-	}, withHeldServerMessageShim(held))
+	}, withHeldServerMessageShim(held), usageBackpressureListener(t))
 	seedLargeUsageReport(t, harness)
 	slowReport := startSlowUsageResponse(t, harness, "report-during-forced-ws-drain")
 	locker, err := sql.Open("sqlite", harness.cfg.UsageDBPath)
@@ -1005,7 +1012,7 @@ func TestRunBoundServeStopsUsageAdmissionBeforeReportingForcedDrainError(t *test
 	})
 	harness := startUsageMeterServeHarness(t, upstream.URL, base, func(cfg *config.ServeConfig) {
 		cfg.ShutdownTimeout = 75 * time.Millisecond
-	}, withHeldServerMessageShim(held))
+	}, withHeldServerMessageShim(held), usageBackpressureListener(t))
 	seedLargeUsageReport(t, harness)
 	slowReport := startSlowUsageResponse(t, harness, "report-before-forced-drain-log")
 	conn := dialUsageMeterWebSocket(t, harness.baseURL, "forced-drain-error-log-order")

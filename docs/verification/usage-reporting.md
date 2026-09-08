@@ -12,9 +12,12 @@ acceptance, the native pipeline, and final local verification.
 **A pipeline definition, cross-build, or local Linux pass is not four-platform
 certification.** The authoritative release result is the implementation SHA,
 per-target run/attempt/artifact links, failures or blockers, and archived evidence
-recorded on [#213](https://github.com/ningw42/copilotd/issues/213). At introduction
-of this guide, native Actions execution has not yet occurred. Later results belong
-to that revision-specific record rather than an undated blanket platform claim.
+recorded on [#213](https://github.com/ningw42/copilotd/issues/213). The first native
+Actions run, [34186159779](https://github.com/ningw42/copilotd/actions/runs/34186159779),
+executed all four targets at `7e3c195`: macOS arm64 passed; Linux native,
+both Windows native jobs, and Linux full race failed. Those results and subsequent
+corrections are retained below. A pass belongs to its exact revision, not an
+undated blanket platform claim.
 Unavailable runners, installation failures, missing mandatory passes, or failed
 checks leave the release gate incomplete. #213 does not close or edit epic #206.
 
@@ -57,7 +60,14 @@ existing Nix development shell (native CI uses setup-go).
 
 [`.github/workflows/test.yml`](../../.github/workflows/test.yml) adds four standard
 native jobs while retaining the existing Linux full race suite and reusable
-`workflow_call`. The release archive workflow is unchanged.
+`workflow_call`. The release archive workflow is unchanged. Windows sets
+`core.autocrlf=false`
+**before** checkout on the disposable runner. The verifier records the effective
+setting and `checkout-bytes.json`: actual byte counts, LF/CRLF counts, SHA-256,
+and no-filter Git blob identity for the pinned catalog and both exercised SSE
+fixtures. A clean Git status alone can conceal newline conversion. It fails if
+these working-tree bytes differ from their committed blobs; it never normalizes
+runtime payloads or changes pinned hashes.
 
 | Runtime target | Hosted runner | setup-go architecture |
 | --- | --- | --- |
@@ -96,8 +106,14 @@ explicit pass events for first-open/read-only WAL/new-connection pragmas,
 native lock caps, size-guarded model transfer/exact filtering, shared snapshots,
 scan interruption, cleanup, whole-report limits, concurrent inference/writers,
 blocked TCP/released SQLite, graceful/forced drain and writer finalization, the
-client teardown regression, and real CLI/native runtime tests. All tests execute;
-this inventory does not replace or narrow the suite.
+client teardown regression, and real CLI/native runtime tests. It also requires
+explicit passes for withheld Content-Length/chunked request bodies; final flush
+and recovery across success, HEAD and early errors; same-connection delayed
+inference/SSE after reports; actual closed stdout pipes in compact/details/JSON;
+recovered writer-log severity; and the real WebSocket slow-reader timeout.
+Unix SIGPIPE and INT/TERM executable checks are mandatory on Linux/macOS and
+explicit `not_applicable` entries on Windows, where their build tags exclude them.
+All tests execute; this inventory does not replace or narrow the suite.
 
 `tests.log-accounting.json` retains required names, every final test status,
 all skips, and failures. Any unexpected Usage-scope skip fails verification,
@@ -130,7 +146,9 @@ This does not relax discovery policy or mislabel a named `TZ` as system discover
   set, so these tests cannot silently skip. Namespace preflight is mandatory.
   Ubuntu's unprivileged-userns AppArmor setting is recorded, temporarily enabled
   only on the disposable VM where needed, and restored; any remaining isolation
-  failure is a blocker.
+  failure is a blocker. Isolation fixtures resolve absolute host `unshare` and
+  `chroot` paths before sanitizing the child environment; `PATH=/absent` proves
+  the jailed CLI needs neither developer search paths nor companion tools.
 - Native Windows requires explicit named zones in flag/env/TOML, including
   `Europe/Berlin` and `UTC`, and intentional no-auto guidance even with OS `TZ`.
   Both daemon and CLI run with absent runtime `ZONEINFO`/`GOROOT` sources after
@@ -284,3 +302,65 @@ command/listener test binaries cross-built successfully. This is local Linux and
 cross-build evidence, not a native Windows/macOS pass. The separate native-CI
 fixture failures and final full-race/flake/native release gates remain coordinator
 work; this correction does not certify #213 or close epic #206.
+
+### First native-run fixture corrections
+
+Run `34186159779`, attempt 1, at `7e3c195` is retained unchanged by the
+coordinator, including all five artifacts and their IDs/digests. Its failures
+are not superseded by a green rerun or by these setup changes:
+
+- **Linux launch:** the child environment omitted PATH; Ubuntu's `chroot` was
+  outside the default executable search path. Both isolation tests failed with
+  `unshare: failed to execute chroot: No such file or directory`. Making PATH
+  deliberately unusable reproduces the same failure locally. Absolute host-tool
+  resolution passes the unchanged jailed-executable assertions with that PATH.
+- **Windows source fidelity:** the pinned catalog grew from 515145 to 516510
+  bytes, exactly its 1365 LF newlines converted to CRLF. SSE separators and
+  verbatim comparisons failed too. Pre-checkout conversion control preserves
+  authored bytes, including any intentionally CRLF fixtures; the new byte
+  evidence independently verifies this rather than trusting Git status.
+- **Simulated Unix filesystems on Windows:** Go converts `os.Symlink` targets
+  to native separators. The private filesystem adapter now returns those real
+  `os.Readlink` observations as Unix slash names. Each created fixture checks
+  that the observed target round-trips to its authored name, without stripping
+  volume prefixes or replacing real symlink/Lstat/Open operations. Production
+  timezone discovery and Windows explicit-only policy are unchanged.
+- **Backpressure:** Windows buffered complete legal ~6.29 MB (>6 MiB) report bodies,
+  so the original fixture had not blocked an application write. Only the slow
+  scenarios now use real accepted TCP sockets with a requested 16 KiB send
+  buffer before HTTP writes. The >6 MiB, <=8 MiB body, two occupied slots/third
+  429, five-second write limit, released SQLite transaction, forced truncation,
+  graceful completion and SSE survival checks remain. The existing 16 MiB
+  WebSocket slow-reader fixture gets the same accepted-socket control while
+  keeping its 25ms production write timeout, 1011 close and session-join checks.
+  This WebSocket diagnosis remains a native-Windows hypothesis until rerun.
+  Failure diagnostics bound unexpected body prefixes instead of flooding logs;
+  the first run's complete original evidence is preserved.
+- **Recovered writer-log severity:** Linux race reported one queue drop, 128
+  intentional runtime losses, 128 final-flush losses and unconfirmed cleanup.
+  The test closed with a one-second context after a pressure log, which is not
+  an acknowledgment of queue drain. A temporary external-lock timing probe
+  found only 256/257 of 1280 admitted valid Turns committed at that log (3/3).
+  The correction waits for real externally observed committed history derived
+  from the synthetic valid Turn count minus the public logged queue-drop count,
+  then checks final severity with the **same** one-second close context. The
+  probe passed 3/3 after correction; the temporary timing change was removed.
+  No writer code, counters, runtime budget or short-budget finalization tests
+  changed. Repeated local race checks additionally cover the retained fixture.
+
+Local correction verification passed: the original writer-severity scenario
+30 times under race, the four slow-report and WebSocket scenarios 10 times under
+race, the full normal suite, vet, formatting, and all local flake checks. The
+full race suite includes the heavy report fixtures (418.446 s for that package).
+Fresh Linux CGO0 verification passed all 45 explicit required entries, including
+both isolated executable tests and new network/pipe regressions. All four CGO0
+executables and affected command/CLI/store/WebSocket test binaries also built;
+those cross-builds are not native execution. The commit body and coordinator's
+retained logs identify the exact commands and revision.
+
+These corrections preserve the separate Spec-review handler/signal fixes and
+SSE correction. Local checks and cross-builds are evidence only for what they
+actually execute. Windows checkout, symlink and TCP behavior still require the
+next native Actions run, and **all four native targets plus Linux full race must
+pass at the same final revision**. #213 remains incomplete until that evidence
+and the final independent review clear; epic #206 remains open.

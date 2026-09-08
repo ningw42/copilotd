@@ -61,13 +61,41 @@ func seedLargeUsageReport(t *testing.T, h *usageMeterServeHarness) {
 	t.Helper()
 	writer := openReportWriter(t, h.cfg.UsageDBPath)
 	// A legal 512 KiB model occurs in one row and one model total. JSON control
-	// escaping makes a little over 6 MiB: below 8 MiB, beyond TCP send buffers.
+	// escaping makes a little over 6 MiB: below 8 MiB, beyond this fixture's
+	// explicitly bounded TCP buffers (not arbitrary platform defaults).
 	if _, err := writer.Exec(`INSERT INTO openai_turn(at_ms,request_id,response_id,turn_index,model,transport,input_tokens,output_tokens) VALUES(1788220800000,'synthetic-private-row','',0,?,'buffered',1,2)`, strings.Repeat("\x01", 524288)); err != nil {
 		t.Fatal(err)
 	}
 }
 
 const largeReportQuery = "?timezone=UTC&since=2026-09-01&until=2026-09-02&surface=openai"
+
+// Bound the accepted socket before the production server can write. Setting
+// only the client's receive buffer after its handshake does not prevent Windows
+// from buffering the entire legal report and releasing admission immediately.
+func usageBackpressureListener(t *testing.T) net.Listener {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	return usageSmallSendBufferListener{listener}
+}
+
+type usageSmallSendBufferListener struct{ net.Listener }
+
+func (l usageSmallSendBufferListener) Accept() (net.Conn, error) {
+	conn, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	if err := conn.(*net.TCPConn).SetWriteBuffer(16 << 10); err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	return conn, nil
+}
 
 type slowUsageResponse struct {
 	conn     *net.TCPConn
@@ -121,7 +149,7 @@ func requestReportStatus(t *testing.T, h *usageMeterServeHarness, method, query 
 	body, err := io.ReadAll(response.Body)
 	_ = response.Body.Close()
 	if err != nil || response.StatusCode != status || method != "HEAD" && !strings.Contains(string(body), `"code":"`+code+`"`) {
-		t.Fatalf("%s %s: status=%d read=%v body=%s", method, query, response.StatusCode, err, body)
+		t.Fatalf("%s %s: status=%d read=%v body_bytes=%d prefix=%.512s", method, query, response.StatusCode, err, len(body), body)
 	}
 	if time.Since(start) > time.Second {
 		t.Fatal("report admission/validation queued instead of returning promptly")
@@ -176,7 +204,7 @@ func TestUsageGracefulDrainFinishesReportAndInferenceBeforeWriterCutoff(t *testi
 	}))
 	t.Cleanup(upstream.Close)
 	logs := newUsageReportLogs()
-	h := startUsageMeterServeHarness(t, upstream.URL, newPhase4Logger(t, logs), nil, nil)
+	h := startUsageMeterServeHarness(t, upstream.URL, newPhase4Logger(t, logs), nil, nil, usageBackpressureListener(t))
 	seedLargeUsageReport(t, h)
 	req, _ := http.NewRequest("POST", h.baseURL+"/openai/v1/responses", strings.NewReader(`{"stream":true}`))
 	req.Header.Set("Authorization", "Bearer "+testAPIKey)
@@ -343,7 +371,7 @@ func TestUsageSlowTCPReportsHoldSlotsReleaseSQLiteAndDoNotDeadlineSSE(t *testing
 	}))
 	t.Cleanup(upstream.Close)
 	logs := newUsageReportLogs()
-	h := startUsageMeterServeHarness(t, upstream.URL, newPhase4Logger(t, logs), func(cfg *config.ServeConfig) { cfg.StreamIdleTimeout = 15 * time.Second }, nil)
+	h := startUsageMeterServeHarness(t, upstream.URL, newPhase4Logger(t, logs), func(cfg *config.ServeConfig) { cfg.StreamIdleTimeout = 15 * time.Second }, nil, usageBackpressureListener(t))
 	seedLargeUsageReport(t, h)
 	req, _ := http.NewRequest("POST", h.baseURL+"/openai/v1/responses", strings.NewReader(`{"stream":true}`))
 	req.Header.Set("Authorization", "Bearer "+testAPIKey)
