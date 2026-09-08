@@ -478,11 +478,59 @@ CGO0 executable/affected-test builds. However, `nix flake check` failed the unch
 `TestReportIncompleteBodiesBoundFinalFlushAndRecovery/syntax`: at 5.000647343s it
 received clean EOF with the complete 400 response, rather than the expected zero
 response bytes. The socket task changed neither that assertion nor the handler;
-the retained flake failure requires separate diagnosis and remains a local release
-blocker. Full-suite passes do not supersede it.
+at that checkpoint, the retained flake failure required separate diagnosis and
+remained a local release blocker. Full-suite passes did not supersede it. The
+assertion correction below retains that RED and explains the mistaken expectation.
 
 Both native Windows architectures must still confirm actual blocking, 1011 and
 session teardown, deadline/force truncation, and graceful throughput. All four
 native targets and Linux full race must pass on one common final revision,
 including the separate deadline/parse-error corrections above. #213 and final
 review remain incomplete pending that evidence; epic #206 remains open.
+
+### Incomplete-body assertion correction
+
+The socket checkpoint's flake RED at `048b62c` was an **overstrict assertion**, not
+an overrun or an appended error: `syntax` received the complete original 400
+`invalid_query` and clean EOF at 5.000647343s. Both incomplete-body tests had
+incorrectly required zero wire bytes. The contract bounds network waiting and
+forbids a replacement error after a failed write; it does not promise nondelivery.
+
+In pinned Go 1.27.1, `net/http` drains the unread body before writing headers,
+marks a failed early drain for connection closure, and can still flush the original
+response. Read and write deadline notifications need not be observed atomically.
+The final flush can therefore deliver nothing, an original prefix, or the complete
+original response. A chunked prefix can include the entire JSON body but lack the
+terminating chunk; raw TCP EOF is not a claim of successful HTTP body delivery.
+
+The corrected production-listener tests retain real Content-Length/chunked inputs,
+real SQLite queries/materialization, two occupied slots/third 429, later 200,
+all seven success/HEAD/early-error/recovery cases, and the unchanged 4.5–7.5s
+observation window around the five-second budget. Reads must finish at server EOF,
+not a client timeout or forced client close. A separate completed TCP exchange is
+checked for its literal status, required headers, error code/body or native report
+values. Received bytes must be an **exact prefix of that original exchange**;
+wrong status/headers/body, appended JSON and a second response cannot pass.
+The fixtures pin HTTP Date, supply a known request ID, and pin only the returned
+Query value's incidental `generated_at`, without replacing SQLite collection or
+recalculating report values. Prefix checks also cover partial HTTP headers without
+introducing a private partial-protocol parser.
+
+Public ResponseController fixtures retain identical deadline values while making
+notification ordering observable: read-first defers installation of the native
+write deadline until after the real body-drain/flush; write-first waits for the
+installed deadline before the first write. These are deliberately controlled
+scheduling cases, **not claims about unmodified native timer scheduling**. They
+require complete original 400 delivery, zero delivery, a chunked original prefix,
+and original large-report bytes with slot release. The old zero-byte assertion
+failed three read-first runs before correction. Temporary attack-only HTTP writer
+mutations for 418, unrelated body bytes, appended replacement JSON, and appended
+HTTP response text each failed the corrected prefix assertion; all mutations were
+removed. An ordinary, unordered small-success case also delivered its complete
+original 200 at the deadline during local verification.
+
+These changes affect tests and verification evidence only. Production handler,
+work/read/write deadlines, recovery, signal handling, inference/SSE, writer and
+socket policy are unchanged. Final-revision native Windows/macOS/Linux and Linux
+full-race CI evidence is still required; this assertion correction does not
+certify #213 or close epic #206.
