@@ -91,6 +91,9 @@ total. Both sections share one read snapshot and request-wide limits.
 Reports cover committed observations in the configured database,
 including other writers and previous daemon runs; they neither flush queued
 Turns nor guarantee freshness, completeness, consumption, or charges.
+`generated_at` is the captured query clock, not a database commit timestamp or
+freshness/completeness watermark. Metric coverage describes only stored Turns,
+not all consumption.
 
 Disabled metering returns an explicit error, not empty history. An enabled
 empty selection prints `No stored Turns in the selected range.` Read failures,
@@ -110,8 +113,10 @@ Copied/custom files, ambiguous names, unsupported rules, and nonempty `TZDIR` or
 `ZONEINFO` cannot be discovered: pass `--timezone Area/City` (or `--timezone UTC`).
 Native Windows always requires an explicit timezone, also settable through
 `COPILOTD_TIMEZONE` or selected TOML. Explicit choices bypass discovery, not name
-validation. Native Linux executable discovery and embedded fallback are tested;
-native macOS/Windows release verification remains pending.
+validation. Native runtime claims are revision-specific: see the
+[verification guide](docs/verification/usage-reporting.md) and the retained
+[#213 results](https://github.com/ningw42/copilotd/issues/213), not runner labels or
+cross-builds alone.
 
 `--model` selects an exact non-empty valid UTF-8 **Reported model**, preserving
 case, whitespace, and Unicode without Catalog alias expansion or Requested-model
@@ -122,9 +127,11 @@ for period rows and both range-total levels. Text safely quotes model identities
 coverage independently of `[clipped]` and `[in progress]` period annotations.
 `--json` emits the complete validated original response plus a newline, preserving
 exact decimal count strings, Unicode, and additive fields. `--details` does not
-change JSON or make another request. There is no pricing, raw-Turn export, or
-chart output. Remaining contention/lifecycle integration and native-platform
-release gates are still pending.
+change JSON or make another request. There is no pricing, raw-Turn export, HTML,
+or chart output. [Contention and lifecycle integration evidence](docs/research/2026-09-08-usage-reporting-concurrency.md)
+includes real blocked TCP output and native SQLite cleanup; the
+[release verification guide](docs/verification/usage-reporting.md) separates
+implemented behavior from the required native release gate.
 See [usage configuration](CONFIGURATION.md#usage) for limits and protocol details.
 
 ## Design principles
@@ -219,10 +226,13 @@ The [release workflow](.github/workflows/release.yml) cross-compiles archives an
 publishes checksums. Nix provides development/build environments for Linux
 x86-64 and macOS arm64. Builds disable cgo; Linux is fully static, while Darwin
 still links the system `libSystem` library. No companion daemon is required; the
-local usage database is opt-in. SQLite runtime, locking, and permission evidence
-is native on Linux; Windows and Darwin have cgo-free build evidence only, and
-Windows ACL behavior remains best effort rather than certified. Optional
-OS-service installation is not implemented
+local usage database is opt-in. The additive [native test matrix](.github/workflows/test.yml)
+executes CGO-disabled acceptance on all four targets and retains architecture,
+SQLite, timezone, command, and skip evidence; Linux also retains the full race
+suite. A workflow definition is not certification: consult the
+[revision-specific verification record](docs/verification/usage-reporting.md).
+Windows ACL behavior remains best effort, not a general desktop/ACL guarantee.
+Optional OS-service installation is not implemented
 ([#191](https://github.com/ningw42/copilotd/issues/191)).
 
 ## Limitations and risks

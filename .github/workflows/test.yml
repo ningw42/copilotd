@@ -35,4 +35,91 @@ jobs:
       - name: Build
         run: go build ./...
       - name: Test
-        run: go test -race ./... -count=1
+        env:
+          CGO_ENABLED: '1'
+        run: |
+          set -o pipefail
+          mkdir -p .scratch/race-evidence
+          git rev-parse HEAD > .scratch/race-evidence/source-sha.txt
+          go version > .scratch/race-evidence/go-version.txt
+          go env -json GOHOSTOS GOHOSTARCH GOOS GOARCH CGO_ENABLED > .scratch/race-evidence/go-environment.json
+          set +e
+          go test -race -json ./... -count=1 | tee .scratch/race-evidence/tests.json
+          status=$?
+          printf 'go test -race -json ./... -count=1\nexit=%s\n' "$status" > .scratch/race-evidence/command-status.txt
+          exit "$status"
+      - name: Retain Linux full-race evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: usage-linux-full-race-${{ github.run_attempt }}
+          path: .scratch/race-evidence/
+          include-hidden-files: true
+          retention-days: 90
+
+  native-usage:
+    name: Native Usage ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-24.04, goos: linux, goarch: amd64, setup_arch: x64 }
+          - { runner: macos-15, goos: darwin, goarch: arm64, setup_arch: arm64 }
+          - { runner: windows-2025, goos: windows, goarch: amd64, setup_arch: x64 }
+          - { runner: windows-11-arm, goos: windows, goarch: arm64, setup_arch: arm64 }
+    env:
+      CGO_ENABLED: '0'
+      COPILOTD_WORKFLOW_SHA: ${{ github.workflow_sha }}
+      COPILOTD_WORKFLOW_REF: ${{ github.workflow_ref }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Set up native Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          architecture: ${{ matrix.setup_arch }}
+      # Ubuntu's AppArmor policy can deny the static filesystem-isolation tests.
+      # This is a disposable hosted VM only; record and restore the policy. A
+      # remaining unshare/chroot failure is a blocker, not a skip or emulation.
+      - name: Prepare isolated Linux test privileges
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          mkdir -p .scratch/native-usage
+          if test -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns; then
+            sysctl -n kernel.apparmor_restrict_unprivileged_userns > .scratch/native-usage/userns-original
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 | tee .scratch/native-usage/userns-setup.log
+          fi
+      - name: Execute native release-shaped acceptance and SQLite tests
+        run: go run ./scripts/verify-usage -target ${{ matrix.goos }}/${{ matrix.goarch }} -runner ${{ matrix.runner }} -native-ci
+      - name: Restore Linux namespace policy
+        if: always() && runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if test -f .scratch/native-usage/userns-original; then
+            original="$(< .scratch/native-usage/userns-original)"
+            sudo sysctl -w "kernel.apparmor_restrict_unprivileged_userns=$original" | tee .scratch/native-usage/userns-restored.log
+          fi
+      - name: Retain native verification evidence even on failure
+        id: evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: usage-native-${{ matrix.goos }}-${{ matrix.goarch }}-${{ github.run_attempt }}
+          path: .scratch/native-usage/
+          include-hidden-files: true
+          retention-days: 90
+          if-no-files-found: error
+      - name: Link retained evidence
+        if: always()
+        shell: bash
+        env:
+          ARTIFACT_URL: ${{ steps.evidence.outputs.artifact-url }}
+          ARTIFACT_DIGEST: ${{ steps.evidence.outputs.artifact-digest }}
+        run: |
+          printf '### Native Usage %s/%s\n\nSource: `%s`\n\n[Evidence](%s), SHA-256 `%s`. Retention: 90 days; archive before expiry. A failed job or missing mandatory pass is not certification.\n' '${{ matrix.goos }}' '${{ matrix.goarch }}' "$GITHUB_SHA" "$ARTIFACT_URL" "$ARTIFACT_DIGEST" >> "$GITHUB_STEP_SUMMARY"

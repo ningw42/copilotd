@@ -13,9 +13,11 @@ reports and a terminal HTTP client. #207–#209 implement native Anthropic/OpenA
 and combined reports with all calendar periods, named zones, and independent
 month defaults; #210 adds supported Unix terminal-local discovery and native
 Windows explicit-only behavior. #211 adds exact Reported-model filters, detailed
-native tables, and validated original-byte JSON. Remaining integration and native
-release gates are pending. This does not revise the native projection or writer
-policies documented here.
+native tables, and validated original-byte JSON. #212 retains integrated
+contention/lifecycle evidence; #213 adds executable acceptance and native CI.
+Actual release certification is revision-specific; see the
+[verification guide](../verification/usage-reporting.md) and #213 results.
+This does not revise the native projection or writer policies documented here.
 
 Maintainer Ning Wang's [current approval](#maintainer-approval-2026-09-06)
 accepts the state-at-rest and Shim-observer exceptions documented in

@@ -172,7 +172,7 @@ func TestUsageExecutableEmbeddedTimezoneWithoutHostData(t *testing.T) {
 	defer server.Close()
 	invoke := func(args ...string) (string, error) {
 		command := exec.Command("unshare", append([]string{"-Ur", "chroot", root, "/copilotd"}, args...)...)
-		command.Env = append(os.Environ(), "ZONEINFO=/absent", "GOROOT=/absent", "TZ=invalid/rules", "COPILOTD_CONFIG=/absent/config")
+		command.Env = []string{"ZONEINFO=/absent", "GOROOT=/absent", "TZ=invalid/rules", "COPILOTD_CONFIG=/absent/config"}
 		output, err := command.CombinedOutput()
 		return string(output), err
 	}

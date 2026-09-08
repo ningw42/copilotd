@@ -9,8 +9,10 @@ approval remains unverified.
 The Usage meter is the sole usage-specific exception to copilotd's no-database
 state-at-rest policy. When explicitly enabled, it persists best-effort Turn
 observations in a private local SQLite database using the cgo-free
-`modernc.org/sqlite v1.58.0` driver, which embeds SQLite 3.53.4 and requires the
-matching `modernc.org/libc v1.75.6`. The meter remains off by default, creates no
+`modernc.org/sqlite v1.58.0` driver, which embeds SQLite 3.53.4. Its historical
+feasibility pin used `modernc.org/libc v1.75.6`; the root module currently selects
+`v1.75.7`, explicitly identified in the
+[reporting verification evidence](../verification/usage-reporting.md). The meter remains off by default, creates no
 usage files while disabled, requires no companion service, and does not change
 the in-memory-only treatment of Copilot tokens or cached values.
 
@@ -23,15 +25,18 @@ terminal client. Reports support Anthropic, OpenAI, or both, with all calendar
 periods, named zones, and independent month defaults (#207–#209). #210 adds
 conservative terminal-local discovery on supported Unix configurations, with
 native Windows explicit-only. #211 adds exact Reported-model filters, detailed
-native tables, and validated original-byte JSON. Remaining integration and native
-release gates are pending. The persistence, file, and finalization policies below
+native tables, and validated original-byte JSON. #212 retains integrated
+contention/lifecycle evidence. #213 adds executable acceptance and native CI;
+actual target/revision certification is tracked in its retained results, not
+inferred from the pipeline. The persistence, file, and finalization policies below
 remain unchanged.
 
 ## Why SQLite
 
-The database is an external-query boundary: operators can inspect native
-per-Surface rows using ordinary SQLite tooling without copilotd growing a query
-API or aggregation service. SQLite provides transactional batches, a
+The original database boundary let operators inspect native per-Surface rows
+using ordinary SQLite tooling without requiring a built-in query API or
+aggregation service. That external inspection remains supported alongside the
+ADR-0019 reporting extension. SQLite provides transactional batches, a
 forward-migrated typed schema, concurrent readers under WAL, and explicit `NULL`
 semantics that JSONL would leave to every reader.
 
@@ -59,7 +64,10 @@ received native runtime, WAL, locking, migration, filesystem, and race tests. Th
 Windows and Darwin results are compile/link evidence, not runtime certification;
 Darwin retains its normal system-library links. Windows ACL inheritance, sidecar
 ACLs, reparse-point behavior, locking, and cleanup remain unverified limitations,
-not certified behavior.
+not certified behavior. That paragraph describes the original feasibility run;
+subsequent native reporting/SQLite checks and remaining limitations are tracked
+per revision in the [verification guide](../verification/usage-reporting.md) and
+#213 artifacts. Hosted-runner success does not certify arbitrary desktop ACLs.
 
 ## Files, permissions, and durability
 

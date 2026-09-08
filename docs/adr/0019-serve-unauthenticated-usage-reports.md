@@ -5,13 +5,15 @@ and combined reports with all calendar periods, explicit named zones, and month
 range defaults implemented in #207–#209; #210 adds conservative Unix terminal-local
 timezone discovery and the native Windows explicit-only policy. #211 adds exact
 Reported-model filters, detailed native tables, and validated original-byte JSON.
-Remaining integration and native release verification are pending. Protocol details
-and verification gates live in the
+#212 retains integrated concurrency/lifecycle evidence; #213 adds complete
+executable acceptance and the native pipeline. Actual native release certification
+is recorded per revision on #213, not implied by implementation status. Protocol
+details and verification gates live in the
 [Usage reporting design](../design/2026-09-07-usage-reporting-design.md).
 
-copilotd will expose calendar aggregates of its configured usage database through
+copilotd exposes calendar aggregates of its configured usage database through
 an unauthenticated local HTTP handler on the same listener as inference.
-`copilotd usage` will be an HTTP client, using a configurable base URL and
+`copilotd usage` is an HTTP client, using a configurable base URL and
 rendering terminal tables or JSON rather than opening SQLite itself. The
 maintainer chose this over a direct-file CLI and explicitly accepted that report
 exposure follows `serve --addr`, including publicly reachable bindings.
@@ -68,10 +70,11 @@ now use supported configuration visible to the CLI process on Linux/macOS;
 SSH/container/WSL execution does not discover a physical workstation outside it.
 Native Windows and unsupported/ambiguous configurations require an explicit name,
 not an offset, registry mapping, copied-file guess, or silent UTC fallback.
-Native Linux executable evidence is retained; macOS/Windows native release gates
-remain pending. Exact UTF-8 model filters, detailed native period/range tables,
+Native evidence and its platform limits are recorded in the
+[verification guide](../verification/usage-reporting.md) and revision-specific
+#213 artifacts; cross-compilation alone is not certification. Exact UTF-8 model filters, detailed native period/range tables,
 and original-byte JSON output now share the same report and client validator;
 no Catalog normalization, Requested-model substitution, or client reaggregation
 is introduced. External SQLite inspection remains supported alongside the new
-bounded HTTP path. #212 contention/lifecycle integration and #213 release gates
-remain separate verification obligations.
+bounded HTTP path. [#212 contention/lifecycle evidence](../research/2026-09-08-usage-reporting-concurrency.md)
+and #213's native release gate remain distinct from feature implementation.

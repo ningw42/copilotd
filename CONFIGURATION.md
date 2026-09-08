@@ -122,9 +122,11 @@ There is no silent UTC or daemon-local fallback. Every successful invocation
 transmits the accepted name; raw HTTP still requires `timezone` (missing is
 400). Traversal/read bounds cover normal filesystem work, not arbitrary stuck
 I/O or an atomic guarantee against concurrent OS reconfiguration.
-Native Linux static-executable isolation covers discovery and embedded loading;
-macOS/Windows policy fixtures are not native runtime certification, which remains
-pending for release verification.
+Native Linux static-executable isolation covers discovery and embedded loading.
+Policy fixtures and cross-builds are not native runtime certification. The
+[verification guide](docs/verification/usage-reporting.md) describes native image
+observations, separately controlled discovery, embedded-fallback evidence, and
+revision-specific results on #213.
 
 `--model` is an exact, case-sensitive **Reported model** filter, independent of
 Requested model and Catalog aliases. Its value must be non-empty valid UTF-8;
@@ -215,8 +217,11 @@ Both native sections share one committed snapshot and all row/group/model/body
 budgets apply across the whole request. A failure in either selected section
 fails the report, never returning the other as complete. Reports describe
 committed best-effort database history (including other writers/process runs),
-not a freshness or completeness watermark. No writer flush, migration, extra
-index, or read worker is introduced. Live file/schema replacement remains unsupported.
+not a freshness or completeness watermark. Specifically, `generated_at` is the
+captured query clock, not a database commit timestamp or freshness/completeness
+guarantee. Metric coverage is only within stored Turns, not all consumption.
+No writer flush, migration, extra index, or read worker is introduced. Live
+file/schema replacement remains unsupported.
 
 ## `serve`
 
