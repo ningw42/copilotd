@@ -230,3 +230,57 @@ verifier (28 required entries), and all four executable/SSE-test cross-builds.
 Exact RED/GREEN commands and results are retained in the separate corrective
 commit and coordinator evidence. These local results do not replace #213's
 still-required final-revision native matrix or final review.
+
+### Final Spec-review network/output corrections
+
+The final Spec review identified two gaps not covered by the original slow-reader
+and failing-Go-writer tests. Both were reproduced before their corrections:
+
+- **Unread HTTP request bodies:** two keep-alive GETs with withheld body bytes
+  could block net/http's implicit request-body drain during response flushing,
+  retain both report slots, and leave later reports returning 429 beyond the
+  five-second write budget. The report handler now applies the same route-local
+  deadline to reads and writes, including initial generic-recovery coverage and
+  net/http's post-handler final flush/body cleanup. It does not reject GET bodies,
+  enable a global server timeout, or change inference deadlines.
+- **Actual Unix stdout pipes:** the built usage executable inherited a pipe with
+  no readers as stdout fd 1 and terminated with SIGPIPE instead of returning the
+  required exit 1 and CLI error. A scoped SIGPIPE notification now makes EPIPE
+  reach the existing error translator. Its lifetime includes the stderr attempt;
+  it is removed afterward, without changing help/serve/login signal policy or
+  the usage command's INT/TERM cancellation. Windows retains ordinary pipe errors.
+
+Retained regressions:
+
+- [`internal/server/usage_report_body_test.go`](../../internal/server/usage_report_body_test.go):
+  `TestUsageIncompleteRequestBodiesReleaseReportSlotsWithinWriteBudget` uses real
+  SQLite, the production listener and complete Query results to distinguish work
+  from blocked network output. Content-Length and chunked requests occupy both
+  slots, then return at about five seconds without a client close; later reports
+  succeed. Its status probe waits until both queries return so it cannot steal
+  admission during fixture setup. `TestReportIncompleteBodiesBoundFinalFlushAndRecovery`
+  covers small successes, HEAD, method/disabled/syntax/semantic errors and generic
+  panic recovery, including post-handler flushing. Removing just the read-deadline
+  call makes both slot cases and all seven cleanup cases fail at the test's 7.5s
+  safety bound; restoring it passes three repetitions of every case.
+- [`cmd/copilotd/usage_report_body_e2e_test.go`](../../cmd/copilotd/usage_report_body_e2e_test.go):
+  `TestUsageReportDeadlinesDoNotLeakIntoReusedInferenceConnections` uses the same
+  raw HTTP/1 connections first for complete GET reports, then authenticated
+  inference. An upload and an SSE response still complete past the preceding
+  report's five-second deadline, with no client reconnect/retry to hide leakage.
+  Existing blocked-TCP/WAL checkpoint/SSE/shutdown regressions remain unchanged.
+- `TestUsageExecutableAcceptance/closed_stdout_pipe` in the executable harness
+  checks compact/details/JSON exit 1 and the stderr error using a real inherited
+  pipe, separately from the retained read-only-file and partial/short/newline
+  writer tests. With both stdout and stderr closed it still requires exit 1,
+  without claiming stderr delivery. Unix-only actual-executable tests in
+  [`usage_signals_unix_test.go`](../../cmd/copilotd/usage_signals_unix_test.go)
+  retain informational commands' SIGPIPE behavior and usage INT/TERM cancellation.
+
+The corrective local full normal suite (including heavy report fixtures), focused
+race suites for reporthttp/reportcli/cmd/server/config/logging/forward/SSE, vet,
+formatting and diff checks passed. All four CGO-disabled executable and affected
+command/listener test binaries cross-built successfully. This is local Linux and
+cross-build evidence, not a native Windows/macOS pass. The separate native-CI
+fixture failures and final full-race/flake/native release gates remain coordinator
+work; this correction does not certify #213 or close epic #206.

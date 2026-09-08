@@ -353,6 +353,51 @@ func TestUsageExecutableAcceptance(t *testing.T) {
 			t.Fatal("original JSON changed")
 		}
 	})
+	t.Run("closed_stdout_pipe", func(t *testing.T) {
+		for _, view := range []string{"compact", "--details", "--json"} {
+			t.Run(view, func(t *testing.T) {
+				readEnd, writeEnd, err := os.Pipe()
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = writeEnd.Close() })
+				if err := readEnd.Close(); err != nil {
+					t.Fatal(err)
+				}
+				args := append([]string(nil), base...)
+				if view != "compact" {
+					args = append(args, view)
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				command := exec.CommandContext(ctx, binary, args...)
+				command.Env = usageExecEnv(nil)
+				// An inherited *os.File is real stdout fd 1, not os/exec's writer
+				// copying goroutine. On Unix its EPIPE normally raises SIGPIPE.
+				command.Stdout = writeEnd
+				var stderr bytes.Buffer
+				command.Stderr = &stderr
+				err = command.Run()
+				exit, ok := err.(*exec.ExitError)
+				usageExecEvidence(t, "closed-stdout-pipe", map[string]any{"argv": args, "result": fmt.Sprint(err), "stderr": stderr.String(), "runtime_os": runtime.GOOS, "stdout": "inherited pipe with no readers"})
+				if !ok || exit.ExitCode() != 1 || !strings.HasPrefix(stderr.String(), "copilotd: write ") || !strings.HasSuffix(stderr.String(), "\n") || strings.Contains(stderr.String(), "schema_version") || strings.Contains(stderr.String(), "Model") {
+					t.Fatalf("closed stdout pipe must return CLI exit 1 with safe error: result=%v stderr=%q", err, stderr.String())
+				}
+				// Error reporting itself may meet a second broken pipe. Keep the
+				// policy active through that attempt; do not claim stderr delivery
+				// when it is unavailable, or allow it to turn exit 1 into SIGPIPE.
+				command = exec.CommandContext(ctx, binary, args...)
+				command.Env = usageExecEnv(nil)
+				command.Stdout, command.Stderr = writeEnd, writeEnd
+				err = command.Run()
+				exit, ok = err.(*exec.ExitError)
+				usageExecEvidence(t, "closed-both-pipes", map[string]any{"argv": args, "result": fmt.Sprint(err), "stdout_and_stderr": "inherited pipe with no readers"})
+				if !ok || exit.ExitCode() != 1 {
+					t.Fatalf("signal handling ended before error reporting: %v", err)
+				}
+			})
+		}
+	})
 	t.Run("disabled_empty_unreachable_protocol_and_output", func(t *testing.T) {
 		empty := usageExec(t, binary, nil, 0, append(base, "--model", "absent")...)
 		if strings.Count(empty, "No stored Turns in the selected range.") != 2 {
@@ -390,8 +435,8 @@ func TestUsageExecutableAcceptance(t *testing.T) {
 				t.Fatal("untrusted body leaked")
 			}
 		}
-		// Inherit a real read-only file as stdout on every OS. Unlike a broken
-		// Unix pipe this yields a write error, not the OS SIGPIPE exit convention.
+		// Retain ordinary file-write failures separately from the actual pipe
+		// and Unix SIGPIPE behavior exercised by closed_stdout_pipe.
 		file := filepath.Join(t.TempDir(), "read-only")
 		if err := os.WriteFile(file, nil, 0600); err != nil {
 			t.Fatal(err)

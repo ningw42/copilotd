@@ -29,8 +29,8 @@ func Handler(query QueryFunc) http.Handler {
 	slots := make(chan struct{}, AdmissionSlots)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Also bound a response emitted by outer generic panic recovery. Normal
-		// responses receive a fresh write-only budget after materialization.
-		if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(WriteTimeout)); err != nil && !errors.Is(err, http.ErrNotSupported) {
+		// responses receive a fresh network budget after materialization.
+		if err := setResponseDeadline(w); err != nil {
 			return
 		}
 		if r.Method != "GET" && r.Method != "HEAD" {
@@ -139,9 +139,7 @@ func writeError(w http.ResponseWriter, r *http.Request, status int, code, messag
 	writeBody(w, r, status, body)
 }
 func writeBody(w http.ResponseWriter, r *http.Request, status int, body []byte) {
-	// Ordinary production writers support ResponseController through Unwrap.
-	// Test recorders may not; never set a global timeout that would break SSE.
-	if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(WriteTimeout)); err != nil && !errors.Is(err, http.ErrNotSupported) {
+	if err := setResponseDeadline(w); err != nil {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -151,4 +149,23 @@ func writeBody(w http.ResponseWriter, r *http.Request, status int, body []byte) 
 	if r.Method != "HEAD" {
 		_, _ = w.Write(body)
 	}
+}
+
+func setResponseDeadline(w http.ResponseWriter) error {
+	// HTTP/1 can drain an unread request body while flushing a response, even
+	// after the handler returns (HEAD/small errors). Bound that read with the
+	// SAME budget as writing; a write deadline alone cannot interrupt it.
+	// Leave both deadlines in place for net/http's final flush/body cleanup;
+	// net/http resets them before reusing the connection for another request.
+	// Production wrappers support ResponseController via Unwrap; recorders may
+	// not. Never set a global timeout that would deadline inference or SSE.
+	controller := http.NewResponseController(w)
+	deadline := time.Now().Add(WriteTimeout)
+	if err := controller.SetReadDeadline(deadline); err != nil && !errors.Is(err, http.ErrNotSupported) {
+		return err
+	}
+	if err := controller.SetWriteDeadline(deadline); err != nil && !errors.Is(err, http.ErrNotSupported) {
+		return err
+	}
+	return nil
 }

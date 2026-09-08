@@ -66,7 +66,18 @@ const (
 // serve error -> 1; unknown subcommand -> 1.
 func run(args []string, lookupEnv func(string) (string, bool), stdout, stderr io.Writer) int {
 	root := buildCommand(lookupEnv, stdout, stderr)
-	switch err := root.ParseAndRun(context.Background(), args); {
+	err := root.Parse(args)
+	if err == nil {
+		if root.GetSelected().Name == "usage" {
+			// Keep stdout EPIPE nonfatal through the CLI error translation below,
+			// including its stderr write. Help and other commands retain their
+			// existing signal policy; parser-native help never reaches Run.
+			stop := notifyUsagePipeErrors()
+			defer stop()
+		}
+		err = root.Run(context.Background())
+	}
+	switch {
 	case err == nil:
 		return 0
 	case errors.Is(err, errServeFailed):
