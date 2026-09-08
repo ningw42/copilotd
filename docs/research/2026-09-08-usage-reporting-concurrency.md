@@ -4,10 +4,13 @@
 
 This is executable integration evidence for #212, built on the verified #207–#211
 baseline `a05018531cd66ee05cba3a04987dd6eceb9b2c89`. It does not defer or introduce
-baseline safety: **the new behavioral characterizations passed without production
-corrections**. No reader/writer schema, index, admission, deadline, authentication,
-or lifecycle policy changed. The task's signed commit contains these tests and
-this evidence; #213 owns the complete release/platform gate.
+baseline safety: the new behavioral characterizations initially passed without
+production corrections in `9c206fa30b7896bafb46808d017dba5387f6699b`. **A subsequent
+coordinator run reproduced the prior graceful-stop failure.** The corrective
+diagnosis below identifies a test-client connection-ownership race and records a
+deterministic red/green regression; the initial green runs were not proof of its
+absence. No reader/writer schema, index, admission, deadline, authentication, or
+production lifecycle policy changed. #213 owns the complete release/platform gate.
 
 Observed locally through `nix develop`:
 
@@ -115,6 +118,77 @@ The read measurement is separate from fixture preparation. Under the race
 detector, preparing the 250,000-row forced-read fixture takes most of its roughly
 38-second test duration; the observed forced shutdown itself is roughly 21 ms.
 
+## Reopened shutdown failure: client ownership, not report work
+
+The coordinator reran the exact affected-package command at `9c206fa`:
+
+```sh
+nix develop -c go test ./internal/config ./internal/usage/... ./internal/server ./internal/logging ./cmd/copilotd -count=1
+```
+
+It failed with `TestDailyOpenAIUsageCommandThroughProductionListener (3.03s)`:
+`graceful shutdown: context deadline exceeded`, followed by a second
+`context deadline exceeded`; command-package duration was 24.476 s. Three initial
+local reruns stayed green, but reducing the context reproduced the exact error:
+
+- A 40-repeat loop of the concurrent-writer, combined-command and daily-command
+  tests failed once (124.982 s).
+- The isolated daily-command test with `-count=100` failed once (104.445 s).
+  Other tests and package load were therefore unnecessary to trigger it.
+
+Before instrumentation, the ranked hypotheses were retained non-idle HTTP
+connections, unfinished report/inference handlers, and a separate WebSocket or
+background shutdown delay. Temporary connection-state and public `httptrace`
+probes identified the first cause. Each captured failure had **one `StateNew`
+connection and no active request handler**, after all report and inference access
+records had completed. HTTP exhausted the fixture's two-second drain budget;
+WebSocket shutdown then received that already-expired context.
+
+The original test closed its small 401 response without reading it. In pinned
+Go 1.27.1, `net/http.Transport.readLoop` can return from that Close before its
+background body drain returns the connection to idle. The next authenticated
+request starts a new dial, then receives the recycled original connection first.
+`dialConnFor` retains the now-unused completed dial in the client's idle pool.
+That socket has never sent HTTP headers, so the daemon still sees `StateNew`.
+Go's `Server.closeIdleConns` does not treat such a connection as idle until over
+five seconds; force-close at the fixture's two-second budget is correct behavior.
+The test was wrongly expecting a clean drain without releasing its own unused
+client connections.
+
+A 150-repeat trace loop captured the same sequence in three failures (159.750 s).
+One literal trace reused client port 51504 for the authenticated request while
+its extra dial opened port 51506. At failure the latter was `state=new` with age
+3.013121924 s. The other two retained-connection ages were 3.014497887 s and
+3.014941383 s. Only synthetic requests and loopback connection metadata were
+captured; all temporary production/test instrumentation was removed.
+
+The retained regression is
+`cmd/copilotd/usage_report_client_shutdown_test.go`:
+`TestUsageReportClientTeardownClosesAnUnusedDialBeforeGracefulStop`. Through the
+real production listener and real `http.Transport`, it leaves a first report
+response unread, gates delivery of a second real TCP dial, lets the first
+connection satisfy the waiting second request, then delivers the completed dial
+unused. Actual socket reading establishes Transport ownership before teardown.
+It uses channels and real response completion, not sleeps or mocked report/SQL
+work. This minimized reproducer needs neither inference observations nor CLI
+polling.
+
+With the original server-only fixture teardown it failed **3/3** with the exact
+stop error (6.059 s total, about two seconds each). The minimal correction adds
+`client.CloseIdleConnections()` before `h.stop()` in the test-only
+`stopAfterClient` helper. The daily-command test now owns a cloned ordinary HTTP
+transport for its probe/auth traffic and uses this teardown rather than leaving
+unused connections in the global client pool. Its unread-401 sequence remains,
+so the correction owns the race's resources instead of assuming the race cannot
+happen. The deterministic test then passed **10/10 in 0.109 s**; a loop containing
+both it and the original daily-command test passed **100 repetitions each in
+103.695 s**.
+
+No production server, report client, retry behavior, report deadline, writer
+cutoff, finalization budget or stop-error assertion changed. The corrected
+fixture does not close active requests on behalf of the production server; the
+retained graceful/forced integration tests continue to exercise those semantics.
+
 ## Verification and limitations
 
 Commands executed through the Nix development shell:
@@ -130,15 +204,36 @@ nix fmt
 git diff --check
 ```
 
-All passed. The affected normal suite was rerun after the last test-fixture
-changes (report 14.511 s, store 35.416 s, command 24.439 s) and includes the heavy,
-real million-row limit fixture. The affected race suite also passed (report
+These initial local commands all passed, before the coordinator's later RED
+reopened the shutdown investigation. The initial final affected normal run
+(report 14.511 s, store 35.416 s, command 24.439 s) included the heavy, real
+million-row limit fixture. The affected race suite also passed (report
 43.219 s, command 72.167 s), skipping only that explicitly named heavy resource
 fixture; the smaller integrated scan/driver/snapshot/lifecycle cases were not
-skipped. The prior one-off #209 graceful-stop failure did not reproduce in 20
-normal repetitions of `TestDailyOpenAIUsageCommandThroughProductionListener` or
-five additional race repetitions. No cause is claimed and no lifecycle timeout
-was inflated or error suppressed.
+skipped. The initial 20 normal and five race repetitions of the daily test also
+passed, but the reopened diagnosis above supersedes their earlier no-reproduction
+limitation. No lifecycle timeout was inflated and no stop error was suppressed.
+
+After the client-ownership correction, the exact coordinator command passed
+three times, including every heavy normal resource fixture. Command-package
+durations were 26.515 s, 22.474 s and 22.483 s; report-package durations were
+14.497 s, 14.546 s and 14.548 s. Corrective verification also passed:
+
+```sh
+nix develop -c go test ./cmd/copilotd -run 'TestUsageReportsOverlapNativeInferenceAndAnotherCommittedWriter|TestAnthropicAndCombinedUsageCommandThroughProductionListener|TestDailyOpenAIUsageCommandThroughProductionListener' -count=40
+nix develop -c go test ./cmd/copilotd -run 'TestDailyOpenAIUsageCommandThroughProductionListener|TestUsageReportClientTeardownClosesAnUnusedDialBeforeGracefulStop' -count=100
+nix develop -c go test -race ./cmd/copilotd -run 'TestDailyOpenAIUsageCommandThroughProductionListener|TestUsageReportClientTeardownClosesAnUnusedDialBeforeGracefulStop|TestUsageGracefulDrainFinishesReportAndInferenceBeforeWriterCutoff|TestUsageSlowTCPReportsHoldSlotsReleaseSQLiteAndDoNotDeadlineSSE|TestRunBoundServeForcedWebSocketDrainAndFreshUsageFinalizationAreBounded|TestRunBoundServeStopsUsageAdmissionBeforeReportingForcedDrainError' -count=5
+nix develop -c go test -race ./internal/config ./internal/usage/... ./internal/server ./internal/logging ./cmd/copilotd -skip '^TestQueryEnforcesWholeReportResourceLimits$' -count=1
+nix develop -c go test -race ./cmd/copilotd -run 'TestDailyOpenAIUsageCommandThroughProductionListener|TestUsageReportClientTeardownClosesAnUnusedDialBeforeGracefulStop' -count=20
+```
+
+The neighbor loop passed in 123.078 s; the five-repeat lifecycle race loop in
+39.420 s; the affected race suite in 72.317 s for commands and 42.277 s for reports;
+and the twenty-repeat client/daily race loop in 23.406 s. The affected race skip
+remains only the named heavy resource fixture, which passed in every full normal
+run. Compilation, affected `go vet`, formatting, and diff checks also passed.
+The ignored `.scratch/usage-reporting-206/212-shutdown-diagnosis.md` retains the
+exact phase-by-phase experiments and output-artifact paths.
 
 During test development, a 1 KiB receive-buffer fixture made draining already
 queued TCP bytes too slow for the close assertion. The retained 64 KiB fixture

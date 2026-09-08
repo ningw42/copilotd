@@ -119,6 +119,10 @@ func TestDailyOpenAIUsageCommandThroughProductionListener(t *testing.T) {
 	defer upstream.Close()
 	var logs bytes.Buffer
 	h := startUsageMeterServeHarness(t, upstream.URL, newPhase4Logger(t, &logs), nil, nil)
+	// Own these probe/auth connections, including any unused speculative dial,
+	// rather than leaving them in the process-global client's idle pool.
+	client := &http.Client{Transport: http.DefaultTransport.(*http.Transport).Clone()}
+	t.Cleanup(client.CloseIdleConnections)
 	now := time.Now().UTC()
 	since := now.Format(time.DateOnly)
 	until := now.AddDate(0, 0, 1).Format(time.DateOnly)
@@ -129,7 +133,7 @@ func TestDailyOpenAIUsageCommandThroughProductionListener(t *testing.T) {
 		if key != "" {
 			request.Header.Set("Authorization", "Bearer "+key)
 		}
-		response, err := http.DefaultClient.Do(request)
+		response, err := client.Do(request)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -139,7 +143,7 @@ func TestDailyOpenAIUsageCommandThroughProductionListener(t *testing.T) {
 			t.Fatalf("unauthenticated report key=%q: %d %s", key, response.StatusCode, body)
 		}
 	}
-	unauth, err := http.Post(h.baseURL+"/openai/v1/responses", "application/json", strings.NewReader(`{"model":"requested"}`))
+	unauth, err := client.Post(h.baseURL+"/openai/v1/responses", "application/json", strings.NewReader(`{"model":"requested"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,7 +154,7 @@ func TestDailyOpenAIUsageCommandThroughProductionListener(t *testing.T) {
 	request, _ := http.NewRequest("POST", h.baseURL+"/openai/v1/responses", strings.NewReader(`{"model":"requested"}`))
 	request.Header.Set("Authorization", "Bearer "+testAPIKey)
 	request.Header.Set("Content-Type", "application/json")
-	response, err := http.DefaultClient.Do(request)
+	response, err := client.Do(request)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -174,7 +178,7 @@ func TestDailyOpenAIUsageCommandThroughProductionListener(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	if err := h.stop(); err != nil {
+	if err := h.stopAfterClient(client); err != nil {
 		t.Fatal(err)
 	}
 	h.closeStore()

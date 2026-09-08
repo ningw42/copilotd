@@ -133,6 +133,14 @@ func (h *usageMeterServeHarness) stop() error {
 	return h.stopErr
 }
 
+// A Transport can retain a completed dial that no request used. Close this
+// fixture's client-owned idle sockets before expecting a clean server drain.
+// This does not bypass the production graceful/forced drain of active requests.
+func (h *usageMeterServeHarness) stopAfterClient(client *http.Client) error {
+	client.CloseIdleConnections()
+	return h.stop()
+}
+
 func (h *usageMeterServeHarness) closeStore() sqlitestore.Report {
 	h.closeOnce.Do(func() {
 		if h.store == nil {
