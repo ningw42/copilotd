@@ -4,7 +4,7 @@ Configuration precedence is shown from left to right in the tables below: an
 explicit command-line flag overrides an environment variable, which overrides
 the selected TOML file, which overrides the built-in default.
 
-Flags must follow `copilotd serve` or `copilotd login`. No configuration file is
+Flags must follow `copilotd serve`, `copilotd login`, or `copilotd usage`. No configuration file is
 loaded automatically; select one with `--config` or `COPILOTD_CONFIG`. The file
 uses the flat TOML keys shown below. Durations use Go duration syntax such as
 `500ms`, `30s`, or `24h`; quote duration and other string values in TOML.
@@ -27,6 +27,201 @@ form is accepted as input, so `--stream-idle-timeout 5m` and
 | [`--github-oauth-token-file <PATH>`](#--github-oauth-token-file) | `COPILOTD_GITHUB_OAUTH_TOKEN_FILE` | `github-oauth-token-file` | `<user config dir>/copilotd/github-oauth-token` |
 | [`--github-client-id <ID>`](#--github-client-id) | `COPILOTD_GITHUB_CLIENT_ID` | `github-client-id` | `Iv1.b507a08c87ecfe98` |
 | [`--github-scope <SCOPE>`](#--github-scope) | `COPILOTD_GITHUB_SCOPE` | `github-scope` | `read:user` |
+
+## `usage`
+
+This one-shot HTTP client has an isolated flag set: no API key, GitHub OAuth
+token, database-path, logging, or inference settings. Shared TOML files may have
+unrelated keys; only these descriptors are resolved. Help/root/version do not
+load a configuration file, discover a timezone, open SQLite, or use the network.
+No positional operands are accepted. Errors, cancellation, and output failures
+exit 1; complete reports (including empty reports) exit 0.
+
+| CLI flag | Environment variable | TOML key | Default |
+| --- | --- | --- | --- |
+| `--endpoint <URL>` | `COPILOTD_ENDPOINT` | `endpoint` | `http://127.0.0.1:8080` |
+| `--period <PERIOD>` | `COPILOTD_PERIOD` | `period` | `day` |
+| `--since <DATE>` | `COPILOTD_SINCE` | `since` | Omitted |
+| `--until <DATE>` | `COPILOTD_UNTIL` | `until` | Omitted |
+| `--timezone <NAME>` | `COPILOTD_TIMEZONE` | `timezone` | Omitted |
+| `--surface <SURFACE>` | `COPILOTD_SURFACE` | `surface` | `all` |
+| `--model <MODEL>` | `COPILOTD_MODEL` | `model` | Omitted |
+| `--details=<BOOL>` | `COPILOTD_DETAILS` | `details` | `false` |
+| `--json=<BOOL>` | `COPILOTD_JSON` | `json` | `false` |
+| `--timeout <DURATION>` | `COPILOTD_TIMEOUT` | `timeout` | `15s` |
+| `--config <PATH>` | `COPILOTD_CONFIG` | — | No file |
+
+**Currently supported:** `--surface all` (the default), `anthropic`, or `openai`,
+with `--period day|week|month|year` and a named timezone. Omitted `--timezone`
+selects supported terminal-local configuration on Linux/macOS; native Windows
+requires an explicit override.
+`--since` (inclusive) and `--until` (exclusive) are strict `YYYY-MM-DD`, between
+`1970-01-01` and `9999-01-01`, with since before until. Each omitted bound
+**independently** selects the current month's first day or the next month's first
+day from one daemon clock capture expressed in the requested zone. Period changes
+grouping only. A historical until alone can precede the default since and is
+invalid: provide both bounds, rather than expecting a rolling range.
+
+Accept `UTC` or loadable slash-style names/aliases, for example `Europe/Berlin`,
+`US/Eastern`, `Etc/UTC`, and `Etc/GMT+5`. Slash segments must be nonempty ASCII
+letters/digits/`_`/`-`/`+`/`.` and cannot be `.` or `..`. Empty overrides, `Local`,
+bare abbreviations/legacy names, offsets, absolute/backslash paths, unknown names,
+and POSIX rule expressions are invalid and never silently become UTC. Client and
+daemon share name validation. The executable embeds fallback timezone data,
+including with CGO disabled; no companion asset is required. Go can prefer
+operator `ZONEINFO` or platform data. The daemon's loaded rules are authoritative;
+equal names do not certify pristine IANA data or equal tzdata revisions.
+
+Weeks start Monday and use that Monday's date even across December/January;
+months and years use first-of-month and January 1 labels. Edges use the earliest
+instant of a date: first repeated midnight, or first valid instant after a skipped
+midnight. A skipped whole date is invalid as an explicit bound; internal skipped
+edges advance, omitting coincident daily buckets while retaining larger-period
+nominal labels. Unsupported/non-monotonic transition behavior fails rather than
+fabricating an interval; calendar traversal is context-checked and bounded for
+custom operator data. UTC half-open intervals govern both selection and grouping,
+even if a historical clock reversal later displays yesterday. The terminal uses
+server-computed `[clipped]` and `[in progress]` flags; the latter tests the captured
+instant against the unclipped interval. Empty/future buckets invent no model rows,
+and future-dated stored Turns are not filtered out by generation time.
+
+**Terminal-local timezone:** the configuration visible to the CLI process,
+including inside SSH, containers, and WSL, not the remote daemon or physical
+workstation outside that environment. Flags > environment > selected TOML >
+defaults still apply; explicitly empty report-timezone/model settings are errors,
+not omission. Valid explicit timezone overrides bypass discovery but still use
+shared name validation. Discovery never rereads `COPILOTD_TIMEZONE` to invent a
+second precedence order.
+
+- On Linux/macOS, nonempty OS `TZDIR` or `ZONEINFO` makes automatic discovery
+  unsupported. Set an explicit report timezone instead.
+- With OS `TZ` present, exactly empty means configured `UTC`. Otherwise at most
+  one leading colon is removed; a named value must validate/load unchanged, or
+  an absolute zone-file path must establish a supported name. Invalid/rule/custom
+  values error without falling back to `/etc/localtime`.
+- With OS `TZ` absent, inspect `/etc/localtime`. A name-bearing symlink must lead
+  to a readable TZif file. Relative links and directory/root aliases share a
+  fixed 40-hop traversal bound. Linux recognizes `/usr/share/zoneinfo`,
+  `/usr/share/lib/zoneinfo`, `/usr/lib/locale/TZ`, `/etc/zoneinfo`, and their
+  verified resolved roots (including NixOS store layouts), not arbitrary paths
+  containing `zoneinfo`. macOS additionally recognizes Apple's final `zoneinfo`
+  directory component in versioned/resolved layouts. Preserve the name suffix;
+  distinct candidate names are ambiguous rather than silently canonicalized.
+- Reject `right/` and `posix/` subtrees, loops, missing/unreadable targets, ordinary
+  copied/custom files, and changed path observations. Read at most 1 MiB of TZif
+  evidence and recheck path/file identity; do not reverse-match bytes, current
+  offsets/abbreviations, `time.Local`, or stale `/etc/timezone` metadata.
+- Native Windows always requires `--timezone`, `COPILOTD_TIMEZONE`, or selected
+  TOML `timezone`. No registry/CLDR mapping or Windows `TZ` inference is used.
+  WSL follows Linux. Explicit named loading retains the embedded fallback on
+  every supported target; no generated name allowlist is introduced.
+
+Failure exits 1 before HTTP with bounded guidance such as
+`cannot determine a named local timezone (unidentifiable or ambiguous zone file); pass --timezone Area/City (or --timezone UTC)`.
+There is no silent UTC or daemon-local fallback. Every successful invocation
+transmits the accepted name; raw HTTP still requires `timezone` (missing is
+400). Traversal/read bounds cover normal filesystem work, not arbitrary stuck
+I/O or an atomic guarantee against concurrent OS reconfiguration.
+Native Linux static-executable isolation covers discovery and embedded loading.
+Policy fixtures and cross-builds are not native runtime certification. The
+[verification guide](docs/verification/usage-reporting.md) describes native image
+observations, separately controlled discovery, embedded-fallback evidence, and
+revision-specific results on #213.
+
+`--model` is an exact, case-sensitive **Reported model** filter, independent of
+Requested model and Catalog aliases. Its value must be non-empty valid UTF-8;
+whitespace and Unicode are preserved without trimming, normalization, or repair.
+Omission selects all identities, while an explicitly empty winning flag/env/TOML
+value is invalid rather than clearing a lower-precedence selection. Invalid
+resolved CLI values fail before HTTP. The raw route rejects invalid UTF-8 as
+`400 invalid_query` during admitted semantic validation, before SQL. Unknown
+identities succeed with selected empty sections. A guarded bound binary SQLite
+predicate excludes unrelated oversized identities before full identity transfer;
+unfiltered oversized identities fail rather than being truncated or hidden.
+
+```sh
+# Model names are examples, not a promise of Catalog contents.
+copilotd usage --timezone UTC --surface anthropic --model claude-example --details
+copilotd usage --timezone UTC --surface openai --model gpt-example --json
+copilotd usage --timezone UTC --model 'exact model with spaces' --details --json
+```
+
+The endpoint is an absolute HTTP(S) base URL. Its optional path prefix is
+preserved: `https://host/copilotd/` becomes
+`https://host/copilotd/usage/v1/report`. Set it explicitly when `serve --addr`
+changes. Userinfo, query strings, fragments, non-HTTP schemes, and invalid ports
+are rejected. TLS verification and standard HTTP proxies remain enabled. No
+credentials, cookies, redirects, retries, daemon discovery, or local-file
+fallback are used. `--timeout` must be positive and bounds the request/read.
+
+The schema-version-1 HTTP response contains all seven Anthropic and/or six
+OpenAI native metrics for the selected Surfaces, period/model rows, per-model
+and separate section totals, and effective selections. An omitted Surface
+selects both. Unselected sections are omitted; selected empty sections contain
+empty arrays, required zeros, and optional NULL sums. Anthropic input stays the
+uncached remainder, while OpenAI input stays complete input. Cache TTL and
+thinking/reasoning counts remain subsets of their native parent counts, never
+extra input/output or an inferred total. No cross-Surface token total is added.
+Counts/coverage are exact decimal strings (or null for an absent sum), never
+floating point. The client validates case-sensitive required fields, duplicate
+names, Unicode, integer ranges, and metric coverage before any output, while
+allowing additive fields. It does not reaggregate totals or reconstruct calendar
+rules. Text uses comma-separated exact counts, ASCII-escaped model identities,
+`—` for unreported metrics, and `*` plus coverage for partial optional metrics.
+Anthropic renders first with Turns, Uncached input, Output, Cache create, and
+Cache read; OpenAI follows with Turns, Input, Output, Cache write, and Cache read.
+A reported zero stays zero; an empty selection is explicitly labeled, not
+represented as proof of no consumption.
+
+`--details` adds secondary native tables for period rows, per-model range totals,
+and section totals: OpenAI **Reasoning** (`reasoning_tokens`) and **Reported
+total** (`total_tokens`, never inferred); Anthropic **Thinking** (`thinking_tokens`),
+**Cache create 5m** (`ephemeral_5m_input_tokens`), and **Cache create 1h**
+(`ephemeral_1h_input_tokens`). All retain NULL/zero and reporting coverage, without
+normalizing or adding subsets to their parent counts. `[clipped]` and
+`[in progress]` are independent of optional-count `*` coverage, not completeness
+claims. Identities are ASCII-quoted without truncation to prevent terminal control
+or bidi injection.
+
+`--json` validates the same bounded complete response as text, then writes its
+original bytes plus a final newline. Whitespace, valid Unicode, exact decimal
+counts, and additive fields survive unchanged. JSON always includes every native
+metric; `--details` has no effect on it. Neither switch changes report selection
+or adds HTTP parameters, requests, or client aggregation. Case variants cannot
+replace required member names, duplicate names after unescaping are rejected at
+every level, and invalid UTF-8/unpaired surrogates are errors rather than repaired
+identities. Schema, effective selections, native metric presence, arrays, int64
+counts, and sum/coverage relationships (including empty sections) must validate
+before any stdout output. Errors use stderr and exit 1, including partial/short
+writes or failure to write the final newline; success, including empty, exits 0.
+No pricing, raw-Turn export, HTML, or charts are provided.
+
+The same listener serves exactly `GET`/`HEAD /usage/v1/report` without inference
+authentication or readiness/upstream work. A disabled meter returns
+`503 usage_meter_disabled`; an enabled empty report is successful, not disabled.
+Failures include `400 invalid_query`, `405 method_not_allowed`,
+`422 report_too_large`/`aggregation_overflow`, `429 report_busy`,
+`503 usage_unavailable`, and `504 report_timeout`. Responses are JSON with
+`Cache-Control: no-store`, `nosniff`, and the ordinary request ID. HEAD follows
+the same work/validation contract without a response body.
+
+Fixed safeguards are not flags: 16 KiB raw query; 3,660 selected dates; 4,096
+buckets; two admitted handlers with no queue; five seconds of report/encoding
+work; native lock waits capped at 100 ms and remaining work; 1,000,000 examined
+Turns; 10,000 period/Surface/model groups; 1 MiB per model before transfer and
+1 MiB retained distinct model bytes; 8 MiB encoded response/client read; five
+seconds for route-local response writing. Admission remains held through writes,
+but SQLite is released first. These caps do not isolate inference from shared
+CPU/disk or an internet flood, and cannot preempt arbitrary stuck filesystem I/O.
+Both native sections share one committed snapshot and all row/group/model/body
+budgets apply across the whole request. A failure in either selected section
+fails the report, never returning the other as complete. Reports describe
+committed best-effort database history (including other writers/process runs),
+not a freshness or completeness watermark. Specifically, `generated_at` is the
+captured query clock, not a database commit timestamp or freshness/completeness
+guarantee. Metric coverage is only within stored Turns, not all consumption.
+No writer flush, migration, extra index, or read worker is introduced. Live
+file/schema replacement remains unsupported.
 
 ## `serve`
 
@@ -183,6 +378,16 @@ by [`--usage-db-path`](#--usage-db-path). It is off by default: disabled `serve`
 and `login` do not open a database, create usage files, start a usage writer, or
 install a metering hook.
 
+**Enabling this flag also exposes unauthenticated aggregate Usage reports on
+`serve --addr`, including non-loopback/public bindings.** Anyone with network
+reachability can read models and activity history at `/usage/v1/report`.
+Inference API keys do not protect this local path, and neither missing CORS nor
+private SQLite files are HTTP access controls. Other local users, DNS rebinding,
+and reachable browser/local-network actors remain part of this deliberate
+exposure. Protect the listener/path with binding, firewall, or reverse-proxy
+policy; inference-only reverse-proxy authentication does not automatically
+protect reports. See [`usage`](#usage) for supported selections and presentations.
+
 **Implemented coverage is all five supported paths: buffered and SSE Anthropic
 Messages plus buffered, SSE, and WebSocket OpenAI Responses.** Requested-model
 attribution covers only the four HTTP buffered/SSE paths; WebSocket rows always
@@ -282,10 +487,10 @@ correlation stays empty. It does not store prompts, generated content, API keys,
 GitHub OAuth tokens, or Copilot tokens.
 
 The GitHub Copilot Surface, raw `/models`, provider/Codex Catalogs, and
-`/v1/messages/count_tokens` are not metered. There is no query API, CLI query
-subcommand, aggregation, pricing or billing reconciliation, automatic pruning,
-per-key attribution, or non-token usage projection. Query either native table
-with external SQLite tooling, for example:
+`/v1/messages/count_tokens` are not metered. Built-in calendar native-Surface aggregation
+is available through [`usage`](#usage); pricing/billing reconciliation, automatic
+pruning, per-key attribution, and non-token usage projection remain out of scope.
+External SQLite tooling still supports either native table, for example:
 
 ```sh
 sqlite3 "$USAGE_DB" \

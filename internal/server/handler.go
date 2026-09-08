@@ -12,6 +12,7 @@ import (
 	"github.com/ningw42/copilotd/internal/identity"
 	"github.com/ningw42/copilotd/internal/logging"
 	"github.com/ningw42/copilotd/internal/requestsummary"
+	"github.com/ningw42/copilotd/internal/usage/reporthttp"
 	"github.com/ningw42/copilotd/internal/wsforward"
 )
 
@@ -25,10 +26,12 @@ const (
 // the auth/readiness guards, so rejected Endpoint requests retain the binding's
 // scope. The full Endpoint order is requestID -> accessLog -> recover -> mux ->
 // scoped -> auth -> local readiness -> handler. Probes use scoped -> handler and
-// are never gated by auth or readiness.
+// are never gated by auth or readiness. The explicit local report handler also
+// bypasses those guards, but receives ordinary non-probe access classification.
 // Invariant: catalog settings cross the render seam only through catalogs.
-func newHandler(apikey string, provider identity.Provider, observers ReadyObservers, fwd *forward.Forwarder, source catalog.Source, logger, catalogLogger *slog.Logger, streamOutcomes StreamOutcomeObserver, catalogs catalog.RenderDescriptors, wsProxy *wsforward.Proxy) http.Handler {
+func newHandler(apikey string, provider identity.Provider, observers ReadyObservers, fwd *forward.Forwarder, source catalog.Source, logger, catalogLogger *slog.Logger, streamOutcomes StreamOutcomeObserver, catalogs catalog.RenderDescriptors, wsProxy *wsforward.Proxy, reportHandler http.Handler) http.Handler {
 	mux := http.NewServeMux()
+	mux.Handle(reporthttp.Path, scoped([]slog.Attr{slog.String(logging.InboundKey, reporthttp.Path)}, false, reportHandler))
 	registerProbe := func(pattern string, handler http.Handler) {
 		attrs := []slog.Attr{slog.String(logging.InboundKey, pattern)}
 		mux.Handle(pattern, scoped(attrs, true, handler))

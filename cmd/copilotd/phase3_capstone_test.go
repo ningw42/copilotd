@@ -23,6 +23,7 @@ import (
 	"github.com/ningw42/copilotd/internal/shim"
 	"github.com/ningw42/copilotd/internal/sse"
 	"github.com/ningw42/copilotd/internal/upstream"
+	"github.com/ningw42/copilotd/internal/usage/reporthttp"
 )
 
 const (
@@ -78,7 +79,7 @@ func startPhase3CapstoneServerWithObservers(
 	)
 	serverLogger := logging.ForComponent(logger, "internal/server")
 	catalogLogger := logging.ForComponent(logger, "internal/catalog")
-	return startTestServer(t, server.New(cfg, serverLogger, catalogLogger, newTestDependencyErrorLog(), provider, newTestReadyObservers(), forwarder, newTestCatalogSource(provider), newTestWSProxy(provider), outcomes, catalog.RenderDescriptors{})), forwarder
+	return startTestServer(t, server.New(cfg, serverLogger, catalogLogger, newTestDependencyErrorLog(), provider, newTestReadyObservers(), forwarder, newTestCatalogSource(provider), newTestWSProxy(provider), outcomes, catalog.RenderDescriptors{}, reporthttp.Handler(nil))), forwarder
 }
 
 type phase3BufferedTranscript struct {

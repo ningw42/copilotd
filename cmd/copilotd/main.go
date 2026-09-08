@@ -1,8 +1,9 @@
 // Command copilotd is the composition root for the copilotd proxy. It assembles
-// a git-style subcommand tree — serve, login, help, version — wiring the internal
+// a git-style subcommand tree — serve, login, usage, help, version — wiring the internal
 // packages together; it holds no business logic. `serve` runs the HTTP daemon
 // (config load → logger → bind → signal-aware graceful shutdown); the other verbs
-// provide discovery (help), build info (version), and GitHub OAuth device login.
+// provide discovery (help), build info (version), GitHub OAuth device login,
+// and HTTP-only Usage report presentation.
 package main
 
 import (
@@ -15,9 +16,11 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
+	_ "time/tzdata" // Named report zones work without host tzdata, including CGO-disabled builds.
 
 	"github.com/ningw42/copilotd/internal/build"
 	"github.com/ningw42/copilotd/internal/cache"
@@ -31,6 +34,9 @@ import (
 	"github.com/ningw42/copilotd/internal/shim"
 	"github.com/ningw42/copilotd/internal/upstream"
 	"github.com/ningw42/copilotd/internal/usage"
+	"github.com/ningw42/copilotd/internal/usage/report"
+	"github.com/ningw42/copilotd/internal/usage/reportcli"
+	"github.com/ningw42/copilotd/internal/usage/reporthttp"
 	"github.com/ningw42/copilotd/internal/usage/sqlitestore"
 	"github.com/ningw42/copilotd/internal/wsforward"
 	"github.com/peterbourgon/ff/v4"
@@ -60,17 +66,30 @@ const (
 // serve error -> 1; unknown subcommand -> 1.
 func run(args []string, lookupEnv func(string) (string, bool), stdout, stderr io.Writer) int {
 	root := buildCommand(lookupEnv, stdout, stderr)
-	switch err := root.ParseAndRun(context.Background(), args); {
+	err := root.Parse(args)
+	selected := root.GetSelected()
+	if errors.Is(err, ff.ErrHelp) {
+		if helpSelected, helpErr := validateHelpRequest(args); helpErr != nil {
+			selected, err = helpSelected, helpErr
+		}
+	}
+	if selected != nil && selected.Name == "usage" && !errors.Is(err, ff.ErrHelp) {
+		// Keep stdout/stderr EPIPE nonfatal through error translation, including
+		// parse failures. ff retains the selected command even when Parse fails.
+		// Valid help and other commands retain their existing signal policy.
+		stop := notifyUsagePipeErrors()
+		defer stop()
+	}
+	if err == nil {
+		err = root.Run(context.Background())
+	}
+	switch {
 	case err == nil:
 		return 0
 	case errors.Is(err, errServeFailed):
 		// Already reported via the structured logger; just carry the exit code.
 		return 1
 	case errors.Is(err, ff.ErrHelp):
-		if err := validateHelpRequest(args); err != nil {
-			writeCLIError(root, stderr, err)
-			return 1
-		}
 		// -h/--help on any command: render its help to stdout and exit clean.
 		fmt.Fprintln(stdout, ffhelp.Command(root))
 		return 0
@@ -92,53 +111,55 @@ func writeCLIError(root *ff.Command, stderr io.Writer, err error) {
 // validateHelpRequest re-parses syntax on a fresh command tree after removing
 // parser-native help flags. ff stops parsing at -h/--help, so this second pass is
 // necessary to reject trailing unknown flags and operands without resolving
-// configuration or executing a command.
-func validateHelpRequest(args []string) error {
+// configuration or executing a command. Return its selected command as well:
+// help can precede the subcommand, so the original parse may have stopped at root.
+func validateHelpRequest(args []string) (*ff.Command, error) {
 	syntaxArgs := append([]string(nil), args...)
 	for {
 		root := buildCommand(func(string) (string, bool) { return "", false }, io.Discard, io.Discard)
 		err := root.Parse(syntaxArgs)
+		selected := root.GetSelected()
 		if errors.Is(err, ff.ErrHelp) {
-			selected := root.GetSelected()
 			if selected == nil || selected.Flags == nil {
-				return err
+				return selected, err
 			}
 			remaining := selected.Flags.GetArgs()
 			helpIndex := len(syntaxArgs) - len(remaining)
 			if len(remaining) == 0 || helpIndex < 0 || helpIndex >= len(syntaxArgs) {
-				return err
+				return selected, err
 			}
 			syntaxArgs = append(syntaxArgs[:helpIndex:helpIndex], syntaxArgs[helpIndex+1:]...)
 			continue
 		}
 		if err != nil {
-			return err
+			return selected, err
 		}
 
-		selected := root.GetSelected()
 		if selected == nil || selected.Flags == nil {
-			return nil
+			return selected, nil
 		}
 		operands := selected.Flags.GetArgs()
 		if selected == root && len(operands) > 0 {
-			return fmt.Errorf("unknown subcommand %q (run 'copilotd help')", operands[0])
+			return selected, fmt.Errorf("unknown subcommand %q (run 'copilotd help')", operands[0])
 		}
 		allowed := 0
 		if selected.Name == "help" {
 			allowed = 1
 		}
-		return rejectSurplusOperands(selected.Name, operands, allowed)
+		return selected, rejectSurplusOperands(selected.Name, operands, allowed)
 	}
 }
 
 // buildCommand assembles the subcommand tree. Root and informational commands
-// have no operational flags; serve and login each own an independent flag set.
+// have no operational flags; serve, login, and usage own independent flag sets.
 func buildCommand(lookupEnv func(string) (string, bool), stdout, stderr io.Writer) *ff.Command {
 	rootFlags := ff.NewFlagSet("copilotd")
 	serveFlags := ff.NewFlagSet("serve")
 	serveCfg := config.RegisterServe(serveFlags)
 	loginFlags := ff.NewFlagSet("login")
 	loginCfg := config.RegisterLogin(loginFlags)
+	usageFlags := ff.NewFlagSet("usage")
+	usageCfg := config.RegisterUsage(usageFlags)
 
 	// root is assigned below and captured by the help/root closures so they can
 	// render the tree's help; ParseAndRun invokes those Execs after assignment.
@@ -171,6 +192,30 @@ func buildCommand(lookupEnv func(string) (string, bool), stdout, stderr io.Write
 				return err
 			}
 			return runLogin(ctx, loginCfg, lookupEnv, stdout)
+		},
+	}
+
+	usageCmd := &ff.Command{
+		Name: "usage", Usage: "copilotd usage [FLAGS]",
+		ShortHelp: "report persisted Anthropic and OpenAI Turns", Flags: usageFlags,
+		Exec: func(ctx context.Context, args []string) error {
+			if err := rejectSurplusOperands("usage", args, 0); err != nil {
+				return err
+			}
+			cfg, err := usageCfg.Resolve(lookupEnv)
+			if err != nil {
+				return err
+			}
+			client, err := reporthttp.NewClient(cfg.Endpoint)
+			if err != nil {
+				return err
+			}
+			ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+			defer stop()
+			return reportcli.Run(ctx, client, reportcli.Options{
+				Endpoint: cfg.Endpoint, Timezone: cfg.Timezone, Details: cfg.Details, JSON: cfg.JSON, Timeout: cfg.Timeout,
+				Query: report.Query{Period: cfg.Period, Since: cfg.Since, Until: cfg.Until, Surface: cfg.Surface, Model: cfg.Model},
+			}, stdout)
 		},
 	}
 
@@ -213,7 +258,7 @@ func buildCommand(lookupEnv func(string) (string, bool), stdout, stderr io.Write
 			return nil
 		},
 	}
-	root.Subcommands = []*ff.Command{versionCmd, helpCmd, serveCmd, loginCmd}
+	root.Subcommands = []*ff.Command{versionCmd, helpCmd, serveCmd, loginCmd, usageCmd}
 	return root
 }
 
@@ -315,7 +360,11 @@ func runServe(ctx context.Context, flags *config.ServeFlags, lookupEnv func(stri
 	var sink usage.Sink
 	if cfg.ShimUsageMeterEnabled {
 		var openErr error
-		usageStore, openErr = sqlitestore.Open(cfg.UsageDBPath, logging.ForComponent(base, "internal/usage/sqlitestore"))
+		// Resolve once; writer and reporter receive this same daemon-owned path.
+		cfg.UsageDBPath, openErr = filepath.Abs(cfg.UsageDBPath)
+		if openErr == nil {
+			usageStore, openErr = sqlitestore.Open(cfg.UsageDBPath, logging.ForComponent(base, "internal/usage/sqlitestore"))
+		}
 		if openErr != nil {
 			logger.Error("cannot start: opening usage database failed",
 				slog.String(logging.PathKey, cfg.UsageDBPath),
@@ -396,10 +445,15 @@ func runBoundServe(ctx context.Context, cfg config.ServeConfig, base *slog.Logge
 		})
 	streamOutcomes := server.NewStreamOutcomeCounter()
 
+	var reportQuery reporthttp.QueryFunc
+	if usageStore != nil {
+		reportQuery = report.New(cfg.UsageDBPath).Query
+	}
+	reportHandler := reporthttp.Handler(reportQuery)
 	serveErr := server.New(cfg, logging.ForComponent(base, "internal/server"), logging.ForComponent(base, "internal/catalog"), logging.DependencyErrorLog(base, slog.LevelWarn), mgr, server.ReadyObservers{
 		Impersonation: imp,
 		Caches:        cacheRegistry,
-	}, fwd, caller, wsProxy, streamOutcomes, catalogs).Run(ctx, ln)
+	}, fwd, caller, wsProxy, streamOutcomes, catalogs, reportHandler).Run(ctx, ln)
 	if usageStore != nil {
 		usageStore.StopAdmission()
 	}

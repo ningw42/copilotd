@@ -18,6 +18,7 @@ type observedStoreLog struct {
 	level            slog.Level
 	msg              string
 	cleanupCompleted *bool
+	queueFullDrops   uint64
 }
 
 type storeLogHandler struct {
@@ -39,6 +40,9 @@ func (h *storeLogHandler) Handle(_ context.Context, record slog.Record) error {
 	}
 	observed := observedStoreLog{level: record.Level, msg: record.Message}
 	record.Attrs(func(attr slog.Attr) bool {
+		if attr.Key == logging.QueueFullDropsKey && attr.Value.Kind() == slog.KindUint64 {
+			observed.queueFullDrops = attr.Value.Uint64()
+		}
 		if attr.Key == logging.DriverCleanupCompletedKey && attr.Value.Kind() == slog.KindBool {
 			completed := attr.Value.Bool()
 			observed.cleanupCompleted = &completed
@@ -142,6 +146,30 @@ func TestStoreRecoveredWriteFailureDoesNotPoisonLaterOrFinalLevels(t *testing.T)
 	}
 
 	store.StopAdmission()
+	if pressure.queueFullDrops == 0 || pressure.queueFullDrops > 1025 {
+		t.Fatalf("queue pressure fixture drops = %d", pressure.queueFullDrops)
+	}
+	// This test concerns recovered log severity, not a one-second queue-drain
+	// SLA. A pressure log can be published between batches with admitted work
+	// still queued. All Record calls have returned: the public drop count and
+	// synthetic valid history independently determine the committed-row target.
+	expected := uint64(128+128+1025) - pressure.queueFullDrops
+	drainCtx, drainCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer drainCancel()
+	for {
+		var committed uint64
+		if err := locker.QueryRowContext(drainCtx, "SELECT count(*) FROM openai_turn").Scan(&committed); err != nil {
+			t.Fatalf("await committed admitted history (want %d): %v", expected, err)
+		}
+		if committed == expected {
+			t.Logf("committed %d admitted valid Turns before final-severity check; queue drops=%d", committed, pressure.queueFullDrops)
+			break
+		}
+		if committed > expected || drainCtx.Err() != nil {
+			t.Fatalf("committed=%d, want admitted=%d before final-severity check", committed, expected)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	closeCtx, closeCancel := context.WithTimeout(context.Background(), time.Second)
 	report := store.Close(closeCtx)
 	closeCancel()

@@ -16,6 +16,7 @@ import (
 	"github.com/ningw42/copilotd/internal/logging"
 	"github.com/ningw42/copilotd/internal/shim"
 	"github.com/ningw42/copilotd/internal/upstream"
+	"github.com/ningw42/copilotd/internal/usage/reporthttp"
 	"github.com/ningw42/copilotd/internal/wsforward"
 )
 
@@ -45,7 +46,7 @@ func serverLogLinesContaining(output string, fragments ...string) []string {
 }
 
 func newTestServer(cfg config.ServeConfig, serverLogger, catalogLogger *slog.Logger, provider identity.Provider, observers ReadyObservers, fwd *forward.Forwarder, source catalog.Source, wsProxy *wsforward.Proxy, streamOutcomes StreamOutcomeObserver, catalogs catalog.RenderDescriptors) *Server {
-	return New(cfg, serverLogger, catalogLogger, newTestDependencyErrorLog(), provider, observers, fwd, source, wsProxy, streamOutcomes, catalogs)
+	return New(cfg, serverLogger, catalogLogger, newTestDependencyErrorLog(), provider, observers, fwd, source, wsProxy, streamOutcomes, catalogs, reporthttp.Handler(nil))
 }
 
 func newTestServerFromBase(cfg config.ServeConfig, base *slog.Logger, provider identity.Provider, observers ReadyObservers, fwd *forward.Forwarder, source catalog.Source, wsProxy *wsforward.Proxy, streamOutcomes StreamOutcomeObserver, catalogs catalog.RenderDescriptors) *Server {
@@ -57,7 +58,7 @@ func newTestServerFromBase(cfg config.ServeConfig, base *slog.Logger, provider i
 func newTestHandler(apikey string, provider identity.Provider, observers ReadyObservers, fwd *forward.Forwarder, source catalog.Source, base *slog.Logger, streamOutcomes StreamOutcomeObserver, catalogs catalog.RenderDescriptors, wsProxy *wsforward.Proxy) http.Handler {
 	serverLogger := logging.ForComponent(base, "internal/server")
 	catalogLogger := logging.ForComponent(base, "internal/catalog")
-	return newHandler(apikey, provider, observers, fwd, source, serverLogger, catalogLogger, streamOutcomes, catalogs, wsProxy)
+	return newHandler(apikey, provider, observers, fwd, source, serverLogger, catalogLogger, streamOutcomes, catalogs, wsProxy, reporthttp.Handler(nil))
 }
 
 func newTestReadyObservers() ReadyObservers {

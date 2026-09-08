@@ -2,7 +2,8 @@
 //
 // Configuration is split by operational subcommand. Serve and login each own an
 // independent flag set containing the same five common operational flags plus
-// their command-specific flags. Env lookup is injected so precedence and
+// their command-specific flags. Usage has only its isolated report-client
+// descriptors. Env lookup is injected so precedence and
 // validation stay pure and table-testable. Precedence is flags > env > TOML file
 // > default.
 package config
@@ -307,7 +308,7 @@ func serveSpecs() ([]spec[ServeConfig], *configPathField[ServeConfig]) {
 		boolField("anthropic-catalog-model-id-normalization-enabled", defaultAnthropicCatalogModelIDNormalizationEnabled, func(c *ServeConfig) *bool { return &c.AnthropicCatalogModelIDNormalizationEnabled }, "normalize Anthropic-vendored Claude model IDs to hyphenated slugs (opt-in)"),
 		boolField("shim-nop-enabled", defaultShimNopEnabled, func(c *ServeConfig) *bool { return &c.ShimNopEnabled }, "enable the canonical no-op shim"),
 		boolField("shim-responses-item-id-stabilizer-enabled", defaultShimResponsesItemIDStabilizerEnabled, func(c *ServeConfig) *bool { return &c.ShimResponsesItemIDStabilizerEnabled }, "stabilize churning OpenAI Responses item ids (opt-in)"),
-		boolField("shim-usage-meter-enabled", defaultShimUsageMeterEnabled, func(c *ServeConfig) *bool { return &c.ShimUsageMeterEnabled }, "persist observed native token usage to local SQLite (opt-in)"),
+		boolField("shim-usage-meter-enabled", defaultShimUsageMeterEnabled, func(c *ServeConfig) *bool { return &c.ShimUsageMeterEnabled }, "persist native Turns; exposes unauthenticated reports on --addr (opt-in)"),
 		stringField("usage-db-path", defaultUsageDBPath(), func(c *ServeConfig) *string { return &c.UsageDBPath }, validUsageDBPath, "path to the private local usage SQLite database"),
 		durationField("shim-hook-overrun-threshold", defaultShimHookOverrunThreshold, inSeconds, func(c *ServeConfig) *time.Duration { return &c.ShimHookOverrunThreshold }, nonNegative, "warn when a post-commit shim hook remains in flight (0 disables monitoring)"),
 		boolField("codex-catalog-enabled", defaultCodexCatalogEnabled, func(c *ServeConfig) *bool { return &c.CodexCatalogEnabled }, "enable the Codex client-shaped catalog"),

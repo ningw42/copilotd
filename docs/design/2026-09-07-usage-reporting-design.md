@@ -1,6 +1,17 @@
 # Usage reports over local HTTP with a terminal client
 
-**Status:** proposed design; agreed product direction, not implemented.
+**Status:** agreed design; #207–#210 implement native Anthropic/OpenAI and combined
+reports with all four calendar periods, named zones, independent month defaults,
+baseline safeguards, and conservative Unix terminal-local timezone discovery
+(native Windows explicit-only). #211 adds exact UTF-8 Reported-model filters,
+detailed native tables, and validated original-byte CLI JSON. #212 retains
+[concurrency/lifecycle evidence](../research/2026-09-08-usage-reporting-concurrency.md),
+including the corrected test-client connection-ownership regression. #213 adds
+real-executable acceptance and the native verification pipeline. Implementation
+is complete; native release certification is a separate, revision-specific gate
+tracked on [#213](https://github.com/ningw42/copilotd/issues/213), using the
+[verification guide](../verification/usage-reporting.md). Pipeline definitions and
+cross-builds do not establish that this gate has passed.
 **Date:** 2026-09-07
 **Related decision:** [ADR-0019](../adr/0019-serve-unauthenticated-usage-reports.md)
 **Tracking epic:** [#206](https://github.com/ningw42/copilotd/issues/206); slice ownership and dependencies are in section 12.
@@ -30,8 +41,9 @@ The maintainer explicitly chose:
    `--timezone` override. Detection failure must request an override, not silently
    select UTC or the daemon's timezone.
 
-The precise protocol, limits, layout, and implementation sequence below are this
-proposal's engineering choices, not claims that those details already shipped.
+The protocol, limits, and layout below describe the implemented contract. The
+implementation sequence records ownership; release/platform evidence must still
+be checked against the exact revision rather than inferred from this design.
 
 ### Non-goals
 
@@ -155,7 +167,7 @@ copilotd usage --period month --since 2026-01-01 --json
 copilotd usage --endpoint https://example.test/copilotd
 ```
 
-These are proposed commands; example model names do not assert Catalog contents.
+These are supported commands; example model names do not assert Catalog contents.
 
 | Flag | Default | Meaning |
 |---|---|---|
@@ -328,8 +340,13 @@ identifier and daemon-owned rules, not certification that operator-supplied
 rules snapshot would add build/data ownership without guaranteeing that a
 terminal's custom rules match the daemon. Custom automatic-discovery inputs are
 rejected instead. Newer-than-bundled names may require a newer daemon; never
-mislabel that error as UTC. Native macOS/Windows execution and the proposed Unix
-discovery implementation remain release-verification obligations.
+mislabel that error as UTC. #210 implements the Unix discovery procedure with
+40-hop component-aware traversal, bounded TZif verification (at most 1 MiB), and
+path/file observation rechecks. Public-command fixtures cover Linux/macOS layouts
+and Windows explicit-only behavior; Linux static-executable isolation also covers
+system discovery and embedded loading. Native execution remains a revision-specific
+release-verification obligation; deterministic fixtures are not certification.
+See the [verification pipeline and evidence guide](../verification/usage-reporting.md).
 
 ### Range and buckets
 
@@ -938,7 +955,7 @@ honor context/lock caps must not be disguised as a hard five-second guarantee;
 retain the same honest stuck-I/O limitation as the writer.
 
 **Remaining product decisions:** none. The numerical limits and wire/layout
-choices in this proposal are ready for implementation review. The release gates
+choices above are implemented and ready for release review. The release gates
 above are engineering verification obligations, not permission to silently
 change the agreed listener, authentication, database ownership, or timezone
 semantics.

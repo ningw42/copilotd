@@ -250,6 +250,39 @@ func boolField[C any](name string, def bool, get func(*C) *bool, usage string) s
 	}
 }
 
+type optionalStringValue struct{ stored **string }
+
+func (v *optionalStringValue) String() string {
+	if *v.stored == nil {
+		return ""
+	}
+	return **v.stored
+}
+func (v *optionalStringValue) Set(raw string) error { *v.stored = &raw; return nil }
+
+// Optional settings use the ordinary overlay engine, retaining presence at
+// every layer rather than re-reading flags/env/TOML in the command.
+func optionalStringField[C any](name string, get func(*C) **string, usage string) spec[C] {
+	return &field[C, *string]{
+		name: name, usage: usage, get: get,
+		parse: func(raw string) (*string, error) { return &raw, nil },
+		reg: func(fs *ff.FlagSet, name string, def *string, usage string) **string {
+			stored := def
+			if _, err := fs.AddFlag(ff.FlagConfig{LongName: name, Usage: usage, Value: &optionalStringValue{stored: &stored}, Placeholder: "STRING"}); err != nil {
+				panic(err)
+			}
+			return &stored
+		},
+		secret: true,
+		check: func(key string, value *string) error {
+			if value != nil && *value == "" {
+				return fmt.Errorf("%s must not be explicitly empty", key)
+			}
+			return nil
+		},
+	}
+}
+
 func secretStringField[C any](name string, get func(*C) *string, check func(string, string) error, usage string) spec[C] {
 	f := newStringField(name, "", get, check, usage)
 	f.secret = true

@@ -58,6 +58,82 @@ clients cannot retrieve through copilotd.
 and non-secret runtime observations. Readiness is not a guarantee that GitHub or
 Copilot is reachable.
 
+## Usage reports
+
+**Enabling `serve --shim-usage-meter-enabled` also exposes aggregate history
+without authentication on the existing `--addr` listener.** Anyone who can reach
+`GET /usage/v1/report` can read model identities and activity patterns. Inference
+API keys, missing CORS headers, and private database permissions do not protect
+this HTTP path; use bind/firewall/reverse-proxy policy. HTTP is plain TCP unless
+an operator supplies a TLS reverse proxy or tunnel.
+
+Reports support Anthropic and OpenAI, separately or together (the default), with
+daily, Monday-weekly, monthly, or yearly groups in a named timezone:
+
+```sh
+copilotd usage # Current month, daily groups, supported Unix terminal-local zone
+copilotd usage --timezone Europe/Berlin # Explicit override on every platform
+copilotd usage --period week --timezone US/Eastern --since 2026-09-01 --until 2026-10-01
+copilotd usage --timezone UTC --surface openai --model gpt-example --details
+copilotd usage --timezone UTC --period month --since 2026-01-01 --json
+# Optional: --surface anthropic or --surface openai (default: all)
+# Optional: --endpoint https://example.test/copilotd
+```
+
+`--endpoint` defaults to `http://127.0.0.1:8080`; a path prefix is preserved when
+appending `/usage/v1/report`. The command is an HTTP client, never an offline
+SQLite reader. It shows exact native counts, stored-Turn coverage, per-model
+and section totals. Anthropic appears first with **Uncached input**, Output,
+Cache create, and Cache read; OpenAI retains complete Input, Output, Cache write,
+and Cache read. TTL/thinking/reasoning subsets are never stacked onto their
+parent counts, and there is no normalized input or cross-Surface token grand
+total. Both sections share one read snapshot and request-wide limits.
+Reports cover committed observations in the configured database,
+including other writers and previous daemon runs; they neither flush queued
+Turns nor guarantee freshness, completeness, consumption, or charges.
+`generated_at` is the captured query clock, not a database commit timestamp or
+freshness/completeness watermark. Metric coverage describes only stored Turns,
+not all consumption.
+
+Disabled metering returns an explicit error, not empty history. An enabled
+empty selection prints `No stored Turns in the selected range.` Read failures,
+unreachable daemons, invalid queries, and protocol errors remain failures.
+Unselected native sections are omitted; selected empty sections stay visible.
+Each omitted date bound independently uses the requested zone's current-month
+start or next-month start from one daemon clock capture; period changes grouping
+only. Date edges use actual timezone transitions, not fixed 24-hour durations.
+The server supplies clipped/in-progress annotations and the effective range.
+Named zones use embedded fallback data without a companion timezone asset;
+operator/platform data can take precedence, and daemon rules are authoritative.
+When `--timezone` is omitted, Linux/macOS use the CLI process's named `TZ` or a
+verified system timezone symlink. Exactly empty OS `TZ` means configured UTC;
+empty report-timezone overrides are errors. SSH, containers, and WSL use their
+own process-visible configuration, not a physical workstation or remote daemon.
+Copied/custom files, ambiguous names, unsupported rules, and nonempty `TZDIR` or
+`ZONEINFO` cannot be discovered: pass `--timezone Area/City` (or `--timezone UTC`).
+Native Windows always requires an explicit timezone, also settable through
+`COPILOTD_TIMEZONE` or selected TOML. Explicit choices bypass discovery, not name
+validation. Native runtime claims are revision-specific: see the
+[verification guide](docs/verification/usage-reporting.md) and the retained
+[#213 results](https://github.com/ningw42/copilotd/issues/213), not runner labels or
+cross-builds alone.
+
+`--model` selects an exact non-empty valid UTF-8 **Reported model**, preserving
+case, whitespace, and Unicode without Catalog alias expansion or Requested-model
+substitution. Unknown identities succeed empty. `--details` adds native reasoning
+and reported-total counts for OpenAI, and thinking/cache-TTL counts for Anthropic,
+for period rows and both range-total levels. Text safely quotes model identities;
+`—` means unreported, `0` means reported zero, and `*` shows partial stored-Turn
+coverage independently of `[clipped]` and `[in progress]` period annotations.
+`--json` emits the complete validated original response plus a newline, preserving
+exact decimal count strings, Unicode, and additive fields. `--details` does not
+change JSON or make another request. There is no pricing, raw-Turn export, HTML,
+or chart output. [Contention and lifecycle integration evidence](docs/research/2026-09-08-usage-reporting-concurrency.md)
+includes real blocked TCP output and native SQLite cleanup; the
+[release verification guide](docs/verification/usage-reporting.md) separates
+implemented behavior from the required native release gate.
+See [usage configuration](CONFIGURATION.md#usage) for limits and protocol details.
+
 ## Design principles
 
 - **Raw passthrough first.** Forward request and response bodies with minimal
@@ -127,6 +203,7 @@ handlers instead fetch support data and render their own representations.
 | Forwarding and streaming | `internal/forward`, `internal/sse`, `internal/wsforward` | Raw HTTP/WebSocket forwarding, SSE framing and terminal handling, OpenAI SSE keepalives, cancellation |
 | Inference shims | `internal/shim` | Ordered hook contract for opt-in parity transforms and read-only observers, including the Responses item-id stabilizer and Usage meter completion observation on all five supported Surface/transport paths |
 | Usage persistence | `internal/usage`, `internal/usage/sqlitestore` | Standard-library usage contract plus private local SQLite writer, migrations, bounded loss reporting, and finalization |
+| Usage reporting | `internal/usage/report`, `internal/usage/reporthttp`, `internal/usage/reportcli` | Bounded snapshot aggregation, local HTTP contract and strict client validation, safe terminal presentation |
 | Catalogs | `internal/catalog` | Provider-shaped and Codex model catalogs |
 | Observability | `internal/logging`, `internal/requestsummary`, component-owned counters | Structured logs, request correlation, terminal summaries, metric scaffolding |
 | Build and distribution | `flake.nix`, `.github/workflows/` | Reproducible builds, verification, release archives and checksums |
@@ -149,10 +226,13 @@ The [release workflow](.github/workflows/release.yml) cross-compiles archives an
 publishes checksums. Nix provides development/build environments for Linux
 x86-64 and macOS arm64. Builds disable cgo; Linux is fully static, while Darwin
 still links the system `libSystem` library. No companion daemon is required; the
-local usage database is opt-in. SQLite runtime, locking, and permission evidence
-is native on Linux; Windows and Darwin have cgo-free build evidence only, and
-Windows ACL behavior remains best effort rather than certified. Optional
-OS-service installation is not implemented
+local usage database is opt-in. The additive [native test matrix](.github/workflows/test.yml)
+executes CGO-disabled acceptance on all four targets and retains architecture,
+SQLite, timezone, command, and skip evidence; Linux also retains the full race
+suite. A workflow definition is not certification: consult the
+[revision-specific verification record](docs/verification/usage-reporting.md).
+Windows ACL behavior remains best effort, not a general desktop/ACL guarantee.
+Optional OS-service installation is not implemented
 ([#191](https://github.com/ningw42/copilotd/issues/191)).
 
 ## Limitations and risks
