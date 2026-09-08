@@ -189,14 +189,44 @@ through `nix develop`, placing outputs in ignored scratch. Those are cross-build
 results only. Full local checks supplement, not replace, the native release gate.
 Do not skip the million-row/group/model-budget fixtures in the final race run.
 
-**Initial local checkpoint observation:** the final full race invocation passed,
+**Initial local checkpoint observation (`7e98593`):** the final full race invocation passed,
 including the heavy report fixtures (423.455 s for the report package), as did
 vet, formatting, flake checks, the four cross-builds and the Linux CGO0 verifier
 (28 required entries, including both static-isolation tests). However, an earlier
 full race run failed the existing unchanged SSE test
 `TestPumpFrameArrivingDuringSlowKeepaliveBeatsStall` with `stall` instead of
-`clean`; an isolated 2,000-repeat run reproduced it. This checkpoint does not
-change the inference engine or claim to fix that failure. The later green run
-is not a correction: the coordinator must resolve this recorded blocker before
-clearing #213. Exact command/results are retained in the checkpoint commit and
-coordinator evidence; subsequent resolution belongs to its own revision record.
+`clean`; an isolated 2,000-repeat run reproduced it. That checkpoint did not
+change the inference engine or fix that failure. Its later green run was not a
+correction. The initial failure remains part of the release history.
+
+### SSE blocker correction
+
+The user approved a separate, narrow correction at the public `sse.Pump` seam.
+The reader captured a timely frame's timestamp before registering its channel
+handoff. A scheduling pause in that interval let stall arbitration see no pending
+read and synthesize a terminal despite observed upstream progress. The clock
+notification was not stale: a deterministic Clock/ResponseWriter fixture captures
+the frame ten seconds before stall, pauses the clock return, then uses
+`testing/synctest` quiescence to let the pump run. The original implementation
+failed 20/20 cases; changing only the channel buffer failed 3/3 as well.
+
+The correction publishes a completed read before sampling its timestamp, then
+acknowledges consumption through an unbuffered timestamp handoff. Timer arbitration
+can wait for that completed read's clock sample, never an unfinished upstream
+read. This closes the observation/publication gap without extending timers,
+adding a grace period, or expanding the one-pending-frame read-ahead bound.
+Cancellation remains authoritative; every exit still cancels, closes and joins.
+
+`internal/sse/pump_progress_test.go` retains the deterministic regression and
+controls for inclusive deadline arrival, genuinely late arrival, cancellation
+while a timestamp is pending, bounded read-ahead, byte-verbatim output and
+joined/fallback-count-safe teardown. Mutating the late-frame comparison or
+buffering the acknowledgment makes the corresponding control fail. The original
+2,000-repeat race command also passed three consecutive runs after correction
+(300,000 inner scenarios), alongside the affected SSE/forward/server/shim suites.
+The corrective full local race run passed, including the heavy report fixtures
+(418.937 s), as did vet, formatting, all local flake checks, the Linux CGO0
+verifier (28 required entries), and all four executable/SSE-test cross-builds.
+Exact RED/GREEN commands and results are retained in the separate corrective
+commit and coordinator evidence. These local results do not replace #213's
+still-required final-revision native matrix or final review.

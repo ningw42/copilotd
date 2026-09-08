@@ -61,9 +61,8 @@ type Policy struct {
 }
 
 type readResult struct {
-	frame      Frame
-	err        error
-	receivedAt time.Time
+	frame Frame
+	err   error
 }
 
 // Pump transforms complete upstream SSE frames when transformer is non-nil,
@@ -95,7 +94,13 @@ func Pump(ctx context.Context, cancel context.CancelFunc, body io.ReadCloser, ds
 		defer stopTimer(keepalive)
 	}
 
-	reads := make(chan readResult)
+	// Publish the completed read before sampling its timestamp: once Now has
+	// observed progress, timer arbitration must be able to find that read even
+	// if the reader is descheduled before Now returns. The unbuffered timestamp
+	// handoff also acknowledges consumption, so only one result can be pending
+	// and the reader cannot read ahead farther than the old direct handoff.
+	reads := make(chan readResult, 1)
+	readTimes := make(chan time.Time)
 	readerExited := make(chan struct{})
 	fallbacks := 0
 	reader := NewReader(body, func() {
@@ -110,7 +115,12 @@ func Pump(ctx context.Context, cancel context.CancelFunc, body io.ReadCloser, ds
 		for {
 			frame, err := reader.Read()
 			select {
-			case reads <- readResult{frame: frame, err: err, receivedAt: clock.Now()}:
+			case reads <- readResult{frame: frame, err: err}:
+			case <-ctx.Done():
+				return
+			}
+			select {
+			case readTimes <- clock.Now():
 			case <-ctx.Done():
 				return
 			}
@@ -196,6 +206,7 @@ func Pump(ctx context.Context, cancel context.CancelFunc, body io.ReadCloser, ds
 	}
 	for {
 		var read readResult
+		var stallAt time.Time
 		haveRead := false
 		stallFired := false
 		keepaliveFired := false
@@ -203,7 +214,8 @@ func Pump(ctx context.Context, cancel context.CancelFunc, body io.ReadCloser, ds
 		case <-ctx.Done():
 			result.Outcome = OutcomeClientCancel
 			return result
-		case stallAt := <-stallC:
+		case tick := <-stallC:
+			stallAt = tick
 			// Client cancellation is authoritative when it races a stall tick.
 			if ctx.Err() != nil {
 				result.Outcome = OutcomeClientCancel
@@ -220,12 +232,8 @@ func Pump(ctx context.Context, cancel context.CancelFunc, body io.ReadCloser, ds
 					}
 					return result
 				}
-				if next.receivedAt.After(stallAt) {
-					stallFired = true
-				} else {
-					read = next
-					haveRead = true
-				}
+				read = next
+				haveRead = true
 			default:
 				stallFired = true
 			}
@@ -268,18 +276,25 @@ func Pump(ctx context.Context, cancel context.CancelFunc, body io.ReadCloser, ds
 			read = next
 			haveRead = true
 		}
-		// If a read and stall tick were both ready and select chose the read,
-		// order them by when the reader completed the frame rather than by the
-		// scheduler's random case choice.
-		if haveRead && stall != nil {
+		if haveRead {
+			// This read is already complete; only its clock sample can still be
+			// in flight. Never wait for an unfinished upstream Read on a timer.
+			var receivedAt time.Time
 			select {
-			case stallAt := <-stallC:
-				if read.receivedAt.After(stallAt) {
-					stallFired = true
-					haveRead = false
-				}
-			default:
+			case receivedAt = <-readTimes:
+			case <-ctx.Done():
+				result.Outcome = OutcomeClientCancel
+				return result
 			}
+			// If a read and stall tick were both ready and select chose the
+			// read, order them by the captured time, not random case choice.
+			if stall != nil && stallAt.IsZero() {
+				select {
+				case stallAt = <-stallC:
+				default:
+				}
+			}
+			stallFired = !stallAt.IsZero() && receivedAt.After(stallAt)
 		}
 		if stallFired {
 			if ctx.Err() != nil {
