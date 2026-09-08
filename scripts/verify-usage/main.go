@@ -379,7 +379,7 @@ func allowedUsageSkip(goos, key string) bool {
 func nativeNotApplicable(goos string) map[string]string {
 	notes := map[string]string{}
 	if goos == "windows" {
-		for _, test := range []string{"TestUsageExecutableInformationalCommandsRetainSIGPIPE", "TestUsageExecutableCancellationUsesCLIErrorPath"} {
+		for _, test := range []string{"TestUsageExecutableInformationalCommandsRetainSIGPIPE", "TestUsageExecutableCancellationUsesCLIErrorPath", "TestUsageExecutableMalformedFlagsWithClosedStderrPipe", "TestUsageExecutableMalformedHelpWithClosedStderrPipe"} {
 			notes["cmd/copilotd:"+test] = "Unix-only signal behavior; excluded by unix build tag, not a Windows pass"
 		}
 	}
@@ -401,6 +401,7 @@ func mandatoryTests(goos string) []string {
 			"TestReportIncompleteBodiesBoundFinalFlushAndRecovery/method", "TestReportIncompleteBodiesBoundFinalFlushAndRecovery/disabled",
 			"TestReportIncompleteBodiesBoundFinalFlushAndRecovery/syntax", "TestReportIncompleteBodiesBoundFinalFlushAndRecovery/semantic", "TestReportIncompleteBodiesBoundFinalFlushAndRecovery/panic",
 		},
+		"internal/usage/reporthttp":  {"TestHandlerBodylessWorkTimeoutSurvivesDeadlineScheduling"},
 		"internal/usage/sqlitestore": {"TestStoreRecoveredWriteFailureDoesNotPoisonLaterOrFinalLevels"},
 		"internal/wsforward":         {"TestProxyWriteTimeoutTearsDownSlowReaderSession"},
 		"cmd/copilotd": {
@@ -419,7 +420,7 @@ func mandatoryTests(goos string) []string {
 	if goos == "windows" {
 		groups["internal/usage/sqlitestore"] = append(groups["internal/usage/sqlitestore"], "TestStoreWindowsPermissionsAreExplicitlyBestEffort")
 	} else {
-		groups["cmd/copilotd"] = append(groups["cmd/copilotd"], "TestUsageExecutableInformationalCommandsRetainSIGPIPE", "TestUsageExecutableCancellationUsesCLIErrorPath")
+		groups["cmd/copilotd"] = append(groups["cmd/copilotd"], "TestUsageExecutableInformationalCommandsRetainSIGPIPE", "TestUsageExecutableCancellationUsesCLIErrorPath", "TestUsageExecutableMalformedFlagsWithClosedStderrPipe", "TestUsageExecutableMalformedHelpWithClosedStderrPipe")
 	}
 	for pkg, tests := range groups {
 		for _, test := range tests {

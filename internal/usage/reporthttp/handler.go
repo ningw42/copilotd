@@ -28,11 +28,16 @@ type QueryFunc func(context.Context, report.Query) (report.Report, error)
 func Handler(query QueryFunc) http.Handler {
 	slots := make(chan struct{}, AdmissionSlots)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Also bound a response emitted by outer generic panic recovery. Normal
-		// responses receive a fresh network budget after materialization.
-		if err := setResponseDeadline(w); err != nil {
-			return
-		}
+		// Arm network deadlines only when work ends. An earlier read deadline
+		// can cancel net/http's background read (and the request context) before
+		// the work deadline. writeBody bounds every normal/early response; panic
+		// unwinding must give outer generic recovery the same fresh budget.
+		defer func() {
+			if failure := recover(); failure != nil {
+				_ = setResponseDeadline(w)
+				panic(failure)
+			}
+		}()
 		if r.Method != "GET" && r.Method != "HEAD" {
 			w.Header().Set("Allow", "GET, HEAD")
 			writeError(w, r, 405, "method_not_allowed", "Use GET or HEAD.")

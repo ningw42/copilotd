@@ -111,8 +111,10 @@ explicit passes for withheld Content-Length/chunked request bodies; final flush
 and recovery across success, HEAD and early errors; same-connection delayed
 inference/SSE after reports; actual closed stdout pipes in compact/details/JSON;
 recovered writer-log severity; and the real WebSocket slow-reader timeout.
-Unix SIGPIPE and INT/TERM executable checks are mandatory on Linux/macOS and
-explicit `not_applicable` entries on Windows, where their build tags exclude them.
+Bodyless work-deadline precedence is also required. Unix SIGPIPE (including
+malformed flags and help-validation errors with closed stderr) and INT/TERM
+executable checks are mandatory on Linux/macOS and explicit `not_applicable`
+entries on Windows, where their build tags exclude them.
 All tests execute; this inventory does not replace or narrow the suite.
 
 `tests.log-accounting.json` retains required names, every final test status,
@@ -257,10 +259,11 @@ and failing-Go-writer tests. Both were reproduced before their corrections:
 - **Unread HTTP request bodies:** two keep-alive GETs with withheld body bytes
   could block net/http's implicit request-body drain during response flushing,
   retain both report slots, and leave later reports returning 429 beyond the
-  five-second write budget. The report handler now applies the same route-local
-  deadline to reads and writes, including initial generic-recovery coverage and
-  net/http's post-handler final flush/body cleanup. It does not reject GET bodies,
-  enable a global server timeout, or change inference deadlines.
+  five-second write budget. At `9ad5282`, the report handler applied the same
+  route-local deadline to reads and writes, including an initial recovery guard
+  and net/http's post-handler final flush/body cleanup. The follow-up below
+  corrects that initial guard's interaction with work deadlines. Neither change
+  rejects GET bodies, enables a global server timeout, or changes inference deadlines.
 - **Actual Unix stdout pipes:** the built usage executable inherited a pipe with
   no readers as stdout fd 1 and terminated with SIGPIPE instead of returning the
   required exit 1 and CLI error. A scoped SIGPIPE notification now makes EPIPE
@@ -302,6 +305,55 @@ command/listener test binaries cross-built successfully. This is local Linux and
 cross-build evidence, not a native Windows/macOS pass. The separate native-CI
 fixture failures and final full-race/flake/native release gates remain coordinator
 work; this correction does not certify #213 or close epic #206.
+
+### Follow-up Spec-review deadline and parse-error corrections
+
+Re-review at `5e8e80f` confirmed the two original defects above were corrected,
+then identified two edge cases. They were reproduced separately before code changes:
+
+- **Bodyless work versus the initial read deadline:** an ordinary real-HTTP probe
+  had returned 504 in all eleven attempts, so source ordering alone was not
+  treated as a reproduced failure. The retained public HTTP/ResponseController
+  regression in
+  [`internal/usage/reporthttp/deadline_test.go`](../../internal/usage/reporthttp/deadline_test.go)
+  widens the scheduling interval by 250 ms after the first native read deadline
+  is installed. Actual net/http background reads remain active; the client sends
+  no body or pipelined bytes and does not cancel/retry. Before correction, all
+  three runs returned 503 `usage_unavailable`, with `context.Canceled` after
+  about 4.75 seconds of query work. A test-only control omitting just that first
+  read deadline returned 504 with `context.DeadlineExceeded` twice; the control
+  was then removed. The handler now arms network deadlines when responding,
+  not before work. Existing normal/early responses retain their five-second
+  read/write budget, and deferred panic unwinding arms a fresh budget before
+  handing the original panic to generic recovery. The work context and its
+  cancellation/driver-error precedence remain unchanged; no extra timeout,
+  grace period, body policy, or upstream wait is introduced.
+- **Malformed usage with closed stderr:** actual `usage --unknown` and
+  `usage --help --unknown` processes separately terminated with SIGPIPE (13),
+  not exit 1. The scoped notification now includes parse errors. The pinned
+  ff parser retains `GetSelected` on failure; syntax-only help validation also
+  returns its selected command because `--help` can precede `usage`. Only a
+  selected usage execution/error installs the existing Notify/Stop subscription;
+  valid help retains its original signal policy. No first-argv guessing,
+  Ignore/Reset, receiver goroutine, or broader command error policy is added.
+  Actual-executable tests in `usage_signals_unix_test.go` cover unknown/missing/
+  malformed flags, case-insensitive and `--` dispatch, operands, repeated help
+  flags, and root help preceding malformed usage. Normal stderr controls still
+  receive the CLI diagnostic with no stdout; closed stderr still exits 1 without
+  claiming diagnostic delivery. Valid root/help/version/serve/login output and
+  usage INT/TERM behavior remain covered.
+
+Local verification passed the complete normal config/report/reporthttp/reportcli/
+server/command suites (including heavy report fixtures), race-enabled affected
+suites excluding the heavy report package, ten race repetitions of the bodyless
+regression, and three race repetitions each of retained body-drain/recovery,
+connection-reuse, stdout/both-pipe, malformed-stderr, informational-signal and
+cancellation cases. Compilation, full vet, formatting and diff checks passed.
+The executable and command/server/reporthttp test binaries cross-built with
+CGO disabled for all four targets. The verifier inventory adds the new required
+regressions, not skips or weaker assertions. Full-repository race/flake and native
+reruns remain the next coordinator checkpoint after the separate socket-fixture
+correction. This follow-up does not certify #213 or close epic #206.
 
 ### First native-run fixture corrections
 

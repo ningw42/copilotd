@@ -67,14 +67,20 @@ const (
 func run(args []string, lookupEnv func(string) (string, bool), stdout, stderr io.Writer) int {
 	root := buildCommand(lookupEnv, stdout, stderr)
 	err := root.Parse(args)
-	if err == nil {
-		if root.GetSelected().Name == "usage" {
-			// Keep stdout EPIPE nonfatal through the CLI error translation below,
-			// including its stderr write. Help and other commands retain their
-			// existing signal policy; parser-native help never reaches Run.
-			stop := notifyUsagePipeErrors()
-			defer stop()
+	selected := root.GetSelected()
+	if errors.Is(err, ff.ErrHelp) {
+		if helpSelected, helpErr := validateHelpRequest(args); helpErr != nil {
+			selected, err = helpSelected, helpErr
 		}
+	}
+	if selected != nil && selected.Name == "usage" && !errors.Is(err, ff.ErrHelp) {
+		// Keep stdout/stderr EPIPE nonfatal through error translation, including
+		// parse failures. ff retains the selected command even when Parse fails.
+		// Valid help and other commands retain their existing signal policy.
+		stop := notifyUsagePipeErrors()
+		defer stop()
+	}
+	if err == nil {
 		err = root.Run(context.Background())
 	}
 	switch {
@@ -84,10 +90,6 @@ func run(args []string, lookupEnv func(string) (string, bool), stdout, stderr io
 		// Already reported via the structured logger; just carry the exit code.
 		return 1
 	case errors.Is(err, ff.ErrHelp):
-		if err := validateHelpRequest(args); err != nil {
-			writeCLIError(root, stderr, err)
-			return 1
-		}
 		// -h/--help on any command: render its help to stdout and exit clean.
 		fmt.Fprintln(stdout, ffhelp.Command(root))
 		return 0
@@ -109,42 +111,42 @@ func writeCLIError(root *ff.Command, stderr io.Writer, err error) {
 // validateHelpRequest re-parses syntax on a fresh command tree after removing
 // parser-native help flags. ff stops parsing at -h/--help, so this second pass is
 // necessary to reject trailing unknown flags and operands without resolving
-// configuration or executing a command.
-func validateHelpRequest(args []string) error {
+// configuration or executing a command. Return its selected command as well:
+// help can precede the subcommand, so the original parse may have stopped at root.
+func validateHelpRequest(args []string) (*ff.Command, error) {
 	syntaxArgs := append([]string(nil), args...)
 	for {
 		root := buildCommand(func(string) (string, bool) { return "", false }, io.Discard, io.Discard)
 		err := root.Parse(syntaxArgs)
+		selected := root.GetSelected()
 		if errors.Is(err, ff.ErrHelp) {
-			selected := root.GetSelected()
 			if selected == nil || selected.Flags == nil {
-				return err
+				return selected, err
 			}
 			remaining := selected.Flags.GetArgs()
 			helpIndex := len(syntaxArgs) - len(remaining)
 			if len(remaining) == 0 || helpIndex < 0 || helpIndex >= len(syntaxArgs) {
-				return err
+				return selected, err
 			}
 			syntaxArgs = append(syntaxArgs[:helpIndex:helpIndex], syntaxArgs[helpIndex+1:]...)
 			continue
 		}
 		if err != nil {
-			return err
+			return selected, err
 		}
 
-		selected := root.GetSelected()
 		if selected == nil || selected.Flags == nil {
-			return nil
+			return selected, nil
 		}
 		operands := selected.Flags.GetArgs()
 		if selected == root && len(operands) > 0 {
-			return fmt.Errorf("unknown subcommand %q (run 'copilotd help')", operands[0])
+			return selected, fmt.Errorf("unknown subcommand %q (run 'copilotd help')", operands[0])
 		}
 		allowed := 0
 		if selected.Name == "help" {
 			allowed = 1
 		}
-		return rejectSurplusOperands(selected.Name, operands, allowed)
+		return selected, rejectSurplusOperands(selected.Name, operands, allowed)
 	}
 }
 
