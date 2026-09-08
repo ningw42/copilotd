@@ -201,6 +201,8 @@ func TestDisabledReportDoesNotOpenHistoryOrValidateTimezone(t *testing.T) {
 	if response.StatusCode != 503 || !strings.Contains(string(body), "usage_meter_disabled") {
 		t.Fatalf("disabled: %d %s", response.StatusCode, body)
 	}
+	requestReportStatus(t, h, "POST", "?timezone=%xx", 405, "method_not_allowed")
+	requestReportStatus(t, h, "HEAD", "?timezone=%xx", 503, "usage_meter_disabled")
 	if _, err := os.Stat(filepath.Dir(path)); !os.IsNotExist(err) {
 		t.Fatalf("disabled report touched database path: %v", err)
 	}

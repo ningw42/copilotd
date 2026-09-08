@@ -876,6 +876,8 @@ func TestRunBoundServeForcedWebSocketDrainAndFreshUsageFinalizationAreBounded(t 
 	harness := startUsageMeterServeHarness(t, upstream.URL, base, func(cfg *config.ServeConfig) {
 		cfg.ShutdownTimeout = 75 * time.Millisecond
 	}, withHeldServerMessageShim(held))
+	seedLargeUsageReport(t, harness)
+	slowReport := startSlowUsageResponse(t, harness, "report-during-forced-ws-drain")
 	locker, err := sql.Open("sqlite", harness.cfg.UsageDBPath)
 	if err != nil {
 		t.Fatal(err)
@@ -912,6 +914,7 @@ func TestRunBoundServeForcedWebSocketDrainAndFreshUsageFinalizationAreBounded(t 
 	if drainElapsed < 50*time.Millisecond || drainElapsed > 500*time.Millisecond {
 		t.Errorf("forced drain elapsed = %s, want one bounded shutdown interval", drainElapsed)
 	}
+	assertForcedUsageResponseClosed(t, slowReport)
 
 	harness.store.StopAdmission()
 	harness.store.Record(usage.Turn{})
@@ -995,6 +998,8 @@ func TestRunBoundServeStopsUsageAdmissionBeforeReportingForcedDrainError(t *test
 	harness := startUsageMeterServeHarness(t, upstream.URL, base, func(cfg *config.ServeConfig) {
 		cfg.ShutdownTimeout = 75 * time.Millisecond
 	}, withHeldServerMessageShim(held))
+	seedLargeUsageReport(t, harness)
+	slowReport := startSlowUsageResponse(t, harness, "report-before-forced-drain-log")
 	conn := dialUsageMeterWebSocket(t, harness.baseURL, "forced-drain-error-log-order")
 	t.Cleanup(func() { _ = conn.CloseNow() })
 	if err := conn.Write(context.Background(), websocket.MessageText, []byte(`{"type":"response.create"}`)); err != nil {
@@ -1013,6 +1018,8 @@ func TestRunBoundServeStopsUsageAdmissionBeforeReportingForcedDrainError(t *test
 	case <-time.After(2 * time.Second):
 		t.Fatal("forced drain did not reach synchronous server-error logging")
 	}
+
+	assertForcedUsageResponseClosed(t, slowReport)
 
 	// Model a producer that was already in flight when the forced drain returned.
 	// The production serve lifecycle, not the harness, must already have cut off

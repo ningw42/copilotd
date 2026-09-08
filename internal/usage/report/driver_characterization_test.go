@@ -5,11 +5,73 @@ import (
 	"database/sql"
 	"errors"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
 	"github.com/ningw42/copilotd/internal/usage/sqlitestore"
 )
+
+func TestPinnedDriverFirstReadOnlyWALConnections(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "first-readonly-wal.db")
+	uri := sqlitestore.LiteralFileURL(path)
+	writer, err := sql.Open("sqlite", uri.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	writer.SetMaxOpenConns(1)
+	if _, err := writer.Exec("PRAGMA journal_mode=WAL; CREATE TABLE history(value INTEGER); INSERT INTO history VALUES(7)"); err != nil {
+		t.Fatal(err)
+	}
+	query := uri.Query()
+	query.Set("mode", "ro")
+	query.Set("_busy_timeout", "100")
+	uri.RawQuery = query.Encode()
+	for range 2 {
+		// This reader's FIRST connection opens a live WAL database, not a prior
+		// writable connection recycled with query_only. The writer stays open.
+		reader, err := sql.Open("sqlite", uri.String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		reader.SetMaxOpenConns(1)
+		conn, err := reader.Conn(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := conn.ExecContext(context.Background(), "PRAGMA query_only=ON"); err != nil {
+			t.Fatal(err)
+		}
+		var version, journal, encoding string
+		var busy, only, value int
+		for _, check := range []struct {
+			sql   string
+			value any
+		}{{"SELECT sqlite_version()", &version}, {"PRAGMA journal_mode", &journal}, {"PRAGMA encoding", &encoding}, {"PRAGMA busy_timeout", &busy}, {"PRAGMA query_only", &only}, {"SELECT value FROM history", &value}} {
+			if err := conn.QueryRowContext(context.Background(), check.sql).Scan(check.value); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if version != "3.53.4" || journal != "wal" || encoding != "UTF-8" || busy != 100 || only != 1 || value != 7 {
+			t.Fatalf("first read-only WAL connection: %s %s %s %d %d %d", version, journal, encoding, busy, only, value)
+		}
+		if _, err := conn.ExecContext(context.Background(), "INSERT INTO history VALUES(8)"); err == nil {
+			t.Fatal("read-only WAL connection wrote")
+		}
+		if err := conn.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := reader.Close(); err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("%s %s/%s SQLite=%s first mode=ro WAL connection: UTF-8, busy_timeout=100ms, query_only=1, committed value=7, clean close", runtime.Version(), runtime.GOOS, runtime.GOARCH, version)
+	}
+	var busy, pages, checkpointed int
+	if err := writer.QueryRow("PRAGMA wal_checkpoint(TRUNCATE)").Scan(&busy, &pages, &checkpointed); err != nil || busy != 0 || pages != 0 || checkpointed != 0 {
+		t.Fatalf("first-open cleanup retained WAL: %d/%d/%d %v", busy, pages, checkpointed, err)
+	}
+}
 
 // The pinned driver's public API is an approved characterization seam. These
 // observations establish transfer/interrupt behavior, not a peak-native-memory
