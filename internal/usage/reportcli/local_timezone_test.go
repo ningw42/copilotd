@@ -153,13 +153,7 @@ func TestCommandUnverifiableZoneinfoRootFailsBeforeHTTP(t *testing.T) {
 		}
 		return os.Lstat(files.path(name))
 	}
-	client, options, requested := localTimezoneCommand(t)
-	options.localSystem = files.system
-	var out bytes.Buffer
-	err := Run(context.Background(), client, options, &out)
-	if err == nil || !strings.Contains(err.Error(), "--timezone Area/City") || len(*requested) != 0 || out.Len() != 0 {
-		t.Fatalf("err=%v requests=%v stdout=%s", err, *requested, out.String())
-	}
+	assertLocalTimezone(t, files, "")
 }
 
 func TestCommandPreservesMacOSVersionedRootAliasSuffix(t *testing.T) {
@@ -195,37 +189,19 @@ func TestCommandChangedZoneinfoRootSetFailsBeforeHTTP(t *testing.T) {
 		}
 		return os.Open(files.path(name))
 	}
-	client, options, requested := localTimezoneCommand(t)
-	options.localSystem = files.system
-	var out bytes.Buffer
-	err = Run(context.Background(), client, options, &out)
-	if err == nil || !strings.Contains(err.Error(), "--timezone Area/City") || len(*requested) != 0 || out.Len() != 0 {
-		t.Fatalf("err=%v requests=%v stdout=%s", err, *requested, out.String())
-	}
+	assertLocalTimezone(t, files, "")
 }
 
 func TestCommandNamedPosixTZNeedsExplicitOverride(t *testing.T) {
 	files := newTimezoneFiles(t, "linux", map[string]string{"TZ": "posix/Europe/Berlin"})
-	client, options, requested := localTimezoneCommand(t)
-	options.localSystem = files.system
-	var out bytes.Buffer
-	err := Run(context.Background(), client, options, &out)
-	if err == nil || !strings.Contains(err.Error(), "--timezone Area/City") || len(*requested) != 0 || out.Len() != 0 {
-		t.Fatalf("err=%v requests=%v stdout=%s", err, *requested, out.String())
-	}
+	assertLocalTimezone(t, files, "")
 }
 
 func TestCommandTruncatedTZifFailsBeforeHTTP(t *testing.T) {
 	files := newTimezoneFiles(t, "linux", nil)
 	files.file("/usr/share/zoneinfo/Europe/Berlin", []byte("TZif"))
 	files.link("/etc/localtime", "/usr/share/zoneinfo/Europe/Berlin")
-	client, options, requested := localTimezoneCommand(t)
-	options.localSystem = files.system
-	var out bytes.Buffer
-	err := Run(context.Background(), client, options, &out)
-	if err == nil || !strings.Contains(err.Error(), "--timezone Area/City") || len(*requested) != 0 || out.Len() != 0 {
-		t.Fatalf("err=%v requests=%v stdout=%s", err, *requested, out.String())
-	}
+	assertLocalTimezone(t, files, "")
 }
 
 func TestCommandInconsistentOpenedZoneFileFailsBeforeHTTP(t *testing.T) {
@@ -234,13 +210,7 @@ func TestCommandInconsistentOpenedZoneFileFailsBeforeHTTP(t *testing.T) {
 	files.zone("/replacement")
 	files.link("/etc/localtime", "/usr/share/zoneinfo/Europe/Berlin")
 	files.system.open = func(string) (*os.File, error) { return os.Open(files.path("/replacement")) }
-	client, options, requested := localTimezoneCommand(t)
-	options.localSystem = files.system
-	var out bytes.Buffer
-	err := Run(context.Background(), client, options, &out)
-	if err == nil || !strings.Contains(err.Error(), "--timezone Area/City") || len(*requested) != 0 || out.Len() != 0 {
-		t.Fatalf("err=%v requests=%v stdout=%s", err, *requested, out.String())
-	}
+	assertLocalTimezone(t, files, "")
 }
 
 func TestCommandChangedSystemTimezoneFailsBeforeHTTP(t *testing.T) {
@@ -255,26 +225,14 @@ func TestCommandChangedSystemTimezoneFailsBeforeHTTP(t *testing.T) {
 		files.link("/etc/localtime", "/usr/share/zoneinfo/America/New_York")
 		return os.Open(files.path(name))
 	}
-	client, options, requested := localTimezoneCommand(t)
-	options.localSystem = files.system
-	var out bytes.Buffer
-	err := Run(context.Background(), client, options, &out)
-	if err == nil || !strings.Contains(err.Error(), "--timezone Area/City") || len(*requested) != 0 || out.Len() != 0 {
-		t.Fatalf("err=%v requests=%v stdout=%s", err, *requested, out.String())
-	}
+	assertLocalTimezone(t, files, "")
 }
 
 func TestCommandRejectsPosixSubtreeInsteadOfStrippingIt(t *testing.T) {
 	files := newTimezoneFiles(t, "linux", nil)
 	files.zone("/usr/share/zoneinfo/posix/Europe/Berlin")
 	files.link("/etc/localtime", "/usr/share/zoneinfo/posix/Europe/Berlin")
-	client, options, requested := localTimezoneCommand(t)
-	options.localSystem = files.system
-	var out bytes.Buffer
-	err := Run(context.Background(), client, options, &out)
-	if err == nil || !strings.Contains(err.Error(), "--timezone Area/City") || len(*requested) != 0 || out.Len() != 0 {
-		t.Fatalf("err=%v requests=%v stdout=%s", err, *requested, out.String())
-	}
+	assertLocalTimezone(t, files, "")
 }
 
 func TestCommandAmbiguousNamedSymlinkChainFailsBeforeHTTP(t *testing.T) {
