@@ -929,7 +929,7 @@ func TestRunBoundServeForcedWebSocketDrainAndFreshUsageFinalizationAreBounded(t 
 	if drainElapsed < 50*time.Millisecond || drainElapsed > 500*time.Millisecond {
 		t.Errorf("forced drain elapsed = %s, want one bounded shutdown interval", drainElapsed)
 	}
-	assertForcedUsageResponseClosed(t, slowReport)
+	assertTruncatedUsageResponseClosed(t, slowReport)
 
 	harness.store.StopAdmission()
 	harness.store.Record(usage.Turn{})
@@ -1034,7 +1034,7 @@ func TestRunBoundServeStopsUsageAdmissionBeforeReportingForcedDrainError(t *test
 		t.Fatal("forced drain did not reach synchronous server-error logging")
 	}
 
-	assertForcedUsageResponseClosed(t, slowReport)
+	assertTruncatedUsageResponseClosed(t, slowReport)
 
 	// Model a producer that was already in flight when the forced drain returned.
 	// The production serve lifecycle, not the harness, must already have cut off

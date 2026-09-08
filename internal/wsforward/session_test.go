@@ -1134,6 +1134,9 @@ func TestProxyWriteTimeoutTearsDownSlowReaderSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = listener.Close() })
+	dialer := net.Dialer{Control: slowPeerControl(t)}
+	transport := &http.Transport{DialContext: dialer.DialContext}
+	t.Cleanup(transport.CloseIdleConnections)
 	upstreamClosed := make(chan websocket.StatusCode, 1)
 	client, sessionDone, cleanup := startSessionWithRegistryAndMetrics(t, 32<<20, 25*time.Millisecond, nil, WsMetrics{}, func(conn *websocket.Conn) {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -1144,7 +1147,10 @@ func TestProxyWriteTimeoutTearsDownSlowReaderSession(t *testing.T) {
 		}
 		_, _, err := conn.Read(ctx)
 		upstreamClosed <- websocket.CloseStatus(err)
-	}, slowReaderListener{listener})
+	}, sessionDownstream{
+		listener: slowReaderListener{Listener: listener, t: t},
+		client:   &http.Client{Transport: transport},
+	})
 	defer cleanup()
 	// Deliberately do not read from client: the proxy's downstream write must
 	// hit its per-write deadline and cancel the sibling upstream read.
@@ -1167,21 +1173,9 @@ func TestProxyWriteTimeoutTearsDownSlowReaderSession(t *testing.T) {
 	}
 }
 
-// A real accepted socket with bounded buffering makes the write-timeout case
-// independent of the native TCP stack's default/autotuned send capacity. The
-// production WebSocket writer and its 25ms per-write deadline remain unchanged.
-type slowReaderListener struct{ net.Listener }
-
-func (l slowReaderListener) Accept() (net.Conn, error) {
-	conn, err := l.Listener.Accept()
-	if err != nil {
-		return nil, err
-	}
-	if err := conn.(*net.TCPConn).SetWriteBuffer(16 << 10); err != nil {
-		_ = conn.Close()
-		return nil, err
-	}
-	return conn, nil
+type sessionDownstream struct {
+	listener net.Listener
+	client   *http.Client
 }
 
 func startSession(t *testing.T, maxMessageBytes int64, writeTimeout time.Duration, serveUpstream func(*websocket.Conn)) (*websocket.Conn, <-chan struct{}, func()) {
@@ -1194,7 +1188,7 @@ func startSessionWithRegistry(t *testing.T, maxMessageBytes int64, writeTimeout 
 	return startSessionWithRegistryAndMetrics(t, maxMessageBytes, writeTimeout, registry, WsMetrics{}, serveUpstream)
 }
 
-func startSessionWithRegistryAndMetrics(t *testing.T, maxMessageBytes int64, writeTimeout time.Duration, registry shim.Registry, metrics WsMetrics, serveUpstream func(*websocket.Conn), listeners ...net.Listener) (*websocket.Conn, <-chan struct{}, func()) {
+func startSessionWithRegistryAndMetrics(t *testing.T, maxMessageBytes int64, writeTimeout time.Duration, registry shim.Registry, metrics WsMetrics, serveUpstream func(*websocket.Conn), network ...sessionDownstream) (*websocket.Conn, <-chan struct{}, func()) {
 	t.Helper()
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1229,13 +1223,15 @@ func startSessionWithRegistryAndMetrics(t *testing.T, maxMessageBytes int64, wri
 		proxy.Handler(endpoint.OpenAIResponsesWS()).ServeHTTP(w, r)
 		close(sessionDone)
 	}))
-	if len(listeners) != 0 {
+	var dialOptions *websocket.DialOptions
+	if len(network) != 0 {
 		_ = downstream.Listener.Close()
-		downstream.Listener = listeners[0]
+		downstream.Listener = network[0].listener
+		dialOptions = &websocket.DialOptions{HTTPClient: network[0].client}
 	}
 	downstream.Start()
 	clientURL := "ws" + strings.TrimPrefix(downstream.URL, "http") + "/openai/v1/responses"
-	client, response, err := websocket.Dial(context.Background(), clientURL, nil)
+	client, response, err := websocket.Dial(context.Background(), clientURL, dialOptions)
 	if err != nil {
 		if response != nil && response.Body != nil {
 			_ = response.Body.Close()

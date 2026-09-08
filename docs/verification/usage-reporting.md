@@ -416,3 +416,73 @@ actually execute. Windows checkout, symlink and TCP behavior still require the
 next native Actions run, and **all four native targets plus Linux full race must
 pass at the same final revision**. #213 remains incomplete until that evidence
 and the final independent review clear; epic #206 remains open.
+
+### Second native-run socket fixture corrections
+
+[Run `34191678530`](https://github.com/ningw42/copilotd/actions/runs/34191678530),
+attempt 1, at `5e8e80f`, is retained alongside the first run. macOS arm64 passed
+again. The checkout-byte, simulated Unix-path, Linux tool-lookup and recovered
+writer-log checks passed. The remaining failures were socket scenarios:
+
+- Both Windows targets still buffered complete 6293011/6293012-byte reports:
+  third requests returned 200 instead of 429, and forced-close checks received
+  complete bodies. The WebSocket slow-reader test still did not observe upstream
+  1011 closure/session teardown within its unchanged two-second bound. Merely
+  requesting a positive 16 KiB accepted-socket send buffer was insufficient.
+- Linux native and full race truncated the graceful report at 4543845 and
+  4609328 bytes respectively, with `unexpected EOF`. Its artificial small send
+  buffer remained in effect after the reader resumed; these failures did not
+  establish a production shutdown bug.
+
+The next fixture experiment changes **only private real sockets**. Slow HTTP
+clients set `SO_RCVBUF=65536` in `net.Dialer.Control` before connecting. The
+motionless WebSocket downstream gets the same control through its private
+`DialOptions.HTTPClient` transport; upstream and unrelated clients do not.
+Accepted fixture sockets request `SO_SNDBUF=0` on Windows before their first
+HTTP/WebSocket write, retaining 16 KiB on Unix. Set/get errors fail setup;
+logs retain endpoint addresses, requested/read-back options and HTTP body
+prefetch, not a claim that options alone prove pending writes.
+
+This timing and zero-buffer choice follows Microsoft's
+[receive-window negotiation guidance](https://learn.microsoft.com/en-us/windows/win32/winsock/sio-set-compatibility-mode),
+[overlapped I/O buffering](https://learn.microsoft.com/en-us/windows/win32/winsock/overlapped-i-o-2),
+and documented [zero send buffering](https://learn.microsoft.com/en-us/windows/win32/winsock/tcp-ip-specific-issues-2).
+Go uses overlapped `WSASend` and already updates the accepted socket context;
+positive buffer sizes are not hard per-write quotas. No registry/netsh setting,
+loopback fast-path toggle, socket duplication or production socket policy is added.
+
+The graceful fixture now retains real accepted TCP connections and matches both
+endpoints to the particular slow client. **After observing the drain's listener
+closure**, it requests 4 MiB for that server's send buffer and that client's
+receive buffer, then reads the entire report. Forced-close cases never release
+the server buffer. Deadline cases additionally consume the server-closed response
+and require truncation without a client read timeout. Two slots/third 429,
+independent commit and TRUNCATE while output waits, >6 MiB/<=8 MiB bodies,
+SSE beyond the report deadline, graceful admitted inference and writer ordering
+remain asserted. No 2s shutdown, 5s report or 25ms WebSocket budget is extended.
+
+The unchanged local Linux baseline passed five race repetitions; that was not a
+reproduction of the hosted failure. A temporary one-second paused-reader probe
+inside the existing drain budget failed 3/3 with only the client buffer enlarged
+(about 650ms transfer), then passed 10/10 with the matched server also enlarged
+(63–70ms). A harsher 1.5s pause reproduced truncation 3/3; enlargement removed
+truncation in all three comparisons but one still exhausted overall shutdown
+polling time. That mixed result is retained, not reported as a pass. Both
+artificial pauses were removed. The ordinary slow/graceful/forced HTTP, native
+SQLite cancellation and WebSocket cases then passed ten local race repetitions.
+These are fixture-sensitivity and Linux results, **not Windows certification**.
+
+The socket correction's full local normal and race suites passed, including the
+heavy report fixtures (417.434s under race), as did vet, formatting and four-target
+CGO0 executable/affected-test builds. However, `nix flake check` failed the unchanged
+`TestReportIncompleteBodiesBoundFinalFlushAndRecovery/syntax`: at 5.000647343s it
+received clean EOF with the complete 400 response, rather than the expected zero
+response bytes. The socket task changed neither that assertion nor the handler;
+the retained flake failure requires separate diagnosis and remains a local release
+blocker. Full-suite passes do not supersede it.
+
+Both native Windows architectures must still confirm actual blocking, 1011 and
+session teardown, deadline/force truncation, and graceful throughput. All four
+native targets and Linux full race must pass on one common final revision,
+including the separate deadline/parse-error corrections above. #213 and final
+review remain incomplete pending that evidence; epic #206 remains open.

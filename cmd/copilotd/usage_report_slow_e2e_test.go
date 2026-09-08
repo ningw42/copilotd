@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -70,31 +71,109 @@ func seedLargeUsageReport(t *testing.T, h *usageMeterServeHarness) {
 
 const largeReportQuery = "?timezone=UTC&since=2026-09-01&until=2026-09-02&surface=openai"
 
-// Bound the accepted socket before the production server can write. Setting
-// only the client's receive buffer after its handshake does not prevent Windows
-// from buffering the entire legal report and releasing admission immediately.
-func usageBackpressureListener(t *testing.T) net.Listener {
+// Configure the accepted socket before the production server can write. Only
+// these slow-client scenarios use this listener; all writes remain real TCP.
+func usageBackpressureListener(t *testing.T) *usageSlowTCPListener {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = listener.Close() })
-	return usageSmallSendBufferListener{listener}
+	return &usageSlowTCPListener{Listener: listener, t: t, accepted: make(map[string]*net.TCPConn)}
 }
 
-type usageSmallSendBufferListener struct{ net.Listener }
+type usageSlowTCPListener struct {
+	net.Listener
+	t        *testing.T
+	mu       sync.Mutex
+	accepted map[string]*net.TCPConn
+}
 
-func (l usageSmallSendBufferListener) Accept() (net.Conn, error) {
+func (l *usageSlowTCPListener) Accept() (net.Conn, error) {
 	conn, err := l.Listener.Accept()
 	if err != nil {
 		return nil, err
 	}
-	if err := conn.(*net.TCPConn).SetWriteBuffer(16 << 10); err != nil {
+	tcp := conn.(*net.TCPConn)
+	if err := tcp.SetWriteBuffer(usageBlockedSendBuffer); err != nil {
 		_ = conn.Close()
 		return nil, err
 	}
+	if err := usageLogSocketBuffers(l.t, fmt.Sprintf("blocked server requested SO_SNDBUF=%d", usageBlockedSendBuffer), tcp); err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	l.mu.Lock()
+	l.accepted[tcp.RemoteAddr().String()] = tcp
+	l.mu.Unlock()
 	return conn, nil
+}
+
+// Call only after observing listener closure at graceful drain. Match both
+// endpoints: the last accepted connection could instead be a status probe or
+// inference client. Forced-close tests never release the blocked server socket.
+func (l *usageSlowTCPListener) resume(client *net.TCPConn) {
+	l.t.Helper()
+	l.mu.Lock()
+	server := l.accepted[client.LocalAddr().String()]
+	l.mu.Unlock()
+	if server == nil || server.LocalAddr().String() != client.RemoteAddr().String() {
+		l.t.Fatalf("no accepted TCP socket matches slow client %s -> %s", client.LocalAddr(), client.RemoteAddr())
+	}
+	if err := server.SetWriteBuffer(4 << 20); err != nil {
+		l.t.Fatal(err)
+	}
+	if err := client.SetReadBuffer(4 << 20); err != nil {
+		l.t.Fatal(err)
+	}
+	if err := usageLogSocketBuffers(l.t, "graceful release server requested SO_SNDBUF=4194304", server); err != nil {
+		l.t.Fatal(err)
+	}
+	if err := usageLogSocketBuffers(l.t, "graceful release client requested SO_RCVBUF=4194304", client); err != nil {
+		l.t.Fatal(err)
+	}
+}
+
+func usageSlowPeerControl(t *testing.T) func(string, string, syscall.RawConn) error {
+	return func(_, address string, raw syscall.RawConn) error {
+		var optionErr error
+		if err := raw.Control(func(fd uintptr) { optionErr = usageSetReceiveBuffer(fd) }); err != nil {
+			return err
+		}
+		if optionErr != nil {
+			return optionErr
+		}
+		// The receive window must be set before connect, not after negotiation.
+		// Keep 65536 bytes to allow scaling when the graceful peer resumes.
+		return usageLogRawBuffers(t, "pre-connect client requested SO_RCVBUF=65536 remote="+address, raw)
+	}
+}
+
+func usageLogSocketBuffers(t *testing.T, phase string, conn *net.TCPConn) error {
+	raw, err := conn.SyscallConn()
+	if err != nil {
+		return err
+	}
+	return usageLogRawBuffers(t, fmt.Sprintf("%s local=%s remote=%s", phase, conn.LocalAddr(), conn.RemoteAddr()), raw)
+}
+
+func usageLogRawBuffers(t *testing.T, phase string, raw syscall.RawConn) error {
+	var receive, send int
+	var optionErr error
+	if err := raw.Control(func(fd uintptr) {
+		receive, optionErr = usageGetSocketBuffer(fd, syscall.SO_RCVBUF)
+		if optionErr == nil {
+			send, optionErr = usageGetSocketBuffer(fd, syscall.SO_SNDBUF)
+		}
+	}); err != nil {
+		return err
+	}
+	if optionErr != nil {
+		return optionErr
+	}
+	t.Logf("TCP fixture %s: SO_RCVBUF=%d SO_SNDBUF=%d (OS readback, not a hard quota)", phase, receive, send)
+	return nil
 }
 
 type slowUsageResponse struct {
@@ -105,16 +184,14 @@ type slowUsageResponse struct {
 
 func startSlowUsageResponse(t *testing.T, h *usageMeterServeHarness, id string) slowUsageResponse {
 	t.Helper()
-	address, err := net.ResolveTCPAddr("tcp", strings.TrimPrefix(h.baseURL, "http://"))
+	dialer := net.Dialer{Control: usageSlowPeerControl(t)}
+	connection, err := dialer.DialContext(t.Context(), "tcp", strings.TrimPrefix(h.baseURL, "http://"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	conn, err := net.DialTCP("tcp", nil, address)
-	if err != nil {
-		t.Fatal(err)
-	}
+	conn := connection.(*net.TCPConn)
 	t.Cleanup(func() { _ = conn.Close() })
-	if err := conn.SetReadBuffer(64 << 10); err != nil {
+	if err := usageLogSocketBuffers(t, "connected slow client", conn); err != nil {
 		t.Fatal(err)
 	}
 	if err := conn.SetDeadline(time.Now().Add(12 * time.Second)); err != nil {
@@ -124,15 +201,17 @@ func startSlowUsageResponse(t *testing.T, h *usageMeterServeHarness, id string) 
 	if _, err := fmt.Fprintf(conn, "GET %s%s HTTP/1.1\r\nHost: localhost\r\nX-Request-Id: %s\r\nConnection: close\r\n\r\n", reporthttp.Path, largeReportQuery, id); err != nil {
 		t.Fatal(err)
 	}
-	response, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: "GET"})
+	reader := bufio.NewReader(conn)
+	response, err := http.ReadResponse(reader, &http.Request{Method: "GET"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if response.StatusCode != 200 {
 		t.Fatalf("large report status=%d", response.StatusCode)
 	}
-	// Receipt of headers establishes that the real Query and bounded encoder
-	// finished. Stop receiving the body; the kernel, not a fake Writer, blocks.
+	// Headers establish materialization, not blocking. The owning test must
+	// still prove slot occupancy and deadline/close behavior while not reading.
+	t.Logf("TCP fixture request_id=%s headers received; body bytes prefetched=%d", id, reader.Buffered())
 	return slowUsageResponse{conn: conn, response: response, started: started}
 }
 
@@ -168,7 +247,7 @@ func requestReportStatus(t *testing.T, h *usageMeterServeHarness, method, query 
 	}
 }
 
-func assertForcedUsageResponseClosed(t *testing.T, slow slowUsageResponse) {
+func assertTruncatedUsageResponseClosed(t *testing.T, slow slowUsageResponse) {
 	t.Helper()
 	if err := slow.conn.SetReadBuffer(4 << 20); err != nil {
 		t.Fatal(err)
@@ -178,11 +257,12 @@ func assertForcedUsageResponseClosed(t *testing.T, slow slowUsageResponse) {
 	}
 	n, err := io.Copy(io.Discard, slow.response.Body)
 	if err == nil || n >= 6<<20 {
-		t.Fatalf("forced close should truncate blocked report: bytes=%d error=%v", n, err)
+		t.Fatalf("server close should truncate blocked report: bytes=%d error=%v", n, err)
 	}
 	if timeout, ok := err.(net.Error); ok && timeout.Timeout() {
-		t.Fatalf("report connection remained open after forced shutdown: %v", err)
+		t.Fatalf("report connection remained open after server close: %v", err)
 	}
+	t.Logf("TCP fixture server-closed response: bytes=%d error=%v", n, err)
 	_ = slow.conn.Close()
 }
 
@@ -204,7 +284,8 @@ func TestUsageGracefulDrainFinishesReportAndInferenceBeforeWriterCutoff(t *testi
 	}))
 	t.Cleanup(upstream.Close)
 	logs := newUsageReportLogs()
-	h := startUsageMeterServeHarness(t, upstream.URL, newPhase4Logger(t, logs), nil, nil, usageBackpressureListener(t))
+	listener := usageBackpressureListener(t)
+	h := startUsageMeterServeHarness(t, upstream.URL, newPhase4Logger(t, logs), nil, nil, listener)
 	seedLargeUsageReport(t, h)
 	req, _ := http.NewRequest("POST", h.baseURL+"/openai/v1/responses", strings.NewReader(`{"stream":true}`))
 	req.Header.Set("Authorization", "Bearer "+testAPIKey)
@@ -237,14 +318,14 @@ func TestUsageGracefulDrainFinishesReportAndInferenceBeforeWriterCutoff(t *testi
 			t.Fatal("drain did not close the listener")
 		}
 	}
-	if err := second.conn.SetReadBuffer(4 << 20); err != nil {
-		t.Fatal(err)
-	}
+	releaseStarted := time.Now()
+	listener.resume(second.conn)
 	body, err := io.ReadAll(second.response.Body)
 	_ = second.conn.Close()
 	if err != nil || len(body) <= 6<<20 || len(body) > 8<<20 {
 		t.Fatalf("graceful report size=%d error=%v", len(body), err)
 	}
+	t.Logf("graceful report received %d bytes in %s after reader release", len(body), time.Since(releaseStarted))
 	logs.await(t, "msg=access", "request_id=graceful-complete-report")
 	// The server is still draining this stream. Its completion must be admitted,
 	// unlike a late producer after Run returns (covered by the forced-log test).
@@ -417,8 +498,8 @@ func TestUsageSlowTCPReportsHoldSlotsReleaseSQLiteAndDoNotDeadlineSSE(t *testing
 	if elapsed < 4500*time.Millisecond || elapsed > 7500*time.Millisecond || time.Since(second.started) < 4500*time.Millisecond {
 		t.Fatalf("real blocked writes did not obey route-local 5s limit: %s", elapsed)
 	}
-	_ = first.conn.Close()
-	_ = second.conn.Close()
+	assertTruncatedUsageResponseClosed(t, first)
+	assertTruncatedUsageResponseClosed(t, second)
 	for _, query := range []string{"?timezone=UTC&since=2026-02-30", "?timezone=UTC&model=%ff", "?timezone=NoSuch/Zone", "?timezone=UTC&period=invalid"} {
 		requestReportStatus(t, h, "GET", query, 400, "invalid_query")
 	}
