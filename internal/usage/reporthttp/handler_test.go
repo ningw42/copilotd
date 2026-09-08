@@ -3,6 +3,8 @@ package reporthttp_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -254,6 +256,56 @@ func TestHandlerWorkTimeoutWinsOverQueryError(t *testing.T) {
 	handler.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, reporthttp.Path+"?timezone=UTC", nil).WithContext(ctx))
 	if rr.Code != 504 || !strings.Contains(rr.Body.String(), "report_timeout") {
 		t.Fatalf("timeout response: %d %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestHandlerMapsAggregationOverflowAndReleasesAdmission(t *testing.T) {
+	const trustedGuidance = "Use a narrower trusted aggregation window."
+	var calls atomic.Int32
+	server := httptest.NewServer(reporthttp.Handler(func(_ context.Context, q report.Query) (report.Report, error) {
+		if q.Timezone != "UTC" {
+			t.Errorf("query: %+v", q)
+		}
+		calls.Add(1)
+		return report.Report{}, &report.Error{Code: report.Overflow, Message: trustedGuidance}
+	}))
+	t.Cleanup(server.Close)
+
+	const envelope = `{"schema_version":1,"error":{"code":"aggregation_overflow","message":"Use a narrower trusted aggregation window."}}`
+	requests := 0
+	for range reporthttp.AdmissionSlots + 2 {
+		for _, method := range []string{http.MethodGet, http.MethodHead} {
+			request, err := http.NewRequest(method, server.URL+reporthttp.Path+"?timezone=UTC", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			response, err := server.Client().Do(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, readErr := io.ReadAll(response.Body)
+			closeErr := response.Body.Close()
+			if err := errors.Join(readErr, closeErr); err != nil {
+				t.Fatal(err)
+			}
+			requests++
+			if response.StatusCode != http.StatusUnprocessableEntity {
+				t.Fatalf("%s status=%d body=%q", method, response.StatusCode, body)
+			}
+			if response.Header.Get("Content-Type") != "application/json" || response.Header.Get("Cache-Control") != "no-store" || response.Header.Get("X-Content-Type-Options") != "nosniff" || response.Header.Get("Access-Control-Allow-Origin") != "" {
+				t.Fatalf("%s headers: %v", method, response.Header)
+			}
+			if method == http.MethodHead {
+				if len(body) != 0 {
+					t.Fatalf("HEAD body=%q", body)
+				}
+			} else if string(body) != envelope {
+				t.Fatalf("GET body=%q; want %q", body, envelope)
+			}
+		}
+	}
+	if got := int(calls.Load()); got != requests {
+		t.Fatalf("query calls=%d; want %d released requests", got, requests)
 	}
 }
 

@@ -20,9 +20,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ningw42/copilotd/internal/catalog"
+	"github.com/ningw42/copilotd/internal/forward"
+	"github.com/ningw42/copilotd/internal/identity"
 	"github.com/ningw42/copilotd/internal/logging"
+	"github.com/ningw42/copilotd/internal/server"
 	"github.com/ningw42/copilotd/internal/usage"
 	"github.com/ningw42/copilotd/internal/usage/report"
+	"github.com/ningw42/copilotd/internal/usage/reporthttp"
 	"github.com/ningw42/copilotd/internal/usage/sqlitestore"
 )
 
@@ -460,6 +465,89 @@ func TestUsageExecutableAcceptance(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestUsageExecutableReadsGenericRecovery(t *testing.T) {
+	binary := usageAcceptanceBinary(t)
+	cfg := e2eConfig("unused-recovery-oauth-token")
+	logger := discardLogger(t)
+	provider := identity.NewStatic(identity.Credential{BaseURL: "http://127.0.0.1:1", Token: "unused-recovery-copilot-token"}, true)
+	forwarder := newTestForwarderWithLogger(
+		provider,
+		forward.NewClient(cfg.ResponseHeaderTimeout),
+		cfg.OutboundTimeout,
+		cfg.WriteTimeout,
+		cfg.StreamIdleTimeout,
+		cfg.StreamKeepaliveInterval,
+		cfg.MaxRequestBytes,
+		cfg.MaxBufferedResponseBytes,
+		logger,
+		configuredShimRegistry(cfg, nil),
+	)
+	const panicSentinel = "private-usage-recovery-panic-sentinel"
+	observed := make(chan string, 3)
+	reportHandler := reporthttp.Handler(func(ctx context.Context, _ report.Query) (report.Report, error) {
+		id, ok := logging.RequestIDFrom(ctx)
+		if !ok {
+			id = "missing-request-id"
+		}
+		observed <- id
+		panic(panicSentinel)
+	})
+	base := startTestServer(t, server.New(
+		cfg,
+		logging.ForComponent(logger, "internal/server"),
+		logging.ForComponent(logger, "internal/catalog"),
+		newTestDependencyErrorLog(),
+		provider,
+		newTestReadyObservers(),
+		forwarder,
+		newTestCatalogSource(provider),
+		newTestWSProxy(provider),
+		server.NewStreamOutcomeCounter(),
+		catalog.RenderDescriptors{},
+		reportHandler,
+	))
+
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{name: "text"},
+		{name: "json", args: []string{"--json"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			args := append([]string{"usage", "--endpoint", base, "--timezone", "UTC"}, tc.args...)
+			stderr := usageExec(t, binary, nil, 1, args...)
+			var requestID string
+			select {
+			case requestID = <-observed:
+			case <-time.After(time.Second):
+				t.Fatal("report callback request ID observation exceeded bound")
+			}
+			if requestID == "missing-request-id" || !logging.ValidRequestID(requestID) {
+				t.Fatalf("callback request ID=%q", requestID)
+			}
+			if len(stderr) > 512 || strings.Count(stderr, "\n") != 1 || !strings.Contains(stderr, "500") || !strings.Contains(stderr, requestID) {
+				t.Fatalf("recovery diagnostic is unbounded or uncorrelated: %q", stderr)
+			}
+			for _, r := range stderr {
+				if r != '\n' && (r < 0x20 || r > 0x7e) {
+					t.Fatalf("recovery diagnostic contains non-ASCII/control character %U: %q", r, stderr)
+				}
+			}
+			for _, forbidden := range []string{"internal server error", panicSentinel, "goroutine ", ".go:", "runtime/debug", "runtime.gopanic", "\x1b"} {
+				if strings.Contains(stderr, forbidden) {
+					t.Fatalf("recovery diagnostic leaked %q: %q", forbidden, stderr)
+				}
+			}
+		})
+	}
+	select {
+	case id := <-observed:
+		t.Fatalf("unexpected extra report query with request ID %q", id)
+	default:
+	}
 }
 
 func usageExecutableReport(t *testing.T, output string) report.Report {

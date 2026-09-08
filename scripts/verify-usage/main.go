@@ -382,6 +382,7 @@ func nativeNotApplicable(goos string) map[string]string {
 		for _, test := range []string{"TestUsageExecutableInformationalCommandsRetainSIGPIPE", "TestUsageExecutableCancellationUsesCLIErrorPath", "TestUsageExecutableMalformedFlagsWithClosedStderrPipe", "TestUsageExecutableMalformedHelpWithClosedStderrPipe"} {
 			notes["cmd/copilotd:"+test] = "Unix-only signal behavior; excluded by unix build tag, not a Windows pass"
 		}
+		notes["internal/usage/report:TestQueryDeniedDatabaseReadIsGenericUnavailable"] = "Unix permission-mode behavior; excluded by unix build tag, not Windows ACL coverage or a Windows pass"
 	}
 	return notes
 }
@@ -401,11 +402,13 @@ func mandatoryTests(goos string) []string {
 			"TestReportIncompleteBodiesBoundFinalFlushAndRecovery/method", "TestReportIncompleteBodiesBoundFinalFlushAndRecovery/disabled",
 			"TestReportIncompleteBodiesBoundFinalFlushAndRecovery/syntax", "TestReportIncompleteBodiesBoundFinalFlushAndRecovery/semantic", "TestReportIncompleteBodiesBoundFinalFlushAndRecovery/panic",
 		},
-		"internal/usage/reporthttp":  {"TestHandlerBodylessWorkTimeoutSurvivesDeadlineScheduling"},
+		"internal/usage/reporthttp": {
+			"TestHandlerBodylessWorkTimeoutSurvivesDeadlineScheduling", "TestHandlerMapsAggregationOverflowAndReleasesAdmission", "TestClientDefaultTLSRejectsUntrustedCertificateBeforeHTTP",
+		},
 		"internal/usage/sqlitestore": {"TestStoreRecoveredWriteFailureDoesNotPoisonLaterOrFinalLevels"},
 		"internal/wsforward":         {"TestProxyWriteTimeoutTearsDownSlowReaderSession"},
 		"cmd/copilotd": {
-			"TestUsageReportDeadlinesDoNotLeakIntoReusedInferenceConnections",
+			"TestUsageReportDeadlinesDoNotLeakIntoReusedInferenceConnections", "TestUsageExecutableReadsGenericRecovery",
 			"TestUsageExecutableAcceptance/closed_stdout_pipe/compact", "TestUsageExecutableAcceptance/closed_stdout_pipe/--details", "TestUsageExecutableAcceptance/closed_stdout_pipe/--json",
 			"TestUsageNativeRuntime", "TestUsageExecutableAcceptance", "TestUsageExecutableAcceptance/process_timezone", "TestUsageExecutableAcceptance/system_timezone", "TestUsageExecutableAcceptance/observed_inference_to_executable",
 			"TestUsageReportsOverlapNativeInferenceAndAnotherCommittedWriter", "TestUsageSlowTCPReportsHoldSlotsReleaseSQLiteAndDoNotDeadlineSSE", "TestUsageForcedDrainCancelsRealSQLiteReadAndInference",
@@ -420,6 +423,7 @@ func mandatoryTests(goos string) []string {
 	if goos == "windows" {
 		groups["internal/usage/sqlitestore"] = append(groups["internal/usage/sqlitestore"], "TestStoreWindowsPermissionsAreExplicitlyBestEffort")
 	} else {
+		groups["internal/usage/report"] = append(groups["internal/usage/report"], "TestQueryDeniedDatabaseReadIsGenericUnavailable")
 		groups["cmd/copilotd"] = append(groups["cmd/copilotd"], "TestUsageExecutableInformationalCommandsRetainSIGPIPE", "TestUsageExecutableCancellationUsesCLIErrorPath", "TestUsageExecutableMalformedFlagsWithClosedStderrPipe", "TestUsageExecutableMalformedHelpWithClosedStderrPipe")
 	}
 	for pkg, tests := range groups {

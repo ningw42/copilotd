@@ -152,6 +152,27 @@ func clientQuery() report.Query {
 	return report.Query{Surface: "openai", Period: "day", Timezone: "UTC", Since: "2026-09-01", Until: "2026-09-02"}
 }
 
+func TestClientDefaultTLSRejectsUntrustedCertificateBeforeHTTP(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, emptyJSON)
+	}))
+	t.Cleanup(server.Close)
+	client, err := reporthttp.NewClient(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.Query(context.Background(), clientQuery())
+	if err == nil || !strings.Contains(err.Error(), "report request failed") || !strings.Contains(err.Error(), "failed to verify certificate") {
+		t.Fatalf("default TLS certificate verification: %v", err)
+	}
+	if got := calls.Load(); got != 0 {
+		t.Fatalf("untrusted TLS reached HTTP handler %d times", got)
+	}
+}
+
 func TestClientRejectsUnsafeEndpointsAndBoundsTransport(t *testing.T) {
 	for _, endpoint := range []string{"file:///tmp/db", "ftp://example.test", "http:///missing", "http://user:secret@example.test", "http://example.test?", "http://example.test#", "http://example.test:0", "http://example.test:65536", "http://example.test:bad", "http://example.test:", "http://:8080"} {
 		if _, err := reporthttp.NewClient(endpoint); err == nil {
