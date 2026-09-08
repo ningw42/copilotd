@@ -85,10 +85,10 @@ func decodeReport(ctx context.Context, body []byte, q report.Query) (report.Repo
 			continue
 		}
 		section := d.object(d.member(root, native.name))
-		s := report.Section{Rows: []report.Row{}, Models: []report.ModelTotal{}, Total: d.total(d.member(section, "total"), true, native.metrics)}
+		s := report.Section{Rows: []report.Row{}, Models: []report.ModelTotal{}, Total: d.total(d.object(d.member(section, "total")), true, native.metrics)}
 		for _, raw := range d.array(section, "rows") {
 			o := d.object(raw)
-			row := report.Row{BucketStart: d.date(o, "bucket_start"), ModelTotal: report.ModelTotal{Model: d.text(o, "model"), Total: d.total(raw, false, native.metrics)}}
+			row := report.Row{BucketStart: d.date(o, "bucket_start"), ModelTotal: report.ModelTotal{Model: d.text(o, "model"), Total: d.total(o, false, native.metrics)}}
 			if !bucketNames[row.BucketStart] || r.Model != nil && row.Model != *r.Model {
 				d.err = errProtocol
 			}
@@ -102,7 +102,7 @@ func decodeReport(ctx context.Context, body []byte, q report.Query) (report.Repo
 		}
 		for _, raw := range d.array(section, "models") {
 			o := d.object(raw)
-			model := report.ModelTotal{Model: d.text(o, "model"), Total: d.total(raw, false, native.metrics)}
+			model := report.ModelTotal{Model: d.text(o, "model"), Total: d.total(o, false, native.metrics)}
 			if r.Model != nil && model.Model != *r.Model {
 				d.err = errProtocol
 			}
@@ -214,8 +214,7 @@ func (d *wireDecoder) array(o object, key string) []json.RawMessage {
 	}
 	return values
 }
-func (d *wireDecoder) total(raw json.RawMessage, section bool, names []string) report.Total {
-	o := d.object(raw)
+func (d *wireDecoder) total(o object, section bool, names []string) report.Total {
 	total := report.Total{Turns: d.count(o, "turns"), Usage: map[string]report.Metric{}}
 	if !section && total.Turns == 0 {
 		d.err = errProtocol

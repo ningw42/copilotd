@@ -39,8 +39,7 @@ func Run(ctx context.Context, client *reporthttp.Client, options Options, stdout
 			return err
 		}
 		zone = &name
-	}
-	if _, err := report.LoadTimezone(*zone); err != nil {
+	} else if _, err := report.LoadTimezone(*zone); err != nil {
 		return err
 	}
 	if model := options.Query.Model; model != nil && (*model == "" || !utf8.ValidString(*model)) {
