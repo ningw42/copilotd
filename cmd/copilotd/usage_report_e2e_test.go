@@ -104,8 +104,8 @@ func TestAnthropicAndCombinedUsageCommandThroughProductionListener(t *testing.T)
 			t.Fatal("unselected OpenAI or synthesized Anthropic input")
 		}
 		if surface == "" || surface == "all" {
-			if strings.Index(text, "Anthropic\n") > strings.Index(text, "OpenAI\n") || strings.Count(text, "Model totals") != 2 || strings.Count(text, "Section total") != 2 {
-				t.Fatalf("native section order/totals: %s", text)
+			if strings.Index(text, "Anthropic\n") > strings.Index(text, "OpenAI\n") || strings.Count(text, " All ") < 2 || strings.Count(text, "└─") < 2 || strings.Contains(text, "Model totals") || strings.Contains(text, "Section total") || strings.Contains(text, "│ Range") {
+				t.Fatalf("native section hierarchy: %s", text)
 			}
 		}
 	}
@@ -249,7 +249,7 @@ func TestUsageCalendarConfigurationThroughProductionListener(t *testing.T) {
 
 func TestUsageHelpDescribesNativeSelectionAndPresentation(t *testing.T) {
 	help := runSuccessfully(t, "usage", "--help")
-	for _, want := range []string{"Anthropic and OpenAI Turns", "native Surface selection: all, anthropic, openai", "day, week, month, year", "current month's first day", "next month's first day", "terminal-local on supported Unix", "native Windows requires explicit", "exact non-empty UTF-8 Reported model", "secondary native tables for period rows and range totals", "original validated JSON plus newline"} {
+	for _, want := range []string{"Anthropic and OpenAI Turns", "native Surface selection: all, anthropic, openai", "day, week, month, year", "current month's first day", "next month's first day", "terminal-local on supported Unix", "native Windows requires explicit", "exact non-empty UTF-8 Reported model", "secondary native tables for period totals and model rows", "original validated JSON plus newline"} {
 		if !strings.Contains(help, want) {
 			t.Errorf("missing %q in usage help: %s", want, help)
 		}

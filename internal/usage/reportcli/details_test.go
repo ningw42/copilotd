@@ -13,12 +13,12 @@ import (
 	"github.com/ningw42/copilotd/internal/usage/reporthttp"
 )
 
-func TestCommandDetailsRendersAnthropicNativeSubsetsAtEveryLevel(t *testing.T) {
+func TestCommandDetailsRendersAnthropicNativeSubsetsInPeriodHierarchy(t *testing.T) {
 	r := commandReport()
 	r.Surface = "all"
 	counts := map[string]report.Metric{"input_tokens": {Sum: number(12), ReportedTurns: 2}, "output_tokens": {Sum: number(9), ReportedTurns: 2}, "cache_creation_input_tokens": {Sum: number(2000), ReportedTurns: 1}, "cache_read_input_tokens": {}, "thinking_tokens": {Sum: number(4), ReportedTurns: 1}, "ephemeral_5m_input_tokens": {Sum: number(0), ReportedTurns: 1}, "ephemeral_1h_input_tokens": {}}
 	model := report.ModelTotal{Model: "模型\t\u2066\n", Total: report.Total{Turns: 2, Usage: counts}}
-	r.Anthropic = &report.Section{Rows: []report.Row{{BucketStart: "2026-09-01", ModelTotal: model}}, Models: []report.ModelTotal{model}, Total: model.Total}
+	r.Anthropic = &report.Section{Rows: []report.Row{{BucketStart: "2026-09-01", ModelTotal: model}}, Periods: []report.PeriodTotal{{BucketStart: "2026-09-01", Total: model.Total}}, Models: []report.ModelTotal{model}, Total: model.Total}
 	server := httptest.NewServer(reporthttp.Handler(func(context.Context, report.Query) (report.Report, error) { return r, nil }))
 	defer server.Close()
 	client, _ := reporthttp.NewClient(server.URL)
@@ -38,9 +38,8 @@ func TestCommandDetailsRendersAnthropicNativeSubsetsAtEveryLevel(t *testing.T) {
 		}
 	}
 	for _, want := range [][]string{
-		{"2026-09-01", `"\u6a21\u578b\t\u2066\n"`, "2", "4*", "0*", "—"},
-		{"Range", `"\u6a21\u578b\t\u2066\n"`, "2", "4*", "0*", "—"},
-		{"Section total", "", "2", "4*", "0*", "—"},
+		{"2026-09-01", "All", "2", "4*", "0*", "—"},
+		{"", `└─ "\u6a21\u578b\t\u2066\n"`, "2", "4*", "0*", "—"},
 	} {
 		if !hasTableRow(text, want...) {
 			t.Errorf("missing secondary row %q: %s", want, text)
@@ -51,23 +50,23 @@ func TestCommandDetailsRendersAnthropicNativeSubsetsAtEveryLevel(t *testing.T) {
 	}
 }
 
-func TestCommandDetailsRendersOpenAIReportedSecondaryValuesAtEveryLevel(t *testing.T) {
+func TestCommandDetailsRendersOpenAIReportedSecondaryValuesInPeriodHierarchy(t *testing.T) {
 	r := commandReport()
 	r.Buckets[0].RangePartial, r.Buckets[0].InProgress = true, true
 	// Deliberately independent server totals: validation is not aggregation.
-	for i, total := range []*report.Total{&r.OpenAI.Rows[0].Total, &r.OpenAI.Models[0].Total, &r.OpenAI.Total} {
+	for i, total := range []*report.Total{&r.OpenAI.Rows[0].Total, &r.OpenAI.Periods[0].Total, &r.OpenAI.Models[0].Total, &r.OpenAI.Total} {
 		metrics := map[string]report.Metric{}
 		for k, v := range total.Usage {
 			metrics[k] = v
 		}
 		total.Usage = metrics
 		switch i {
-		case 0:
+		case 0, 1:
 			metrics["reasoning_tokens"] = report.Metric{Sum: number(0), ReportedTurns: 1}
-		case 1:
+		case 2:
 			metrics["reasoning_tokens"] = report.Metric{Sum: number(4), ReportedTurns: 2}
 			metrics["total_tokens"] = report.Metric{Sum: number(9007199254740993), ReportedTurns: 1}
-		case 2:
+		case 3:
 			metrics["reasoning_tokens"] = report.Metric{Sum: number(6), ReportedTurns: 2}
 			metrics["total_tokens"] = report.Metric{Sum: number(9223372036854775807), ReportedTurns: 2}
 		}
@@ -82,22 +81,21 @@ func TestCommandDetailsRendersOpenAIReportedSecondaryValuesAtEveryLevel(t *testi
 		t.Fatal(err)
 	}
 	text := out.String()
-	for _, want := range []string{"Reasoning", "Reported total", "reasoning: 1/2 stored Turns", "reported total: 1/2 stored Turns", "Persisted successful Turns"} {
+	for _, want := range []string{"Reasoning", "Reported total", "reasoning: 1/2 stored Turns", "Persisted successful Turns"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("missing %q: %s", want, text)
 		}
 	}
 	for _, want := range [][]string{
-		{"2026-09-01", `"evil\x1b[31m\n\u202e"`, "2", "0*", "—"},
-		{"Range", `"evil\x1b[31m\n\u202e"`, "2", "4", "9,007,199,254,740,993*"},
-		{"Section total", "", "2", "6", "9,223,372,036,854,775,807"},
+		{"2026-09-01", "All", "2", "0*", "—"},
+		{"", `└─ "evil\x1b[31m\n\u202e"`, "2", "0*", "—"},
 	} {
 		if !hasTableRow(text, want...) {
 			t.Errorf("missing secondary row %q: %s", want, text)
 		}
 	}
-	if strings.ContainsAny(text, "\x1b\u202e") || strings.Contains(text, "[clipped]") || strings.Contains(text, "[in progress]") {
-		t.Fatal("unsafe identity")
+	if strings.ContainsAny(text, "\x1b\u202e") || strings.Contains(text, "[clipped]") || strings.Contains(text, "[in progress]") || strings.Contains(text, "Model totals") || strings.Contains(text, "Section total") || strings.Contains(text, "│ Range") || strings.Contains(text, "reported total: 1/2 stored Turns") || strings.Contains(text, "9,223,372,036,854,775,807") {
+		t.Fatal("unsafe identity or rendered range totals")
 	}
 	options.Details = false
 	out.Reset()

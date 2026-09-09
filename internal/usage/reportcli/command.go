@@ -94,10 +94,10 @@ func render(endpoint string, r report.Report, details bool) string {
 		if native.section.Total.Turns == 0 {
 			fmt.Fprintln(&out, "No stored Turns in the selected range.")
 		}
-		renderTables(&out, native.section, native.primary, "Model totals")
+		renderTables(&out, native.section, native.primary)
 		if details {
 			fmt.Fprintln(&out, "Secondary native counts")
-			renderTables(&out, native.section, native.secondary, "Secondary model totals")
+			renderTables(&out, native.section, native.secondary)
 		}
 		fmt.Fprintln(&out)
 	}
@@ -109,33 +109,74 @@ type metricColumn struct{ name, label string }
 
 // The two native projections share presentation mechanics, never aggregation.
 // All writes here target the in-memory builder; Run owns fallible stdout writes.
-func renderTables(out *strings.Builder, section *report.Section, columns []metricColumn, totalsHeading string) {
-	headers := tableHeaders(columns)
-	if len(section.Rows) > 0 {
-		rows := make([][]string, 0, len(section.Rows))
-		var notes []string
-		for _, row := range section.Rows {
-			rendered, coverage := renderTotal(row.BucketStart, strconv.QuoteToASCII(row.Model), row.Total, columns)
+func renderTables(out *strings.Builder, section *report.Section, columns []metricColumn) {
+	rows, notes := hierarchicalRows(section, columns)
+	if len(rows) == 0 {
+		return
+	}
+	renderTable(out, tableHeaders(columns), rows)
+	renderCoverage(out, notes)
+}
+
+func hierarchicalRows(section *report.Section, columns []metricColumn) ([][]string, []string) {
+	byPeriod := make(map[string][]report.Row, len(section.Periods))
+	for _, row := range section.Rows {
+		byPeriod[row.BucketStart] = append(byPeriod[row.BucketStart], row)
+	}
+
+	rows := make([][]string, 0, len(section.Rows)+len(section.Periods))
+	var notes []string
+	if section.Periods == nil {
+		for _, group := range orderedRows(section.Rows) {
+			for i, model := range group.models {
+				period := ""
+				if i == 0 {
+					period = group.bucket
+				}
+				rendered, coverage := renderTotal(period, modelLabel(i, len(group.models), model.Model), model.Total, columns)
+				rows = append(rows, rendered)
+				notes = append(notes, coverage...)
+			}
+		}
+		return rows, notes
+	}
+
+	for _, period := range section.Periods {
+		rendered, coverage := renderTotal(period.BucketStart, "All", period.Total, columns)
+		rows = append(rows, rendered)
+		notes = append(notes, coverage...)
+		models := byPeriod[period.BucketStart]
+		for i, model := range models {
+			rendered, coverage = renderTotal("", modelLabel(i, len(models), model.Model), model.Total, columns)
 			rows = append(rows, rendered)
 			notes = append(notes, coverage...)
 		}
-		renderTable(out, headers, rows)
-		renderCoverage(out, notes)
 	}
+	return rows, notes
+}
 
-	fmt.Fprintln(out, totalsHeading)
-	rows := make([][]string, 0, len(section.Models)+1)
-	var notes []string
-	for _, model := range section.Models {
-		rendered, coverage := renderTotal("Range", strconv.QuoteToASCII(model.Model), model.Total, columns)
-		rows = append(rows, rendered)
-		notes = append(notes, coverage...)
+type periodRows struct {
+	bucket string
+	models []report.Row
+}
+
+func orderedRows(rows []report.Row) []periodRows {
+	var grouped []periodRows
+	for _, row := range rows {
+		if len(grouped) == 0 || grouped[len(grouped)-1].bucket != row.BucketStart {
+			grouped = append(grouped, periodRows{bucket: row.BucketStart})
+		}
+		grouped[len(grouped)-1].models = append(grouped[len(grouped)-1].models, row)
 	}
-	rendered, coverage := renderTotal("Section total", "", section.Total, columns)
-	rows = append(rows, rendered)
-	notes = append(notes, coverage...)
-	renderTable(out, headers, rows)
-	renderCoverage(out, notes)
+	return grouped
+}
+
+func modelLabel(index, total int, model string) string {
+	branch := "├─ "
+	if index == total-1 {
+		branch = "└─ "
+	}
+	return branch + strconv.QuoteToASCII(model)
 }
 
 func tableHeaders(columns []metricColumn) []string {

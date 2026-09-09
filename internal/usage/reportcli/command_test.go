@@ -47,7 +47,7 @@ func commandReport() report.Report {
 	counts := map[string]report.Metric{"input_tokens": {Sum: number(9007199254740993), ReportedTurns: 2}, "output_tokens": {Sum: number(12), ReportedTurns: 2}, "cached_tokens": {Sum: number(6000), ReportedTurns: 1}, "cache_write_tokens": {}, "reasoning_tokens": {}, "total_tokens": {}}
 	total := report.Total{Turns: 2, Usage: counts}
 	model := report.ModelTotal{Model: "evil\x1b[31m\n\u202e", Total: total}
-	return report.Report{SchemaVersion: 1, GeneratedAt: start, Timezone: "UTC", Period: "day", Since: "2026-09-01", Until: "2026-09-02", WindowStart: start, WindowEnd: end, Scope: "configured_database", Collection: "best_effort", Surface: "openai", Buckets: []report.Bucket{{StartDate: "2026-09-01", UntilDate: "2026-09-02", RangeStart: start, RangeEnd: end}}, OpenAI: &report.Section{Rows: []report.Row{{BucketStart: "2026-09-01", ModelTotal: model}}, Models: []report.ModelTotal{model}, Total: total}}
+	return report.Report{SchemaVersion: 1, GeneratedAt: start, Timezone: "UTC", Period: "day", Since: "2026-09-01", Until: "2026-09-02", WindowStart: start, WindowEnd: end, Scope: "configured_database", Collection: "best_effort", Surface: "openai", Buckets: []report.Bucket{{StartDate: "2026-09-01", UntilDate: "2026-09-02", RangeStart: start, RangeEnd: end}}, OpenAI: &report.Section{Rows: []report.Row{{BucketStart: "2026-09-01", ModelTotal: model}}, Periods: []report.PeriodTotal{{BucketStart: "2026-09-01", Total: total}}, Models: []report.ModelTotal{model}, Total: total}}
 }
 func TestCommandValidatesExplicitNamedZonesBeforeHTTP(t *testing.T) {
 	var calls atomic.Int32
@@ -119,7 +119,7 @@ func TestCommandRendersAnthropicNativeCoverageWithoutPeriodAnnotations(t *testin
 		"ephemeral_5m_input_tokens": {}, "ephemeral_1h_input_tokens": {}, "thinking_tokens": {},
 	}}
 	a, z := report.ModelTotal{Model: "a\x1b\n\u202e", Total: first}, report.ModelTotal{Model: "z", Total: second}
-	result.Anthropic = &report.Section{Rows: []report.Row{{BucketStart: "2026-09-01", ModelTotal: a}, {BucketStart: "2026-09-01", ModelTotal: z}}, Models: []report.ModelTotal{a, z}, Total: total}
+	result.Anthropic = &report.Section{Rows: []report.Row{{BucketStart: "2026-09-01", ModelTotal: a}, {BucketStart: "2026-09-01", ModelTotal: z}}, Periods: []report.PeriodTotal{{BucketStart: "2026-09-01", Total: total}}, Models: []report.ModelTotal{a, z}, Total: total}
 	server := httptest.NewServer(reporthttp.Handler(func(context.Context, report.Query) (report.Report, error) { return result, nil }))
 	defer server.Close()
 	client, _ := reporthttp.NewClient(server.URL)
@@ -137,6 +137,15 @@ func TestCommandRendersAnthropicNativeCoverageWithoutPeriodAnnotations(t *testin
 	for _, want := range []string{"Uncached input", "Output", "Cache create", "Cache read", "2,000*", "0*", "—", "cache create: 1/2 stored Turns", "cache read: 1/2 stored Turns", "cache read: 1/3 stored Turns", "9,007,199,254,741,005", `"a\x1b\n\u202e"`, "╭", "╯"} {
 		if !strings.Contains(anthropic, want) {
 			t.Errorf("missing %q: %s", want, anthropic)
+		}
+	}
+	for _, want := range [][]string{
+		{"2026-09-01", "All", "3", "9,007,199,254,741,005", "12", "2,000*", "0*"},
+		{"", `├─ "a\x1b\n\u202e"`, "2", "12", "9", "2,000*", "0*"},
+		{"", `└─ "z"`, "1", "9,007,199,254,740,993", "3", "—", "—"},
+	} {
+		if !hasTableRow(anthropic, want...) {
+			t.Errorf("missing hierarchical row %q: %s", want, anthropic)
 		}
 	}
 	if strings.ContainsAny(text, "\x1b\u202e") || strings.Contains(anthropic, "Cache write") || strings.Contains(openai, "Uncached input") || strings.Contains(text, "Grand total") || strings.Contains(text, "[clipped]") || strings.Contains(text, "[in progress]") {
@@ -161,13 +170,13 @@ func TestCommandRendersServerValuesSafelyAndReturnsOutputFailures(t *testing.T) 
 		t.Fatal(err)
 	}
 	text := out.String()
-	for _, want := range []string{server.URL, "UTC", "2026-09-01", "OpenAI", "Model totals", "Section total", "9,007,199,254,740,993", "6,000*", "cache read: 1/2 stored Turns", "—", `"evil\x1b[31m\n\u202e"`, "Persisted successful Turns observed by the Usage meter; best-effort", "╭", "╯"} {
+	for _, want := range []string{server.URL, "UTC", "2026-09-01", "OpenAI", "All", "└─", "9,007,199,254,740,993", "6,000*", "cache read: 1/2 stored Turns", "—", `"evil\x1b[31m\n\u202e"`, "Persisted successful Turns observed by the Usage meter; best-effort", "╭", "╯"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("missing %q in:\n%s", want, text)
 		}
 	}
-	if strings.ContainsAny(text, "\x1b\u202e") {
-		t.Fatal("unsafe terminal identity")
+	if strings.ContainsAny(text, "\x1b\u202e") || strings.Contains(text, "Model totals") || strings.Contains(text, "Section total") || strings.Contains(text, "│ Range") {
+		t.Fatal("unsafe identity or range totals")
 	}
 	if err := reportcli.Run(context.Background(), client, options, brokenOutput{}); err == nil {
 		t.Fatal("output failure succeeded")

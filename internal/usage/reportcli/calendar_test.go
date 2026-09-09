@@ -58,16 +58,15 @@ func TestCommandAllPeriodsFromSQLiteThroughHTTPInExplicitNamedZone(t *testing.T)
 				t.Fatal(err)
 			}
 			text := out.String()
-			for _, want := range []string{`Timezone: "Europe/Berlin"`, "Range: 2020-12-31 to 2021-01-05 (exclusive)", "Period: " + tc.period, "Anthropic\n", "OpenAI\n", tc.first, tc.second, "Section total", "Persisted successful Turns"} {
+			for _, want := range []string{`Timezone: "Europe/Berlin"`, "Range: 2020-12-31 to 2021-01-05 (exclusive)", "Period: " + tc.period, "Anthropic\n", "OpenAI\n", tc.first, tc.second, "All", "└─ \"m\"", "Persisted successful Turns"} {
 				if !strings.Contains(text, want) {
 					t.Errorf("missing %q: %s", want, text)
 				}
 			}
-			// Literal native counts reach the terminal, not just the separate
-			// wire assertions below: two period rows per Surface and both kinds
-			// of range total, without renderer-side regrouping.
-			if strings.Count(text, "  18 ") != 2 || strings.Count(text, "  13 ") != 2 || strings.Count(text, "  31 ") != 4 {
-				t.Fatalf("period and range counts did not reach terminal: %s", text)
+			// Server-owned period totals and their model children reach both
+			// native tables without renderer-side aggregation or range rows.
+			if strings.Count(text, "  18 ") != 4 || strings.Count(text, "  13 ") != 4 || strings.Contains(text, "  31 ") || strings.Contains(text, "Section total") || strings.Contains(text, "│ Range") {
+				t.Fatalf("period hierarchy did not reach terminal: %s", text)
 			}
 			if strings.Contains(text, "[clipped]") || strings.Contains(text, "[in progress]") {
 				t.Fatalf("rendered period annotations: %s", text)
@@ -81,7 +80,7 @@ func TestCommandAllPeriodsFromSQLiteThroughHTTPInExplicitNamedZone(t *testing.T)
 				t.Fatalf("calendar: %+v", r)
 			}
 			for _, s := range []*report.Section{r.Anthropic, r.OpenAI} {
-				if len(s.Rows) != 2 || s.Rows[0].BucketStart != tc.first || s.Rows[1].BucketStart != tc.second || s.Rows[0].Turns != 2 || *s.Rows[0].Usage["input_tokens"].Sum != 18 || s.Total.Turns != 3 || *s.Total.Usage["input_tokens"].Sum != 31 || s.Models[0].Turns != 3 {
+				if len(s.Rows) != 2 || len(s.Periods) != 2 || s.Rows[0].BucketStart != tc.first || s.Rows[1].BucketStart != tc.second || s.Periods[0].BucketStart != tc.first || s.Periods[0].Turns != 2 || *s.Periods[0].Usage["input_tokens"].Sum != 18 || s.Total.Turns != 3 || *s.Total.Usage["input_tokens"].Sum != 31 || s.Models[0].Turns != 3 {
 					t.Fatalf("shared interval native aggregates: %+v", s)
 				}
 			}

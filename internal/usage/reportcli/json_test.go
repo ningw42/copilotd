@@ -31,7 +31,7 @@ func TestCommandValidatesCompleteWireContractBeforeEitherPresentation(t *testing
 		"input_tokens": {Sum: number(12), ReportedTurns: 2}, "output_tokens": {Sum: number(9), ReportedTurns: 2},
 		"cache_creation_input_tokens": {}, "cache_read_input_tokens": {}, "ephemeral_5m_input_tokens": {}, "ephemeral_1h_input_tokens": {}, "thinking_tokens": {Sum: number(0), ReportedTurns: 1},
 	}}}
-	r.Anthropic = &report.Section{Rows: []report.Row{{BucketStart: "2026-09-01", ModelTotal: a}}, Models: []report.ModelTotal{a}, Total: a.Total}
+	r.Anthropic = &report.Section{Rows: []report.Row{{BucketStart: "2026-09-01", ModelTotal: a}}, Periods: []report.PeriodTotal{{BucketStart: "2026-09-01", Total: a.Total}}, Models: []report.ModelTotal{a}, Total: a.Total}
 	base, err := json.Marshal(r)
 	if err != nil {
 		t.Fatal(err)
@@ -74,7 +74,7 @@ func TestCommandValidatesCompleteWireContractBeforeEitherPresentation(t *testing
 		if native == "anthropic" {
 			names = []string{"input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens", "thinking_tokens"}
 		}
-		for _, level := range []string{"rows", "models", "total"} {
+		for _, level := range []string{"rows", "periods", "models", "total"} {
 			getTotal := func(root map[string]any) map[string]any {
 				s := root[native].(map[string]any)
 				if level == "total" {
@@ -200,7 +200,7 @@ func TestCommandEmptySectionCoverageExceptionInTextAndJSON(t *testing.T) {
 				}
 				metrics["input_tokens"] = report.Metric{Sum: number(0)}
 				metrics["output_tokens"] = report.Metric{Sum: number(0)}
-				s := &report.Section{Rows: []report.Row{}, Models: []report.ModelTotal{}, Total: report.Total{Usage: metrics}}
+				s := &report.Section{Rows: []report.Row{}, Periods: []report.PeriodTotal{}, Models: []report.ModelTotal{}, Total: report.Total{Usage: metrics}}
 				switch kind {
 				case "NULL rows":
 					s.Rows = nil
