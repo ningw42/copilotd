@@ -69,8 +69,8 @@ func TestCommandAllPeriodsFromSQLiteThroughHTTPInExplicitNamedZone(t *testing.T)
 			if strings.Count(text, "  18 ") != 2 || strings.Count(text, "  13 ") != 2 || strings.Count(text, "  31 ") != 4 {
 				t.Fatalf("period and range counts did not reach terminal: %s", text)
 			}
-			if tc.period != "day" && !strings.Contains(text, "[clipped]") {
-				t.Fatalf("lost clipping: %s", text)
+			if strings.Contains(text, "[clipped]") || strings.Contains(text, "[in progress]") {
+				t.Fatalf("rendered period annotations: %s", text)
 			}
 			result, err := client.Query(context.Background(), q)
 			if err != nil {

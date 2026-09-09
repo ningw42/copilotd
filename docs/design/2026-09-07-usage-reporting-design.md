@@ -800,15 +800,18 @@ Render exact integer counts with deterministic thousands separators, never
 rounded `k`/`M` values that obscure differences. `—` means unreported, not zero.
 A partially covered optional metric gets `*`; a following compact coverage list
 states its reported-Turn fraction, for example `cache read: 8/10 stored Turns`.
-Use distinct annotations for range clipping and in-progress periods; do not
-reuse the coverage marker for them.
+Static table period labels show only the bucket start date. The validated JSON
+retains the server-provided `range_partial` and `in_progress` flags for callers
+that need those distinctions; do not reuse the coverage marker for them.
 
 `--details` adds the server-provided OpenAI reasoning/reported-total metrics and
 Anthropic thinking/cache-TTL metrics, for both period rows and range totals.
 Input/output/cache fields remain the compact default. `--json` always includes
 all fields; `--details` does not change the HTTP request or JSON representation.
-No colors, interactive terminal control, chart, width-based identity truncation,
-or TTY-only behavior is required in v1; piped output remains deterministic text.
+Render the static tables with rounded Lip Gloss borders, without Bubble Tea or
+another interactive event loop. Do not add colors, interactive terminal control,
+charts, width-based identity truncation, or TTY-only behavior; piped output
+remains deterministic text.
 
 For an empty selection, print `No stored Turns in the selected range.` rather
 than a page of invented model rows. Always include this caveat in text:

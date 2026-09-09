@@ -178,10 +178,11 @@ and section totals: OpenAI **Reasoning** (`reasoning_tokens`) and **Reported
 total** (`total_tokens`, never inferred); Anthropic **Thinking** (`thinking_tokens`),
 **Cache create 5m** (`ephemeral_5m_input_tokens`), and **Cache create 1h**
 (`ephemeral_1h_input_tokens`). All retain NULL/zero and reporting coverage, without
-normalizing or adding subsets to their parent counts. `[clipped]` and
-`[in progress]` are independent of optional-count `*` coverage, not completeness
-claims. Identities are ASCII-quoted without truncation to prevent terminal control
-or bidi injection.
+normalizing or adding subsets to their parent counts. Static tables show bucket
+start dates without clipping or in-progress remarks; those flags remain available
+as `range_partial` and `in_progress` in JSON. Optional-count `*` coverage is not a
+completeness claim. Identities are ASCII-quoted without truncation to prevent
+terminal control or bidi injection.
 
 `--json` validates the same bounded complete response as text, then writes its
 original bytes plus a final newline. Whitespace, valid Unicode, exact decimal

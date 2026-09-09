@@ -37,14 +37,12 @@ func TestCommandDetailsRendersAnthropicNativeSubsetsAtEveryLevel(t *testing.T) {
 			t.Errorf("missing %q: %s", want, text)
 		}
 	}
-	for _, want := range []string{`2026-09-01 "\u6a21\u578b\t\u2066\n" 2 4* 0* —`, `Range "\u6a21\u578b\t\u2066\n" 2 4* 0* —`, `Section total 2 4* 0* —`} {
-		found := false
-		for _, line := range strings.Split(text, "\n") {
-			if strings.Join(strings.Fields(line), " ") == want {
-				found = true
-			}
-		}
-		if !found {
+	for _, want := range [][]string{
+		{"2026-09-01", `"\u6a21\u578b\t\u2066\n"`, "2", "4*", "0*", "—"},
+		{"Range", `"\u6a21\u578b\t\u2066\n"`, "2", "4*", "0*", "—"},
+		{"Section total", "", "2", "4*", "0*", "—"},
+	} {
+		if !hasTableRow(text, want...) {
 			t.Errorf("missing secondary row %q: %s", want, text)
 		}
 	}
@@ -84,23 +82,21 @@ func TestCommandDetailsRendersOpenAIReportedSecondaryValuesAtEveryLevel(t *testi
 		t.Fatal(err)
 	}
 	text := out.String()
-	for _, want := range []string{"Reasoning", "Reported total", "reasoning: 1/2 stored Turns", "reported total: 1/2 stored Turns", "[clipped] [in progress]", "Persisted successful Turns"} {
+	for _, want := range []string{"Reasoning", "Reported total", "reasoning: 1/2 stored Turns", "reported total: 1/2 stored Turns", "Persisted successful Turns"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("missing %q: %s", want, text)
 		}
 	}
-	for _, want := range []string{`2026-09-01 [clipped] [in progress] "evil\x1b[31m\n\u202e" 2 0* —`, `Range "evil\x1b[31m\n\u202e" 2 4 9,007,199,254,740,993*`, `Section total 2 6 9,223,372,036,854,775,807`} {
-		found := false
-		for _, line := range strings.Split(text, "\n") {
-			if strings.Join(strings.Fields(line), " ") == want {
-				found = true
-			}
-		}
-		if !found {
+	for _, want := range [][]string{
+		{"2026-09-01", `"evil\x1b[31m\n\u202e"`, "2", "0*", "—"},
+		{"Range", `"evil\x1b[31m\n\u202e"`, "2", "4", "9,007,199,254,740,993*"},
+		{"Section total", "", "2", "6", "9,223,372,036,854,775,807"},
+	} {
+		if !hasTableRow(text, want...) {
 			t.Errorf("missing secondary row %q: %s", want, text)
 		}
 	}
-	if strings.ContainsAny(text, "\x1b\u202e") {
+	if strings.ContainsAny(text, "\x1b\u202e") || strings.Contains(text, "[clipped]") || strings.Contains(text, "[in progress]") {
 		t.Fatal("unsafe identity")
 	}
 	options.Details = false

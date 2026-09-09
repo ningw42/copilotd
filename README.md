@@ -102,7 +102,8 @@ Unselected native sections are omitted; selected empty sections stay visible.
 Each omitted date bound independently uses the requested zone's current-month
 start or next-month start from one daemon clock capture; period changes grouping
 only. Date edges use actual timezone transitions, not fixed 24-hour durations.
-The server supplies clipped/in-progress annotations and the effective range.
+The server supplies the effective range and retains bucket clipping/progress
+metadata in JSON; static table period labels show only the bucket start date.
 Named zones use embedded fallback data without a companion timezone asset;
 operator/platform data can take precedence, and daemon rules are authoritative.
 When `--timezone` is omitted, Linux/macOS use the CLI process's named `TZ` or a
@@ -124,7 +125,8 @@ substitution. Unknown identities succeed empty. `--details` adds native reasonin
 and reported-total counts for OpenAI, and thinking/cache-TTL counts for Anthropic,
 for period rows and both range-total levels. Text safely quotes model identities;
 `—` means unreported, `0` means reported zero, and `*` shows partial stored-Turn
-coverage independently of `[clipped]` and `[in progress]` period annotations.
+coverage. Static tables use rounded Lip Gloss borders without color or interactive
+terminal control; `range_partial` and `in_progress` remain available in JSON.
 `--json` emits the complete validated original response plus a newline, preserving
 exact decimal count strings, Unicode, and additive fields. `--details` does not
 change JSON or make another request. There is no pricing, raw-Turn export, HTML,

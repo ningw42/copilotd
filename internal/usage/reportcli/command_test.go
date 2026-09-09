@@ -16,6 +16,31 @@ import (
 )
 
 func number(n int64) *int64 { return &n }
+
+func hasTableRow(text string, want ...string) bool {
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "│") || !strings.HasSuffix(line, "│") {
+			continue
+		}
+		cells := strings.Split(strings.TrimSuffix(strings.TrimPrefix(line, "│"), "│"), "│")
+		if len(cells) != len(want) {
+			continue
+		}
+		matches := true
+		for i := range cells {
+			if strings.TrimSpace(cells[i]) != want[i] {
+				matches = false
+				break
+			}
+		}
+		if matches {
+			return true
+		}
+	}
+	return false
+}
+
 func commandReport() report.Report {
 	start := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
 	end := start.AddDate(0, 0, 1)
@@ -75,7 +100,7 @@ func TestCommandRejectsInvalidSelectionsBeforeHTTP(t *testing.T) {
 	}
 }
 
-func TestCommandRendersAnthropicNativeCoverageAndPeriodAnnotations(t *testing.T) {
+func TestCommandRendersAnthropicNativeCoverageWithoutPeriodAnnotations(t *testing.T) {
 	result := commandReport()
 	result.Surface = "all"
 	result.Buckets[0].RangePartial, result.Buckets[0].InProgress = true, true
@@ -109,12 +134,12 @@ func TestCommandRendersAnthropicNativeCoverageAndPeriodAnnotations(t *testing.T)
 	if !found || !strings.Contains(anthropic, "Anthropic\n") {
 		t.Fatalf("section ordering: %s", text)
 	}
-	for _, want := range []string{"Uncached input", "Output", "Cache create", "Cache read", "2,000*", "0*", "—", "cache create: 1/2 stored Turns", "cache read: 1/2 stored Turns", "cache read: 1/3 stored Turns", "9,007,199,254,741,005", `"a\x1b\n\u202e"`, "[clipped] [in progress]"} {
+	for _, want := range []string{"Uncached input", "Output", "Cache create", "Cache read", "2,000*", "0*", "—", "cache create: 1/2 stored Turns", "cache read: 1/2 stored Turns", "cache read: 1/3 stored Turns", "9,007,199,254,741,005", `"a\x1b\n\u202e"`, "╭", "╯"} {
 		if !strings.Contains(anthropic, want) {
 			t.Errorf("missing %q: %s", want, anthropic)
 		}
 	}
-	if strings.ContainsAny(text, "\x1b\u202e") || strings.Contains(anthropic, "Cache write") || strings.Contains(openai, "Uncached input") || strings.Contains(text, "Grand total") {
+	if strings.ContainsAny(text, "\x1b\u202e") || strings.Contains(anthropic, "Cache write") || strings.Contains(openai, "Uncached input") || strings.Contains(text, "Grand total") || strings.Contains(text, "[clipped]") || strings.Contains(text, "[in progress]") {
 		t.Fatalf("unsafe or cross-Surface presentation: %s", text)
 	}
 	if !strings.Contains(openai, "6,000*") || !strings.Contains(openai, "Persisted successful Turns") {
@@ -136,7 +161,7 @@ func TestCommandRendersServerValuesSafelyAndReturnsOutputFailures(t *testing.T) 
 		t.Fatal(err)
 	}
 	text := out.String()
-	for _, want := range []string{server.URL, "UTC", "2026-09-01", "OpenAI", "Model totals", "Section total", "9,007,199,254,740,993", "6,000*", "cache read: 1/2 stored Turns", "—", `"evil\x1b[31m\n\u202e"`, "Persisted successful Turns observed by the Usage meter; best-effort"} {
+	for _, want := range []string{server.URL, "UTC", "2026-09-01", "OpenAI", "Model totals", "Section total", "9,007,199,254,740,993", "6,000*", "cache read: 1/2 stored Turns", "—", `"evil\x1b[31m\n\u202e"`, "Persisted successful Turns observed by the Usage meter; best-effort", "╭", "╯"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("missing %q in:\n%s", want, text)
 		}
