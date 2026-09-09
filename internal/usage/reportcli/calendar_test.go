@@ -68,6 +68,9 @@ func TestCommandAllPeriodsFromSQLiteThroughHTTPInExplicitNamedZone(t *testing.T)
 			if strings.Count(text, "  18 ") != 2 || strings.Count(text, "  13 ") != 2 || strings.Contains(text, "  31 ") || strings.Contains(text, `├─ "`) || strings.Contains(text, `└─ "`) || strings.Contains(text, "│ All ") || strings.Contains(text, "Section total") || strings.Contains(text, "│ Range") {
 				t.Fatalf("period groups did not reach terminal: %s", text)
 			}
+			if strings.Count(text, "\n├") != 4 {
+				t.Fatalf("missing horizontal separators between periods: %s", text)
+			}
 			if strings.Contains(text, "[clipped]") || strings.Contains(text, "[in progress]") {
 				t.Fatalf("rendered period annotations: %s", text)
 			}

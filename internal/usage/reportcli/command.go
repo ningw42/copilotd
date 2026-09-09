@@ -170,6 +170,7 @@ func tableHeaders(columns []metricColumn) []string {
 func renderTable(out *strings.Builder, headers []string, rows [][]string) {
 	t := table.New().
 		Border(lipgloss.RoundedBorder()).
+		BorderRow(true).
 		Headers(headers...).
 		Rows(rows...).
 		Wrap(true).

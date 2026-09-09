@@ -147,6 +147,9 @@ func TestCommandRendersAnthropicNativeCoverageWithoutPeriodAnnotations(t *testin
 			t.Errorf("missing grouped row %q: %s", want, anthropic)
 		}
 	}
+	if strings.Count(anthropic, "\n├") != 1 {
+		t.Fatalf("models within one period were separated: %s", anthropic)
+	}
 	if strings.ContainsAny(text, "\x1b\u202e") || strings.Contains(anthropic, "Cache write") || strings.Contains(openai, "Uncached input") || strings.Contains(text, "Grand total") || strings.Contains(text, `├─ "`) || strings.Contains(text, `└─ "`) || strings.Contains(text, "│ All ") || strings.Contains(text, "[clipped]") || strings.Contains(text, "[in progress]") {
 		t.Fatalf("unsafe or cross-Surface presentation: %s", text)
 	}
