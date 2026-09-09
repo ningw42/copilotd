@@ -460,13 +460,15 @@ authoritative. Do not add a universal input/total count, stack subsets onto thei
 containing counts, or derive cache-hit percentages from partially reported data.
 
 The report contains separate Anthropic and OpenAI sections. Each selected
-section has period/model rows, per-model totals for the whole selected range,
-and one whole-section total. Totals are computed in the reporting module from
-the same read, not by the client. Unselected sections are omitted; selected empty
-sections remain present. There is no cross-Surface token total.
+section has period/model rows, one total for each non-empty period, per-model
+totals for the whole selected range, and one whole-section total. Totals are
+computed in the reporting module from the same read, not by the client.
+Unselected sections are omitted; selected empty sections remain present. There
+is no cross-Surface token total.
 
-Rows sort by bucket start, then model bytes. Model totals sort by model bytes;
-section order in terminal output is Anthropic, then OpenAI. Arithmetic for sums,
+Rows sort by bucket start, then model bytes. Period totals sort by bucket start,
+and model totals sort by model bytes; section order in terminal output is
+Anthropic, then OpenAI. Arithmetic for sums,
 Turn counts, and coverage is checked signed 64-bit integer arithmetic. Overflow
 fails the **whole** report with a request-to-narrow-the-range error. Do not switch
 to floating point, saturate, wrap, or return partially accumulated totals.
@@ -517,14 +519,27 @@ Illustrative fragment, not a complete response:
           "cached_tokens": {"sum": "12400", "reported_turns": "8"}
         }
       }
+    ],
+    "periods": [
+      {
+        "bucket_start": "2026-08-31",
+        "turns": "10",
+        "usage": {
+          "input_tokens": {"sum": "15000", "reported_turns": "10"},
+          "cached_tokens": {"sum": "12400", "reported_turns": "8"}
+        }
+      }
     ]
   }
 }
 ```
 
 Complete responses include every native metric in the table above for their
-section, even when its sum is NULL, plus `models` and `total`. `models` entries
-have `model`, `turns`, and `usage`; `total` has `turns` and `usage`. The effective
+section, even when its sum is NULL, plus `periods`, `models`, and `total`.
+`periods` entries have `bucket_start`, `turns`, and `usage`; `models` entries have
+`model`, `turns`, and `usage`; `total` has `turns` and `usage`. The additive
+`periods` field may be absent on an older schema-version-1 daemon; clients must
+not reconstruct it by summing model rows. The effective
 filters appear as `surface` (`all`/`anthropic`/`openai`) and `model` (string or
 NULL) at the top level. All arrays, including empty ones, are JSON arrays rather
 than NULL. UTC instants use RFC3339 with optional fractional seconds. Clients
@@ -690,9 +705,9 @@ For each admitted query:
    Requested model, or whole tables into memory. Map timestamps to the
    precomputed intervals in Go; SQLite `localtime`, string-prefix grouping, and
    offset-only bucketing do not implement this calendar-edge contract.
-5. Accumulate rows, per-model totals, and section totals with checked integer
-   arithmetic and coverage. Intern each model identity and reuse its string
-   across groups/totals, so the retained-model-byte limit bounds retained data,
+5. Accumulate rows, per-period totals, per-model totals, and section totals with
+   checked integer arithmetic and coverage. Intern each model identity and reuse
+   its string across groups/totals, so the retained-model-byte limit bounds retained data,
    not just a distinct-name statistic while duplicate large strings accumulate.
    Stop with an error when a row/group/retained-data limit is exceeded; never
    return a successful truncated report. Check context
@@ -779,19 +794,26 @@ time in a short header. Render separate native sections with these core columns:
 
 ```text
 Anthropic
-Period      Model  Turns  Uncached input  Output  Cache create  Cache read
-...
+Period      Model                 Turns  Uncached input  Output  Cache create  Cache read
+2026-09-08 All                   7,302       ...          ...     ...           ...
+           ├─ "claude-example"  ...         ...          ...     ...           ...
+           └─ "claude-other"    ...         ...          ...     ...           ...
 
 OpenAI
-Period      Model  Turns  Input           Output  Cache write   Cache read
-...
+Period      Model              Turns  Input  Output  Cache write  Cache read
+2026-09-08 All                7,302   ...    ...     ...          ...
+           ├─ "gpt-example"  ...     ...    ...     ...          ...
+           └─ "gpt-other"    ...     ...    ...     ...          ...
 ```
 
-Each section then shows the server-provided per-model totals and section total
-for the range. Do not sum unlike Surface inputs into a grand total. Model strings
-are rendered verbatim in identity but escaped for terminal safety: quote/escape
-controls, newlines, escape sequences, and non-ASCII formatting characters so
-upstream text cannot inject terminal commands, bidi reordering, or extra rows.
+Within each section, render one server-provided `All` row for each non-empty
+period, followed by that period's tree-indented Reported-model rows. Do not
+render the whole-range per-model or section totals as duplicate terminal rows;
+they remain in JSON. Do not sum unlike Surface inputs into a grand total. Model
+strings are rendered verbatim in identity but escaped for terminal safety:
+quote/escape controls, newlines, escape sequences, and non-ASCII formatting
+characters so upstream text cannot inject terminal commands, bidi reordering,
+or extra rows.
 Use a deterministic ASCII-escaped representation for model cells in v1; JSON
 preserves the original valid Unicode identity. No truncation or aliasing of
 model names to make a row fit.
@@ -805,7 +827,7 @@ retains the server-provided `range_partial` and `in_progress` flags for callers
 that need those distinctions; do not reuse the coverage marker for them.
 
 `--details` adds the server-provided OpenAI reasoning/reported-total metrics and
-Anthropic thinking/cache-TTL metrics, for both period rows and range totals.
+Anthropic thinking/cache-TTL metrics to the same period/model hierarchy.
 Input/output/cache fields remain the compact default. `--json` always includes
 all fields; `--details` does not change the HTTP request or JSON representation.
 Render the static tables with rounded Lip Gloss borders, without Bubble Tea or
@@ -856,8 +878,8 @@ literal expected reports, not tests coupled to private SQL strings.
 
 - Both native Surfaces; mixed transports; multiple Reported models; independent
   Requested model values do not change grouping; exact case-sensitive filters.
-- Period rows, model totals, and section totals agree without double-counting
-  cache/reasoning subsets or manufacturing native totals.
+- Period rows, period totals, model totals, and section totals agree without
+  double-counting cache/reasoning subsets or manufacturing native totals.
 - Optional all-NULL, reported zero, and mixed coverage; empty selection; one
   Surface selected while the other is empty/unselected; no cross-Surface total.
 - Exact counts above JavaScript's safe integer range, int64 overflow, invalid
@@ -901,14 +923,16 @@ literal expected reports, not tests coupled to private SQL strings.
 - Independent flag scope; help/root/version make no filesystem/network/timezone
   calls; exact flag/env/TOML precedence and eager malformed-overlay behavior.
 - Default and prefixed base URL joins, invalid URLs, TLS verification, redirects,
-  daemon-down/older-daemon errors, bounded bodies, timeout, and cancellation.
+  daemon-down/older-daemon errors, bounded bodies, timeout, cancellation, and
+  non-aggregating fallback when a schema-v1 daemon omits additive period totals.
 - Explicit timezone precedence, terminal-local named detection, ambiguous or
   missing detection errors, and no fallback to daemon local time or UTC.
 - Exact HTTP query parameters; terminal and daemon hosts with different zones;
   no API key, GitHub OAuth token, database path, or Upstream call dependency.
-- Both terminal layouts, details/coverage/partial annotations, exact numbers,
-  malicious model/error strings, empty report, JSON-only stdout, stderr errors,
-  protocol version skew, additive fields, and failing output writers.
+- Both native period hierarchies, details/coverage, omission of range rows and
+  period annotations, exact numbers, malicious model/error strings, empty report,
+  JSON-only stdout, stderr errors, protocol version skew, additive fields, and
+  failing output writers.
 - Exact case-sensitive JSON member matching, duplicate members (including
   escaped spellings), invalid UTF-8/unpaired surrogates, contradictory
   filter/section/metric coverage, and valid additive fields. Reject invalid

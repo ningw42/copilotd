@@ -82,8 +82,10 @@ copilotd usage --timezone UTC --period month --since 2026-01-01 --json
 
 `--endpoint` defaults to `http://127.0.0.1:8080`; a path prefix is preserved when
 appending `/usage/v1/report`. The command is an HTTP client, never an offline
-SQLite reader. It shows exact native counts, stored-Turn coverage, per-model
-and section totals. Anthropic appears first with **Uncached input**, Output,
+SQLite reader. It shows exact native counts and stored-Turn coverage as one
+server-computed `All` total per period followed by indented Reported-model rows.
+Whole-range per-model and section totals remain in JSON but are not repeated in
+the text tables. Anthropic appears first with **Uncached input**, Output,
 Cache create, and Cache read; OpenAI retains complete Input, Output, Cache write,
 and Cache read. TTL/thinking/reasoning subsets are never stacked onto their
 parent counts, and there is no normalized input or cross-Surface token grand
@@ -123,8 +125,8 @@ cross-builds alone.
 case, whitespace, and Unicode without Catalog alias expansion or Requested-model
 substitution. Unknown identities succeed empty. `--details` adds native reasoning
 and reported-total counts for OpenAI, and thinking/cache-TTL counts for Anthropic,
-for period rows and both range-total levels. Text safely quotes model identities;
-`—` means unreported, `0` means reported zero, and `*` shows partial stored-Turn
+for each period's `All` total and Reported-model rows. Text safely quotes model
+identities. `—` means unreported, `0` means reported zero, and `*` shows partial stored-Turn
 coverage. Static tables use rounded Lip Gloss borders without color or interactive
 terminal control; `range_partial` and `in_progress` remain available in JSON.
 `--json` emits the complete validated original response plus a newline, preserving

@@ -156,6 +156,25 @@ func TestCommandRendersAnthropicNativeCoverageWithoutPeriodAnnotations(t *testin
 	}
 }
 
+func TestCommandLegacyReportDoesNotSynthesizePeriodTotals(t *testing.T) {
+	result := commandReport()
+	result.OpenAI.Periods = nil
+	result.OpenAI.Rows[0].Model = "legacy"
+	result.OpenAI.Models[0].Model = "legacy"
+	server := httptest.NewServer(reporthttp.Handler(func(context.Context, report.Query) (report.Report, error) { return result, nil }))
+	defer server.Close()
+	client, _ := reporthttp.NewClient(server.URL)
+	utc := "UTC"
+	var out bytes.Buffer
+	options := reportcli.Options{Endpoint: server.URL, Timezone: &utc, Query: report.Query{Surface: "openai", Period: "day", Since: "2026-09-01", Until: "2026-09-02"}, Timeout: time.Second}
+	if err := reportcli.Run(context.Background(), client, options, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !hasTableRow(out.String(), "2026-09-01", `└─ "legacy"`, "2", "9,007,199,254,740,993", "12", "—", "6,000*") || strings.Contains(out.String(), " All ") {
+		t.Fatalf("legacy report was reaggregated: %s", out.String())
+	}
+}
+
 func TestCommandRendersServerValuesSafelyAndReturnsOutputFailures(t *testing.T) {
 	server := httptest.NewServer(reporthttp.Handler(func(context.Context, report.Query) (report.Report, error) { return commandReport(), nil }))
 	defer server.Close()
