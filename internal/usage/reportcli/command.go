@@ -110,7 +110,7 @@ type metricColumn struct{ name, label string }
 // The two native projections share presentation mechanics, never aggregation.
 // All writes here target the in-memory builder; Run owns fallible stdout writes.
 func renderTables(out *strings.Builder, section *report.Section, columns []metricColumn) {
-	rows, notes := hierarchicalRows(section, columns)
+	rows, notes := groupedRows(section.Rows, columns)
 	if len(rows) == 0 {
 		return
 	}
@@ -118,41 +118,29 @@ func renderTables(out *strings.Builder, section *report.Section, columns []metri
 	renderCoverage(out, notes)
 }
 
-func hierarchicalRows(section *report.Section, columns []metricColumn) ([][]string, []string) {
-	byPeriod := make(map[string][]report.Row, len(section.Periods))
-	for _, row := range section.Rows {
-		byPeriod[row.BucketStart] = append(byPeriod[row.BucketStart], row)
-	}
-
-	rows := make([][]string, 0, len(section.Rows)+len(section.Periods))
+func groupedRows(rows []report.Row, columns []metricColumn) ([][]string, []string) {
+	groups := orderedRows(rows)
+	renderedGroups := make([][]string, 0, len(groups))
 	var notes []string
-	if section.Periods == nil {
-		for _, group := range orderedRows(section.Rows) {
-			for i, model := range group.models {
-				period := ""
-				if i == 0 {
-					period = group.bucket
-				}
-				rendered, coverage := renderTotal(period, modelLabel(i, len(group.models), model.Model), model.Total, columns)
-				rows = append(rows, rendered)
-				notes = append(notes, coverage...)
+	for _, group := range groups {
+		cells := make([][]string, 3+len(columns))
+		for i, model := range group.models {
+			rendered, coverage := renderTotal("", strconv.QuoteToASCII(model.Model), model.Total, columns)
+			if i == 0 {
+				rendered[0] = group.bucket
 			}
-		}
-		return rows, notes
-	}
-
-	for _, period := range section.Periods {
-		rendered, coverage := renderTotal(period.BucketStart, "All", period.Total, columns)
-		rows = append(rows, rendered)
-		notes = append(notes, coverage...)
-		models := byPeriod[period.BucketStart]
-		for i, model := range models {
-			rendered, coverage = renderTotal("", modelLabel(i, len(models), model.Model), model.Total, columns)
-			rows = append(rows, rendered)
+			for column, value := range rendered {
+				cells[column] = append(cells[column], value)
+			}
 			notes = append(notes, coverage...)
 		}
+		groupRow := make([]string, len(cells))
+		for column := range cells {
+			groupRow[column] = strings.Join(cells[column], "\n")
+		}
+		renderedGroups = append(renderedGroups, groupRow)
 	}
-	return rows, notes
+	return renderedGroups, notes
 }
 
 type periodRows struct {
@@ -171,14 +159,6 @@ func orderedRows(rows []report.Row) []periodRows {
 	return grouped
 }
 
-func modelLabel(index, total int, model string) string {
-	branch := "├─ "
-	if index == total-1 {
-		branch = "└─ "
-	}
-	return branch + strconv.QuoteToASCII(model)
-}
-
 func tableHeaders(columns []metricColumn) []string {
 	headers := []string{"Period", "Model", "Turns"}
 	for _, column := range columns {
@@ -192,7 +172,7 @@ func renderTable(out *strings.Builder, headers []string, rows [][]string) {
 		Border(lipgloss.RoundedBorder()).
 		Headers(headers...).
 		Rows(rows...).
-		Wrap(false).
+		Wrap(true).
 		StyleFunc(func(_ int, column int) lipgloss.Style {
 			style := lipgloss.NewStyle().Padding(0, 1)
 			if column >= 2 {

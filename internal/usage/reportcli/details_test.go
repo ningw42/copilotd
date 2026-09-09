@@ -13,7 +13,7 @@ import (
 	"github.com/ningw42/copilotd/internal/usage/reporthttp"
 )
 
-func TestCommandDetailsRendersAnthropicNativeSubsetsInPeriodHierarchy(t *testing.T) {
+func TestCommandDetailsGroupsAnthropicNativeSubsetsByPeriod(t *testing.T) {
 	r := commandReport()
 	r.Surface = "all"
 	counts := map[string]report.Metric{"input_tokens": {Sum: number(12), ReportedTurns: 2}, "output_tokens": {Sum: number(9), ReportedTurns: 2}, "cache_creation_input_tokens": {Sum: number(2000), ReportedTurns: 1}, "cache_read_input_tokens": {}, "thinking_tokens": {Sum: number(4), ReportedTurns: 1}, "ephemeral_5m_input_tokens": {Sum: number(0), ReportedTurns: 1}, "ephemeral_1h_input_tokens": {}}
@@ -38,8 +38,7 @@ func TestCommandDetailsRendersAnthropicNativeSubsetsInPeriodHierarchy(t *testing
 		}
 	}
 	for _, want := range [][]string{
-		{"2026-09-01", "All", "2", "4*", "0*", "—"},
-		{"", `└─ "\u6a21\u578b\t\u2066\n"`, "2", "4*", "0*", "—"},
+		{"2026-09-01", `"\u6a21\u578b\t\u2066\n"`, "2", "4*", "0*", "—"},
 	} {
 		if !hasTableRow(text, want...) {
 			t.Errorf("missing secondary row %q: %s", want, text)
@@ -50,7 +49,7 @@ func TestCommandDetailsRendersAnthropicNativeSubsetsInPeriodHierarchy(t *testing
 	}
 }
 
-func TestCommandDetailsRendersOpenAIReportedSecondaryValuesInPeriodHierarchy(t *testing.T) {
+func TestCommandDetailsGroupsOpenAIReportedSecondaryValuesByPeriod(t *testing.T) {
 	r := commandReport()
 	r.Buckets[0].RangePartial, r.Buckets[0].InProgress = true, true
 	// Deliberately independent server totals: validation is not aggregation.
@@ -87,14 +86,13 @@ func TestCommandDetailsRendersOpenAIReportedSecondaryValuesInPeriodHierarchy(t *
 		}
 	}
 	for _, want := range [][]string{
-		{"2026-09-01", "All", "2", "0*", "—"},
-		{"", `└─ "evil\x1b[31m\n\u202e"`, "2", "0*", "—"},
+		{"2026-09-01", `"evil\x1b[31m\n\u202e"`, "2", "0*", "—"},
 	} {
 		if !hasTableRow(text, want...) {
 			t.Errorf("missing secondary row %q: %s", want, text)
 		}
 	}
-	if strings.ContainsAny(text, "\x1b\u202e") || strings.Contains(text, "[clipped]") || strings.Contains(text, "[in progress]") || strings.Contains(text, "Model totals") || strings.Contains(text, "Section total") || strings.Contains(text, "│ Range") || strings.Contains(text, "reported total: 1/2 stored Turns") || strings.Contains(text, "9,223,372,036,854,775,807") {
+	if strings.ContainsAny(text, "\x1b\u202e") || strings.Contains(text, `├─ "`) || strings.Contains(text, `└─ "`) || strings.Contains(text, "│ All ") || strings.Contains(text, "[clipped]") || strings.Contains(text, "[in progress]") || strings.Contains(text, "Model totals") || strings.Contains(text, "Section total") || strings.Contains(text, "│ Range") || strings.Contains(text, "reported total: 1/2 stored Turns") || strings.Contains(text, "9,223,372,036,854,775,807") {
 		t.Fatal("unsafe identity or rendered range totals")
 	}
 	options.Details = false

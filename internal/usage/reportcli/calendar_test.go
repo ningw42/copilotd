@@ -58,15 +58,15 @@ func TestCommandAllPeriodsFromSQLiteThroughHTTPInExplicitNamedZone(t *testing.T)
 				t.Fatal(err)
 			}
 			text := out.String()
-			for _, want := range []string{`Timezone: "Europe/Berlin"`, "Range: 2020-12-31 to 2021-01-05 (exclusive)", "Period: " + tc.period, "Anthropic\n", "OpenAI\n", tc.first, tc.second, "All", "└─ \"m\"", "Persisted successful Turns"} {
+			for _, want := range []string{`Timezone: "Europe/Berlin"`, "Range: 2020-12-31 to 2021-01-05 (exclusive)", "Period: " + tc.period, "Anthropic\n", "OpenAI\n", tc.first, tc.second, `"m"`, "Persisted successful Turns"} {
 				if !strings.Contains(text, want) {
 					t.Errorf("missing %q: %s", want, text)
 				}
 			}
-			// Server-owned period totals and their model children reach both
-			// native tables without renderer-side aggregation or range rows.
-			if strings.Count(text, "  18 ") != 4 || strings.Count(text, "  13 ") != 4 || strings.Contains(text, "  31 ") || strings.Contains(text, "Section total") || strings.Contains(text, "│ Range") {
-				t.Fatalf("period hierarchy did not reach terminal: %s", text)
+			// Period/model rows reach both native tables without renderer-side
+			// aggregation or duplicate range rows.
+			if strings.Count(text, "  18 ") != 2 || strings.Count(text, "  13 ") != 2 || strings.Contains(text, "  31 ") || strings.Contains(text, `├─ "`) || strings.Contains(text, `└─ "`) || strings.Contains(text, "│ All ") || strings.Contains(text, "Section total") || strings.Contains(text, "│ Range") {
+				t.Fatalf("period groups did not reach terminal: %s", text)
 			}
 			if strings.Contains(text, "[clipped]") || strings.Contains(text, "[in progress]") {
 				t.Fatalf("rendered period annotations: %s", text)

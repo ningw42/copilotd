@@ -104,8 +104,8 @@ func TestAnthropicAndCombinedUsageCommandThroughProductionListener(t *testing.T)
 			t.Fatal("unselected OpenAI or synthesized Anthropic input")
 		}
 		if surface == "" || surface == "all" {
-			if strings.Index(text, "Anthropic\n") > strings.Index(text, "OpenAI\n") || strings.Count(text, " All ") < 2 || strings.Count(text, "└─") < 2 || strings.Contains(text, "Model totals") || strings.Contains(text, "Section total") || strings.Contains(text, "│ Range") {
-				t.Fatalf("native section hierarchy: %s", text)
+			if strings.Index(text, "Anthropic\n") > strings.Index(text, "OpenAI\n") || strings.Contains(text, `├─ "`) || strings.Contains(text, `└─ "`) || strings.Contains(text, "│ All ") || strings.Contains(text, "Model totals") || strings.Contains(text, "Section total") || strings.Contains(text, "│ Range") {
+				t.Fatalf("native period groups: %s", text)
 			}
 		}
 	}
