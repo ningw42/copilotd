@@ -48,8 +48,8 @@ jobs:
           status=$?
           printf 'go test -race -json ./... -count=1\nexit=%s\n' "$status" > .scratch/race-evidence/command-status.txt
           exit "$status"
-      - name: Retain Linux full-race evidence
-        if: always()
+      - name: Retain failed Linux full-race evidence
+        if: failure()
         uses: actions/upload-artifact@v7
         with:
           name: usage-linux-full-race-${{ github.run_attempt }}
@@ -111,9 +111,9 @@ jobs:
             original="$(< .scratch/native-usage/userns-original)"
             sudo sysctl -w "kernel.apparmor_restrict_unprivileged_userns=$original" | tee .scratch/native-usage/userns-restored.log
           fi
-      - name: Retain native verification evidence even on failure
+      - name: Retain failed native verification evidence
         id: evidence
-        if: always()
+        if: failure()
         uses: actions/upload-artifact@v7
         with:
           name: usage-native-${{ matrix.goos }}-${{ matrix.goarch }}-${{ github.run_attempt }}
@@ -121,11 +121,13 @@ jobs:
           include-hidden-files: true
           retention-days: 90
           if-no-files-found: error
-      - name: Link retained evidence
-        if: always()
+      - name: Link retained failure evidence
+        if: failure() && steps.evidence.outcome == 'success'
         shell: bash
         env:
           ARTIFACT_URL: ${{ steps.evidence.outputs.artifact-url }}
           ARTIFACT_DIGEST: ${{ steps.evidence.outputs.artifact-digest }}
+          TARGET_GOOS: ${{ matrix.goos }}
+          TARGET_GOARCH: ${{ matrix.goarch }}
         run: |
-          printf '### Native Usage %s/%s\n\nSource: `%s`\n\n[Evidence](%s), SHA-256 `%s`. Retention: 90 days; archive before expiry. A failed job or missing mandatory pass is not certification.\n' '${{ matrix.goos }}' '${{ matrix.goarch }}' "$GITHUB_SHA" "$ARTIFACT_URL" "$ARTIFACT_DIGEST" >> "$GITHUB_STEP_SUMMARY"
+          printf "### Native Usage %s/%s failure\n\nSource: \`%s\`\n\n[Failure evidence](%s), SHA-256 \`%s\`. Retention: 90 days; archive before expiry.\n" "$TARGET_GOOS" "$TARGET_GOARCH" "$GITHUB_SHA" "$ARTIFACT_URL" "$ARTIFACT_DIGEST" >> "$GITHUB_STEP_SUMMARY"

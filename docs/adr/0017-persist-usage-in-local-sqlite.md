@@ -67,7 +67,8 @@ ACLs, reparse-point behavior, locking, and cleanup remain unverified limitations
 not certified behavior. That paragraph describes the original feasibility run;
 subsequent native reporting/SQLite checks and remaining limitations are tracked
 per revision in the [verification guide](../verification/usage-reporting.md) and
-#213 artifacts. Hosted-runner success does not certify arbitrary desktop ACLs.
+#213 run results. Only failed runs retain diagnostic artifacts. Hosted-runner
+success does not certify arbitrary desktop ACLs.
 
 ## Files, permissions, and durability
 

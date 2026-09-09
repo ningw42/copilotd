@@ -928,7 +928,7 @@ policy stays in the owning module, not duplicated across tickets or renderers.
 | [#210](https://github.com/ningw42/copilotd/issues/210) — terminal-local timezone default | Sections 4–5 and 11: presence-aware overrides, conservative platform discovery, failure guidance, and resolver tests | #209 |
 | [#211](https://github.com/ningw42/copilotd/issues/211) — filters, details, JSON | Sections 4, 6, 8–9, 11: exact UTF-8 model filters and guarded predicates, detailed native tables, validated original-byte JSON, and output-error tests | #208 |
 | [#212](https://github.com/ningw42/copilotd/issues/212) — concurrent inference and shutdown | Sections 7–8, 10–11: integrated contention/admission/cancellation/slow-reader/shutdown evidence and pinned-driver characterization | #208 |
-| [#213](https://github.com/ningw42/copilotd/issues/213) — release verification | Sections 10–12: complete executable acceptance, documentation/status agreement, retained native-platform evidence, and the full verification suite | #210, #211, #212 |
+| [#213](https://github.com/ningw42/copilotd/issues/213) — release verification | Sections 10–12: complete executable acceptance, documentation/status agreement, revision-specific native-platform run evidence, and the full verification suite | #210, #211, #212 |
 
 Every slice inherits section 1's scope and the preserved contracts in section 2.
 All section 7 safeguards must land with the first exposed data route in #207;

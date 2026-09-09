@@ -227,9 +227,10 @@ publishes checksums. Nix provides development/build environments for Linux
 x86-64 and macOS arm64. Builds disable cgo; Linux is fully static, while Darwin
 still links the system `libSystem` library. No companion daemon is required; the
 local usage database is opt-in. The additive [native test matrix](.github/workflows/test.yml)
-executes CGO-disabled acceptance on all four targets and retains architecture,
-SQLite, timezone, command, and skip evidence; Linux also retains the full race
-suite. A workflow definition is not certification: consult the
+executes CGO-disabled acceptance on all four targets and records architecture,
+SQLite, timezone, command, and skip evidence; Linux also runs the full race
+suite. Only failed jobs upload evidence artifacts. A workflow definition is not
+certification: consult the
 [revision-specific verification record](docs/verification/usage-reporting.md).
 Windows ACL behavior remains best effort, not a general desktop/ACL guarantee.
 Optional OS-service installation is not implemented

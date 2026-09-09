@@ -11,8 +11,8 @@ acceptance, the native pipeline, and final local verification.
 
 **A pipeline definition, cross-build, or local Linux pass is not four-platform
 certification.** The authoritative release result is the implementation SHA,
-per-target run/attempt/artifact links, failures or blockers, and archived evidence
-recorded on [#213](https://github.com/ningw42/copilotd/issues/213). The first native
+per-target run/attempt status and logs, failures or blockers, and any failed-run
+evidence recorded on [#213](https://github.com/ningw42/copilotd/issues/213). The first native
 Actions run, [34186159779](https://github.com/ningw42/copilotd/actions/runs/34186159779),
 executed all four targets at `7e3c195`: macOS arm64 passed; Linux native,
 both Windows native jobs, and Linux full race failed. Those results and subsequent
@@ -92,7 +92,7 @@ architecture comes from modern PowerShell/.NET, not an emulated process's name.
 macOS also checks Apple Silicon hardware; the Go host/test/binary must be arm64.
 No WSL, Rosetta, x64-on-Arm binary, or `go test -c` substitutes for native execution.
 
-Root-selected dependencies are retained with `go list -m all`. The introduction
+Root-selected dependencies are recorded with `go list -m all`. The introduction
 revision uses Go 1.27.1, `modernc.org/sqlite v1.58.0`, SQLite 3.53.4, and
 `modernc.org/libc v1.75.7`. ADR-0017's original feasibility run used libc v1.75.6;
 that historical result is not silently relabeled as the current selection.
@@ -117,7 +117,7 @@ executable checks are mandatory on Linux/macOS and explicit `not_applicable`
 entries on Windows, where their build tags exclude them.
 All tests execute; this inventory does not replace or narrow the suite.
 
-`tests.log-accounting.json` retains required names, every final test status,
+`tests.log-accounting.json` records required names, every final test status,
 all skips, and failures. Any unexpected Usage-scope skip fails verification,
 including skipped symlink fixtures. `TestUsageNativeRuntime` preflights real
 `os.Symlink` for files **and directories** before certification. Windows's
@@ -126,7 +126,7 @@ N/A; the store subprocess helper is intentionally skipped in the parent test
 process and exercised by its owning multi-process test. Non-Usage opt-in Codex
 binary audit skips remain visible, not claimed as performed.
 
-Linux retains the full `CGO_ENABLED=1` race suite. Windows arm64 does not support
+Linux runs the full `CGO_ENABLED=1` race suite. Windows arm64 does not support
 Go's race detector; no impossible or fake-success race lane is introduced. Native
 CGO-disabled SQLite/integration tests remain mandatory on both Windows targets.
 
@@ -139,7 +139,7 @@ unsupported untouched configuration must retain the correct override guidance.
 Then Linux/macOS CI separately installs a known `Europe/Berlin` system symlink
 on the **disposable hosted VM**, tests the real system-link path with no explicit
 zone, and restores the original link/file. Commands, results and controlled-vs-
-untouched labels are retained. `-native-ci` refuses to mutate a local machine.
+untouched labels are recorded. `-native-ci` refuses to mutate a local machine.
 This does not relax discovery policy or mislabel a named `TZ` as system discovery.
 
 - Linux also requires the two static-executable `unshare -Ur chroot` tests. The
@@ -161,23 +161,27 @@ This does not relax discovery policy or mislabel a named `TZ` as system discover
   No macOS no-host-data sandbox claim is made; Darwin still requires libSystem.
   Keep native macOS discovery evidence distinct from Linux/Windows fallback proof.
 
-### Retention and interpretation
+### Failure-artifact retention and interpretation
 
-Native artifacts `usage-native-OS-ARCH-ATTEMPT` are uploaded even on failure for
-90 days. They contain source/workflow SHA/ref, run URL/attempt/job, runner/image/
-OS architecture, Go environment and root modules, executable SHA-256/build
-metadata and executable, exact commands/exit codes/timings, uncached Go JSON logs,
-required-test/skip accounting, CLI argv/stdout/stderr/JSON/caveats, system timezone
-observations, and the final result. Only synthetic fixtures and selected public
-metadata are recorded; no full environment or real usage/credential dump.
-Linux race logs have a separate `usage-linux-full-race-ATTEMPT` artifact.
+Only failed jobs upload evidence artifacts, retained for 90 days. Successful jobs
+do not upload artifacts. Native failure artifacts
+`usage-native-OS-ARCH-ATTEMPT` contain source/workflow SHA/ref, run
+URL/attempt/job, runner/image/OS architecture, Go environment and root modules,
+executable SHA-256/build metadata and executable, exact commands/exit
+codes/timings, uncached Go JSON logs, required-test/skip accounting, CLI
+argv/stdout/stderr/JSON/caveats, system timezone observations, and the final
+result. Only synthetic fixtures and selected public metadata are recorded; no
+full environment or real usage/credential dump. Failed Linux full-race jobs use
+a separate `usage-linux-full-race-ATTEMPT` artifact.
 
-The job summary links artifact URL/digest. The coordinator must download/archive
-artifacts before expiration and summarize exact final-SHA results, run/attempt,
-artifact identity/digest and limitations on #213. Verify **the same final source
-revision** on all four targets after any fixes; do not combine passes from
-incompatible revisions. A setup failure without an artifact remains a visible
-blocker; inspect the job setup logs and image version as well.
+A failed-job summary links the artifact URL/digest when upload succeeds. The
+coordinator should download a needed failure artifact before expiration and
+record its identity/digest on #213. Successful certification records the exact
+final SHA, run/attempt, job results, logs, and limitations without a successful-run
+artifact. Verify **the same final source revision** on all four targets after any
+fixes; do not combine passes from incompatible revisions. A setup failure without
+an artifact remains a visible blocker; inspect the job setup logs and image
+version as well.
 
 A hosted VM pass covers its actual image/ISA/local filesystem and fixture
 conditions, not all desktops, Windows inherited/sidecar ACLs, antivirus policies,
