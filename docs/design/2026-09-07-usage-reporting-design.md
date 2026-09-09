@@ -691,8 +691,8 @@ For each admitted query:
    precomputed intervals in Go; SQLite `localtime`, string-prefix grouping, and
    offset-only bucketing do not implement this calendar-edge contract.
 5. Accumulate rows, per-model totals, and section totals with checked integer
-   arithmetic and coverage. Intern each model identity and reuse
-   its string across groups/totals, so the retained-model-byte limit bounds retained data,
+   arithmetic and coverage. Intern each model identity and reuse its string
+   across groups/totals, so the retained-model-byte limit bounds retained data,
    not just a distinct-name statistic while duplicate large strings accumulate.
    Stop with an error when a row/group/retained-data limit is exceeded; never
    return a successful truncated report. Check context

@@ -85,8 +85,8 @@ appending `/usage/v1/report`. The command is an HTTP client, never an offline
 SQLite reader. It shows exact native counts and stored-Turn coverage in
 Reported-model rows grouped by period, with a horizontal separator between
 periods. Whole-range per-model and section totals remain in JSON but are not
-repeated in the text tables. Anthropic appears first with **Uncached input**, Output,
-Cache create, and Cache read; OpenAI retains complete Input, Output, Cache write,
+repeated in the text tables. Anthropic appears first with **Uncached input**,
+Output, Cache create, and Cache read; OpenAI retains complete Input, Output, Cache write,
 and Cache read. TTL/thinking/reasoning subsets are never stacked onto their
 parent counts, and there is no normalized input or cross-Surface token grand
 total. Both sections share one read snapshot and request-wide limits.
@@ -127,8 +127,9 @@ substitution. Unknown identities succeed empty. `--details` adds native reasonin
 and reported-total counts for OpenAI, and thinking/cache-TTL counts for Anthropic,
 for the same period-grouped Reported-model rows. Text safely quotes model
 identities. `—` means unreported, `0` means reported zero, and `*` shows partial
-stored-Turn coverage. Static tables use rounded Lip Gloss borders without color or interactive
-terminal control; `range_partial` and `in_progress` remain available in JSON.
+stored-Turn coverage. Static tables use rounded Lip Gloss borders without color
+or interactive terminal control; `range_partial` and `in_progress` remain
+available in JSON.
 `--json` emits the complete validated original response plus a newline, preserving
 exact decimal count strings, Unicode, and additive fields. `--details` does not
 change JSON or make another request. There is no pricing, raw-Turn export, HTML,
