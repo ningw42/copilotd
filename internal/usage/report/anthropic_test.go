@@ -86,7 +86,7 @@ func TestQueryDistinguishesSelectedEmptyAndUnselectedNativeSections(t *testing.T
 			}
 		} else {
 			a := got.Anthropic
-			if a == nil || a.Rows == nil || a.Models == nil || len(a.Rows) != 0 || len(a.Models) != 0 || a.Total.Turns != 0 || len(a.Total.Usage) != 7 {
+			if a == nil || a.Rows == nil || a.Periods == nil || a.Models == nil || len(a.Rows) != 0 || len(a.Periods) != 0 || len(a.Models) != 0 || a.Total.Turns != 0 || len(a.Total.Usage) != 7 {
 				t.Fatalf("empty section: %+v", a)
 			}
 			for name, m := range a.Total.Usage {

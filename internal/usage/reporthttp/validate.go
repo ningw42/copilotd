@@ -86,6 +86,20 @@ func decodeReport(ctx context.Context, body []byte, q report.Query) (report.Repo
 		}
 		section := d.object(d.member(root, native.name))
 		s := report.Section{Rows: []report.Row{}, Models: []report.ModelTotal{}, Total: d.total(d.object(d.member(section, "total")), true, native.metrics)}
+		periodBuckets := map[string]bool{}
+		if _, present := section["periods"]; present {
+			s.Periods = []report.PeriodTotal{}
+			for _, raw := range d.array(section, "periods") {
+				o := d.object(raw)
+				period := report.PeriodTotal{BucketStart: d.date(o, "bucket_start"), Total: d.total(o, false, native.metrics)}
+				if !bucketNames[period.BucketStart] || periodBuckets[period.BucketStart] || len(s.Periods) > 0 && s.Periods[len(s.Periods)-1].BucketStart >= period.BucketStart {
+					d.err = errProtocol
+				}
+				periodBuckets[period.BucketStart] = true
+				s.Periods = append(s.Periods, period)
+			}
+		}
+		rowBuckets := map[string]bool{}
 		for _, raw := range d.array(section, "rows") {
 			o := d.object(raw)
 			row := report.Row{BucketStart: d.date(o, "bucket_start"), ModelTotal: report.ModelTotal{Model: d.text(o, "model"), Total: d.total(o, false, native.metrics)}}
@@ -98,6 +112,7 @@ func decodeReport(ctx context.Context, body []byte, q report.Query) (report.Repo
 					d.err = errProtocol
 				}
 			}
+			rowBuckets[row.BucketStart] = true
 			s.Rows = append(s.Rows, row)
 		}
 		for _, raw := range d.array(section, "models") {
@@ -111,7 +126,19 @@ func decodeReport(ctx context.Context, body []byte, q report.Query) (report.Repo
 			}
 			s.Models = append(s.Models, model)
 		}
-		if s.Total.Turns == 0 && (len(s.Rows) != 0 || len(s.Models) != 0) || s.Total.Turns > 0 && (len(s.Rows) == 0 || len(s.Models) == 0) {
+		if s.Periods != nil {
+			if len(periodBuckets) != len(rowBuckets) {
+				d.err = errProtocol
+			}
+			for bucket := range rowBuckets {
+				if !periodBuckets[bucket] {
+					d.err = errProtocol
+				}
+			}
+		}
+		hasData := len(s.Rows) != 0 || len(s.Models) != 0 || len(s.Periods) != 0
+		missingData := len(s.Rows) == 0 || len(s.Models) == 0 || s.Periods != nil && len(s.Periods) == 0
+		if s.Total.Turns == 0 && hasData || s.Total.Turns > 0 && missingData {
 			d.err = errProtocol
 		}
 		*native.dest = &s

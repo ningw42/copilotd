@@ -40,10 +40,15 @@ type Row struct {
 	BucketStart string `json:"bucket_start"`
 	ModelTotal
 }
+type PeriodTotal struct {
+	BucketStart string `json:"bucket_start"`
+	Total
+}
 type Section struct {
-	Rows   []Row        `json:"rows"`
-	Models []ModelTotal `json:"models"`
-	Total  Total        `json:"total"`
+	Rows    []Row         `json:"rows"`
+	Periods []PeriodTotal `json:"periods,omitempty"`
+	Models  []ModelTotal  `json:"models"`
+	Total   Total         `json:"total"`
 }
 type Bucket struct {
 	StartDate    string    `json:"start_date"`

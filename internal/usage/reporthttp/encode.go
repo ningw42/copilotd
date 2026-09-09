@@ -51,7 +51,18 @@ func encodeReport(ctx context.Context, result report.Report) ([]byte, error) {
 			}
 			out.model(row.Model, row)
 		}
-		out.append([]byte(`],"models":[`))
+		out.append([]byte("]"))
+		if native.section.Periods != nil {
+			out.append([]byte(`,"periods":[`))
+			for i, period := range native.section.Periods {
+				if i > 0 {
+					out.append([]byte(","))
+				}
+				out.value(period)
+			}
+			out.append([]byte("]"))
+		}
+		out.append([]byte(`,"models":[`))
 		for i, model := range native.section.Models {
 			if i > 0 {
 				out.append([]byte(","))

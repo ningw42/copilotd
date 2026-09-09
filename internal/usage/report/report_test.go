@@ -256,6 +256,34 @@ func TestQueryRejectsUnsupportedSelectionsBeforeOpeningFiles(t *testing.T) {
 	}
 }
 
+func TestQueryComputesServerOwnedPeriodTotals(t *testing.T) {
+	path := stored(t,
+		turn("2026-09-01T01:00:00Z", "a", usage.OpenAIUsage{InputTokens: 10, OutputTokens: 2, CachedTokens: ptr(4)}),
+		turn("2026-09-01T02:00:00Z", "b", usage.OpenAIUsage{InputTokens: 20, OutputTokens: 3}),
+		turn("2026-09-02T01:00:00Z", "a", usage.OpenAIUsage{InputTokens: 30, OutputTokens: 4, CachedTokens: ptr(0)}),
+	)
+	got, err := report.New(path).Query(context.Background(), selection())
+	if err != nil {
+		t.Fatal(err)
+	}
+	periods := got.OpenAI.Periods
+	if len(periods) != 2 || periods[0].BucketStart != "2026-09-01" || periods[1].BucketStart != "2026-09-02" {
+		t.Fatalf("period ordering: %+v", periods)
+	}
+	first := periods[0].Total
+	if first.Turns != 2 || *first.Usage["input_tokens"].Sum != 30 || *first.Usage["output_tokens"].Sum != 5 {
+		t.Fatalf("first period total: %+v", first)
+	}
+	if cached := first.Usage["cached_tokens"]; cached.ReportedTurns != 1 || cached.Sum == nil || *cached.Sum != 4 {
+		t.Fatalf("first period coverage: %+v", cached)
+	}
+	second := periods[1].Total
+	cached := second.Usage["cached_tokens"]
+	if second.Turns != 1 || *second.Usage["input_tokens"].Sum != 30 || cached.Sum == nil || *cached.Sum != 0 || cached.ReportedTurns != 1 {
+		t.Fatalf("second period total: %+v", second)
+	}
+}
+
 func TestQueryDailyOpenAINativeCounts(t *testing.T) {
 	sse := turn("2026-09-01T12:00:00Z", "z", usage.OpenAIUsage{InputTokens: 10, OutputTokens: 3, CacheWriteTokens: ptr(0)})
 	sse.Transport = usage.TransportSSE
