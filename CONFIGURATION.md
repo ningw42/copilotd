@@ -170,8 +170,9 @@ rules. Text uses comma-separated exact counts, ASCII-escaped model identities,
 `—` for unreported metrics, and `*` plus coverage for partial optional metrics.
 Anthropic renders first with Turns, Uncached input, Output, Cache create, and
 Cache read; OpenAI follows with Turns, Input, Output, Cache write, and Cache read.
-Each text section groups Reported-model rows by period, with a horizontal rule
-between period groups. Whole-range per-model and section totals remain in JSON
+Each text section groups Reported-model rows by period, labels the first column
+as `Day`, `Week`, `Month`, or `Year`, and places a horizontal rule between period
+groups. Whole-range per-model and section totals remain in JSON
 but are not rendered as duplicate text rows. A reported zero stays zero; an empty
 selection is explicitly labeled, not represented as proof of no consumption.
 

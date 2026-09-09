@@ -58,6 +58,7 @@ func TestCommandAllPeriodsFromSQLiteThroughHTTPInExplicitNamedZone(t *testing.T)
 				t.Fatal(err)
 			}
 			text := out.String()
+			heading := strings.ToUpper(tc.period[:1]) + tc.period[1:]
 			for _, want := range []string{`Timezone: "Europe/Berlin"`, "Range: 2020-12-31 to 2021-01-05 (exclusive)", "Period: " + tc.period, "Anthropic\n", "OpenAI\n", tc.first, tc.second, "m", "Persisted successful Turns"} {
 				if !strings.Contains(text, want) {
 					t.Errorf("missing %q: %s", want, text)
@@ -67,6 +68,9 @@ func TestCommandAllPeriodsFromSQLiteThroughHTTPInExplicitNamedZone(t *testing.T)
 			// aggregation or duplicate range rows.
 			if strings.Count(text, "  18 ") != 2 || strings.Count(text, "  13 ") != 2 || strings.Contains(text, "  31 ") || strings.Contains(text, `"m"`) || strings.Contains(text, `├─ "`) || strings.Contains(text, `└─ "`) || strings.Contains(text, "│ All ") || strings.Contains(text, "Section total") || strings.Contains(text, "│ Range") {
 				t.Fatalf("period groups did not reach terminal: %s", text)
+			}
+			if strings.Count(text, "\n│ "+heading) != 2 {
+				t.Fatalf("period-specific headings missing: %s", text)
 			}
 			if strings.Count(text, "\n├") != 4 {
 				t.Fatalf("missing horizontal separators between periods: %s", text)

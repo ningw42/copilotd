@@ -94,10 +94,10 @@ func render(endpoint string, r report.Report, details bool) string {
 		if native.section.Total.Turns == 0 {
 			fmt.Fprintln(&out, "No stored Turns in the selected range.")
 		}
-		renderTables(&out, native.section, native.primary)
+		renderTables(&out, r.Period, native.section, native.primary)
 		if details {
 			fmt.Fprintln(&out, "Secondary native counts")
-			renderTables(&out, native.section, native.secondary)
+			renderTables(&out, r.Period, native.section, native.secondary)
 		}
 		fmt.Fprintln(&out)
 	}
@@ -109,12 +109,12 @@ type metricColumn struct{ name, label string }
 
 // The two native projections share presentation mechanics, never aggregation.
 // All writes here target the in-memory builder; Run owns fallible stdout writes.
-func renderTables(out *strings.Builder, section *report.Section, columns []metricColumn) {
+func renderTables(out *strings.Builder, period string, section *report.Section, columns []metricColumn) {
 	rows, notes := groupedRows(section.Rows, columns)
 	if len(rows) == 0 {
 		return
 	}
-	renderTable(out, tableHeaders(columns), rows)
+	renderTable(out, tableHeaders(period, columns), rows)
 	renderCoverage(out, notes)
 }
 
@@ -164,12 +164,27 @@ func escapeModel(model string) string {
 	return quoted[1 : len(quoted)-1]
 }
 
-func tableHeaders(columns []metricColumn) []string {
-	headers := []string{"Period", "Model", "Turns"}
+func tableHeaders(period string, columns []metricColumn) []string {
+	headers := []string{periodHeading(period), "Model", "Turns"}
 	for _, column := range columns {
 		headers = append(headers, column.label)
 	}
 	return headers
+}
+
+func periodHeading(period string) string {
+	switch period {
+	case "day":
+		return "Day"
+	case "week":
+		return "Week"
+	case "month":
+		return "Month"
+	case "year":
+		return "Year"
+	default:
+		return "Period"
+	}
 }
 
 func renderTable(out *strings.Builder, headers []string, rows [][]string) {

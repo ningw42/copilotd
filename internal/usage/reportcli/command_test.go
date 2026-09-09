@@ -134,7 +134,7 @@ func TestCommandRendersAnthropicNativeCoverageWithoutPeriodAnnotations(t *testin
 	if !found || !strings.Contains(anthropic, "Anthropic\n") {
 		t.Fatalf("section ordering: %s", text)
 	}
-	for _, want := range []string{"Uncached input", "Output", "Cache create", "Cache read", "2,000*", "0*", "—", "cache create: 1/2 stored Turns", "cache read: 1/2 stored Turns", "9,007,199,254,740,993", `a\x1b\n\u202e`, "╭", "╯"} {
+	for _, want := range []string{"Day", "Uncached input", "Output", "Cache create", "Cache read", "2,000*", "0*", "—", "cache create: 1/2 stored Turns", "cache read: 1/2 stored Turns", "9,007,199,254,740,993", `a\x1b\n\u202e`, "╭", "╯"} {
 		if !strings.Contains(anthropic, want) {
 			t.Errorf("missing %q: %s", want, anthropic)
 		}
@@ -150,7 +150,7 @@ func TestCommandRendersAnthropicNativeCoverageWithoutPeriodAnnotations(t *testin
 	if strings.Count(anthropic, "\n├") != 1 {
 		t.Fatalf("models within one period were separated: %s", anthropic)
 	}
-	if strings.ContainsAny(text, "\x1b\u202e") || strings.Contains(anthropic, `"a\x1b\n\u202e"`) || strings.Contains(anthropic, `"z"`) || strings.Contains(anthropic, "Cache write") || strings.Contains(openai, "Uncached input") || strings.Contains(text, "Grand total") || strings.Contains(text, `├─ "`) || strings.Contains(text, `└─ "`) || strings.Contains(text, "│ All ") || strings.Contains(text, "[clipped]") || strings.Contains(text, "[in progress]") {
+	if strings.ContainsAny(text, "\x1b\u202e") || strings.Contains(anthropic, `"a\x1b\n\u202e"`) || strings.Contains(anthropic, `"z"`) || strings.Contains(anthropic, "Cache write") || strings.Contains(openai, "Uncached input") || strings.Contains(text, "Grand total") || strings.Contains(text, `├─ "`) || strings.Contains(text, `└─ "`) || strings.Contains(text, "│ All ") || strings.Contains(text, "│ Period ") || strings.Contains(text, "[clipped]") || strings.Contains(text, "[in progress]") {
 		t.Fatalf("unsafe or cross-Surface presentation: %s", text)
 	}
 	if !strings.Contains(openai, "6,000*") || !strings.Contains(openai, "Persisted successful Turns") {

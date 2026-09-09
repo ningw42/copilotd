@@ -779,23 +779,24 @@ time in a short header. Render separate native sections with these core columns:
 
 ```text
 Anthropic
-Period      Model              Turns  Uncached input  Output  Cache create  Cache read
+Week        Model              Turns  Uncached input  Output  Cache create  Cache read
 2026-09-01 claude-example  ...    ...             ...     ...           ...
            claude-other    ...    ...             ...     ...           ...
 ──────────────────────────────────────────────────────────────────────────────────────
 2026-09-08 claude-example  ...    ...             ...     ...           ...
 
 OpenAI
-Period      Model           Turns  Input  Output  Cache write  Cache read
+Week        Model           Turns  Input  Output  Cache write  Cache read
 2026-09-01 gpt-example  ...    ...    ...     ...          ...
            gpt-other    ...    ...    ...     ...          ...
 ─────────────────────────────────────────────────────────────────────────
 2026-09-08 gpt-example  ...    ...    ...     ...          ...
 ```
 
-Within each section, group one period's Reported-model values into multiline
-cells and put a horizontal table rule between period groups. Show the period
-label only on the group's first model line; do not add tree markers or an `All`
+Within each section, label the first column with the selected grouping
+(`Day`, `Week`, `Month`, or `Year`), group one period's Reported-model values
+into multiline cells, and put a horizontal table rule between period groups.
+Show the period label only on the group's first model line; do not add tree markers or an `All`
 row. Do not render the whole-range per-model or section totals as duplicate
 terminal rows; they remain in JSON. Do not sum unlike Surface inputs into a grand
 total. Model strings are rendered verbatim in identity but escaped for terminal
