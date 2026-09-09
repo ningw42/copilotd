@@ -125,7 +125,7 @@ func groupedRows(rows []report.Row, columns []metricColumn) ([][]string, []strin
 	for _, group := range groups {
 		cells := make([][]string, 3+len(columns))
 		for i, model := range group.models {
-			rendered, coverage := renderTotal("", strconv.QuoteToASCII(model.Model), model.Total, columns)
+			rendered, coverage := renderTotal("", escapeModel(model.Model), model.Total, columns)
 			if i == 0 {
 				rendered[0] = group.bucket
 			}
@@ -157,6 +157,11 @@ func orderedRows(rows []report.Row) []periodRows {
 		grouped[len(grouped)-1].models = append(grouped[len(grouped)-1].models, row)
 	}
 	return grouped
+}
+
+func escapeModel(model string) string {
+	quoted := strconv.QuoteToASCII(model)
+	return quoted[1 : len(quoted)-1]
 }
 
 func tableHeaders(columns []metricColumn) []string {

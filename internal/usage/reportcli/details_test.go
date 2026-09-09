@@ -38,7 +38,7 @@ func TestCommandDetailsGroupsAnthropicNativeSubsetsByPeriod(t *testing.T) {
 		}
 	}
 	for _, want := range [][]string{
-		{"2026-09-01", `"\u6a21\u578b\t\u2066\n"`, "2", "4*", "0*", "—"},
+		{"2026-09-01", `\u6a21\u578b\t\u2066\n`, "2", "4*", "0*", "—"},
 	} {
 		if !hasTableRow(text, want...) {
 			t.Errorf("missing secondary row %q: %s", want, text)
@@ -86,13 +86,13 @@ func TestCommandDetailsGroupsOpenAIReportedSecondaryValuesByPeriod(t *testing.T)
 		}
 	}
 	for _, want := range [][]string{
-		{"2026-09-01", `"evil\x1b[31m\n\u202e"`, "2", "0*", "—"},
+		{"2026-09-01", `evil\x1b[31m\n\u202e`, "2", "0*", "—"},
 	} {
 		if !hasTableRow(text, want...) {
 			t.Errorf("missing secondary row %q: %s", want, text)
 		}
 	}
-	if strings.ContainsAny(text, "\x1b\u202e") || strings.Contains(text, `├─ "`) || strings.Contains(text, `└─ "`) || strings.Contains(text, "│ All ") || strings.Contains(text, "[clipped]") || strings.Contains(text, "[in progress]") || strings.Contains(text, "Model totals") || strings.Contains(text, "Section total") || strings.Contains(text, "│ Range") || strings.Contains(text, "reported total: 1/2 stored Turns") || strings.Contains(text, "9,223,372,036,854,775,807") {
+	if strings.ContainsAny(text, "\x1b\u202e") || strings.Contains(text, `"evil\x1b[31m\n\u202e"`) || strings.Contains(text, `├─ "`) || strings.Contains(text, `└─ "`) || strings.Contains(text, "│ All ") || strings.Contains(text, "[clipped]") || strings.Contains(text, "[in progress]") || strings.Contains(text, "Model totals") || strings.Contains(text, "Section total") || strings.Contains(text, "│ Range") || strings.Contains(text, "reported total: 1/2 stored Turns") || strings.Contains(text, "9,223,372,036,854,775,807") {
 		t.Fatal("unsafe identity or rendered range totals")
 	}
 	options.Details = false

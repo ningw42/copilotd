@@ -134,14 +134,14 @@ func TestCommandRendersAnthropicNativeCoverageWithoutPeriodAnnotations(t *testin
 	if !found || !strings.Contains(anthropic, "Anthropic\n") {
 		t.Fatalf("section ordering: %s", text)
 	}
-	for _, want := range []string{"Uncached input", "Output", "Cache create", "Cache read", "2,000*", "0*", "—", "cache create: 1/2 stored Turns", "cache read: 1/2 stored Turns", "9,007,199,254,740,993", `"a\x1b\n\u202e"`, "╭", "╯"} {
+	for _, want := range []string{"Uncached input", "Output", "Cache create", "Cache read", "2,000*", "0*", "—", "cache create: 1/2 stored Turns", "cache read: 1/2 stored Turns", "9,007,199,254,740,993", `a\x1b\n\u202e`, "╭", "╯"} {
 		if !strings.Contains(anthropic, want) {
 			t.Errorf("missing %q: %s", want, anthropic)
 		}
 	}
 	for _, want := range [][]string{
-		{"2026-09-01", `"a\x1b\n\u202e"`, "2", "12", "9", "2,000*", "0*"},
-		{"", `"z"`, "1", "9,007,199,254,740,993", "3", "—", "—"},
+		{"2026-09-01", `a\x1b\n\u202e`, "2", "12", "9", "2,000*", "0*"},
+		{"", "z", "1", "9,007,199,254,740,993", "3", "—", "—"},
 	} {
 		if !hasTableRow(anthropic, want...) {
 			t.Errorf("missing grouped row %q: %s", want, anthropic)
@@ -150,7 +150,7 @@ func TestCommandRendersAnthropicNativeCoverageWithoutPeriodAnnotations(t *testin
 	if strings.Count(anthropic, "\n├") != 1 {
 		t.Fatalf("models within one period were separated: %s", anthropic)
 	}
-	if strings.ContainsAny(text, "\x1b\u202e") || strings.Contains(anthropic, "Cache write") || strings.Contains(openai, "Uncached input") || strings.Contains(text, "Grand total") || strings.Contains(text, `├─ "`) || strings.Contains(text, `└─ "`) || strings.Contains(text, "│ All ") || strings.Contains(text, "[clipped]") || strings.Contains(text, "[in progress]") {
+	if strings.ContainsAny(text, "\x1b\u202e") || strings.Contains(anthropic, `"a\x1b\n\u202e"`) || strings.Contains(anthropic, `"z"`) || strings.Contains(anthropic, "Cache write") || strings.Contains(openai, "Uncached input") || strings.Contains(text, "Grand total") || strings.Contains(text, `├─ "`) || strings.Contains(text, `└─ "`) || strings.Contains(text, "│ All ") || strings.Contains(text, "[clipped]") || strings.Contains(text, "[in progress]") {
 		t.Fatalf("unsafe or cross-Surface presentation: %s", text)
 	}
 	if !strings.Contains(openai, "6,000*") || !strings.Contains(openai, "Persisted successful Turns") {
@@ -172,12 +172,12 @@ func TestCommandRendersServerValuesSafelyAndReturnsOutputFailures(t *testing.T) 
 		t.Fatal(err)
 	}
 	text := out.String()
-	for _, want := range []string{server.URL, "UTC", "2026-09-01", "OpenAI", "9,007,199,254,740,993", "6,000*", "cache read: 1/2 stored Turns", "—", `"evil\x1b[31m\n\u202e"`, "Persisted successful Turns observed by the Usage meter; best-effort", "╭", "╯"} {
+	for _, want := range []string{server.URL, "UTC", "2026-09-01", "OpenAI", "9,007,199,254,740,993", "6,000*", "cache read: 1/2 stored Turns", "—", `evil\x1b[31m\n\u202e`, "Persisted successful Turns observed by the Usage meter; best-effort", "╭", "╯"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("missing %q in:\n%s", want, text)
 		}
 	}
-	if strings.ContainsAny(text, "\x1b\u202e") || strings.Contains(text, `├─ "`) || strings.Contains(text, `└─ "`) || strings.Contains(text, "│ All ") || strings.Contains(text, "Model totals") || strings.Contains(text, "Section total") || strings.Contains(text, "│ Range") {
+	if strings.ContainsAny(text, "\x1b\u202e") || strings.Contains(text, `"evil\x1b[31m\n\u202e"`) || strings.Contains(text, `├─ "`) || strings.Contains(text, `└─ "`) || strings.Contains(text, "│ All ") || strings.Contains(text, "Model totals") || strings.Contains(text, "Section total") || strings.Contains(text, "│ Range") {
 		t.Fatal("unsafe identity or range totals")
 	}
 	if err := reportcli.Run(context.Background(), client, options, brokenOutput{}); err == nil {

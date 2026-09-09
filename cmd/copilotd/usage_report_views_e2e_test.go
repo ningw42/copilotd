@@ -228,7 +228,9 @@ func TestUsageExactModelConfigurationThroughProductionListener(t *testing.T) {
 						t.Fatal(text)
 					}
 				} else {
-					if !strings.Contains(text, strconv.QuoteToASCII(tc.model)) || strings.Contains(text, "No stored Turns") {
+					quoted := strconv.QuoteToASCII(tc.model)
+					escaped := quoted[1 : len(quoted)-1]
+					if !strings.Contains(text, escaped) || strings.Contains(text, "No stored Turns") {
 						t.Fatal(text)
 					}
 					if surface != "anthropic" && !strings.Contains(text, "8,012") {

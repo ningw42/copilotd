@@ -125,9 +125,9 @@ cross-builds alone.
 case, whitespace, and Unicode without Catalog alias expansion or Requested-model
 substitution. Unknown identities succeed empty. `--details` adds native reasoning
 and reported-total counts for OpenAI, and thinking/cache-TTL counts for Anthropic,
-for the same period-grouped Reported-model rows. Text safely quotes model
-identities. `—` means unreported, `0` means reported zero, and `*` shows partial
-stored-Turn coverage. Static tables use rounded Lip Gloss borders without color
+for the same period-grouped Reported-model rows. Text safely ASCII-escapes model
+identities without surrounding quotes. `—` means unreported, `0` means reported
+zero, and `*` shows partial stored-Turn coverage. Static tables use rounded Lip Gloss borders without color
 or interactive terminal control; `range_partial` and `in_progress` remain
 available in JSON.
 `--json` emits the complete validated original response plus a newline, preserving
