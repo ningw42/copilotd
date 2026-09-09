@@ -30,25 +30,6 @@ func reportBody(t *testing.T, mutate func(map[string]any)) string {
 	return string(body)
 }
 
-func periodReportBody(t *testing.T, mutate func(map[string]any)) string {
-	t.Helper()
-	return reportBody(t, func(root map[string]any) {
-		section := root["openai"].(map[string]any)
-		total := section["total"].(map[string]any)
-		total["turns"] = "1"
-		usage := total["usage"].(map[string]any)
-		for _, name := range []string{"input_tokens", "output_tokens"} {
-			usage[name].(map[string]any)["reported_turns"] = "1"
-		}
-		section["rows"] = []any{map[string]any{"bucket_start": "2026-09-01", "model": "example", "turns": "1", "usage": usage}}
-		section["periods"] = []any{map[string]any{"bucket_start": "2026-09-01", "turns": "1", "usage": usage}}
-		section["models"] = []any{map[string]any{"model": "example", "turns": "1", "usage": usage}}
-		if mutate != nil {
-			mutate(section)
-		}
-	})
-}
-
 func runPresentations(t *testing.T, body string, query report.Query, valid bool) {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -93,32 +74,6 @@ func runPresentations(t *testing.T, body string, query report.Query, valid bool)
 			if valid && jsonMode && output.String() != body+"\n" {
 				t.Fatal("original JSON bytes changed")
 			}
-		})
-	}
-}
-
-func TestClientValidatesOptionalServerPeriodTotals(t *testing.T) {
-	runPresentations(t, periodReportBody(t, nil), report.Query{Surface: "openai", Period: "day"}, true)
-	runPresentations(t, periodReportBody(t, func(section map[string]any) {
-		delete(section, "periods")
-	}), report.Query{Surface: "openai", Period: "day"}, true)
-
-	for _, tc := range []struct {
-		name   string
-		mutate func(map[string]any)
-	}{
-		{"null periods", func(section map[string]any) { section["periods"] = nil }},
-		{"empty periods with rows", func(section map[string]any) { section["periods"] = []any{} }},
-		{"unknown bucket", func(section map[string]any) {
-			section["periods"].([]any)[0].(map[string]any)["bucket_start"] = "2026-09-02"
-		}},
-		{"duplicate bucket", func(section map[string]any) {
-			period := section["periods"].([]any)[0]
-			section["periods"] = append(section["periods"].([]any), period)
-		}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			runPresentations(t, periodReportBody(t, tc.mutate), report.Query{Surface: "openai", Period: "day"}, false)
 		})
 	}
 }
@@ -234,10 +189,9 @@ func TestClientSelectedDateLimitsDoNotConstrainLabelsOrInstants(t *testing.T) {
 					usage[name].(map[string]any)["reported_turns"] = "1"
 				}
 				root["openai"] = map[string]any{
-					"rows":    []any{map[string]any{"bucket_start": tc.label, "model": "example", "turns": "1", "usage": usage}},
-					"periods": []any{map[string]any{"bucket_start": tc.label, "turns": "1", "usage": usage}},
-					"models":  []any{map[string]any{"model": "example", "turns": "1", "usage": usage}},
-					"total":   map[string]any{"turns": "1", "usage": usage},
+					"rows":   []any{map[string]any{"bucket_start": tc.label, "model": "example", "turns": "1", "usage": usage}},
+					"models": []any{map[string]any{"model": "example", "turns": "1", "usage": usage}},
+					"total":  map[string]any{"turns": "1", "usage": usage},
 				}
 			})
 			runPresentations(t, body, report.Query{Surface: "openai", Period: tc.period, Timezone: tc.zone, Since: tc.since, Until: tc.until}, true)

@@ -18,7 +18,7 @@ func TestCommandDetailsGroupsAnthropicNativeSubsetsByPeriod(t *testing.T) {
 	r.Surface = "all"
 	counts := map[string]report.Metric{"input_tokens": {Sum: number(12), ReportedTurns: 2}, "output_tokens": {Sum: number(9), ReportedTurns: 2}, "cache_creation_input_tokens": {Sum: number(2000), ReportedTurns: 1}, "cache_read_input_tokens": {}, "thinking_tokens": {Sum: number(4), ReportedTurns: 1}, "ephemeral_5m_input_tokens": {Sum: number(0), ReportedTurns: 1}, "ephemeral_1h_input_tokens": {}}
 	model := report.ModelTotal{Model: "模型\t\u2066\n", Total: report.Total{Turns: 2, Usage: counts}}
-	r.Anthropic = &report.Section{Rows: []report.Row{{BucketStart: "2026-09-01", ModelTotal: model}}, Periods: []report.PeriodTotal{{BucketStart: "2026-09-01", Total: model.Total}}, Models: []report.ModelTotal{model}, Total: model.Total}
+	r.Anthropic = &report.Section{Rows: []report.Row{{BucketStart: "2026-09-01", ModelTotal: model}}, Models: []report.ModelTotal{model}, Total: model.Total}
 	server := httptest.NewServer(reporthttp.Handler(func(context.Context, report.Query) (report.Report, error) { return r, nil }))
 	defer server.Close()
 	client, _ := reporthttp.NewClient(server.URL)
@@ -53,19 +53,19 @@ func TestCommandDetailsGroupsOpenAIReportedSecondaryValuesByPeriod(t *testing.T)
 	r := commandReport()
 	r.Buckets[0].RangePartial, r.Buckets[0].InProgress = true, true
 	// Deliberately independent server totals: validation is not aggregation.
-	for i, total := range []*report.Total{&r.OpenAI.Rows[0].Total, &r.OpenAI.Periods[0].Total, &r.OpenAI.Models[0].Total, &r.OpenAI.Total} {
+	for i, total := range []*report.Total{&r.OpenAI.Rows[0].Total, &r.OpenAI.Models[0].Total, &r.OpenAI.Total} {
 		metrics := map[string]report.Metric{}
 		for k, v := range total.Usage {
 			metrics[k] = v
 		}
 		total.Usage = metrics
 		switch i {
-		case 0, 1:
+		case 0:
 			metrics["reasoning_tokens"] = report.Metric{Sum: number(0), ReportedTurns: 1}
-		case 2:
+		case 1:
 			metrics["reasoning_tokens"] = report.Metric{Sum: number(4), ReportedTurns: 2}
 			metrics["total_tokens"] = report.Metric{Sum: number(9007199254740993), ReportedTurns: 1}
-		case 3:
+		case 2:
 			metrics["reasoning_tokens"] = report.Metric{Sum: number(6), ReportedTurns: 2}
 			metrics["total_tokens"] = report.Metric{Sum: number(9223372036854775807), ReportedTurns: 2}
 		}

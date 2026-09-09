@@ -83,7 +83,7 @@ func TestCommandAllPeriodsFromSQLiteThroughHTTPInExplicitNamedZone(t *testing.T)
 				t.Fatalf("calendar: %+v", r)
 			}
 			for _, s := range []*report.Section{r.Anthropic, r.OpenAI} {
-				if len(s.Rows) != 2 || len(s.Periods) != 2 || s.Rows[0].BucketStart != tc.first || s.Rows[1].BucketStart != tc.second || s.Periods[0].BucketStart != tc.first || s.Periods[0].Turns != 2 || *s.Periods[0].Usage["input_tokens"].Sum != 18 || s.Total.Turns != 3 || *s.Total.Usage["input_tokens"].Sum != 31 || s.Models[0].Turns != 3 {
+				if len(s.Rows) != 2 || s.Rows[0].BucketStart != tc.first || s.Rows[1].BucketStart != tc.second || s.Rows[0].Turns != 2 || *s.Rows[0].Usage["input_tokens"].Sum != 18 || s.Total.Turns != 3 || *s.Total.Usage["input_tokens"].Sum != 31 || s.Models[0].Turns != 3 {
 					t.Fatalf("shared interval native aggregates: %+v", s)
 				}
 			}

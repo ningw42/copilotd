@@ -36,7 +36,7 @@ func RegisterUsage(fs *ff.FlagSet) *UsageFlags {
 		optionalStringField("timezone", func(c *UsageConfig) **string { return &c.Timezone }, "named Area/City or UTC (omitted: terminal-local on supported Unix; native Windows requires explicit)"),
 		stringField("surface", "all", func(c *UsageConfig) *string { return &c.Surface }, oneOf([]string{"all", "anthropic", "openai"}), "native Surface selection: all, anthropic, openai"),
 		optionalStringField("model", func(c *UsageConfig) **string { return &c.Model }, "exact non-empty UTF-8 Reported model (case/whitespace preserved; no aliases)"),
-		boolField("details", false, func(c *UsageConfig) *bool { return &c.Details }, "secondary native tables for period totals and model rows"),
+		boolField("details", false, func(c *UsageConfig) *bool { return &c.Details }, "secondary native tables for period-grouped model rows"),
 		boolField("json", false, func(c *UsageConfig) *bool { return &c.JSON }, "original validated JSON plus newline (complete report; unaffected by --details)"),
 		durationField("timeout", 15*time.Second, inSeconds, func(c *UsageConfig) *time.Duration { return &c.Timeout }, positive, "overall HTTP request/read timeout"),
 		path,

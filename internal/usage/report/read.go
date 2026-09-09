@@ -143,8 +143,7 @@ func readSection(ctx context.Context, conn *sql.Conn, buckets []Bucket, surface 
 		return nil, err
 	}
 	defer func() { err = errors.Join(err, rows.Close()) }()
-	section := Section{Rows: []Row{}, Periods: []PeriodTotal{}, Models: []ModelTotal{}, Total: emptyTotal(names)}
-	periods := map[string]*Total{}
+	section := Section{Rows: []Row{}, Models: []ModelTotal{}, Total: emptyTotal(names)}
 	models := map[string]*Total{}
 	type groupKey struct{ bucket, model string }
 	groups := map[groupKey]*Total{}
@@ -200,8 +199,7 @@ func readSection(ctx context.Context, conn *sql.Conn, buckets []Bucket, surface 
 		if bucket == len(buckets) || at < buckets[bucket].RangeStart.UnixMilli() {
 			return nil, errors.New("timestamp outside report intervals")
 		}
-		bucketStart := buckets[bucket].StartDate
-		key := groupKey{bucketStart, model}
+		key := groupKey{buckets[bucket].StartDate, model}
 		if groups[key] == nil {
 			// Surface is implicit in this section's map, but its groups count
 			// against the one request-wide limit.
@@ -212,15 +210,11 @@ func readSection(ctx context.Context, conn *sql.Conn, buckets []Bucket, surface 
 			total := emptyTotal(names)
 			groups[key] = &total
 		}
-		if periods[bucketStart] == nil {
-			total := emptyTotal(names)
-			periods[bucketStart] = &total
-		}
 		if models[model] == nil {
 			total := emptyTotal(names)
 			models[model] = &total
 		}
-		for _, total := range []*Total{groups[key], periods[bucketStart], models[model], &section.Total} {
+		for _, total := range []*Total{groups[key], models[model], &section.Total} {
 			if total.Turns == math.MaxInt64 {
 				return nil, overflow()
 			}
@@ -251,9 +245,6 @@ func readSection(ctx context.Context, conn *sql.Conn, buckets []Bucket, surface 
 	for key, total := range groups {
 		section.Rows = append(section.Rows, Row{BucketStart: key.bucket, ModelTotal: ModelTotal{Model: key.model, Total: *total}})
 	}
-	for bucketStart, total := range periods {
-		section.Periods = append(section.Periods, PeriodTotal{BucketStart: bucketStart, Total: *total})
-	}
 	for model, total := range models {
 		section.Models = append(section.Models, ModelTotal{Model: model, Total: *total})
 	}
@@ -261,7 +252,6 @@ func readSection(ctx context.Context, conn *sql.Conn, buckets []Bucket, surface 
 		a, b := section.Rows[i], section.Rows[j]
 		return a.BucketStart < b.BucketStart || a.BucketStart == b.BucketStart && a.Model < b.Model
 	})
-	sort.Slice(section.Periods, func(i, j int) bool { return section.Periods[i].BucketStart < section.Periods[j].BucketStart })
 	sort.Slice(section.Models, func(i, j int) bool { return section.Models[i].Model < section.Models[j].Model })
 	return &section, ctx.Err()
 }

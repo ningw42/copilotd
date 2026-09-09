@@ -64,8 +64,8 @@ not an inference-authentication exemption accidentally inherited from probes.
 
 The implementation serves Anthropic, OpenAI, or both (the default) with daily
 groups by default, all four calendar periods, explicit named zones, independent
-current-month date defaults, and hierarchical native terminal sections backed
-by server-computed period totals. Both selected histories share one snapshot and
+current-month date defaults, and period-grouped native terminal sections. Both
+selected histories share one snapshot and
 request-wide limits. Omitted report timezones
 now use supported configuration visible to the CLI process on Linux/macOS;
 SSH/container/WSL execution does not discover a physical workstation outside it.

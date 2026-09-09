@@ -155,9 +155,9 @@ credentials, cookies, redirects, retries, daemon discovery, or local-file
 fallback are used. `--timeout` must be positive and bounds the request/read.
 
 The schema-version-1 HTTP response contains all seven Anthropic and/or six
-OpenAI native metrics for the selected Surfaces, period/model rows,
-server-computed period totals, per-model and separate section totals, and
-effective selections. An omitted Surface selects both. Unselected sections are omitted; selected empty sections contain
+OpenAI native metrics for the selected Surfaces, period/model rows, per-model
+and separate section totals, and effective selections. An omitted Surface
+selects both. Unselected sections are omitted; selected empty sections contain
 empty arrays, required zeros, and optional NULL sums. Anthropic input stays the
 uncached remainder, while OpenAI input stays complete input. Cache TTL and
 thinking/reasoning counts remain subsets of their native parent counts, never
@@ -170,12 +170,12 @@ rules. Text uses comma-separated exact counts, ASCII-escaped model identities,
 `—` for unreported metrics, and `*` plus coverage for partial optional metrics.
 Anthropic renders first with Turns, Uncached input, Output, Cache create, and
 Cache read; OpenAI follows with Turns, Input, Output, Cache write, and Cache read.
-Each text section groups a server-computed period `All` row with tree-indented
-Reported-model rows. Whole-range per-model and section totals remain in JSON but
-are not rendered as duplicate text rows. A reported zero stays zero; an empty
+Each text section groups Reported-model rows by period, with a horizontal rule
+between period groups. Whole-range per-model and section totals remain in JSON
+but are not rendered as duplicate text rows. A reported zero stays zero; an empty
 selection is explicitly labeled, not represented as proof of no consumption.
 
-`--details` adds secondary native tables for each period's `All` total and
+`--details` adds secondary native tables for the same period-grouped
 Reported-model rows: OpenAI **Reasoning** (`reasoning_tokens`) and **Reported
 total** (`total_tokens`, never inferred); Anthropic **Thinking** (`thinking_tokens`),
 **Cache create 5m** (`ephemeral_5m_input_tokens`), and **Cache create 1h**
