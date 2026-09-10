@@ -280,19 +280,31 @@ func TestCommandDiscoversAbsoluteTZZoneFile(t *testing.T) {
 	}
 }
 
-func TestCommandDiscoversResolvedNixOSZoneinfoRoot(t *testing.T) {
-	files := newTimezoneFiles(t, "linux", nil)
-	files.zone("/nix/store/fixture-tzdata/share/zoneinfo/Europe/Berlin")
-	files.link("/usr/share/zoneinfo", "/nix/store/fixture-tzdata/share/zoneinfo")
-	files.link("/etc/localtime", "/nix/store/fixture-tzdata/share/zoneinfo/Europe/Berlin")
-	client, options, requested := localTimezoneCommand(t)
-	options.localSystem = files.system
-	var out bytes.Buffer
-	if err := Run(context.Background(), client, options, &out); err != nil {
-		t.Fatal(err)
-	}
-	if len(*requested) != 1 || (*requested)[0] != "Europe/Berlin" {
-		t.Fatalf("requests=%v\n%s", *requested, out.String())
+func TestCommandAcceptsNixOSSystemZoneinfoDataRoot(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		env  map[string]string
+	}{
+		{"system timezone with TZDIR", map[string]string{"TZDIR": "/etc/zoneinfo"}},
+		{"named TZ with TZDIR", map[string]string{"TZ": "Europe/Berlin", "TZDIR": "/etc/zoneinfo"}},
+		{"system timezone with ZONEINFO", map[string]string{"ZONEINFO": "/etc/zoneinfo"}},
+		{"named TZ with ZONEINFO", map[string]string{"TZ": "Europe/Berlin", "ZONEINFO": "/etc/zoneinfo"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			files := newTimezoneFiles(t, "linux", tc.env)
+			files.zone("/nix/store/fixture-tzdata/share/zoneinfo/Europe/Berlin")
+			files.link("/etc/zoneinfo", "/nix/store/fixture-tzdata/share/zoneinfo")
+			files.link("/etc/localtime", "/nix/store/fixture-tzdata/share/zoneinfo/Europe/Berlin")
+			client, options, requested := localTimezoneCommand(t)
+			options.localSystem = files.system
+			var out bytes.Buffer
+			if err := Run(context.Background(), client, options, &out); err != nil {
+				t.Fatal(err)
+			}
+			if len(*requested) != 1 || (*requested)[0] != "Europe/Berlin" {
+				t.Fatalf("requests=%v\n%s", *requested, out.String())
+			}
+		})
 	}
 }
 

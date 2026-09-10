@@ -300,8 +300,11 @@ resolves and no explicit timezone override was supplied:
    colon, then accept a validated named value or an absolute zone-file path
    whose name can be established by the next step. A lone colon is invalid.
    Unsupported rules, invalid values, or a custom/unidentifiable file error
-   without trying the OS default. A non-empty `TZDIR` or `ZONEINFO` override
-   disables automatic discovery; require an explicit report timezone instead.
+   without trying the OS default. A non-empty `TZDIR` or `ZONEINFO` value whose
+   cleaned path equals one of the platform zoneinfo root paths in the next step
+   is system data, not a custom override; this includes NixOS's system-exported
+   `TZDIR=/etc/zoneinfo`. Other values disable automatic discovery; require an
+   explicit report timezone instead.
 2. **Linux/macOS system setting:** with `TZ` absent, inspect `/etc/localtime`.
    Follow symlinks with a fixed 40-hop bound, handling relative targets and
    rejecting loops, missing/unreadable targets, or inconsistent results. On
