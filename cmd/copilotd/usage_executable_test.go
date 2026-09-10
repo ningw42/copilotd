@@ -62,14 +62,12 @@ func TestUsageExecutableAcceptance(t *testing.T) {
 	base := []string{"usage", "--endpoint", endpoint, "--timezone", "UTC", "--since", "2026-09-01", "--until", "2026-09-02"}
 	t.Run("compact", func(t *testing.T) {
 		out := usageExec(t, binary, nil, 0, append(base, "--model", "Model")...)
-		for _, want := range []string{"Anthropic\n", "OpenAI\n", "Uncached input", "8,012", "Model totals", "Section total", "best-effort and", "Optional-count coverage refers only to stored Turns"} {
+		for _, want := range []string{"Anthropic\n", "OpenAI\n", "│ Day", "Uncached input", "8,012", "Model", "best-effort and", "Optional-count coverage refers only to stored Turns"} {
 			if !strings.Contains(out, want) {
 				t.Fatalf("missing %q: %s", want, out)
 			}
 		}
-		if strings.Contains(out, "Reasoning") || strings.Contains(out, "Grand total") {
-			t.Fatal(out)
-		}
+		assertTextExcludes(t, out, "Reasoning", "Grand total", `"Model"`, `├─ "`, `└─ "`, "│ All ", "Model totals", "Section total", "│ Range")
 	})
 	t.Run("periods_surfaces_and_exact_filters", func(t *testing.T) {
 		for _, period := range []struct{ name, start string }{{"day", "2026-09-01"}, {"week", "2026-08-31"}, {"month", "2026-09-01"}, {"year", "2026-01-01"}} {

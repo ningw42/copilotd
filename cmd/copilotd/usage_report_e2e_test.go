@@ -17,6 +17,15 @@ import (
 	"github.com/ningw42/copilotd/internal/usage/reporthttp"
 )
 
+func assertTextExcludes(t *testing.T, text string, fragments ...string) {
+	t.Helper()
+	for _, fragment := range fragments {
+		if strings.Contains(text, fragment) {
+			t.Errorf("unexpected fragment %q in:\n%s", fragment, text)
+		}
+	}
+}
+
 func TestAnthropicAndCombinedUsageCommandThroughProductionListener(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -104,9 +113,10 @@ func TestAnthropicAndCombinedUsageCommandThroughProductionListener(t *testing.T)
 			t.Fatal("unselected OpenAI or synthesized Anthropic input")
 		}
 		if surface == "" || surface == "all" {
-			if strings.Index(text, "Anthropic\n") > strings.Index(text, "OpenAI\n") || strings.Count(text, "Model totals") != 2 || strings.Count(text, "Section total") != 2 {
-				t.Fatalf("native section order/totals: %s", text)
+			if strings.Index(text, "Anthropic\n") > strings.Index(text, "OpenAI\n") {
+				t.Fatalf("native section order: %s", text)
 			}
+			assertTextExcludes(t, text, `├─ "`, `└─ "`, "│ All ", "Model totals", "Section total", "│ Range")
 		}
 	}
 }
@@ -249,7 +259,7 @@ func TestUsageCalendarConfigurationThroughProductionListener(t *testing.T) {
 
 func TestUsageHelpDescribesNativeSelectionAndPresentation(t *testing.T) {
 	help := runSuccessfully(t, "usage", "--help")
-	for _, want := range []string{"Anthropic and OpenAI Turns", "native Surface selection: all, anthropic, openai", "day, week, month, year", "current month's first day", "next month's first day", "terminal-local on supported Unix", "native Windows requires explicit", "exact non-empty UTF-8 Reported model", "secondary native tables for period rows and range totals", "original validated JSON plus newline"} {
+	for _, want := range []string{"Anthropic and OpenAI Turns", "native Surface selection: all, anthropic, openai", "day, week, month, year", "current month's first day", "next month's first day", "terminal-local on supported Unix", "native Windows requires explicit", "exact non-empty UTF-8 Reported model", "secondary native tables for period-grouped model rows", "original validated JSON plus newline"} {
 		if !strings.Contains(help, want) {
 			t.Errorf("missing %q in usage help: %s", want, help)
 		}

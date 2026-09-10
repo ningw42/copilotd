@@ -8,7 +8,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -157,15 +156,16 @@ func TestUsageExactModelConfigurationThroughProductionListener(t *testing.T) {
 	for _, surface := range []string{"anthropic", "openai", "all"} {
 		for _, tc := range []struct {
 			model string
+			text  string
 			flags []string
 			env   map[string]string
 		}{
-			{"Model", nil, nil},
-			{"model", nil, map[string]string{"COPILOTD_MODEL": "model"}},
-			{" model ", []string{"--model", " model "}, map[string]string{"COPILOTD_MODEL": "model"}},
-			{"é", []string{"--model", "é"}, nil}, {"e\u0301", []string{"--model", "e\u0301"}, nil}, {"模型", []string{"--model", "模型"}, nil},
-			{" ", []string{"--model", " "}, nil}, {"model\x00suffix", []string{"--model", "model\x00suffix"}, nil},
-			{"requested-only", []string{"--model", "requested-only"}, nil}, {"MODEL", []string{"--model", "MODEL"}, nil},
+			{"Model", "Model", nil, nil},
+			{"model", "model", nil, map[string]string{"COPILOTD_MODEL": "model"}},
+			{" model ", `\x20model\x20`, []string{"--model", " model "}, map[string]string{"COPILOTD_MODEL": "model"}},
+			{"é", `\u00e9`, []string{"--model", "é"}, nil}, {"e\u0301", `e\u0301`, []string{"--model", "e\u0301"}, nil}, {"模型", `\u6a21\u578b`, []string{"--model", "模型"}, nil},
+			{" ", `\x20`, []string{"--model", " "}, nil}, {"model\x00suffix", `model\x00suffix`, []string{"--model", "model\x00suffix"}, nil},
+			{"requested-only", "", []string{"--model", "requested-only"}, nil}, {"MODEL", "", []string{"--model", "MODEL"}, nil},
 		} {
 			for _, view := range [][]string{nil, {"--details"}, {"--json"}, {"--details", "--json"}} {
 				args := append([]string{"usage", "--endpoint", h.baseURL, "--config", path, "--surface", surface}, tc.flags...)
@@ -228,7 +228,7 @@ func TestUsageExactModelConfigurationThroughProductionListener(t *testing.T) {
 						t.Fatal(text)
 					}
 				} else {
-					if !strings.Contains(text, strconv.QuoteToASCII(tc.model)) || strings.Contains(text, "No stored Turns") {
+					if !strings.Contains(text, tc.text) || strings.Contains(text, "No stored Turns") {
 						t.Fatal(text)
 					}
 					if surface != "anthropic" && !strings.Contains(text, "8,012") {

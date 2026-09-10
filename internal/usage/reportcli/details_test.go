@@ -13,7 +13,7 @@ import (
 	"github.com/ningw42/copilotd/internal/usage/reporthttp"
 )
 
-func TestCommandDetailsRendersAnthropicNativeSubsetsAtEveryLevel(t *testing.T) {
+func TestCommandDetailsGroupsAnthropicNativeSubsetsByPeriod(t *testing.T) {
 	r := commandReport()
 	r.Surface = "all"
 	counts := map[string]report.Metric{"input_tokens": {Sum: number(12), ReportedTurns: 2}, "output_tokens": {Sum: number(9), ReportedTurns: 2}, "cache_creation_input_tokens": {Sum: number(2000), ReportedTurns: 1}, "cache_read_input_tokens": {}, "thinking_tokens": {Sum: number(4), ReportedTurns: 1}, "ephemeral_5m_input_tokens": {Sum: number(0), ReportedTurns: 1}, "ephemeral_1h_input_tokens": {}}
@@ -37,23 +37,17 @@ func TestCommandDetailsRendersAnthropicNativeSubsetsAtEveryLevel(t *testing.T) {
 			t.Errorf("missing %q: %s", want, text)
 		}
 	}
-	for _, want := range []string{`2026-09-01 "\u6a21\u578b\t\u2066\n" 2 4* 0* —`, `Range "\u6a21\u578b\t\u2066\n" 2 4* 0* —`, `Section total 2 4* 0* —`} {
-		found := false
-		for _, line := range strings.Split(text, "\n") {
-			if strings.Join(strings.Fields(line), " ") == want {
-				found = true
-			}
-		}
-		if !found {
+	for _, want := range [][]string{
+		{"2026-09-01", `\u6a21\u578b\t\u2066\n`, "2", "4*", "0*", "—"},
+	} {
+		if !hasTableRow(text, want...) {
 			t.Errorf("missing secondary row %q: %s", want, text)
 		}
 	}
-	if strings.ContainsAny(text, "模型\u2066") || strings.Contains(text, "Reasoning") || strings.Contains(text, "8,012") || strings.Contains(text, "Grand total") {
-		t.Fatal("unsafe or normalized native output")
-	}
+	assertTextExcludes(t, text, "模型", "\u2066", "Reasoning", "8,012", "Grand total")
 }
 
-func TestCommandDetailsRendersOpenAIReportedSecondaryValuesAtEveryLevel(t *testing.T) {
+func TestCommandDetailsGroupsOpenAIReportedSecondaryValuesByPeriod(t *testing.T) {
 	r := commandReport()
 	r.Buckets[0].RangePartial, r.Buckets[0].InProgress = true, true
 	// Deliberately independent server totals: validation is not aggregation.
@@ -84,25 +78,19 @@ func TestCommandDetailsRendersOpenAIReportedSecondaryValuesAtEveryLevel(t *testi
 		t.Fatal(err)
 	}
 	text := out.String()
-	for _, want := range []string{"Reasoning", "Reported total", "reasoning: 1/2 stored Turns", "reported total: 1/2 stored Turns", "[clipped] [in progress]", "Persisted successful Turns"} {
+	for _, want := range []string{"Reasoning", "Reported total", "reasoning: 1/2 stored Turns", "Persisted successful Turns"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("missing %q: %s", want, text)
 		}
 	}
-	for _, want := range []string{`2026-09-01 [clipped] [in progress] "evil\x1b[31m\n\u202e" 2 0* —`, `Range "evil\x1b[31m\n\u202e" 2 4 9,007,199,254,740,993*`, `Section total 2 6 9,223,372,036,854,775,807`} {
-		found := false
-		for _, line := range strings.Split(text, "\n") {
-			if strings.Join(strings.Fields(line), " ") == want {
-				found = true
-			}
-		}
-		if !found {
+	for _, want := range [][]string{
+		{"2026-09-01", `evil\x1b[31m\n\u202e`, "2", "0*", "—"},
+	} {
+		if !hasTableRow(text, want...) {
 			t.Errorf("missing secondary row %q: %s", want, text)
 		}
 	}
-	if strings.ContainsAny(text, "\x1b\u202e") {
-		t.Fatal("unsafe identity")
-	}
+	assertTextExcludes(t, text, "\x1b", "\u202e", `"evil\x1b[31m\n\u202e"`, `├─ "`, `└─ "`, "│ All ", "[clipped]", "[in progress]", "Model totals", "Section total", "│ Range", "reported total: 1/2 stored Turns", "9,223,372,036,854,775,807")
 	options.Details = false
 	out.Reset()
 	if err := reportcli.Run(context.Background(), client, options, &out); err != nil {

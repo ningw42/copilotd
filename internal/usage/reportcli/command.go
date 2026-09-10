@@ -8,10 +8,11 @@ import (
 	"io"
 	"strconv"
 	"strings"
-	"text/tabwriter"
 	"time"
 	"unicode/utf8"
 
+	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/lipgloss/table"
 	"github.com/ningw42/copilotd/internal/usage/report"
 	"github.com/ningw42/copilotd/internal/usage/reporthttp"
 )
@@ -74,17 +75,6 @@ const caveat = "Persisted successful Turns observed by the Usage meter; best-eff
 func render(endpoint string, r report.Report, details bool) string {
 	var out strings.Builder
 	fmt.Fprintf(&out, "Usage report — %s\nTimezone: %s | Range: %s to %s (exclusive) | Period: %s\nQuery time: %s\n\n", strconv.QuoteToASCII(endpoint), strconv.QuoteToASCII(r.Timezone), r.Since, r.Until, r.Period, r.GeneratedAt.Format(time.RFC3339Nano))
-	labels := map[string]string{}
-	for _, bucket := range r.Buckets {
-		label := bucket.StartDate
-		if bucket.RangePartial {
-			label += " [clipped]"
-		}
-		if bucket.InProgress {
-			label += " [in progress]"
-		}
-		labels[bucket.StartDate] = label
-	}
 	for _, native := range []struct {
 		title              string
 		section            *report.Section
@@ -104,10 +94,10 @@ func render(endpoint string, r report.Report, details bool) string {
 		if native.section.Total.Turns == 0 {
 			fmt.Fprintln(&out, "No stored Turns in the selected range.")
 		}
-		renderTables(&out, labels, native.section, native.primary, "Model totals")
+		renderTables(&out, r.Period, native.section, native.primary)
 		if details {
 			fmt.Fprintln(&out, "Secondary native counts")
-			renderTables(&out, labels, native.section, native.secondary, "Secondary model totals")
+			renderTables(&out, r.Period, native.section, native.secondary)
 		}
 		fmt.Fprintln(&out)
 	}
@@ -119,39 +109,118 @@ type metricColumn struct{ name, label string }
 
 // The two native projections share presentation mechanics, never aggregation.
 // All writes here target the in-memory builder; Run owns fallible stdout writes.
-func renderTables(out *strings.Builder, labels map[string]string, section *report.Section, columns []metricColumn, totalsHeading string) {
-	if len(section.Rows) > 0 {
-		table := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
-		fmt.Fprint(table, "Period\tModel\tTurns")
-		for _, column := range columns {
-			fmt.Fprintf(table, "\t%s", column.label)
-		}
-		fmt.Fprintln(table)
-		for _, row := range section.Rows {
-			renderTotal(table, labels[row.BucketStart], strconv.QuoteToASCII(row.Model), row.Total, columns)
-		}
-		_ = table.Flush()
+func renderTables(out *strings.Builder, period string, section *report.Section, columns []metricColumn) {
+	rows, notes := groupedRows(section.Rows, columns)
+	if len(rows) == 0 {
+		return
 	}
-	fmt.Fprintln(out, totalsHeading)
-	table := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
-	for _, model := range section.Models {
-		renderTotal(table, "Range", strconv.QuoteToASCII(model.Model), model.Total, columns)
-	}
-	renderTotal(table, "Section total", "", section.Total, columns)
-	_ = table.Flush()
+	renderTable(out, tableHeaders(period, columns), rows)
+	renderCoverage(out, notes)
 }
 
-func renderTotal(out io.Writer, label, model string, total report.Total, columns []metricColumn) {
-	fmt.Fprintf(out, "%s\t%s\t%s", label, model, count(total.Turns))
-	for _, column := range columns {
-		fmt.Fprintf(out, "\t%s", metric(total, column.name))
+func groupedRows(rows []report.Row, columns []metricColumn) ([][]string, []string) {
+	renderedGroups := make([][]string, 0, len(rows))
+	var notes []string
+	for start := 0; start < len(rows); {
+		bucket := rows[start].BucketStart
+		end := start + 1
+		for end < len(rows) && rows[end].BucketStart == bucket {
+			end++
+		}
+
+		cells := make([][]string, 3+len(columns))
+		for index := start; index < end; index++ {
+			model := escapeModel(rows[index].Model)
+			period := ""
+			if index == start {
+				period = bucket
+			}
+			cells[0] = append(cells[0], period)
+			rendered, coverage := renderTotal(model, rows[index].Total, columns)
+			for column, value := range rendered {
+				cells[column+1] = append(cells[column+1], value)
+			}
+			for _, note := range coverage {
+				notes = append(notes, bucket+" / "+model+" — "+note)
+			}
+		}
+		groupRow := make([]string, len(cells))
+		for column := range cells {
+			groupRow[column] = strings.Join(cells[column], "\n")
+		}
+		renderedGroups = append(renderedGroups, groupRow)
+		start = end
 	}
-	fmt.Fprintln(out)
+	return renderedGroups, notes
+}
+
+func escapeModel(model string) string {
+	start := 0
+	for start < len(model) && model[start] == ' ' {
+		start++
+	}
+	end := len(model)
+	for end > start && model[end-1] == ' ' {
+		end--
+	}
+
+	var escaped strings.Builder
+	escaped.Grow(len(model))
+	for range start {
+		escaped.WriteString(`\x20`)
+	}
+	quoted := strconv.QuoteToASCII(model[start:end])
+	escaped.WriteString(quoted[1 : len(quoted)-1])
+	for range len(model) - end {
+		escaped.WriteString(`\x20`)
+	}
+	return escaped.String()
+}
+
+func tableHeaders(period string, columns []metricColumn) []string {
+	heading := strings.ToUpper(period[:1]) + period[1:]
+	headers := []string{heading, "Model", "Turns"}
+	for _, column := range columns {
+		headers = append(headers, column.label)
+	}
+	return headers
+}
+
+func renderTable(out *strings.Builder, headers []string, rows [][]string) {
+	t := table.New().
+		Border(lipgloss.RoundedBorder()).
+		BorderRow(true).
+		Headers(headers...).
+		Rows(rows...).
+		Wrap(true).
+		StyleFunc(func(_ int, column int) lipgloss.Style {
+			style := lipgloss.NewStyle().Padding(0, 1)
+			if column >= 2 {
+				style = style.Align(lipgloss.Right)
+			}
+			return style
+		})
+	fmt.Fprintln(out, t.Render())
+}
+
+func renderTotal(model string, total report.Total, columns []metricColumn) ([]string, []string) {
+	row := []string{model, count(total.Turns)}
+	for _, column := range columns {
+		row = append(row, metric(total, column.name))
+	}
+	var coverage []string
 	for _, column := range columns {
 		m := total.Usage[column.name]
 		if m.ReportedTurns > 0 && m.ReportedTurns < total.Turns {
-			fmt.Fprintf(out, "  %s: %s/%s stored Turns\n", strings.ToLower(column.label), count(m.ReportedTurns), count(total.Turns))
+			coverage = append(coverage, fmt.Sprintf("%s: %s/%s stored Turns", strings.ToLower(column.label), count(m.ReportedTurns), count(total.Turns)))
 		}
+	}
+	return row, coverage
+}
+
+func renderCoverage(out *strings.Builder, notes []string) {
+	for _, note := range notes {
+		fmt.Fprintf(out, "  %s\n", note)
 	}
 }
 

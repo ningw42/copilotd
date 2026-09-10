@@ -58,20 +58,25 @@ func TestCommandAllPeriodsFromSQLiteThroughHTTPInExplicitNamedZone(t *testing.T)
 				t.Fatal(err)
 			}
 			text := out.String()
-			for _, want := range []string{`Timezone: "Europe/Berlin"`, "Range: 2020-12-31 to 2021-01-05 (exclusive)", "Period: " + tc.period, "Anthropic\n", "OpenAI\n", tc.first, tc.second, "Section total", "Persisted successful Turns"} {
+			heading := strings.ToUpper(tc.period[:1]) + tc.period[1:]
+			for _, want := range []string{`Timezone: "Europe/Berlin"`, "Range: 2020-12-31 to 2021-01-05 (exclusive)", "Period: " + tc.period, "Anthropic\n", "OpenAI\n", tc.first, tc.second, "m", "Persisted successful Turns"} {
 				if !strings.Contains(text, want) {
 					t.Errorf("missing %q: %s", want, text)
 				}
 			}
-			// Literal native counts reach the terminal, not just the separate
-			// wire assertions below: two period rows per Surface and both kinds
-			// of range total, without renderer-side regrouping.
-			if strings.Count(text, "  18 ") != 2 || strings.Count(text, "  13 ") != 2 || strings.Count(text, "  31 ") != 4 {
-				t.Fatalf("period and range counts did not reach terminal: %s", text)
+			// Period/model rows reach both native tables without renderer-side
+			// aggregation or duplicate range rows.
+			if strings.Count(text, "  18 ") != 2 || strings.Count(text, "  13 ") != 2 {
+				t.Fatalf("period groups did not reach terminal: %s", text)
 			}
-			if tc.period != "day" && !strings.Contains(text, "[clipped]") {
-				t.Fatalf("lost clipping: %s", text)
+			assertTextExcludes(t, text, "  31 ", `"m"`, `├─ "`, `└─ "`, "│ All ", "Section total", "│ Range")
+			if strings.Count(text, "\n│ "+heading) != 2 {
+				t.Fatalf("period-specific headings missing: %s", text)
 			}
+			if strings.Count(text, "\n├") != 4 {
+				t.Fatalf("missing horizontal separators between periods: %s", text)
+			}
+			assertTextExcludes(t, text, "[clipped]", "[in progress]")
 			result, err := client.Query(context.Background(), q)
 			if err != nil {
 				t.Fatal(err)

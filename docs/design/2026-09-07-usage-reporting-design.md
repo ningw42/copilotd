@@ -779,36 +779,53 @@ time in a short header. Render separate native sections with these core columns:
 
 ```text
 Anthropic
-Period      Model  Turns  Uncached input  Output  Cache create  Cache read
-...
+Week        Model              Turns  Uncached input  Output  Cache create  Cache read
+2026-09-01 claude-example  ...    ...             ...     ...           ...
+           claude-other    ...    ...             ...     ...           ...
+──────────────────────────────────────────────────────────────────────────────────────
+2026-09-08 claude-example  ...    ...             ...     ...           ...
 
 OpenAI
-Period      Model  Turns  Input           Output  Cache write   Cache read
-...
+Week        Model           Turns  Input  Output  Cache write  Cache read
+2026-09-01 gpt-example  ...    ...    ...     ...          ...
+           gpt-other    ...    ...    ...     ...          ...
+─────────────────────────────────────────────────────────────────────────
+2026-09-08 gpt-example  ...    ...    ...     ...          ...
 ```
 
-Each section then shows the server-provided per-model totals and section total
-for the range. Do not sum unlike Surface inputs into a grand total. Model strings
-are rendered verbatim in identity but escaped for terminal safety: quote/escape
-controls, newlines, escape sequences, and non-ASCII formatting characters so
-upstream text cannot inject terminal commands, bidi reordering, or extra rows.
-Use a deterministic ASCII-escaped representation for model cells in v1; JSON
-preserves the original valid Unicode identity. No truncation or aliasing of
-model names to make a row fit.
+Within each section, label the first column with the selected grouping
+(`Day`, `Week`, `Month`, or `Year`), group one period's Reported-model values
+into multiline cells, and put a horizontal table rule between period groups.
+Show the period label only on the group's first model line; do not add tree markers or an `All`
+row. Do not render the whole-range per-model or section totals as duplicate
+terminal rows; they remain in JSON. Do not sum unlike Surface inputs into a grand
+total. Model strings are rendered verbatim in identity but escaped for terminal
+safety: quote/escape controls, newlines, escape sequences, and non-ASCII
+formatting characters so upstream text cannot inject terminal commands, bidi
+reordering, or extra rows.
+Use a deterministic ASCII-escaped representation without surrounding quotes for
+model cells in v1. Escape each boundary ASCII space as `\x20`; escaping literal
+backslashes keeps that representation distinct from a model containing those
+four characters. JSON preserves the original valid Unicode identity. No
+truncation or aliasing of model names to make a row fit.
 
 Render exact integer counts with deterministic thousands separators, never
 rounded `k`/`M` values that obscure differences. `—` means unreported, not zero.
 A partially covered optional metric gets `*`; a following compact coverage list
-states its reported-Turn fraction, for example `cache read: 8/10 stored Turns`.
-Use distinct annotations for range clipping and in-progress periods; do not
-reuse the coverage marker for them.
+identifies its bucket and escaped model before stating its reported-Turn fraction,
+for example `2026-09-07 / gpt-example — cache read: 8/10 stored Turns`.
+Static table period labels show only the bucket start date. The validated JSON
+retains the server-provided `range_partial` and `in_progress` flags for callers
+that need those distinctions; do not reuse the coverage marker for them.
 
 `--details` adds the server-provided OpenAI reasoning/reported-total metrics and
-Anthropic thinking/cache-TTL metrics, for both period rows and range totals.
+Anthropic thinking/cache-TTL metrics to the same period-grouped model rows.
 Input/output/cache fields remain the compact default. `--json` always includes
 all fields; `--details` does not change the HTTP request or JSON representation.
-No colors, interactive terminal control, chart, width-based identity truncation,
-or TTY-only behavior is required in v1; piped output remains deterministic text.
+Render the static tables with rounded Lip Gloss borders, without Bubble Tea or
+another interactive event loop. Do not add colors, interactive terminal control,
+charts, width-based identity truncation, or TTY-only behavior; piped output
+remains deterministic text.
 
 For an empty selection, print `No stored Turns in the selected range.` rather
 than a page of invented model rows. Always include this caveat in text:
@@ -903,9 +920,11 @@ literal expected reports, not tests coupled to private SQL strings.
   missing detection errors, and no fallback to daemon local time or UTC.
 - Exact HTTP query parameters; terminal and daemon hosts with different zones;
   no API key, GitHub OAuth token, database path, or Upstream call dependency.
-- Both terminal layouts, details/coverage/partial annotations, exact numbers,
-  malicious model/error strings, empty report, JSON-only stdout, stderr errors,
-  protocol version skew, additive fields, and failing output writers.
+- Both native period-grouped layouts, horizontal inter-period rules, no tree
+  markers, details/coverage, omission of range rows and period annotations,
+  exact numbers, malicious model/error strings, empty report,
+  JSON-only stdout, stderr errors, protocol version skew, additive fields, and
+  failing output writers.
 - Exact case-sensitive JSON member matching, duplicate members (including
   escaped spellings), invalid UTF-8/unpaired surrogates, contradictory
   filter/section/metric coverage, and valid additive fields. Reject invalid

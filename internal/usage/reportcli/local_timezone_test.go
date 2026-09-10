@@ -430,7 +430,7 @@ func TestCommandDiscoversNamedUnixTimezoneThroughHTTP(t *testing.T) {
 	if err := Run(context.Background(), client, options, &out); err != nil {
 		t.Fatal(err)
 	}
-	if len(*requested) != 1 || (*requested)[0] != "Europe/Berlin" || !strings.Contains(out.String(), `Timezone: "Europe/Berlin"`) || !strings.Contains(out.String(), `"boundary"`) || !strings.Contains(out.String(), "  17 ") {
+	if len(*requested) != 1 || (*requested)[0] != "Europe/Berlin" || !strings.Contains(out.String(), `Timezone: "Europe/Berlin"`) || !strings.Contains(out.String(), "boundary") || strings.Contains(out.String(), `"boundary"`) || !strings.Contains(out.String(), "  17 ") {
 		t.Fatalf("terminal-local selection: requests=%v\n%s", *requested, out.String())
 	}
 }

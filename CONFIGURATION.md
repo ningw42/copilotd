@@ -170,18 +170,23 @@ rules. Text uses comma-separated exact counts, ASCII-escaped model identities,
 `—` for unreported metrics, and `*` plus coverage for partial optional metrics.
 Anthropic renders first with Turns, Uncached input, Output, Cache create, and
 Cache read; OpenAI follows with Turns, Input, Output, Cache write, and Cache read.
-A reported zero stays zero; an empty selection is explicitly labeled, not
-represented as proof of no consumption.
+Each text section groups Reported-model rows by period, labels the first column
+as `Day`, `Week`, `Month`, or `Year`, and places a horizontal rule between period
+groups. Whole-range per-model and section totals remain in JSON
+but are not rendered as duplicate text rows. A reported zero stays zero; an empty
+selection is explicitly labeled, not represented as proof of no consumption.
 
-`--details` adds secondary native tables for period rows, per-model range totals,
-and section totals: OpenAI **Reasoning** (`reasoning_tokens`) and **Reported
+`--details` adds secondary native tables for the same period-grouped
+Reported-model rows: OpenAI **Reasoning** (`reasoning_tokens`) and **Reported
 total** (`total_tokens`, never inferred); Anthropic **Thinking** (`thinking_tokens`),
 **Cache create 5m** (`ephemeral_5m_input_tokens`), and **Cache create 1h**
 (`ephemeral_1h_input_tokens`). All retain NULL/zero and reporting coverage, without
-normalizing or adding subsets to their parent counts. `[clipped]` and
-`[in progress]` are independent of optional-count `*` coverage, not completeness
-claims. Identities are ASCII-quoted without truncation to prevent terminal control
-or bidi injection.
+normalizing or adding subsets to their parent counts. Static tables show bucket
+start dates without clipping or in-progress remarks; those flags remain available
+as `range_partial` and `in_progress` in JSON. Optional-count `*` coverage is not a
+completeness claim. Identities are ASCII-escaped without surrounding quotes or
+truncation; boundary spaces use `\x20` so distinct identities remain visible and
+terminal controls or bidi text cannot inject presentation.
 
 `--json` validates the same bounded complete response as text, then writes its
 original bytes plus a final newline. Whitespace, valid Unicode, exact decimal
