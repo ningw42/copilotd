@@ -211,7 +211,10 @@ nix develop -c go run ./scripts/verify-usage -target linux/amd64 -runner local-n
 Also build `./cmd/copilotd` with `CGO_ENABLED=0` for all four release target pairs
 through `nix develop`, placing outputs in ignored scratch. Those are cross-build
 results only. Full local checks supplement, not replace, the native release gate.
-Do not skip the million-row/group/model-budget fixtures in the final race run.
+Do not skip the row/group/model-budget fixtures in the final race run. They
+exercise the real SQLite and report paths with small injected limits; a separate
+same-package assertion pins the published production limits without requiring
+production-scale fixtures in every run.
 
 **Initial local checkpoint observation (`7e98593`):** the final full race invocation passed,
 including the heavy report fixtures (423.455 s for the report package), as did

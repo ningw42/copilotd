@@ -91,10 +91,42 @@ func TestQueryCapsNativeLockWaitingByRemainingBudget(t *testing.T) {
 }
 
 func TestQueryEnforcesWholeReportResourceLimits(t *testing.T) {
-	for _, tc := range []struct{ name, statement string }{
-		{"groups", `WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<10001) INSERT INTO openai_turn(at_ms,request_id,response_id,turn_index,model,transport,input_tokens,output_tokens) SELECT 1788220800000,'','',0,printf('model-%05d',x),'buffered',0,0 FROM n`},
-		{"distinct model bytes", `INSERT INTO openai_turn(at_ms,request_id,response_id,turn_index,model,transport,input_tokens,output_tokens) VALUES(1788220800000,'','',0,printf('%.*c',524289,'a'),'buffered',0,0),(1788220800000,'','',0,printf('%.*c',524289,'b'),'buffered',0,0)`},
-		{"examined Turns", `WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<1000001) INSERT INTO openai_turn(at_ms,request_id,response_id,turn_index,model,transport,input_tokens,output_tokens) SELECT 1788220800000,'','',0,'x','buffered',0,0 FROM n`},
+	for _, tc := range []struct {
+		name, statement                           string
+		maxRows, maxGroups, maxDistinctModelBytes int
+		cutoff                                    int
+		wantAnthropic, wantOpenAI                 int64
+	}{
+		{
+			name:                  "groups",
+			statement:             `WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<11) INSERT INTO openai_turn(at_ms,request_id,response_id,turn_index,model,transport,input_tokens,output_tokens) SELECT 1788220800000,'','',0,printf('model-%02d',x),'buffered',0,0 FROM n`,
+			maxRows:               report.MaxRows,
+			maxGroups:             10,
+			maxDistinctModelBytes: report.MaxDistinctModelBytes,
+			cutoff:                5,
+			wantAnthropic:         5,
+			wantOpenAI:            6,
+		},
+		{
+			name:                  "distinct model bytes",
+			statement:             `INSERT INTO openai_turn(at_ms,request_id,response_id,turn_index,model,transport,input_tokens,output_tokens) VALUES(1788220800000,'','',0,printf('%.*c',6,'a'),'buffered',0,0),(1788220800000,'','',0,printf('%.*c',6,'b'),'buffered',0,0)`,
+			maxRows:               report.MaxRows,
+			maxGroups:             report.MaxGroups,
+			maxDistinctModelBytes: 10,
+			cutoff:                1,
+			wantAnthropic:         1,
+			wantOpenAI:            1,
+		},
+		{
+			name:                  "examined Turns",
+			statement:             `WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<11) INSERT INTO openai_turn(at_ms,request_id,response_id,turn_index,model,transport,input_tokens,output_tokens) SELECT 1788220800000,'','',0,'x','buffered',0,0 FROM n`,
+			maxRows:               10,
+			maxGroups:             report.MaxGroups,
+			maxDistinctModelBytes: report.MaxDistinctModelBytes,
+			cutoff:                5,
+			wantAnthropic:         5,
+			wantOpenAI:            6,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path := stored(t)
@@ -108,29 +140,23 @@ func TestQueryEnforcesWholeReportResourceLimits(t *testing.T) {
 			if err = db.Close(); err != nil {
 				t.Fatal(err)
 			}
-			got, err := report.New(path).Query(context.Background(), selection())
+			reader := report.NewReadLimitsForTest(path, tc.maxRows, tc.maxGroups, tc.maxDistinctModelBytes)
+			got, err := reader.Query(context.Background(), selection())
 			var failure *report.Error
 			if !errors.As(err, &failure) || failure.Code != report.TooLarge || got.OpenAI != nil {
 				t.Fatalf("resource limit: report=%+v error=%v", got, err)
 			}
 			// Reuse this boundary fixture: split its rows across native tables.
-			// Each Surface is now below the fixed production limit, while the
-			// combined query must still fail atomically (including cancellation).
+			// Each Surface is now below the injected limit, while the combined
+			// query must still fail atomically.
 			db, err = sql.Open("sqlite", sqlitestore.LiteralFileURL(path).String())
 			if err != nil {
 				t.Fatal(err)
 			}
-			cutoff, wantAnthropic, wantOpenAI := 1, int64(1), int64(1)
-			switch tc.name {
-			case "groups":
-				cutoff, wantAnthropic, wantOpenAI = 5000, 5000, 5001
-			case "examined Turns":
-				cutoff, wantAnthropic, wantOpenAI = 500000, 500000, 500001
-			}
-			if _, err = db.Exec(`INSERT INTO anthropic_turn(at_ms,request_id,message_id,turn_index,model,transport,input_tokens,output_tokens) SELECT at_ms,request_id,response_id,turn_index,model,transport,input_tokens,output_tokens FROM openai_turn WHERE rowid<=?`, cutoff); err != nil {
+			if _, err = db.Exec(`INSERT INTO anthropic_turn(at_ms,request_id,message_id,turn_index,model,transport,input_tokens,output_tokens) SELECT at_ms,request_id,response_id,turn_index,model,transport,input_tokens,output_tokens FROM openai_turn WHERE rowid<=?`, tc.cutoff); err != nil {
 				t.Fatal(err)
 			}
-			if _, err = db.Exec(`DELETE FROM openai_turn WHERE rowid<=?`, cutoff); err != nil {
+			if _, err = db.Exec(`DELETE FROM openai_turn WHERE rowid<=?`, tc.cutoff); err != nil {
 				t.Fatal(err)
 			}
 			if err = db.Close(); err != nil {
@@ -138,25 +164,31 @@ func TestQueryEnforcesWholeReportResourceLimits(t *testing.T) {
 			}
 			q := selection()
 			q.Surface = "anthropic"
-			a, err := report.New(path).Query(context.Background(), q)
-			if err != nil || a.Anthropic == nil || a.Anthropic.Total.Turns != wantAnthropic {
+			a, err := reader.Query(context.Background(), q)
+			if err != nil || a.Anthropic == nil || a.Anthropic.Total.Turns != tc.wantAnthropic {
 				t.Fatalf("Anthropic alone should fit: %+v %v", a, err)
 			}
 			q.Surface = "openai"
-			o, err := report.New(path).Query(context.Background(), q)
-			if err != nil || o.OpenAI == nil || o.OpenAI.Total.Turns != wantOpenAI {
+			o, err := reader.Query(context.Background(), q)
+			if err != nil || o.OpenAI == nil || o.OpenAI.Total.Turns != tc.wantOpenAI {
 				t.Fatalf("OpenAI alone should fit: %+v %v", o, err)
 			}
 			q.Surface = "all"
-			got, err = report.New(path).Query(context.Background(), q)
+			got, err = reader.Query(context.Background(), q)
 			if !errors.As(err, &failure) || failure.Code != report.TooLarge || got.OpenAI != nil || got.Anthropic != nil {
 				t.Fatalf("request-wide limit: report=%+v error=%v", got, err)
 			}
 			if tc.name == "examined Turns" {
-				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+				ctx, cancel := context.WithCancel(context.Background())
 				defer cancel()
-				got, err = report.New(path).Query(ctx, q)
-				if !errors.Is(err, context.DeadlineExceeded) || !errors.As(err, &failure) || failure.Code != report.Timeout || got.OpenAI != nil || got.Anthropic != nil {
+				interrupted := report.NewReadLimitsForTest(path, tc.maxRows, tc.maxGroups, tc.maxDistinctModelBytes)
+				report.NotifyAfterExaminedTurnForTest(interrupted, func(examined int) {
+					if examined == int(tc.wantAnthropic)+1 {
+						cancel()
+					}
+				})
+				got, err = interrupted.Query(ctx, q)
+				if !errors.Is(err, context.Canceled) || !errors.As(err, &failure) || failure.Code != report.Unavailable || got.OpenAI != nil || got.Anthropic != nil {
 					t.Fatalf("interrupted scan returned partial report: %+v %v", got, err)
 				}
 			}

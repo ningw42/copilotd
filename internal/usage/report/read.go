@@ -24,6 +24,19 @@ const (
 	NativeBusyWait        = 100 * time.Millisecond
 )
 
+type readLimits struct {
+	maxModelBytes, maxRows, maxGroups, maxDistinctModelBytes int
+}
+
+func productionReadLimits() readLimits {
+	return readLimits{
+		maxModelBytes:         MaxModelBytes,
+		maxRows:               MaxRows,
+		maxGroups:             MaxGroups,
+		maxDistinctModelBytes: MaxDistinctModelBytes,
+	}
+}
+
 // Each call owns exactly one read-only connection and one snapshot, including
 // compatibility checks. No resource survives materialization, even on failure.
 func (r *Reporter) read(ctx context.Context, buckets []Bucket, surface string, model *string) (_ map[string]*Section, err error) {
@@ -100,7 +113,7 @@ func (r *Reporter) read(ctx context.Context, buckets []Bucket, surface string, m
 		}
 	}
 	sections := map[string]*Section{}
-	budget := readBudget{identities: map[string]string{}}
+	budget := readBudget{limits: r.limits, afterExaminedTurn: r.afterExaminedTurn, identities: map[string]string{}}
 	for _, native := range []string{"anthropic", "openai"} {
 		if surface != "all" && surface != native {
 			continue
@@ -116,6 +129,8 @@ func (r *Reporter) read(ctx context.Context, buckets []Bucket, surface string, m
 }
 
 type readBudget struct {
+	limits                          readLimits
+	afterExaminedTurn               func(int)
 	identities                      map[string]string
 	retainedBytes, examined, groups int
 }
@@ -132,7 +147,7 @@ func readSection(ctx context.Context, conn *sql.Conn, buckets []Bucket, surface 
 	// caller-provided SQL. Preserve timestamp-only indexed ordering and the
 	// lazy byte-length guard before transferring either Surface's identity.
 	predicate := ""
-	args := []any{MaxModelBytes, buckets[0].RangeStart.UnixMilli(), buckets[len(buckets)-1].RangeEnd.UnixMilli()}
+	args := []any{budget.limits.maxModelBytes, buckets[0].RangeStart.UnixMilli(), buckets[len(buckets)-1].RangeEnd.UnixMilli()}
 	if model != nil {
 		// CASE, not ordinary AND evaluation order, guards identity comparison.
 		predicate = ` AND CASE WHEN octet_length(model)=? THEN model=? COLLATE BINARY ELSE 0 END`
@@ -159,8 +174,11 @@ func readSection(ctx context.Context, conn *sql.Conn, buckets []Bucket, surface 
 	bucket := 0
 	for rows.Next() {
 		budget.examined++
-		if budget.examined > MaxRows {
+		if budget.examined > budget.limits.maxRows {
 			return nil, tooLarge()
+		}
+		if budget.afterExaminedTurn != nil {
+			budget.afterExaminedTurn(budget.examined)
 		}
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -168,7 +186,7 @@ func readSection(ctx context.Context, conn *sql.Conn, buckets []Bucket, surface 
 		if err := rows.Scan(dest...); err != nil {
 			return nil, err
 		}
-		if modelBytes > MaxModelBytes {
+		if modelBytes > int64(budget.limits.maxModelBytes) {
 			return nil, tooLarge()
 		}
 		if !safeModel.Valid || !utf8.ValidString(safeModel.String) || modelBytes != int64(len(safeModel.String)) {
@@ -185,7 +203,7 @@ func readSection(ctx context.Context, conn *sql.Conn, buckets []Bucket, surface 
 		model, interned := budget.identities[safeModel.String]
 		if !interned {
 			budget.retainedBytes += len(safeModel.String)
-			if budget.retainedBytes > MaxDistinctModelBytes {
+			if budget.retainedBytes > budget.limits.maxDistinctModelBytes {
 				return nil, tooLarge()
 			}
 			model = safeModel.String
@@ -204,7 +222,7 @@ func readSection(ctx context.Context, conn *sql.Conn, buckets []Bucket, surface 
 			// Surface is implicit in this section's map, but its groups count
 			// against the one request-wide limit.
 			budget.groups++
-			if budget.groups > MaxGroups {
+			if budget.groups > budget.limits.maxGroups {
 				return nil, tooLarge()
 			}
 			total := emptyTotal(names)
