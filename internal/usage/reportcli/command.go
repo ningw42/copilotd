@@ -70,8 +70,6 @@ func Run(ctx context.Context, client *reporthttp.Client, options Options, stdout
 	return err
 }
 
-const caveat = "Persisted successful Turns observed by the Usage meter; best-effort and potentially incomplete. Optional-count coverage refers only to stored Turns."
-
 func render(endpoint string, r report.Report, details bool) string {
 	var out strings.Builder
 	fmt.Fprintf(&out, "Usage report — %s\nTimezone: %s | Range: %s to %s (exclusive) | Period: %s\nQuery time: %s\n\n", strconv.QuoteToASCII(endpoint), r.Timezone, r.Since, r.Until, r.Period, r.GeneratedAt.Format(time.RFC3339Nano))
@@ -101,7 +99,6 @@ func render(endpoint string, r report.Report, details bool) string {
 		}
 		fmt.Fprintln(&out)
 	}
-	fmt.Fprintln(&out, "\n"+caveat)
 	return out.String()
 }
 
