@@ -73,11 +73,11 @@ func Run(ctx context.Context, client *reporthttp.Client, options Options, stdout
 var (
 	anthropicSurfaceColor = lipgloss.Color("#D97757")
 	openAISurfaceColor    = lipgloss.Color("#10A37F")
-	surfaceTextColor      = lipgloss.Color("#000000")
 )
 
 func render(renderer *lipgloss.Renderer, endpoint string, r report.Report, details bool) string {
 	var out strings.Builder
+	surfaceTextColor := terminalBackgroundColor(renderer)
 	fmt.Fprintf(&out, "Usage report — %s\nTimezone: %s | Range: %s to %s (exclusive) | Period: %s\nQuery time: %s\n\n", strconv.QuoteToASCII(endpoint), r.Timezone, r.Since, r.Until, r.Period, r.GeneratedAt.Format(time.RFC3339Nano))
 	for _, native := range []struct {
 		title              string
@@ -95,7 +95,7 @@ func render(renderer *lipgloss.Renderer, endpoint string, r report.Report, detai
 		if native.section == nil {
 			continue
 		}
-		fmt.Fprintln(&out, surfaceTitleStyle(renderer, native.background).Render(native.title))
+		fmt.Fprintln(&out, surfaceTitleStyle(renderer, surfaceTextColor, native.background).Render(native.title))
 		if native.section.Total.Turns == 0 {
 			fmt.Fprintln(&out, "No stored Turns in the selected range.")
 		}
@@ -109,10 +109,18 @@ func render(renderer *lipgloss.Renderer, endpoint string, r report.Report, detai
 	return out.String()
 }
 
-func surfaceTitleStyle(renderer *lipgloss.Renderer, background lipgloss.TerminalColor) lipgloss.Style {
+func terminalBackgroundColor(renderer *lipgloss.Renderer) lipgloss.TerminalColor {
+	background := fmt.Sprint(renderer.Output().BackgroundColor())
+	if background == "" {
+		return lipgloss.NoColor{}
+	}
+	return lipgloss.Color(background)
+}
+
+func surfaceTitleStyle(renderer *lipgloss.Renderer, foreground, background lipgloss.TerminalColor) lipgloss.Style {
 	return renderer.NewStyle().
 		Bold(true).
-		Foreground(surfaceTextColor).
+		Foreground(foreground).
 		Background(background)
 }
 
