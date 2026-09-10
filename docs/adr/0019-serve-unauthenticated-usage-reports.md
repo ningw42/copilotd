@@ -73,9 +73,12 @@ not an offset, registry mapping, copied-file guess, or silent UTC fallback.
 Native evidence and its platform limits are recorded in the
 [verification guide](../verification/usage-reporting.md) and revision-specific
 #213 run results; failed runs retain diagnostic artifacts, while successful runs
-do not. Cross-compilation alone is not certification. Exact UTF-8 model filters, detailed native period/range tables,
-and original-byte JSON output now share the same report and client validator;
-no Catalog normalization, Requested-model substitution, or client reaggregation
-is introduced. External SQLite inspection remains supported alongside the new
+do not. Cross-compilation alone is not certification. Exact UTF-8 model filters,
+detailed native period/range tables, and original-byte JSON output now share the
+same report and client validator. Terminal tables derive a presentation-only
+`Total` for each period from its validated Reported-model rows; this does not
+change or replace the server's per-model and whole-range aggregates or the
+original-byte JSON. No Catalog normalization or Requested-model substitution is
+introduced. External SQLite inspection remains supported alongside the new
 bounded HTTP path. [#212 contention/lifecycle evidence](../research/2026-09-08-usage-reporting-concurrency.md)
 and #213's native release gate remain distinct from feature implementation.
