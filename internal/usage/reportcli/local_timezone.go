@@ -1,6 +1,7 @@
 package reportcli
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -84,6 +85,8 @@ const (
 	maxTimezoneFileBytes = 1 << 20
 )
 
+var errOptionalTimezonePathAbsent = errors.New("optional timezone path absent")
+
 type timezoneObservation struct {
 	info os.FileInfo
 	link string
@@ -91,7 +94,6 @@ type timezoneObservation struct {
 type timezoneWalk struct {
 	system       *localTimezoneSystem
 	observations map[string]timezoneObservation
-	unverifiable bool
 }
 
 func sameTimezoneFile(a, b os.FileInfo) bool {
@@ -104,9 +106,6 @@ func sameTimezoneFile(a, b os.FileInfo) bool {
 // Recheck the path evidence, not just the final filename: a changed system link
 // or root alias must not label a different configuration with the old name.
 func (w *timezoneWalk) consistent() bool {
-	if w.unverifiable {
-		return false
-	}
 	for name, previous := range w.observations {
 		info, err := w.system.lstat(name)
 		if previous.info == nil && os.IsNotExist(err) {
@@ -145,13 +144,12 @@ func (w *timezoneWalk) walk(name string) (string, []string, error) {
 		next := path.Join(resolved, part)
 		info, err := w.system.lstat(next)
 		if err != nil {
-			if previous, ok := w.observations[next]; ok && previous.info != nil {
-				w.unverifiable = true
-			}
 			if os.IsNotExist(err) {
+				if previous, ok := w.observations[next]; ok && previous.info != nil {
+					return "", nil, localTimezoneError("timezone path changed during discovery")
+				}
 				w.observations[next] = timezoneObservation{}
-			} else {
-				w.unverifiable = true
+				return "", nil, errOptionalTimezonePathAbsent
 			}
 			return "", nil, localTimezoneError("missing or unreadable timezone path")
 		}
@@ -159,12 +157,10 @@ func (w *timezoneWalk) walk(name string) (string, []string, error) {
 		if info.Mode()&os.ModeSymlink != 0 {
 			observation.link, err = w.system.readlink(next)
 			if err != nil {
-				w.unverifiable = true
 				return "", nil, localTimezoneError("unreadable timezone symlink")
 			}
 		}
 		if previous, ok := w.observations[next]; ok && (!sameTimezoneFile(previous.info, info) || previous.link != observation.link) {
-			w.unverifiable = true
 			return "", nil, localTimezoneError("timezone path changed during discovery")
 		}
 		w.observations[next] = observation
@@ -175,7 +171,6 @@ func (w *timezoneWalk) walk(name string) (string, []string, error) {
 			paths = append(paths, strings.TrimSuffix(next+"/"+strings.Join(pending, "/"), "/"))
 			hops++
 			if hops > maxTimezoneSymlinks {
-				w.unverifiable = true
 				return "", nil, localTimezoneError("symlink loop or more than 40 links")
 			}
 			target := observation.link
@@ -187,7 +182,6 @@ func (w *timezoneWalk) walk(name string) (string, []string, error) {
 			continue
 		}
 		if len(pending) > 0 && !info.IsDir() {
-			w.unverifiable = true
 			return "", nil, localTimezoneError("non-directory timezone path")
 		}
 		resolved = next
@@ -227,6 +221,9 @@ func forbiddenTimezoneRootPath(name string, boundaries map[string]bool) bool {
 func (s *localTimezoneSystem) fileTimezone(filename string) (string, error) {
 	walk := timezoneWalk{system: s, observations: map[string]timezoneObservation{}}
 	target, paths, err := walk.walk(filename)
+	if errors.Is(err, errOptionalTimezonePathAbsent) {
+		return "", localTimezoneError("missing or unreadable timezone path")
+	}
 	if err != nil {
 		return "", err
 	}
@@ -247,7 +244,11 @@ func (s *localTimezoneSystem) fileTimezone(filename string) (string, error) {
 	records := make([]timezoneRootRecord, 0, len(rootSeeds))
 	for _, root := range rootSeeds {
 		record := timezoneRootRecord{original: root}
-		if resolved, rootPaths, err := walk.walk(root); err == nil {
+		resolved, rootPaths, err := walk.walk(root)
+		if err != nil && !errors.Is(err, errOptionalTimezonePathAbsent) {
+			return "", err
+		}
+		if err == nil {
 			record.resolved = resolved
 			record.paths = rootPaths
 			boundaries[path.Clean(resolved)] = true

@@ -153,7 +153,39 @@ func TestCommandUnverifiableZoneinfoRootFailsBeforeHTTP(t *testing.T) {
 		}
 		return os.Lstat(files.path(name))
 	}
+	files.system.open = func(string) (*os.File, error) {
+		t.Fatal("fatal root traversal reached zone file open")
+		return nil, nil
+	}
 	assertLocalTimezone(t, files, "")
+}
+
+func TestCommandPreviouslyObservedZoneinfoRootMissingFailsBeforeFileOpen(t *testing.T) {
+	files := newTimezoneFiles(t, "linux", nil)
+	files.zone("/usr/share/zoneinfo/Europe/Berlin")
+	files.link("/etc/localtime", "/usr/share/zoneinfo/Europe/Berlin")
+	rootObservations := 0
+	files.system.lstat = func(name string) (os.FileInfo, error) {
+		if name == "/usr/share/zoneinfo" {
+			rootObservations++
+			if rootObservations == 2 {
+				return nil, os.ErrNotExist
+			}
+		}
+		return os.Lstat(files.path(name))
+	}
+	opened := false
+	files.system.open = func(name string) (*os.File, error) {
+		opened = true
+		return os.Open(files.path(name))
+	}
+	client, options, requested := localTimezoneCommand(t)
+	options.localSystem = files.system
+	var out bytes.Buffer
+	err := Run(context.Background(), client, options, &out)
+	if err == nil || !strings.Contains(err.Error(), "cannot determine a named local timezone") || strings.Contains(err.Error(), "/usr/share/zoneinfo") || strings.Contains(err.Error(), os.ErrNotExist.Error()) || rootObservations != 2 || opened || len(*requested) != 0 || out.Len() != 0 {
+		t.Fatalf("err=%v root observations=%d opened=%t requests=%v stdout=%s", err, rootObservations, opened, *requested, out.String())
+	}
 }
 
 func TestCommandPreservesMacOSVersionedRootAliasSuffix(t *testing.T) {
