@@ -48,6 +48,11 @@ func (panicOnAnthropicStop) TransformEvent(_ context.Context, frame sse.Frame) [
 	return []sse.Frame{frame}
 }
 
+const (
+	usageMeterFixtureShutdownTimeout = 10 * time.Second
+	usageMeterHarnessStopWatchdog    = 15 * time.Second
+)
+
 type usageMeterServeHarness struct {
 	cfg     config.ServeConfig
 	baseURL string
@@ -66,6 +71,9 @@ type usageMeterServeHarness struct {
 func startUsageMeterServeHarness(t *testing.T, upstreamURL string, base *slog.Logger, configure func(*config.ServeConfig), decorate func(shim.Registry) shim.Registry, listeners ...net.Listener) *usageMeterServeHarness {
 	t.Helper()
 	cfg := e2eConfig("gho-usage-meter-serve-harness")
+	// Ordinary fixture finalization uses the production shutdown budget. Tests
+	// of bounded forced shutdown override it explicitly below.
+	cfg.ShutdownTimeout = usageMeterFixtureShutdownTimeout
 	cfg.ImpersonationRefreshInterval = 0
 	cfg.WebSocketHandshakeTimeout = 5 * time.Second
 	cfg.ShimUsageMeterEnabled = true
@@ -84,6 +92,9 @@ func startUsageMeterServeHarness(t *testing.T, upstreamURL string, base *slog.Lo
 		sink = store
 	}
 	harness := &usageMeterServeHarness{cfg: cfg, store: store}
+	// Run the configured close first so short-deadline tests retain their exact
+	// report, then allow any abandoned native cleanup to finish before TempDir.
+	t.Cleanup(harness.awaitStoreCleanup)
 	t.Cleanup(func() { _ = harness.closeStore() })
 
 	var exchangeAuth, exchangeUA string
@@ -133,8 +144,8 @@ func (h *usageMeterServeHarness) stop() error {
 		h.cancel()
 		select {
 		case h.stopErr = <-h.done:
-		case <-time.After(5 * time.Second):
-			h.stopErr = errors.New("runBoundServe did not stop within five seconds")
+		case <-time.After(usageMeterHarnessStopWatchdog):
+			h.stopErr = errors.New("runBoundServe did not stop within the fixture watchdog")
 		}
 	})
 	return h.stopErr
@@ -159,6 +170,15 @@ func (h *usageMeterServeHarness) closeStore() sqlitestore.Report {
 		h.closeReport = h.store.Close(ctx)
 	})
 	return h.closeReport
+}
+
+func (h *usageMeterServeHarness) awaitStoreCleanup() {
+	if h.store == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), usageMeterHarnessStopWatchdog)
+	defer cancel()
+	_ = h.store.Close(ctx)
 }
 
 func dialUsageMeterWebSocket(t *testing.T, baseURL, requestID string) *websocket.Conn {
