@@ -176,7 +176,7 @@ func escapeModel(model string) string {
 
 func tableHeaders(period string, columns []metricColumn) []string {
 	heading := strings.ToUpper(period[:1]) + period[1:]
-	headers := []string{heading, "Model", "Turns"}
+	headers := []string{heading, "Model(s)", "Turns"}
 	for _, column := range columns {
 		headers = append(headers, column.label)
 	}

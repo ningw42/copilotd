@@ -128,7 +128,7 @@ func TestCommandEscapesBoundarySpacesWithoutModelCollisions(t *testing.T) {
 			continue
 		}
 		cells := strings.Split(line, "│")
-		if len(cells) == 9 && strings.TrimSpace(cells[2]) != "Model" {
+		if len(cells) == 9 && strings.TrimSpace(cells[2]) != "Model(s)" {
 			got = append(got, strings.TrimSpace(cells[2]))
 		}
 	}
