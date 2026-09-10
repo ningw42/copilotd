@@ -22,6 +22,10 @@ import (
 	"github.com/ningw42/copilotd/internal/usage/sqlitestore"
 )
 
+// fixtureStoreCloseTimeout is a test-cleanup watchdog, not a Store.Close
+// latency contract. Dedicated deadline tests below use their own short contexts.
+const fixtureStoreCloseTimeout = 10 * time.Second
+
 func testStoreLogger(output io.Writer) *slog.Logger {
 	return slog.New(slog.NewTextHandler(output, &slog.HandlerOptions{Level: slog.LevelDebug}))
 }
@@ -39,7 +43,7 @@ func openStore(t *testing.T, output io.Writer) (string, *sqlitestore.Store) {
 func closeStore(t *testing.T, store *sqlitestore.Store) sqlitestore.Report {
 	t.Helper()
 	store.StopAdmission()
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), fixtureStoreCloseTimeout)
 	defer cancel()
 	return store.Close(ctx)
 }
@@ -694,7 +698,7 @@ func TestStoreRecordRacingWithCloseIsSafe(t *testing.T) {
 	}
 	close(start)
 	store.StopAdmission()
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), fixtureStoreCloseTimeout)
 	report := store.Close(ctx)
 	cancel()
 	producers.Wait()

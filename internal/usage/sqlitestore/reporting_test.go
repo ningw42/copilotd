@@ -170,9 +170,7 @@ func TestStoreRecoveredWriteFailureDoesNotPoisonLaterOrFinalLevels(t *testing.T)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	closeCtx, closeCancel := context.WithTimeout(context.Background(), time.Second)
-	report := store.Close(closeCtx)
-	closeCancel()
+	report := closeStore(t, store)
 	if report.RuntimeWriteLosses != 128 || report.FinalFlushLosses != 0 || !report.DriverCleanupCompleted {
 		t.Fatalf("recovered final report = %+v", report)
 	}
@@ -199,10 +197,7 @@ func TestStoreRepeatedWriteFailuresEscalateCurrentPersistentState(t *testing.T) 
 	if failure.level != slog.LevelError {
 		t.Errorf("repeated current failure level = %s, want ERROR", failure.level)
 	}
-	store.StopAdmission()
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	_ = store.Close(ctx)
-	cancel()
+	_ = closeStore(t, store)
 }
 
 func TestStoreFinalLogWaitsForInProgressRuntimeLogAndRemainsTerminal(t *testing.T) {

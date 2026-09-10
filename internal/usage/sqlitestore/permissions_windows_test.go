@@ -3,12 +3,10 @@
 package sqlitestore_test
 
 import (
-	"context"
 	"io"
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/ningw42/copilotd/internal/usage/sqlitestore"
 )
@@ -19,10 +17,7 @@ func TestStoreWindowsPermissionsAreExplicitlyBestEffort(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store.StopAdmission()
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	report := store.Close(ctx)
-	cancel()
+	report := closeStore(t, store)
 	if !report.DriverCleanupCompleted {
 		t.Fatal(report)
 	}

@@ -3,7 +3,6 @@
 package sqlitestore_test
 
 import (
-	"context"
 	"database/sql"
 	"io"
 	"net/url"
@@ -62,10 +61,7 @@ func TestStoreOpensPunctuationFilenameAsLiteralDestination(t *testing.T) {
 				Model: "m", Transport: usage.TransportBuffered,
 				Usage: usage.OpenAIUsage{InputTokens: 1, OutputTokens: 1},
 			})
-			store.StopAdmission()
-			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-			report := store.Close(ctx)
-			cancel()
+			report := closeStore(t, store)
 			if !report.DriverCleanupCompleted || report.FinalFlushLosses != 0 {
 				t.Fatalf("Close literal %q: %+v", path, report)
 			}
@@ -111,10 +107,7 @@ func TestStoreLiteralQueryFilenameCannotRedirectToNeighborSymlink(t *testing.T) 
 		t.Fatalf("Open literal query filename: %v", err)
 	}
 	store.Record(usage.Turn{At: time.UnixMilli(1), ResponseID: "literal", Model: "m", Transport: usage.TransportBuffered, Usage: usage.OpenAIUsage{InputTokens: 1, OutputTokens: 1}})
-	store.StopAdmission()
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	report := store.Close(ctx)
-	cancel()
+	report := closeStore(t, store)
 	if !report.DriverCleanupCompleted || report.FinalFlushLosses != 0 {
 		t.Fatalf("Close literal query filename: %+v", report)
 	}
