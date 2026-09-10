@@ -124,9 +124,15 @@ func TestUsageReportClientTeardownClosesAnUnusedDialBeforeGracefulStop(t *testin
 	}
 	// This is the same client-before-server teardown used by the daily command
 	// test. A completed request is not proof that its Transport has no unused
-	// socket awaiting a first HTTP request on the production listener.
+	// socket awaiting a first HTTP request on the production listener. Retain the
+	// original two-second prompt-stop bound independently of the wider SQLite
+	// fixture-finalization watchdog.
+	stopStarted := time.Now()
 	if err := h.stopAfterClient(client); err != nil {
 		t.Fatal(err)
+	}
+	if elapsed := time.Since(stopStarted); elapsed >= 2*time.Second {
+		t.Fatalf("client teardown delayed graceful stop for %s, want less than two seconds", elapsed)
 	}
 	assertCleanUsageReport(t, h.closeStore())
 }
