@@ -15,7 +15,7 @@ func TestSurfaceTitleStylesUseTerminalBaseAndDistinctBrandBackgrounds(t *testing
 		background lipgloss.Color
 	}{
 		{"Anthropic", "#D97757"},
-		{"OpenAI", "#10A37F"},
+		{"OpenAI", "#3C6AC8"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			style := surfaceTitleStyle(renderer, terminalBase, tc.background)

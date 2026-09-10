@@ -72,7 +72,7 @@ func Run(ctx context.Context, client *reporthttp.Client, options Options, stdout
 
 var (
 	anthropicSurfaceColor = lipgloss.Color("#D97757")
-	openAISurfaceColor    = lipgloss.Color("#10A37F")
+	openAISurfaceColor    = lipgloss.Color("#3C6AC8")
 )
 
 func render(renderer *lipgloss.Renderer, endpoint string, r report.Report, details bool) string {
