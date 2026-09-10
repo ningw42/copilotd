@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math/big"
 	"strconv"
 	"strings"
 	"time"
@@ -127,8 +128,8 @@ func surfaceTitleStyle(renderer *lipgloss.Renderer, foreground, background lipgl
 
 type metricColumn struct{ name, label string }
 
-// The two native projections share presentation mechanics, never aggregation.
-// All writes here target the in-memory builder; Run owns fallible stdout writes.
+// The two native projections share presentation mechanics. Period totals are
+// derived only for terminal display; Run owns fallible stdout writes.
 func renderTables(renderer *lipgloss.Renderer, out *strings.Builder, period string, section *report.Section, columns []metricColumn) {
 	rows, notes := groupedRows(section.Rows, columns)
 	if len(rows) == 0 {
@@ -139,7 +140,7 @@ func renderTables(renderer *lipgloss.Renderer, out *strings.Builder, period stri
 }
 
 func groupedRows(rows []report.Row, columns []metricColumn) ([][]string, []string) {
-	renderedGroups := make([][]string, 0, len(rows))
+	renderedGroups := make([][]string, 0, 2*len(rows))
 	var notes []string
 	for start := 0; start < len(rows); {
 		bucket := rows[start].BucketStart
@@ -148,14 +149,16 @@ func groupedRows(rows []report.Row, columns []metricColumn) ([][]string, []strin
 			end++
 		}
 
+		renderedTotal, totalCoverage := renderPeriodTotal(rows[start:end], columns)
+		renderedGroups = append(renderedGroups, append([]string{bucket}, renderedTotal...))
+		for _, note := range totalCoverage {
+			notes = append(notes, bucket+" / Total — "+note)
+		}
+
 		cells := make([][]string, 3+len(columns))
 		for index := start; index < end; index++ {
 			model := escapeModel(rows[index].Model)
-			period := ""
-			if index == start {
-				period = bucket
-			}
-			cells[0] = append(cells[0], period)
+			cells[0] = append(cells[0], "")
 			rendered, coverage := renderTotal(model, rows[index].Total, columns)
 			for column, value := range rendered {
 				cells[column+1] = append(cells[column+1], value)
@@ -172,6 +175,53 @@ func groupedRows(rows []report.Row, columns []metricColumn) ([][]string, []strin
 		start = end
 	}
 	return renderedGroups, notes
+}
+
+type periodMetric struct {
+	sum, reportedTurns big.Int
+	reported           bool
+}
+
+// renderPeriodTotal derives a terminal-only subtotal from the validated model
+// rows. big.Int keeps presentation exact even when an inconsistent remote
+// response's independently valid int64 rows would overflow when combined.
+func renderPeriodTotal(rows []report.Row, columns []metricColumn) ([]string, []string) {
+	var turns, value big.Int
+	metrics := make(map[string]*periodMetric, len(columns))
+	for _, column := range columns {
+		metrics[column.name] = &periodMetric{}
+	}
+	for _, row := range rows {
+		turns.Add(&turns, value.SetInt64(row.Turns))
+		for _, column := range columns {
+			source := row.Usage[column.name]
+			metric := metrics[column.name]
+			metric.reportedTurns.Add(&metric.reportedTurns, value.SetInt64(source.ReportedTurns))
+			if source.Sum != nil {
+				metric.reported = true
+				metric.sum.Add(&metric.sum, value.SetInt64(*source.Sum))
+			}
+		}
+	}
+
+	rendered := []string{"Total", exactCount(&turns)}
+	var coverage []string
+	for _, column := range columns {
+		metric := metrics[column.name]
+		if !metric.reported {
+			rendered = append(rendered, "—")
+			continue
+		}
+		count := exactCount(&metric.sum)
+		if metric.reportedTurns.Cmp(&turns) < 0 {
+			count += "*"
+		}
+		rendered = append(rendered, count)
+		if metric.reportedTurns.Sign() > 0 && metric.reportedTurns.Cmp(&turns) < 0 {
+			coverage = append(coverage, fmt.Sprintf("%s: %s/%s stored Turns", strings.ToLower(column.label), exactCount(&metric.reportedTurns), exactCount(&turns)))
+		}
+	}
+	return rendered, coverage
 }
 
 func escapeASCII(value string) string {
@@ -261,7 +311,14 @@ func metric(total report.Total, name string) string {
 	return value
 }
 func count(n int64) string {
-	value := strconv.FormatInt(n, 10)
+	return commaCount(strconv.FormatInt(n, 10))
+}
+
+func exactCount(n *big.Int) string {
+	return commaCount(n.String())
+}
+
+func commaCount(value string) string {
 	for i := len(value) - 3; i > 0; i -= 3 {
 		value = value[:i] + "," + value[i:]
 	}

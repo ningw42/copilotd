@@ -246,8 +246,9 @@ unescaping, invalid UTF-8 JSON, and unpaired surrogate escapes rather than
 silently choosing or repairing a value. Validate effective filters against
 explicit request selections, selected-section and native-metric presence,
 non-NULL arrays, int64 ranges, and the metric sum/coverage relationships in
-section 6, including its empty-section exception. This is report validation,
-not client-side reaggregation or calendar reconstruction.
+section 6, including its empty-section exception. Protocol validation neither
+cross-checks aggregate levels nor reconstructs calendar rules. Terminal
+presentation separately derives period totals from validated period/model rows.
 
 On non-2xx, prefer the bounded structured error code/message; handle an older
 daemon's HTML/plain 404 or a proxy's response without dumping its body into the
@@ -783,27 +784,39 @@ time in a short header. Render separate native sections with these core columns:
 ```text
 Anthropic
 Week        Model              Turns  Uncached input  Output  Cache create  Cache read
-2026-09-01 claude-example  ...    ...             ...     ...           ...
-           claude-other    ...    ...             ...     ...           ...
+2026-09-01 Total          ...    ...             ...     ...           ...
 ──────────────────────────────────────────────────────────────────────────────────────
-2026-09-08 claude-example  ...    ...             ...     ...           ...
+           claude-example ...    ...             ...     ...           ...
+           claude-other   ...    ...             ...     ...           ...
+──────────────────────────────────────────────────────────────────────────────────────
+2026-09-08 Total          ...    ...             ...     ...           ...
+──────────────────────────────────────────────────────────────────────────────────────
+           claude-example ...    ...             ...     ...           ...
 
 OpenAI
 Week        Model           Turns  Input  Output  Cache write  Cache read
-2026-09-01 gpt-example  ...    ...    ...     ...          ...
-           gpt-other    ...    ...    ...     ...          ...
+2026-09-01 Total       ...    ...    ...     ...          ...
 ─────────────────────────────────────────────────────────────────────────
-2026-09-08 gpt-example  ...    ...    ...     ...          ...
+           gpt-example ...    ...    ...     ...          ...
+           gpt-other   ...    ...    ...     ...          ...
+─────────────────────────────────────────────────────────────────────────
+2026-09-08 Total       ...    ...    ...     ...          ...
+─────────────────────────────────────────────────────────────────────────
+           gpt-example ...    ...    ...     ...          ...
 ```
 
 Within each section, label the first column with the selected grouping
-(`Day`, `Week`, `Month`, or `Year`), group one period's Reported-model values
-into multiline cells, and put a horizontal table rule between period groups.
-Show the period label only on the group's first model line; do not add tree markers or an `All`
-row. Do not render the whole-range per-model or section totals as duplicate
-terminal rows; they remain in JSON. Do not sum unlike Surface inputs into a grand
-total. Model strings are rendered verbatim in identity but escaped for terminal
-safety: quote/escape controls, newlines, escape sequences, and non-ASCII
+(`Day`, `Week`, `Month`, or `Year`). Derive a terminal-only `Total` from each
+period's validated Reported-model rows, show the period label on that row, and put
+a horizontal table rule before its multiline model breakdown. Another rule
+separates the breakdown from the next period. Sum metric values and their
+reported-Turn coverage independently so NULL, reported zero, and partial
+coverage retain their meaning. Do not add tree markers or an `All` row, and do
+not change the HTTP/JSON representation. Do not render the whole-range per-model
+or section totals as duplicate terminal rows; they remain in JSON. Do not sum
+unlike Surface inputs into a grand total. Model strings are rendered verbatim in
+identity but escaped for terminal safety: quote/escape controls, newlines, escape
+sequences, and non-ASCII
 formatting characters so upstream text cannot inject terminal commands, bidi
 reordering, or extra rows.
 Use a deterministic ASCII-escaped representation without surrounding quotes for
@@ -815,14 +828,16 @@ truncation or aliasing of model names to make a row fit.
 Render exact integer counts with deterministic thousands separators, never
 rounded `k`/`M` values that obscure differences. `—` means unreported, not zero.
 A partially covered optional metric gets `*`; a following compact coverage list
-identifies its bucket and escaped model before stating its reported-Turn fraction,
-for example `2026-09-07 / gpt-example — cache read: 8/10 stored Turns`.
+identifies its bucket and `Total` or escaped model row before stating its
+reported-Turn fraction, for example
+`2026-09-07 / gpt-example — cache read: 8/10 stored Turns`.
 Static table period labels show only the bucket start date. The validated JSON
 retains the server-provided `range_partial` and `in_progress` flags for callers
 that need those distinctions; do not reuse the coverage marker for them.
 
 `--details` adds the server-provided OpenAI reasoning/reported-total metrics and
-Anthropic thinking/cache-TTL metrics to the same period-grouped model rows.
+Anthropic thinking/cache-TTL metrics to the same period totals and model
+breakdowns.
 Input/output/cache fields remain the compact default. `--json` always includes
 all fields; `--details` does not change the HTTP request or JSON representation.
 Render the static tables with rounded Lip Gloss borders, without Bubble Tea or
@@ -923,8 +938,9 @@ literal expected reports, not tests coupled to private SQL strings.
   missing detection errors, and no fallback to daemon local time or UTC.
 - Exact HTTP query parameters; terminal and daemon hosts with different zones;
   no API key, GitHub OAuth token, database path, or Upstream call dependency.
-- Both native period-grouped layouts, horizontal inter-period rules, no tree
-  markers, details/coverage, omission of range rows and period annotations,
+- Both native period-grouped layouts, presentation-derived `Total` rows,
+  horizontal total/inter-period rules, no tree markers, details/coverage,
+  omission of range rows and period annotations,
   exact numbers, malicious model/error strings, empty report,
   JSON-only stdout, stderr errors, protocol version skew, additive fields, and
   failing output writers.
@@ -932,7 +948,9 @@ literal expected reports, not tests coupled to private SQL strings.
   escaped spellings), invalid UTF-8/unpaired surrogates, contradictory
   filter/section/metric coverage, and valid additive fields. Reject invalid
   model-filter UTF-8 before HTTP or SQL as applicable; preserve valid Unicode
-  without normalization. The client validates but never recomputes totals.
+  without normalization. The client does not replace server range totals or
+  reconstruct calendar rules; text alone derives period totals from validated
+  rows.
 
 ## 12. Implementation sequence and release gates
 

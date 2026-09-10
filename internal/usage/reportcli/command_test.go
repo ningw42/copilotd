@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math"
 	"net/http/httptest"
 	"slices"
 	"strings"
@@ -118,6 +119,56 @@ func multiPeriodCommandReport(names []string, days int, turns int64, coverage fu
 	return r
 }
 
+func TestCommandRendersPeriodTotalsBeforeModelBreakdowns(t *testing.T) {
+	r := multiPeriodCommandReport([]string{"alpha", "beta"}, 2, 3, func(day, model int) int64 {
+		return int64(1 + (day+model)%2)
+	})
+	text := commandOutput(t, r, false)
+	for _, day := range []string{"2026-09-01", "2026-09-02"} {
+		if !hasTableRow(text, day, "Total", "6", "60", "6", "—", "3*") {
+			t.Errorf("missing period total for %s:\n%s", day, text)
+		}
+		want := day + " / Total — cache read: 3/6 stored Turns"
+		if strings.Count(text, want) != 1 {
+			t.Errorf("period coverage %q count != 1:\n%s", want, text)
+		}
+	}
+	for _, want := range [][]string{
+		{"", "alpha", "3", "30", "3", "—", "1*"},
+		{"", "beta", "3", "30", "3", "—", "2*"},
+	} {
+		if !hasTableRow(text, want...) {
+			t.Errorf("missing model breakdown row %q:\n%s", want, text)
+		}
+	}
+	if total, model := strings.Index(text, "Total"), strings.Index(text, "alpha"); total < 0 || model < 0 || total > model {
+		t.Fatalf("period total does not precede model breakdown:\n%s", text)
+	}
+	if strings.Count(text, "\n├") != 4 {
+		t.Fatalf("total and period separators missing:\n%s", text)
+	}
+}
+
+func TestCommandPeriodTotalStaysExactBeyondInt64(t *testing.T) {
+	r := multiPeriodCommandReport([]string{"alpha", "beta"}, 1, 1, func(int, int) int64 { return 0 })
+	for i := range r.OpenAI.Rows {
+		maximum := int64(math.MaxInt64)
+		r.OpenAI.Rows[i].Total = report.Total{Turns: maximum, Usage: map[string]report.Metric{
+			"input_tokens":       {Sum: &maximum, ReportedTurns: maximum},
+			"output_tokens":      {Sum: &maximum, ReportedTurns: maximum},
+			"cached_tokens":      {},
+			"cache_write_tokens": {},
+			"reasoning_tokens":   {},
+			"total_tokens":       {},
+		}}
+	}
+	text := commandOutput(t, r, false)
+	const combined = "18,446,744,073,709,551,614"
+	if !hasTableRow(text, "2026-09-01", "Total", combined, combined, combined, "—", "—") {
+		t.Fatalf("period total overflowed independently valid model rows:\n%s", text)
+	}
+}
+
 func TestCommandEscapesBoundarySpacesWithoutModelCollisions(t *testing.T) {
 	names := []string{" ", " m", "m", "m ", `m\x20`}
 	r := multiPeriodCommandReport(names, 1, 1, func(int, int) int64 { return 0 })
@@ -128,7 +179,7 @@ func TestCommandEscapesBoundarySpacesWithoutModelCollisions(t *testing.T) {
 			continue
 		}
 		cells := strings.Split(line, "│")
-		if len(cells) == 9 && strings.TrimSpace(cells[2]) != "Model(s)" {
+		if len(cells) == 9 && strings.TrimSpace(cells[1]) == "" {
 			got = append(got, strings.TrimSpace(cells[2]))
 		}
 	}
@@ -271,15 +322,16 @@ func TestCommandRendersAnthropicNativeCoverageWithoutPeriodAnnotations(t *testin
 		}
 	}
 	for _, want := range [][]string{
-		{"2026-09-01", `a\x1b\n\u202e`, "2", "12", "9", "2,000*", "0*"},
+		{"2026-09-01", "Total", "3", "9,007,199,254,741,005", "12", "2,000*", "0*"},
+		{"", `a\x1b\n\u202e`, "2", "12", "9", "2,000*", "0*"},
 		{"", "z", "1", "9,007,199,254,740,993", "3", "—", "—"},
 	} {
 		if !hasTableRow(anthropic, want...) {
 			t.Errorf("missing grouped row %q: %s", want, anthropic)
 		}
 	}
-	if strings.Count(anthropic, "\n├") != 1 {
-		t.Fatalf("models within one period were separated: %s", anthropic)
+	if strings.Count(anthropic, "\n├") != 2 {
+		t.Fatalf("total was not separated from one period's models: %s", anthropic)
 	}
 	assertTextExcludes(t, text, "\x1b", "\u202e", "Grand total", `├─ "`, `└─ "`, "│ All ", "│ Period ", "[clipped]", "[in progress]")
 	assertTextExcludes(t, anthropic, `"a\x1b\n\u202e"`, `"z"`, "Cache write")

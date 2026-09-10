@@ -167,20 +167,23 @@ extra input/output or an inferred total. No cross-Surface token total is added.
 Counts/coverage are exact decimal strings (or null for an absent sum), never
 floating point. The client validates case-sensitive required fields, duplicate
 names, Unicode, integer ranges, and metric coverage before any output, while
-allowing additive fields. It does not reaggregate totals or reconstruct calendar
-rules. Text uses comma-separated exact counts, ASCII-escaped model identities,
+allowing additive fields. Text derives terminal-only period totals from the
+validated period/model rows without changing JSON or reconstructing calendar
+rules. It uses comma-separated exact counts, ASCII-escaped model identities,
 `—` for unreported metrics, and `*` plus coverage for partial optional metrics.
 Anthropic renders first with Turns, Uncached input, Output, Cache create, and
 Cache read; OpenAI follows with Turns, Input, Output, Cache write, and Cache read.
-Each text section groups Reported-model rows by period, labels the first column
-as `Day`, `Week`, `Month`, or `Year`, and places a horizontal rule between period
-groups. Whole-range per-model and section totals remain in JSON
-but are not rendered as duplicate text rows. A reported zero stays zero; an empty
+Each text section groups Reported-model rows by period and labels the first
+column as `Day`, `Week`, `Month`, or `Year`. A period starts with `Total`, followed
+by a horizontal rule and its model breakdown; another rule separates the next
+period. Whole-range per-model and section totals remain in JSON but are not
+rendered as duplicate text rows. A reported zero stays zero; an empty
 selection is explicitly labeled, not represented as proof of no consumption.
 
-`--details` adds secondary native tables for the same period-grouped
-Reported-model rows: OpenAI **Reasoning** (`reasoning_tokens`) and **Reported
-total** (`total_tokens`, never inferred); Anthropic **Thinking** (`thinking_tokens`),
+`--details` adds secondary native tables for the same period totals and
+Reported-model breakdowns: OpenAI **Reasoning** (`reasoning_tokens`) and
+**Reported total** (`total_tokens`, never inferred); Anthropic **Thinking**
+(`thinking_tokens`),
 **Cache create 5m** (`ephemeral_5m_input_tokens`), and **Cache create 1h**
 (`ephemeral_1h_input_tokens`). All retain NULL/zero and reporting coverage, without
 normalizing or adding subsets to their parent counts. Static tables show bucket

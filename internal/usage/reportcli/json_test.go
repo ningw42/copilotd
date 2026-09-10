@@ -19,7 +19,8 @@ import (
 )
 
 // This matrix characterizes the inherited shared validator through BOTH public
-// command presentations. It never reconstructs calendar rules or sums totals.
+// command presentations. Validation never reconstructs calendar rules or
+// replaces server totals; text may derive presentation-only period totals.
 func TestCommandValidatesCompleteWireContractBeforeEitherPresentation(t *testing.T) {
 	r := commandReport()
 	r.Surface = "all"

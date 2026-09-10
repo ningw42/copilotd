@@ -38,7 +38,8 @@ func TestCommandDetailsGroupsAnthropicNativeSubsetsByPeriod(t *testing.T) {
 		}
 	}
 	for _, want := range [][]string{
-		{"2026-09-01", `\u6a21\u578b\t\u2066\n`, "2", "4*", "0*", "—"},
+		{"2026-09-01", "Total", "2", "4*", "0*", "—"},
+		{"", `\u6a21\u578b\t\u2066\n`, "2", "4*", "0*", "—"},
 	} {
 		if !hasTableRow(text, want...) {
 			t.Errorf("missing secondary row %q: %s", want, text)
@@ -84,7 +85,8 @@ func TestCommandDetailsGroupsOpenAIReportedSecondaryValuesByPeriod(t *testing.T)
 		}
 	}
 	for _, want := range [][]string{
-		{"2026-09-01", `evil\x1b[31m\n\u202e`, "2", "0*", "—"},
+		{"2026-09-01", "Total", "2", "0*", "—"},
+		{"", `evil\x1b[31m\n\u202e`, "2", "0*", "—"},
 	} {
 		if !hasTableRow(text, want...) {
 			t.Errorf("missing secondary row %q: %s", want, text)
