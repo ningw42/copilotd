@@ -109,10 +109,14 @@ second precedence order.
   containing `zoneinfo`. macOS additionally recognizes Apple's final `zoneinfo`
   directory component in versioned/resolved layouts. Preserve the name suffix;
   distinct candidate names are ambiguous rather than silently canonicalized.
-- Reject `right/` and `posix/` subtrees, loops, missing/unreadable targets, ordinary
-  copied/custom files, and changed path observations. Read at most 1 MiB of TZif
-  evidence and recheck path/file identity; do not reverse-match bytes, current
-  offsets/abbreviations, `time.Local`, or stale `/etc/timezone` metadata.
+- Reject `right/` and `posix/` subtrees, loops, missing/unreadable targets, and
+  ordinary copied/custom files. Initial discovery checks every recognized root
+  for unreadable evidence, candidate ambiguity, and forbidden provenance.
+- Read at most 1 MiB of TZif evidence. After selecting one name, recheck its
+  filename path and the root alias that established it: selected symlink and TZif
+  changes, or selected directory identity/type changes, fail. Unrelated directory
+  size/mtime activity and later changes to unused roots do not. Do not reverse-match
+  bytes, current offsets/abbreviations, `time.Local`, or stale `/etc/timezone` metadata.
 - Native Windows always requires `--timezone`, `COPILOTD_TIMEZONE`, or selected
   TOML `timezone`. No registry/CLDR mapping or Windows `TZ` inference is used.
   WSL follows Linux. Explicit named loading retains the embedded fallback on

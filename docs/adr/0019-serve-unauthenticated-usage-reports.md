@@ -55,7 +55,13 @@ not an inference-authentication exemption accidentally inherited from probes.
   interference but are not resource isolation from untrusted traffic.
 - The CLI defaults to the terminal host's named timezone and sends it explicitly.
   Ambiguous local detection requires `--timezone`; neither a current UTC offset
-  nor the daemon's local clock silently replaces that choice.
+  nor the daemon's local clock silently replaces that choice. Filesystem
+  discovery initially evaluates every recognized root for ambiguity, forbidden
+  provenance, and unreadable evidence. After one name is selected, its final
+  consistency check is deliberately limited to the selected filename path and
+  the root alias that established that name. Selected directory identity/type,
+  symlink, and TZif changes still fail; unrelated directory size/mtime activity
+  and later changes to unused roots do not.
 - The CLI requires a running reachable daemon; offline history and reporting
   while the Usage meter is disabled remain outside this design.
 - The HTTP handler has no upstream dependency and is not a project Endpoint,

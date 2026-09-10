@@ -346,11 +346,19 @@ rules snapshot would add build/data ownership without guaranteeing that a
 terminal's custom rules match the daemon. Custom automatic-discovery inputs are
 rejected instead. Newer-than-bundled names may require a newer daemon; never
 mislabel that error as UTC. #210 implements the Unix discovery procedure with
-40-hop component-aware traversal, bounded TZif verification (at most 1 MiB), and
-path/file observation rechecks. Public-command fixtures cover Linux/macOS layouts
-and Windows explicit-only behavior; Linux static-executable isolation also covers
-system discovery and embedded loading. Native execution remains a revision-specific
-release-verification obligation; deterministic fixtures are not certification.
+40-hop component-aware traversal and bounded TZif verification (at most 1 MiB).
+Initial discovery still walks every recognized root: unreadable evidence fails,
+and all roots participate in candidate ambiguity and `right/`/`posix/` provenance
+classification. Each root walk begins with the selected filename observations;
+once exactly one name remains, the first root that establishes it owns the
+consistency proof. The final recheck covers that filename path, the establishing
+root alias, selected directory identity/type, symlink targets, and regular TZif
+identity/mode/size/mtime. Directory size/mtime alone and later changes to unused
+or initially absent alternative roots are deliberately outside that proof.
+Public-command fixtures cover Linux/macOS layouts and Windows explicit-only
+behavior; Linux static-executable isolation also covers system discovery and
+embedded loading. Native execution remains a revision-specific release-verification
+obligation; deterministic fixtures are not certification.
 See the [verification pipeline and evidence guide](../verification/usage-reporting.md).
 
 ### Range and buckets

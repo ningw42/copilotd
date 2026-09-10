@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path"
 	"runtime"
@@ -100,7 +101,13 @@ func sameTimezoneFile(a, b os.FileInfo) bool {
 	if a == nil || b == nil {
 		return a == nil && b == nil
 	}
-	return os.SameFile(a, b) && a.Mode() == b.Mode() && a.Size() == b.Size() && a.ModTime().Equal(b.ModTime())
+	if !os.SameFile(a, b) {
+		return false
+	}
+	if a.IsDir() || b.IsDir() {
+		return a.IsDir() && b.IsDir()
+	}
+	return a.Mode() == b.Mode() && a.Size() == b.Size() && a.ModTime().Equal(b.ModTime())
 }
 
 // Recheck the path evidence, not just the final filename: a changed system link
@@ -193,6 +200,7 @@ type timezoneRootRecord struct {
 	original  string
 	resolved  string
 	paths     []string
+	proof     timezoneWalk
 	forbidden bool
 }
 
@@ -243,8 +251,10 @@ func (s *localTimezoneSystem) fileTimezone(filename string) (string, error) {
 	}
 	records := make([]timezoneRootRecord, 0, len(rootSeeds))
 	for _, root := range rootSeeds {
-		record := timezoneRootRecord{original: root}
-		resolved, rootPaths, err := walk.walk(root)
+		// Seed each root with the selected filename's evidence so it cannot
+		// contradict an already-observed selected path while proving its alias.
+		record := timezoneRootRecord{original: root, proof: timezoneWalk{system: s, observations: maps.Clone(walk.observations)}}
+		resolved, rootPaths, err := record.proof.walk(root)
 		if err != nil && !errors.Is(err, errOptionalTimezonePathAbsent) {
 			return "", err
 		}
@@ -263,7 +273,9 @@ func (s *localTimezoneSystem) fileTimezone(filename string) (string, error) {
 			}
 		}
 	}
-	candidates := map[string]bool{}
+	// The first root that establishes each name owns its deterministic proof.
+	// Every later root still participates in ambiguity and provenance checks.
+	candidateProofs := map[string]timezoneWalk{}
 	for _, observed := range paths {
 		for _, record := range records {
 			for _, root := range []string{record.original, record.resolved} {
@@ -275,18 +287,22 @@ func (s *localTimezoneSystem) fileTimezone(filename string) (string, error) {
 						return "", localTimezoneError("unsupported right/posix zoneinfo subtree")
 					}
 					if _, err := report.LoadTimezone(name); err == nil {
-						candidates[name] = true
+						if _, exists := candidateProofs[name]; !exists {
+							candidateProofs[name] = record.proof
+						}
 					}
 				}
 			}
 		}
 	}
-	if len(candidates) != 1 {
+	if len(candidateProofs) != 1 {
 		return "", localTimezoneError("unidentifiable or ambiguous zone file")
 	}
 	var name string
-	for candidate := range candidates {
+	var proof timezoneWalk
+	for candidate, candidateProof := range candidateProofs {
 		name = candidate
+		proof = candidateProof
 	}
 	observed := walk.observations[target].info
 	if observed == nil || !observed.Mode().IsRegular() {
@@ -311,7 +327,7 @@ func (s *localTimezoneSystem) fileTimezone(filename string) (string, error) {
 		return "", localTimezoneError("not a readable TZif file")
 	}
 	finished, err := file.Stat()
-	if err != nil || !sameTimezoneFile(opened, finished) || !walk.consistent() {
+	if err != nil || !sameTimezoneFile(opened, finished) || !proof.consistent() {
 		return "", localTimezoneError("timezone paths changed or could not be verified")
 	}
 	return name, nil
