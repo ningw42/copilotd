@@ -119,72 +119,71 @@ func renderTables(out *strings.Builder, period string, section *report.Section, 
 }
 
 func groupedRows(rows []report.Row, columns []metricColumn) ([][]string, []string) {
-	groups := orderedRows(rows)
-	renderedGroups := make([][]string, 0, len(groups))
+	renderedGroups := make([][]string, 0, len(rows))
 	var notes []string
-	for _, group := range groups {
+	for start := 0; start < len(rows); {
+		bucket := rows[start].BucketStart
+		end := start + 1
+		for end < len(rows) && rows[end].BucketStart == bucket {
+			end++
+		}
+
 		cells := make([][]string, 3+len(columns))
-		for i, model := range group.models {
-			rendered, coverage := renderTotal("", escapeModel(model.Model), model.Total, columns)
-			if i == 0 {
-				rendered[0] = group.bucket
+		for index := start; index < end; index++ {
+			model := escapeModel(rows[index].Model)
+			period := ""
+			if index == start {
+				period = bucket
 			}
+			cells[0] = append(cells[0], period)
+			rendered, coverage := renderTotal(model, rows[index].Total, columns)
 			for column, value := range rendered {
-				cells[column] = append(cells[column], value)
+				cells[column+1] = append(cells[column+1], value)
 			}
-			notes = append(notes, coverage...)
+			for _, note := range coverage {
+				notes = append(notes, bucket+" / "+model+" — "+note)
+			}
 		}
 		groupRow := make([]string, len(cells))
 		for column := range cells {
 			groupRow[column] = strings.Join(cells[column], "\n")
 		}
 		renderedGroups = append(renderedGroups, groupRow)
+		start = end
 	}
 	return renderedGroups, notes
 }
 
-type periodRows struct {
-	bucket string
-	models []report.Row
-}
-
-func orderedRows(rows []report.Row) []periodRows {
-	var grouped []periodRows
-	for _, row := range rows {
-		if len(grouped) == 0 || grouped[len(grouped)-1].bucket != row.BucketStart {
-			grouped = append(grouped, periodRows{bucket: row.BucketStart})
-		}
-		grouped[len(grouped)-1].models = append(grouped[len(grouped)-1].models, row)
-	}
-	return grouped
-}
-
 func escapeModel(model string) string {
-	quoted := strconv.QuoteToASCII(model)
-	return quoted[1 : len(quoted)-1]
+	start := 0
+	for start < len(model) && model[start] == ' ' {
+		start++
+	}
+	end := len(model)
+	for end > start && model[end-1] == ' ' {
+		end--
+	}
+
+	var escaped strings.Builder
+	escaped.Grow(len(model))
+	for range start {
+		escaped.WriteString(`\x20`)
+	}
+	quoted := strconv.QuoteToASCII(model[start:end])
+	escaped.WriteString(quoted[1 : len(quoted)-1])
+	for range len(model) - end {
+		escaped.WriteString(`\x20`)
+	}
+	return escaped.String()
 }
 
 func tableHeaders(period string, columns []metricColumn) []string {
-	headers := []string{periodHeading(period), "Model", "Turns"}
+	heading := strings.ToUpper(period[:1]) + period[1:]
+	headers := []string{heading, "Model", "Turns"}
 	for _, column := range columns {
 		headers = append(headers, column.label)
 	}
 	return headers
-}
-
-func periodHeading(period string) string {
-	switch period {
-	case "day":
-		return "Day"
-	case "week":
-		return "Week"
-	case "month":
-		return "Month"
-	case "year":
-		return "Year"
-	default:
-		return "Period"
-	}
 }
 
 func renderTable(out *strings.Builder, headers []string, rows [][]string) {
@@ -204,8 +203,8 @@ func renderTable(out *strings.Builder, headers []string, rows [][]string) {
 	fmt.Fprintln(out, t.Render())
 }
 
-func renderTotal(label, model string, total report.Total, columns []metricColumn) ([]string, []string) {
-	row := []string{label, model, count(total.Turns)}
+func renderTotal(model string, total report.Total, columns []metricColumn) ([]string, []string) {
+	row := []string{model, count(total.Turns)}
 	for _, column := range columns {
 		row = append(row, metric(total, column.name))
 	}

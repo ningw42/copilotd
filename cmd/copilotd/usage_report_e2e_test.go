@@ -17,6 +17,15 @@ import (
 	"github.com/ningw42/copilotd/internal/usage/reporthttp"
 )
 
+func assertTextExcludes(t *testing.T, text string, fragments ...string) {
+	t.Helper()
+	for _, fragment := range fragments {
+		if strings.Contains(text, fragment) {
+			t.Errorf("unexpected fragment %q in:\n%s", fragment, text)
+		}
+	}
+}
+
 func TestAnthropicAndCombinedUsageCommandThroughProductionListener(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -104,9 +113,10 @@ func TestAnthropicAndCombinedUsageCommandThroughProductionListener(t *testing.T)
 			t.Fatal("unselected OpenAI or synthesized Anthropic input")
 		}
 		if surface == "" || surface == "all" {
-			if strings.Index(text, "Anthropic\n") > strings.Index(text, "OpenAI\n") || strings.Contains(text, `├─ "`) || strings.Contains(text, `└─ "`) || strings.Contains(text, "│ All ") || strings.Contains(text, "Model totals") || strings.Contains(text, "Section total") || strings.Contains(text, "│ Range") {
-				t.Fatalf("native period groups: %s", text)
+			if strings.Index(text, "Anthropic\n") > strings.Index(text, "OpenAI\n") {
+				t.Fatalf("native section order: %s", text)
 			}
+			assertTextExcludes(t, text, `├─ "`, `└─ "`, "│ All ", "Model totals", "Section total", "│ Range")
 		}
 	}
 }

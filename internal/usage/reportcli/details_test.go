@@ -44,9 +44,7 @@ func TestCommandDetailsGroupsAnthropicNativeSubsetsByPeriod(t *testing.T) {
 			t.Errorf("missing secondary row %q: %s", want, text)
 		}
 	}
-	if strings.ContainsAny(text, "模型\u2066") || strings.Contains(text, "Reasoning") || strings.Contains(text, "8,012") || strings.Contains(text, "Grand total") {
-		t.Fatal("unsafe or normalized native output")
-	}
+	assertTextExcludes(t, text, "模型", "\u2066", "Reasoning", "8,012", "Grand total")
 }
 
 func TestCommandDetailsGroupsOpenAIReportedSecondaryValuesByPeriod(t *testing.T) {
@@ -92,9 +90,7 @@ func TestCommandDetailsGroupsOpenAIReportedSecondaryValuesByPeriod(t *testing.T)
 			t.Errorf("missing secondary row %q: %s", want, text)
 		}
 	}
-	if strings.ContainsAny(text, "\x1b\u202e") || strings.Contains(text, `"evil\x1b[31m\n\u202e"`) || strings.Contains(text, `├─ "`) || strings.Contains(text, `└─ "`) || strings.Contains(text, "│ All ") || strings.Contains(text, "[clipped]") || strings.Contains(text, "[in progress]") || strings.Contains(text, "Model totals") || strings.Contains(text, "Section total") || strings.Contains(text, "│ Range") || strings.Contains(text, "reported total: 1/2 stored Turns") || strings.Contains(text, "9,223,372,036,854,775,807") {
-		t.Fatal("unsafe identity or rendered range totals")
-	}
+	assertTextExcludes(t, text, "\x1b", "\u202e", `"evil\x1b[31m\n\u202e"`, `├─ "`, `└─ "`, "│ All ", "[clipped]", "[in progress]", "Model totals", "Section total", "│ Range", "reported total: 1/2 stored Turns", "9,223,372,036,854,775,807")
 	options.Details = false
 	out.Reset()
 	if err := reportcli.Run(context.Background(), client, options, &out); err != nil {

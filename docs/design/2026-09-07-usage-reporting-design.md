@@ -804,13 +804,16 @@ safety: quote/escape controls, newlines, escape sequences, and non-ASCII
 formatting characters so upstream text cannot inject terminal commands, bidi
 reordering, or extra rows.
 Use a deterministic ASCII-escaped representation without surrounding quotes for
-model cells in v1; JSON preserves the original valid Unicode identity. No
+model cells in v1. Escape each boundary ASCII space as `\x20`; escaping literal
+backslashes keeps that representation distinct from a model containing those
+four characters. JSON preserves the original valid Unicode identity. No
 truncation or aliasing of model names to make a row fit.
 
 Render exact integer counts with deterministic thousands separators, never
 rounded `k`/`M` values that obscure differences. `—` means unreported, not zero.
 A partially covered optional metric gets `*`; a following compact coverage list
-states its reported-Turn fraction, for example `cache read: 8/10 stored Turns`.
+identifies its bucket and escaped model before stating its reported-Turn fraction,
+for example `2026-09-07 / gpt-example — cache read: 8/10 stored Turns`.
 Static table period labels show only the bucket start date. The validated JSON
 retains the server-provided `range_partial` and `in_progress` flags for callers
 that need those distinctions; do not reuse the coverage marker for them.

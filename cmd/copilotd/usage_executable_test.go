@@ -67,9 +67,7 @@ func TestUsageExecutableAcceptance(t *testing.T) {
 				t.Fatalf("missing %q: %s", want, out)
 			}
 		}
-		if strings.Contains(out, "Reasoning") || strings.Contains(out, "Grand total") || strings.Contains(out, `"Model"`) || strings.Contains(out, `├─ "`) || strings.Contains(out, `└─ "`) || strings.Contains(out, "│ All ") || strings.Contains(out, "Model totals") || strings.Contains(out, "Section total") || strings.Contains(out, "│ Range") {
-			t.Fatal(out)
-		}
+		assertTextExcludes(t, out, "Reasoning", "Grand total", `"Model"`, `├─ "`, `└─ "`, "│ All ", "Model totals", "Section total", "│ Range")
 	})
 	t.Run("periods_surfaces_and_exact_filters", func(t *testing.T) {
 		for _, period := range []struct{ name, start string }{{"day", "2026-09-01"}, {"week", "2026-08-31"}, {"month", "2026-09-01"}, {"year", "2026-01-01"}} {

@@ -185,7 +185,8 @@ normalizing or adding subsets to their parent counts. Static tables show bucket
 start dates without clipping or in-progress remarks; those flags remain available
 as `range_partial` and `in_progress` in JSON. Optional-count `*` coverage is not a
 completeness claim. Identities are ASCII-escaped without surrounding quotes or
-truncation to prevent terminal control or bidi injection.
+truncation; boundary spaces use `\x20` so distinct identities remain visible and
+terminal controls or bidi text cannot inject presentation.
 
 `--json` validates the same bounded complete response as text, then writes its
 original bytes plus a final newline. Whitespace, valid Unicode, exact decimal

@@ -3,8 +3,10 @@ package reportcli_test
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -16,6 +18,15 @@ import (
 )
 
 func number(n int64) *int64 { return &n }
+
+func assertTextExcludes(t *testing.T, text string, fragments ...string) {
+	t.Helper()
+	for _, fragment := range fragments {
+		if strings.Contains(text, fragment) {
+			t.Errorf("unexpected fragment %q in:\n%s", fragment, text)
+		}
+	}
+}
 
 func hasTableRow(text string, want ...string) bool {
 	for _, line := range strings.Split(text, "\n") {
@@ -39,6 +50,126 @@ func hasTableRow(text string, want ...string) bool {
 		}
 	}
 	return false
+}
+
+func commandOutput(t *testing.T, r report.Report, details bool) string {
+	t.Helper()
+	server := httptest.NewServer(reporthttp.Handler(func(context.Context, report.Query) (report.Report, error) { return r, nil }))
+	defer server.Close()
+	client, err := reporthttp.NewClient(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	utc := "UTC"
+	var out bytes.Buffer
+	options := reportcli.Options{Endpoint: server.URL, Timezone: &utc, Query: report.Query{Surface: "openai", Period: r.Period, Since: r.Since, Until: r.Until}, Details: details, Timeout: time.Second}
+	if err := reportcli.Run(context.Background(), client, options, &out); err != nil {
+		t.Fatal(err)
+	}
+	return out.String()
+}
+
+func openAICommandTotal(turns, cachedCoverage, reasoningCoverage int64) report.Total {
+	input, output := 10*turns, turns
+	usage := map[string]report.Metric{
+		"input_tokens":       {Sum: &input, ReportedTurns: turns},
+		"output_tokens":      {Sum: &output, ReportedTurns: turns},
+		"cached_tokens":      {},
+		"cache_write_tokens": {},
+		"reasoning_tokens":   {},
+		"total_tokens":       {},
+	}
+	if cachedCoverage > 0 {
+		cached := cachedCoverage
+		usage["cached_tokens"] = report.Metric{Sum: &cached, ReportedTurns: cachedCoverage}
+	}
+	if reasoningCoverage > 0 {
+		reasoning := reasoningCoverage
+		usage["reasoning_tokens"] = report.Metric{Sum: &reasoning, ReportedTurns: reasoningCoverage}
+	}
+	return report.Total{Turns: turns, Usage: usage}
+}
+
+func multiPeriodCommandReport(names []string, days int, turns int64, coverage func(day, model int) int64) report.Report {
+	start := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	end := start.AddDate(0, 0, days)
+	section := &report.Section{Rows: []report.Row{}, Models: []report.ModelTotal{}}
+	modelCoverage := make([]int64, len(names))
+	var totalCoverage int64
+	for day := range days {
+		from := start.AddDate(0, 0, day)
+		bucket := from.Format(time.DateOnly)
+		for model, name := range names {
+			reported := coverage(day, model)
+			modelCoverage[model] += reported
+			totalCoverage += reported
+			section.Rows = append(section.Rows, report.Row{BucketStart: bucket, ModelTotal: report.ModelTotal{Model: name, Total: openAICommandTotal(turns, reported, reported)}})
+		}
+	}
+	for model, name := range names {
+		section.Models = append(section.Models, report.ModelTotal{Model: name, Total: openAICommandTotal(turns*int64(days), modelCoverage[model], modelCoverage[model])})
+	}
+	section.Total = openAICommandTotal(turns*int64(days*len(names)), totalCoverage, totalCoverage)
+	r := report.Report{SchemaVersion: 1, GeneratedAt: end, Timezone: "UTC", Period: "day", Since: start.Format(time.DateOnly), Until: end.Format(time.DateOnly), WindowStart: start, WindowEnd: end, Scope: "configured_database", Collection: "best_effort", Surface: "openai", OpenAI: section}
+	for day := range days {
+		from, until := start.AddDate(0, 0, day), start.AddDate(0, 0, day+1)
+		r.Buckets = append(r.Buckets, report.Bucket{StartDate: from.Format(time.DateOnly), UntilDate: until.Format(time.DateOnly), RangeStart: from, RangeEnd: until})
+	}
+	return r
+}
+
+func TestCommandEscapesBoundarySpacesWithoutModelCollisions(t *testing.T) {
+	names := []string{" ", " m", "m", "m ", `m\x20`}
+	r := multiPeriodCommandReport(names, 1, 1, func(int, int) int64 { return 0 })
+	text := commandOutput(t, r, false)
+	var got []string
+	for _, line := range strings.Split(text, "\n") {
+		if !strings.HasPrefix(line, "│") {
+			continue
+		}
+		cells := strings.Split(line, "│")
+		if len(cells) == 9 && strings.TrimSpace(cells[2]) != "Model" {
+			got = append(got, strings.TrimSpace(cells[2]))
+		}
+	}
+	want := []string{`\x20`, `\x20m`, "m", `m\x20`, `m\\x20`}
+	if !slices.Equal(got, want) {
+		t.Fatalf("model cells = %q, want distinct escaped identities %q\n%s", got, want, text)
+	}
+}
+
+func TestCommandCoverageNotesIdentifyPeriodAndModel(t *testing.T) {
+	names := []string{"alpha ", "beta"}
+	r := multiPeriodCommandReport(names, 2, 3, func(day, model int) int64 { return int64(1 + (day+model)%2) })
+	for _, details := range []bool{false, true} {
+		t.Run(fmt.Sprintf("details=%t", details), func(t *testing.T) {
+			text := commandOutput(t, r, details)
+			for day := range 2 {
+				bucket := time.Date(2026, 9, 1+day, 0, 0, 0, 0, time.UTC).Format(time.DateOnly)
+				for model, name := range []string{`alpha\x20`, "beta"} {
+					fraction := 1 + (day+model)%2
+					for _, metric := range []string{"cache read", "reasoning"} {
+						want := fmt.Sprintf("%s / %s — %s: %d/3 stored Turns", bucket, name, metric, fraction)
+						if metric == "reasoning" && !details {
+							if strings.Contains(text, want) {
+								t.Fatalf("compact output contains secondary coverage %q", want)
+							}
+							continue
+						}
+						if strings.Count(text, want) != 1 {
+							t.Errorf("coverage context %q count != 1:\n%s", want, text)
+						}
+					}
+				}
+			}
+			for _, line := range strings.Split(text, "\n") {
+				trimmed := strings.TrimSpace(line)
+				if strings.HasPrefix(trimmed, "cache read:") || strings.HasPrefix(trimmed, "reasoning:") {
+					t.Errorf("detached coverage note %q", trimmed)
+				}
+			}
+		})
+	}
 }
 
 func commandReport() report.Report {
@@ -150,9 +281,9 @@ func TestCommandRendersAnthropicNativeCoverageWithoutPeriodAnnotations(t *testin
 	if strings.Count(anthropic, "\n├") != 1 {
 		t.Fatalf("models within one period were separated: %s", anthropic)
 	}
-	if strings.ContainsAny(text, "\x1b\u202e") || strings.Contains(anthropic, `"a\x1b\n\u202e"`) || strings.Contains(anthropic, `"z"`) || strings.Contains(anthropic, "Cache write") || strings.Contains(openai, "Uncached input") || strings.Contains(text, "Grand total") || strings.Contains(text, `├─ "`) || strings.Contains(text, `└─ "`) || strings.Contains(text, "│ All ") || strings.Contains(text, "│ Period ") || strings.Contains(text, "[clipped]") || strings.Contains(text, "[in progress]") {
-		t.Fatalf("unsafe or cross-Surface presentation: %s", text)
-	}
+	assertTextExcludes(t, text, "\x1b", "\u202e", "Grand total", `├─ "`, `└─ "`, "│ All ", "│ Period ", "[clipped]", "[in progress]")
+	assertTextExcludes(t, anthropic, `"a\x1b\n\u202e"`, `"z"`, "Cache write")
+	assertTextExcludes(t, openai, "Uncached input")
 	if !strings.Contains(openai, "6,000*") || !strings.Contains(openai, "Persisted successful Turns") {
 		t.Fatal("OpenAI/caveat regressed")
 	}
@@ -177,9 +308,7 @@ func TestCommandRendersServerValuesSafelyAndReturnsOutputFailures(t *testing.T) 
 			t.Errorf("missing %q in:\n%s", want, text)
 		}
 	}
-	if strings.ContainsAny(text, "\x1b\u202e") || strings.Contains(text, `"evil\x1b[31m\n\u202e"`) || strings.Contains(text, `├─ "`) || strings.Contains(text, `└─ "`) || strings.Contains(text, "│ All ") || strings.Contains(text, "Model totals") || strings.Contains(text, "Section total") || strings.Contains(text, "│ Range") {
-		t.Fatal("unsafe identity or range totals")
-	}
+	assertTextExcludes(t, text, "\x1b", "\u202e", `"evil\x1b[31m\n\u202e"`, `├─ "`, `└─ "`, "│ All ", "Model totals", "Section total", "│ Range")
 	if err := reportcli.Run(context.Background(), client, options, brokenOutput{}); err == nil {
 		t.Fatal("output failure succeeded")
 	}

@@ -66,18 +66,17 @@ func TestCommandAllPeriodsFromSQLiteThroughHTTPInExplicitNamedZone(t *testing.T)
 			}
 			// Period/model rows reach both native tables without renderer-side
 			// aggregation or duplicate range rows.
-			if strings.Count(text, "  18 ") != 2 || strings.Count(text, "  13 ") != 2 || strings.Contains(text, "  31 ") || strings.Contains(text, `"m"`) || strings.Contains(text, `├─ "`) || strings.Contains(text, `└─ "`) || strings.Contains(text, "│ All ") || strings.Contains(text, "Section total") || strings.Contains(text, "│ Range") {
+			if strings.Count(text, "  18 ") != 2 || strings.Count(text, "  13 ") != 2 {
 				t.Fatalf("period groups did not reach terminal: %s", text)
 			}
+			assertTextExcludes(t, text, "  31 ", `"m"`, `├─ "`, `└─ "`, "│ All ", "Section total", "│ Range")
 			if strings.Count(text, "\n│ "+heading) != 2 {
 				t.Fatalf("period-specific headings missing: %s", text)
 			}
 			if strings.Count(text, "\n├") != 4 {
 				t.Fatalf("missing horizontal separators between periods: %s", text)
 			}
-			if strings.Contains(text, "[clipped]") || strings.Contains(text, "[in progress]") {
-				t.Fatalf("rendered period annotations: %s", text)
-			}
+			assertTextExcludes(t, text, "[clipped]", "[in progress]")
 			result, err := client.Query(context.Background(), q)
 			if err != nil {
 				t.Fatal(err)
