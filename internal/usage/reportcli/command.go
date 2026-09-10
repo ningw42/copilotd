@@ -61,7 +61,7 @@ func Run(ctx context.Context, client *reporthttp.Client, options Options, stdout
 	if options.JSON {
 		text = string(result.JSON) + "\n"
 	} else {
-		text = render(options.Endpoint, result.Report, options.Details)
+		text = render(lipgloss.NewRenderer(stdout), options.Endpoint, result.Report, options.Details)
 	}
 	n, err := io.WriteString(stdout, text)
 	if err == nil && n != len(text) {
@@ -70,48 +70,62 @@ func Run(ctx context.Context, client *reporthttp.Client, options Options, stdout
 	return err
 }
 
-func render(endpoint string, r report.Report, details bool) string {
+var (
+	anthropicSurfaceColor = lipgloss.Color("#D97757")
+	openAISurfaceColor    = lipgloss.Color("#10A37F")
+	surfaceTextColor      = lipgloss.Color("#000000")
+)
+
+func render(renderer *lipgloss.Renderer, endpoint string, r report.Report, details bool) string {
 	var out strings.Builder
 	fmt.Fprintf(&out, "Usage report — %s\nTimezone: %s | Range: %s to %s (exclusive) | Period: %s\nQuery time: %s\n\n", strconv.QuoteToASCII(endpoint), r.Timezone, r.Since, r.Until, r.Period, r.GeneratedAt.Format(time.RFC3339Nano))
 	for _, native := range []struct {
 		title              string
+		background         lipgloss.TerminalColor
 		section            *report.Section
 		primary, secondary []metricColumn
 	}{
-		{"Anthropic", r.Anthropic,
+		{"Anthropic", anthropicSurfaceColor, r.Anthropic,
 			[]metricColumn{{"input_tokens", "Uncached input"}, {"output_tokens", "Output"}, {"cache_creation_input_tokens", "Cache create"}, {"cache_read_input_tokens", "Cache read"}},
 			[]metricColumn{{"thinking_tokens", "Thinking"}, {"ephemeral_5m_input_tokens", "Cache create 5m"}, {"ephemeral_1h_input_tokens", "Cache create 1h"}}},
-		{"OpenAI", r.OpenAI,
+		{"OpenAI", openAISurfaceColor, r.OpenAI,
 			[]metricColumn{{"input_tokens", "Input"}, {"output_tokens", "Output"}, {"cache_write_tokens", "Cache write"}, {"cached_tokens", "Cache read"}},
 			[]metricColumn{{"reasoning_tokens", "Reasoning"}, {"total_tokens", "Reported total"}}},
 	} {
 		if native.section == nil {
 			continue
 		}
-		fmt.Fprintln(&out, native.title)
+		fmt.Fprintln(&out, surfaceTitleStyle(renderer, native.background).Render(native.title))
 		if native.section.Total.Turns == 0 {
 			fmt.Fprintln(&out, "No stored Turns in the selected range.")
 		}
-		renderTables(&out, r.Period, native.section, native.primary)
+		renderTables(renderer, &out, r.Period, native.section, native.primary)
 		if details {
 			fmt.Fprintln(&out, "Secondary native counts")
-			renderTables(&out, r.Period, native.section, native.secondary)
+			renderTables(renderer, &out, r.Period, native.section, native.secondary)
 		}
 		fmt.Fprintln(&out)
 	}
 	return out.String()
 }
 
+func surfaceTitleStyle(renderer *lipgloss.Renderer, background lipgloss.TerminalColor) lipgloss.Style {
+	return renderer.NewStyle().
+		Bold(true).
+		Foreground(surfaceTextColor).
+		Background(background)
+}
+
 type metricColumn struct{ name, label string }
 
 // The two native projections share presentation mechanics, never aggregation.
 // All writes here target the in-memory builder; Run owns fallible stdout writes.
-func renderTables(out *strings.Builder, period string, section *report.Section, columns []metricColumn) {
+func renderTables(renderer *lipgloss.Renderer, out *strings.Builder, period string, section *report.Section, columns []metricColumn) {
 	rows, notes := groupedRows(section.Rows, columns)
 	if len(rows) == 0 {
 		return
 	}
-	renderTable(out, tableHeaders(period, columns), rows)
+	renderTable(renderer, out, tableHeaders(period, columns), rows)
 	renderCoverage(out, notes)
 }
 
@@ -183,7 +197,7 @@ func tableHeaders(period string, columns []metricColumn) []string {
 	return headers
 }
 
-func renderTable(out *strings.Builder, headers []string, rows [][]string) {
+func renderTable(renderer *lipgloss.Renderer, out *strings.Builder, headers []string, rows [][]string) {
 	t := table.New().
 		Border(lipgloss.RoundedBorder()).
 		BorderRow(true).
@@ -191,7 +205,7 @@ func renderTable(out *strings.Builder, headers []string, rows [][]string) {
 		Rows(rows...).
 		Wrap(true).
 		StyleFunc(func(_ int, column int) lipgloss.Style {
-			style := lipgloss.NewStyle().Padding(0, 1)
+			style := renderer.NewStyle().Padding(0, 1)
 			if column >= 2 {
 				style = style.Align(lipgloss.Right)
 			}
