@@ -35,6 +35,31 @@ The release also publishes the manifest asset identified in `release.json`.
 GitHub's generated commit tarball and commit ZIP have no API-provided digest, so
 they are not used as the vendored snapshot identity.
 
+## Current snapshot audit delta
+
+The embedded floor advanced to [`rust-v0.154.0`][current-release] on 2026-09-10.
+GitHub reported the release as stable and mutable (`draft: false`,
+`prerelease: false`, `immutable: false`); its annotated tag and peeled commit
+were unsigned. The commit and individual Git blob IDs recorded in `release.json`
+are therefore the durable identities. The recorded executable archive digest
+matched GitHub's release-asset digest, its decompressed binary matched the
+recorded executable digest, and the binary reported `codex-cli 0.154.0`.
+
+Relative to `rust-v0.153.4`, the vendored `models.json` retains eleven entries
+and `gpt-6-astra` as the bundled default. Its only content change adds
+`supports_experimental_context: true` to `gpt-6-astra`. Codex's `ModelInfo`
+contract adds that default-false field and an optional `guardian` policy;
+copilotd accepts and preserves both through its unknown-field fidelity rule.
+The upstream model merge/default manager and provider-default sources are
+byte-identical to the historical baseline. Guardian review was refactored, but
+the model-override and provider-default selection block remains in force.
+`LICENSE` and `NOTICE` are byte-identical to the previous vendored copies.
+First-party evidence is the GitHub [release response][current-release],
+[tag object][current-tag-object], [peeled commit][current-commit], current
+[`models.json` bytes][current-catalog-raw], [`ModelInfo` source][current-model-types],
+[manager source][current-manager], [provider defaults][current-provider], and
+[executable asset][current-codex-binary].
+
 ## Historical contract-audit baseline
 
 The deserialization, merge, selection, Guardian, and executable observations
@@ -263,6 +288,14 @@ the independent literal `defaultConfig` expectations in
 default rows in [`CONFIGURATION.md`](../../../CONFIGURATION.md). Synthetic test
 fixture versions remain unchanged; a fallback bump alone does not retarget them.
 
+[current-release]: https://api.github.com/repos/openai/codex/releases/385887902
+[current-tag-object]: https://api.github.com/repos/openai/codex/git/tags/36eab01061df3cde5f95ec20a526777b430091ba
+[current-commit]: https://github.com/openai/codex/commit/6b9826e3aa83b1a5947db50f4332cb9c65f1b340
+[current-catalog-raw]: https://raw.githubusercontent.com/openai/codex/6b9826e3aa83b1a5947db50f4332cb9c65f1b340/codex-rs/models-manager/models.json
+[current-model-types]: https://github.com/openai/codex/blob/6b9826e3aa83b1a5947db50f4332cb9c65f1b340/codex-rs/protocol/src/openai_models.rs
+[current-manager]: https://github.com/openai/codex/blob/6b9826e3aa83b1a5947db50f4332cb9c65f1b340/codex-rs/models-manager/src/manager.rs
+[current-provider]: https://github.com/openai/codex/blob/6b9826e3aa83b1a5947db50f4332cb9c65f1b340/codex-rs/model-provider/src/provider.rs
+[current-codex-binary]: https://github.com/openai/codex/releases/download/rust-v0.154.0/codex-x86_64-unknown-linux-musl.zst
 [audit-release]: https://api.github.com/repos/openai/codex/releases/383061770
 [audit-tag-object]: https://api.github.com/repos/openai/codex/git/tags/042fb41b7c813ac7999105e886b2b7aa715b5081
 [audit-commit]: https://github.com/openai/codex/commit/3d2ee51ca2d5db578f328aa75e20aa22c0197c9a

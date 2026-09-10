@@ -44,7 +44,8 @@ func TestVendoredCodexCatalogRoundTripFidelity(t *testing.T) {
 
 	// gpt-6-astra is the rust-v0.153.4 (2026-09-05) witness for Codex's
 	// canonical-only instruction shape and raw transport-field preservation.
-	// Keep this historical schema witness independent of the moving default.
+	// rust-v0.154.0 adds the defaulted supports_experimental_context field.
+	// Keep these schema witnesses independent of the moving default.
 	const astraSlug = "gpt-6-astra"
 	astra, present := vendoredModels[astraSlug]
 	if !present {
@@ -62,6 +63,9 @@ func TestVendoredCodexCatalogRoundTripFidelity(t *testing.T) {
 	}
 	if got := bytes.TrimSpace(astra["requires_sandboxed_review"]); !bytes.Equal(got, []byte("false")) {
 		t.Errorf("%s.requires_sandboxed_review = %s, want preserved false", astraSlug, got)
+	}
+	if got := bytes.TrimSpace(astra["supports_experimental_context"]); !bytes.Equal(got, []byte("true")) {
+		t.Errorf("%s.supports_experimental_context = %s, want preserved true", astraSlug, got)
 	}
 
 	github := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
