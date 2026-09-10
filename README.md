@@ -113,8 +113,10 @@ When `--timezone` is omitted, Linux/macOS use the CLI process's named `TZ` or a
 verified system timezone symlink. Exactly empty OS `TZ` means configured UTC;
 empty report-timezone overrides are errors. SSH, containers, and WSL use their
 own process-visible configuration, not a physical workstation or remote daemon.
-Copied/custom files, ambiguous names, unsupported rules, and nonempty `TZDIR` or
-`ZONEINFO` cannot be discovered: pass `--timezone Area/City` (or `--timezone UTC`).
+Copied/custom files, ambiguous names, unsupported rules, and `TZDIR` or
+`ZONEINFO` values outside recognized system zoneinfo root paths cannot be
+discovered: pass `--timezone Area/City` (or `--timezone UTC`). NixOS's
+system-exported `TZDIR=/etc/zoneinfo` is recognized.
 Native Windows always requires an explicit timezone, also settable through
 `COPILOTD_TIMEZONE` or selected TOML. Explicit choices bypass discovery, not name
 validation. Native runtime claims are revision-specific: see the

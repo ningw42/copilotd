@@ -93,8 +93,10 @@ not omission. Valid explicit timezone overrides bypass discovery but still use
 shared name validation. Discovery never rereads `COPILOTD_TIMEZONE` to invent a
 second precedence order.
 
-- On Linux/macOS, nonempty OS `TZDIR` or `ZONEINFO` makes automatic discovery
-  unsupported. Set an explicit report timezone instead.
+- On Linux/macOS, nonempty OS `TZDIR` or `ZONEINFO` is accepted when its
+  cleaned value names one of the platform zoneinfo root paths below; this
+  includes NixOS's system-exported `TZDIR=/etc/zoneinfo`. Other values make
+  automatic discovery unsupported; set an explicit report timezone instead.
 - With OS `TZ` present, exactly empty means configured `UTC`. Otherwise at most
   one leading colon is removed; a named value must validate/load unchanged, or
   an absolute zone-file path must establish a supported name. Invalid/rule/custom

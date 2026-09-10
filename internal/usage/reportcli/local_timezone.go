@@ -31,13 +31,32 @@ func localTimezoneError(reason string) error {
 	return fmt.Errorf("cannot determine a named local timezone (%s); pass --timezone Area/City (or --timezone UTC)", reason)
 }
 
+func timezoneRootSeeds(goos string) []string {
+	if goos == "darwin" {
+		return []string{"/var/db/timezone/zoneinfo", "/usr/share/zoneinfo"}
+	}
+	return []string{"/usr/share/zoneinfo", "/usr/share/lib/zoneinfo", "/usr/lib/locale/TZ", "/etc/zoneinfo"}
+}
+
+func recognizedTimezoneRoot(goos, name string) bool {
+	name = path.Clean(name)
+	for _, root := range timezoneRootSeeds(goos) {
+		if name == root {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *localTimezoneSystem) discover() (string, error) {
 	if s.goos == "windows" {
 		return "", localTimezoneError("native Windows requires an explicit timezone")
 	}
 	tzdir, _ := s.lookupEnv("TZDIR")
 	zoneinfo, _ := s.lookupEnv("ZONEINFO")
-	if tzdir != "" || zoneinfo != "" {
+	// NixOS exports TZDIR=/etc/zoneinfo process-wide. A named platform root is
+	// system data rather than the custom data this guard excludes.
+	if (tzdir != "" && !recognizedTimezoneRoot(s.goos, tzdir)) || (zoneinfo != "" && !recognizedTimezoneRoot(s.goos, zoneinfo)) {
 		return "", localTimezoneError("custom TZDIR or ZONEINFO")
 	}
 	name, present := s.lookupEnv("TZ")
@@ -211,9 +230,8 @@ func (s *localTimezoneSystem) fileTimezone(filename string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	rootSeeds := []string{"/usr/share/zoneinfo", "/usr/share/lib/zoneinfo", "/usr/lib/locale/TZ", "/etc/zoneinfo"}
+	rootSeeds := timezoneRootSeeds(s.goos)
 	if s.goos == "darwin" {
-		rootSeeds = []string{"/var/db/timezone/zoneinfo", "/usr/share/zoneinfo"}
 		// Apple's documented prefix ends in zoneinfo, including versioned
 		// layouts. This heuristic is intentionally never used on Linux.
 		for _, observed := range paths {

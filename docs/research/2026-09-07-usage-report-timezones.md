@@ -97,8 +97,10 @@ forcing one rules snapshot would require owning embedded TZif data and using
    resolve an absolute zone-file path using step 4. Empty, invalid, unsupported
    rule/custom-file values error immediately—do not fall through to OS default.
    Empty `TZ` means UTC to Go/libc, but this policy requires `--timezone UTC`
-   because it contains no named selection. Treat custom `TZDIR`/`ZONEINFO`
-   overrides as unsupported for automatic discovery; require `--timezone`.
+   because it contains no named selection. Treat `TZDIR`/`ZONEINFO` values whose
+   cleaned paths equal a platform root path in step 4 as system data (including
+   NixOS's system-exported `TZDIR=/etc/zoneinfo`); custom values remain
+   unsupported for automatic discovery and require `--timezone`.
 4. With `TZ` absent, inspect `/etc/localtime`. Traverse relative/absolute
    symlinks with a bound, rejecting loops, missing/unreadable targets and
    inconsistent results. On Linux recognize installed zoneinfo roots
