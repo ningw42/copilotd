@@ -82,7 +82,9 @@ func TestClientValidatesCompleteWireContract(t *testing.T) {
 		{name: "complete native report", body: base, query: query, valid: true},
 		{name: "unsolicited effective model filter", body: base, query: queryWithoutModel},
 		{name: "malformed", body: `{`, query: query},
+		{name: "truncated nesting", body: strings.TrimSuffix(base, "}"), query: query},
 		{name: "trailing document", body: base + ` {}`, query: query},
+		{name: "trailing scalar", body: base + ` true`, query: query},
 	}
 	mutate := func(name string, q report.Query, valid bool, change func(map[string]any)) {
 		var root map[string]any
