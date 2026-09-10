@@ -197,6 +197,43 @@ func TestCommandRendersPeriodTotalsBeforeModelBreakdowns(t *testing.T) {
 	}
 }
 
+func TestCommandFormatsModelAndPeriodTotalMetricsIdentically(t *testing.T) {
+	r := multiPeriodCommandReport([]string{"model"}, 2, 2, func(int, int) int64 { return 0 })
+	first := openAIExactTotal(2, 12, 0)
+	first.Usage["cached_tokens"] = report.Metric{Sum: number(3), ReportedTurns: 1}
+	first.Usage["reasoning_tokens"] = report.Metric{Sum: number(4), ReportedTurns: 2}
+	first.Usage["total_tokens"] = report.Metric{Sum: number(9), ReportedTurns: 1}
+	second := openAIExactTotal(2, 8, 2)
+	second.Usage["total_tokens"] = report.Metric{Sum: number(0), ReportedTurns: 2}
+	r.OpenAI.Rows[0].Total, r.OpenAI.Rows[1].Total = first, second
+
+	text := commandOutput(t, r, true)
+	for _, want := range [][]string{
+		// Primary columns: complete, reported zero, NULL, and partial.
+		{"2026-09-01", "Total", "2", "12", "0", "—", "3*"},
+		{"", "model", "2", "12", "0", "—", "3*"},
+		// Secondary columns cover complete and partial, then NULL and reported zero.
+		{"2026-09-01", "Total", "2", "4", "9*"},
+		{"", "model", "2", "4", "9*"},
+		{"2026-09-02", "Total", "2", "—", "0"},
+		{"", "model", "2", "—", "0"},
+	} {
+		if !hasTableRow(text, want...) {
+			t.Errorf("missing shared-format row %q:\n%s", want, text)
+		}
+	}
+	for _, want := range []string{
+		"2026-09-01 / Total — cache read: 1/2 stored Turns",
+		"2026-09-01 / model — cache read: 1/2 stored Turns",
+		"2026-09-01 / Total — reported total: 1/2 stored Turns",
+		"2026-09-01 / model — reported total: 1/2 stored Turns",
+	} {
+		if strings.Count(text, want) != 1 {
+			t.Errorf("coverage context %q count != 1:\n%s", want, text)
+		}
+	}
+}
+
 func TestCommandPeriodTotalOverflowFailsTextBeforeOutputButNotJSON(t *testing.T) {
 	r := multiPeriodCommandReport([]string{"alpha", "beta"}, 1, 1, func(int, int) int64 { return 0 })
 	maximum := int64(math.MaxInt64)

@@ -158,10 +158,11 @@ func groupedRows(rows []report.Row, columns []metricColumn) ([][]string, []strin
 			end++
 		}
 
-		renderedTotal, totalCoverage, err := renderPeriodTotal(rows[start:end], columns)
+		total, err := periodTotal(rows[start:end], columns)
 		if err != nil {
 			return nil, nil, err
 		}
+		renderedTotal, totalCoverage := renderTotal("Total", total, columns)
 		renderedGroups = append(renderedGroups, append([]string{bucket}, renderedTotal...))
 		for _, note := range totalCoverage {
 			notes = append(notes, bucket+" / Total — "+note)
@@ -189,57 +190,33 @@ func groupedRows(rows []report.Row, columns []metricColumn) ([][]string, []strin
 	return renderedGroups, notes, nil
 }
 
-type periodMetric struct {
-	sum, reportedTurns int64
-	reported           bool
-}
-
-// renderPeriodTotal derives a terminal-only subtotal from validated model rows.
+// periodTotal derives a terminal-only subtotal from validated model rows.
 // Independently valid rows may be mutually inconsistent; checked int64 addition
 // rejects their overflow rather than wrapping, saturating, or changing JSON.
-func renderPeriodTotal(rows []report.Row, columns []metricColumn) ([]string, []string, error) {
-	var turns int64
-	metrics := make(map[string]*periodMetric, len(columns))
-	for _, column := range columns {
-		metrics[column.name] = &periodMetric{}
-	}
+func periodTotal(rows []report.Row, columns []metricColumn) (report.Total, error) {
+	total := report.Total{Usage: make(map[string]report.Metric, len(columns))}
 	for _, row := range rows {
-		if err := addPeriodCount(&turns, row.Turns, "Turns"); err != nil {
-			return nil, nil, err
+		if err := addPeriodCount(&total.Turns, row.Turns, "Turns"); err != nil {
+			return report.Total{}, err
 		}
 		for _, column := range columns {
 			source := row.Usage[column.name]
-			metric := metrics[column.name]
-			if err := addPeriodCount(&metric.reportedTurns, source.ReportedTurns, column.label+" coverage"); err != nil {
-				return nil, nil, err
+			metric := total.Usage[column.name]
+			if err := addPeriodCount(&metric.ReportedTurns, source.ReportedTurns, column.label+" coverage"); err != nil {
+				return report.Total{}, err
 			}
 			if source.Sum != nil {
-				metric.reported = true
-				if err := addPeriodCount(&metric.sum, *source.Sum, column.label+" sum"); err != nil {
-					return nil, nil, err
+				if metric.Sum == nil {
+					metric.Sum = new(int64)
+				}
+				if err := addPeriodCount(metric.Sum, *source.Sum, column.label+" sum"); err != nil {
+					return report.Total{}, err
 				}
 			}
+			total.Usage[column.name] = metric
 		}
 	}
-
-	rendered := []string{"Total", count(turns)}
-	var coverage []string
-	for _, column := range columns {
-		metric := metrics[column.name]
-		if !metric.reported {
-			rendered = append(rendered, "—")
-			continue
-		}
-		value := count(metric.sum)
-		if metric.reportedTurns < turns {
-			value += "*"
-		}
-		rendered = append(rendered, value)
-		if metric.reportedTurns > 0 && metric.reportedTurns < turns {
-			coverage = append(coverage, fmt.Sprintf("%s: %s/%s stored Turns", strings.ToLower(column.label), count(metric.reportedTurns), count(turns)))
-		}
-	}
-	return rendered, coverage, nil
+	return total, nil
 }
 
 func addPeriodCount(total *int64, value int64, field string) error {
@@ -310,14 +287,19 @@ func renderTable(renderer *lipgloss.Renderer, out *strings.Builder, headers []st
 
 func renderTotal(model string, total report.Total, columns []metricColumn) ([]string, []string) {
 	row := []string{model, count(total.Turns)}
-	for _, column := range columns {
-		row = append(row, metric(total, column.name))
-	}
 	var coverage []string
 	for _, column := range columns {
-		m := total.Usage[column.name]
-		if m.ReportedTurns > 0 && m.ReportedTurns < total.Turns {
-			coverage = append(coverage, fmt.Sprintf("%s: %s/%s stored Turns", strings.ToLower(column.label), count(m.ReportedTurns), count(total.Turns)))
+		metric := total.Usage[column.name]
+		value := "—"
+		if metric.Sum != nil {
+			value = count(*metric.Sum)
+			if metric.ReportedTurns < total.Turns {
+				value += "*"
+			}
+		}
+		row = append(row, value)
+		if metric.ReportedTurns > 0 && metric.ReportedTurns < total.Turns {
+			coverage = append(coverage, fmt.Sprintf("%s: %s/%s stored Turns", strings.ToLower(column.label), count(metric.ReportedTurns), count(total.Turns)))
 		}
 	}
 	return row, coverage
@@ -329,17 +311,6 @@ func renderCoverage(out *strings.Builder, notes []string) {
 	}
 }
 
-func metric(total report.Total, name string) string {
-	m := total.Usage[name]
-	if m.Sum == nil {
-		return "—"
-	}
-	value := count(*m.Sum)
-	if m.ReportedTurns < total.Turns {
-		value += "*"
-	}
-	return value
-}
 func count(n int64) string {
 	return commaCount(strconv.FormatInt(n, 10))
 }
