@@ -1,12 +1,13 @@
 // Package reportcli orchestrates a one-shot HTTP report and safe terminal
-// presentation. It never opens SQLite or recomputes report aggregates.
+// presentation. It never opens SQLite or replaces server aggregates; text
+// derives checked, presentation-only period subtotals.
 package reportcli
 
 import (
 	"context"
 	"fmt"
 	"io"
-	"math/big"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -62,7 +63,10 @@ func Run(ctx context.Context, client *reporthttp.Client, options Options, stdout
 	if options.JSON {
 		text = string(result.JSON) + "\n"
 	} else {
-		text = render(lipgloss.NewRenderer(stdout), options.Endpoint, result.Report, options.Details)
+		text, err = render(lipgloss.NewRenderer(stdout), options.Endpoint, result.Report, options.Details)
+		if err != nil {
+			return err
+		}
 	}
 	n, err := io.WriteString(stdout, text)
 	if err == nil && n != len(text) {
@@ -76,7 +80,7 @@ var (
 	openAISurfaceColor    = lipgloss.Color("#3C6AC8")
 )
 
-func render(renderer *lipgloss.Renderer, endpoint string, r report.Report, details bool) string {
+func render(renderer *lipgloss.Renderer, endpoint string, r report.Report, details bool) (string, error) {
 	var out strings.Builder
 	surfaceTextColor := terminalBackgroundColor(renderer)
 	fmt.Fprintf(&out, "Usage report — %s\nTimezone: %s | Range: %s to %s (exclusive) | Period: %s\nQuery time: %s\n\n", escapeASCII(endpoint), r.Timezone, r.Since, r.Until, r.Period, r.GeneratedAt.Format(time.RFC3339Nano))
@@ -100,14 +104,18 @@ func render(renderer *lipgloss.Renderer, endpoint string, r report.Report, detai
 		if native.section.Total.Turns == 0 {
 			fmt.Fprintln(&out, "No stored Turns in the selected range.")
 		}
-		renderTables(renderer, &out, r.Period, native.section, native.primary)
+		if err := renderTables(renderer, &out, r.Period, native.section, native.primary); err != nil {
+			return "", err
+		}
 		if details {
 			fmt.Fprintln(&out, "Secondary native counts")
-			renderTables(renderer, &out, r.Period, native.section, native.secondary)
+			if err := renderTables(renderer, &out, r.Period, native.section, native.secondary); err != nil {
+				return "", err
+			}
 		}
 		fmt.Fprintln(&out)
 	}
-	return out.String()
+	return out.String(), nil
 }
 
 func terminalBackgroundColor(renderer *lipgloss.Renderer) lipgloss.TerminalColor {
@@ -129,17 +137,18 @@ func surfaceTitleStyle(renderer *lipgloss.Renderer, foreground, background lipgl
 type metricColumn struct{ name, label string }
 
 // The two native projections share presentation mechanics. Period totals are
-// derived only for terminal display; Run owns fallible stdout writes.
-func renderTables(renderer *lipgloss.Renderer, out *strings.Builder, period string, section *report.Section, columns []metricColumn) {
-	rows, notes := groupedRows(section.Rows, columns)
-	if len(rows) == 0 {
-		return
+// derived only for terminal display; errors reach Run before its stdout write.
+func renderTables(renderer *lipgloss.Renderer, out *strings.Builder, period string, section *report.Section, columns []metricColumn) error {
+	rows, notes, err := groupedRows(section.Rows, columns)
+	if err != nil || len(rows) == 0 {
+		return err
 	}
 	renderTable(renderer, out, tableHeaders(period, columns), rows)
 	renderCoverage(out, notes)
+	return nil
 }
 
-func groupedRows(rows []report.Row, columns []metricColumn) ([][]string, []string) {
+func groupedRows(rows []report.Row, columns []metricColumn) ([][]string, []string, error) {
 	renderedGroups := make([][]string, 0, 2*len(rows))
 	var notes []string
 	for start := 0; start < len(rows); {
@@ -149,7 +158,10 @@ func groupedRows(rows []report.Row, columns []metricColumn) ([][]string, []strin
 			end++
 		}
 
-		renderedTotal, totalCoverage := renderPeriodTotal(rows[start:end], columns)
+		renderedTotal, totalCoverage, err := renderPeriodTotal(rows[start:end], columns)
+		if err != nil {
+			return nil, nil, err
+		}
 		renderedGroups = append(renderedGroups, append([]string{bucket}, renderedTotal...))
 		for _, note := range totalCoverage {
 			notes = append(notes, bucket+" / Total — "+note)
@@ -174,37 +186,43 @@ func groupedRows(rows []report.Row, columns []metricColumn) ([][]string, []strin
 		renderedGroups = append(renderedGroups, groupRow)
 		start = end
 	}
-	return renderedGroups, notes
+	return renderedGroups, notes, nil
 }
 
 type periodMetric struct {
-	sum, reportedTurns big.Int
+	sum, reportedTurns int64
 	reported           bool
 }
 
-// renderPeriodTotal derives a terminal-only subtotal from the validated model
-// rows. big.Int keeps presentation exact even when an inconsistent remote
-// response's independently valid int64 rows would overflow when combined.
-func renderPeriodTotal(rows []report.Row, columns []metricColumn) ([]string, []string) {
-	var turns, value big.Int
+// renderPeriodTotal derives a terminal-only subtotal from validated model rows.
+// Independently valid rows may be mutually inconsistent; checked int64 addition
+// rejects their overflow rather than wrapping, saturating, or changing JSON.
+func renderPeriodTotal(rows []report.Row, columns []metricColumn) ([]string, []string, error) {
+	var turns int64
 	metrics := make(map[string]*periodMetric, len(columns))
 	for _, column := range columns {
 		metrics[column.name] = &periodMetric{}
 	}
 	for _, row := range rows {
-		turns.Add(&turns, value.SetInt64(row.Turns))
+		if err := addPeriodCount(&turns, row.Turns, "Turns"); err != nil {
+			return nil, nil, err
+		}
 		for _, column := range columns {
 			source := row.Usage[column.name]
 			metric := metrics[column.name]
-			metric.reportedTurns.Add(&metric.reportedTurns, value.SetInt64(source.ReportedTurns))
+			if err := addPeriodCount(&metric.reportedTurns, source.ReportedTurns, column.label+" coverage"); err != nil {
+				return nil, nil, err
+			}
 			if source.Sum != nil {
 				metric.reported = true
-				metric.sum.Add(&metric.sum, value.SetInt64(*source.Sum))
+				if err := addPeriodCount(&metric.sum, *source.Sum, column.label+" sum"); err != nil {
+					return nil, nil, err
+				}
 			}
 		}
 	}
 
-	rendered := []string{"Total", exactCount(&turns)}
+	rendered := []string{"Total", count(turns)}
 	var coverage []string
 	for _, column := range columns {
 		metric := metrics[column.name]
@@ -212,16 +230,28 @@ func renderPeriodTotal(rows []report.Row, columns []metricColumn) ([]string, []s
 			rendered = append(rendered, "—")
 			continue
 		}
-		count := exactCount(&metric.sum)
-		if metric.reportedTurns.Cmp(&turns) < 0 {
-			count += "*"
+		value := count(metric.sum)
+		if metric.reportedTurns < turns {
+			value += "*"
 		}
-		rendered = append(rendered, count)
-		if metric.reportedTurns.Sign() > 0 && metric.reportedTurns.Cmp(&turns) < 0 {
-			coverage = append(coverage, fmt.Sprintf("%s: %s/%s stored Turns", strings.ToLower(column.label), exactCount(&metric.reportedTurns), exactCount(&turns)))
+		rendered = append(rendered, value)
+		if metric.reportedTurns > 0 && metric.reportedTurns < turns {
+			coverage = append(coverage, fmt.Sprintf("%s: %s/%s stored Turns", strings.ToLower(column.label), count(metric.reportedTurns), count(turns)))
 		}
 	}
-	return rendered, coverage
+	return rendered, coverage, nil
+}
+
+func addPeriodCount(total *int64, value int64, field string) error {
+	if value > math.MaxInt64-*total {
+		return periodSubtotalOverflow(field)
+	}
+	*total += value
+	return nil
+}
+
+func periodSubtotalOverflow(field string) error {
+	return fmt.Errorf("terminal text period subtotal exceeds int64 while accumulating %s; narrow the date range or model/Surface selection", field)
 }
 
 func escapeASCII(value string) string {
@@ -312,10 +342,6 @@ func metric(total report.Total, name string) string {
 }
 func count(n int64) string {
 	return commaCount(strconv.FormatInt(n, 10))
-}
-
-func exactCount(n *big.Int) string {
-	return commaCount(n.String())
 }
 
 func commaCount(value string) string {

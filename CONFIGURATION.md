@@ -169,7 +169,10 @@ floating point. The client validates case-sensitive required fields, duplicate
 names, Unicode, integer ranges, and metric coverage before any output, while
 allowing additive fields. Text derives terminal-only period totals from the
 validated period/model rows without changing JSON or reconstructing calendar
-rules. It uses comma-separated exact counts, ASCII-escaped model identities,
+rules. Their Turns, sum, and coverage arithmetic is checked int64; overflow of
+inconsistent rows fails the complete text rendering before stdout, while JSON
+continues to emit the independently validated original bytes. Text uses
+comma-separated exact counts, ASCII-escaped model identities,
 `—` for unreported metrics, and `*` plus coverage for partial optional metrics.
 Anthropic renders first with Turns, Uncached input, Output, Cache create, and
 Cache read; OpenAI follows with Turns, Input, Output, Cache write, and Cache read.

@@ -257,8 +257,9 @@ untrusted diagnostic text.
 
 `--json` validates the bounded response before writing its original JSON bytes
 plus a final newline; this preserves unknown additive fields and exact numbers.
-Build/validate the whole report before any terminal output. A stdout write error
-can still leave partial output; it never turns into success. Signal cancellation
+Build/validate the whole report and complete text rendering before any terminal
+output. A stdout write error can still leave partial output; it never turns into
+success. Signal cancellation
 uses the command context; it does not request daemon shutdown.
 
 ## 5. Timezone and calendar policy
@@ -809,10 +810,14 @@ Within each section, label the first column with the selected grouping
 (`Day`, `Week`, `Month`, or `Year`). Derive a terminal-only `Total` from each
 period's validated Reported-model rows, show the period label on that row, and put
 a horizontal table rule before its multiline model breakdown. Another rule
-separates the breakdown from the next period. Sum metric values and their
-reported-Turn coverage independently so NULL, reported zero, and partial
-coverage retain their meaning. Do not add tree markers or an `All` row, and do
-not change the HTTP/JSON representation. Do not render the whole-range per-model
+separates the breakdown from the next period. Sum Turns, metric values, and
+reported-Turn coverage independently with checked int64 arithmetic so NULL,
+reported zero, and partial coverage retain their meaning. If independently
+valid but inconsistent model rows overflow a text subtotal, fail the complete
+text rendering before stdout rather than wrapping, saturating, or using floating
+point. This text-only policy does not alter validated original-byte JSON. Do not
+add tree markers or an `All` row, and do not change the HTTP/JSON representation.
+Do not render the whole-range per-model
 or section totals as duplicate terminal rows; they remain in JSON. Do not sum
 unlike Surface inputs into a grand total. Model strings are rendered verbatim in
 identity but escaped for terminal safety: quote/escape controls, newlines, escape

@@ -3,9 +3,11 @@ package reportcli_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"math"
+	"net/http"
 	"net/http/httptest"
 	"slices"
 	"strings"
@@ -119,6 +121,52 @@ func multiPeriodCommandReport(names []string, days int, turns int64, coverage fu
 	return r
 }
 
+func openAIExactTotal(turns, input, output int64) report.Total {
+	return report.Total{Turns: turns, Usage: map[string]report.Metric{
+		"input_tokens":       {Sum: number(input), ReportedTurns: turns},
+		"output_tokens":      {Sum: number(output), ReportedTurns: turns},
+		"cached_tokens":      {},
+		"cache_write_tokens": {},
+		"reasoning_tokens":   {},
+		"total_tokens":       {},
+	}}
+}
+
+func commandResult(t *testing.T, r report.Report, details, jsonMode bool) ([]byte, string, error) {
+	t.Helper()
+	body, err := json.Marshal(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(body)
+	}))
+	defer server.Close()
+	client, err := reporthttp.NewClient(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	utc := "UTC"
+	var out bytes.Buffer
+	options := reportcli.Options{
+		Endpoint: server.URL,
+		Timezone: &utc,
+		Query: report.Query{
+			Surface: r.Surface,
+			Period:  r.Period,
+			Since:   r.Since,
+			Until:   r.Until,
+			Model:   r.Model,
+		},
+		Details: details,
+		JSON:    jsonMode,
+		Timeout: time.Second,
+	}
+	err = reportcli.Run(context.Background(), client, options, &out)
+	return body, out.String(), err
+}
+
 func TestCommandRendersPeriodTotalsBeforeModelBreakdowns(t *testing.T) {
 	r := multiPeriodCommandReport([]string{"alpha", "beta"}, 2, 3, func(day, model int) int64 {
 		return int64(1 + (day+model)%2)
@@ -149,23 +197,102 @@ func TestCommandRendersPeriodTotalsBeforeModelBreakdowns(t *testing.T) {
 	}
 }
 
-func TestCommandPeriodTotalStaysExactBeyondInt64(t *testing.T) {
+func TestCommandPeriodTotalOverflowFailsTextBeforeOutputButNotJSON(t *testing.T) {
 	r := multiPeriodCommandReport([]string{"alpha", "beta"}, 1, 1, func(int, int) int64 { return 0 })
+	maximum := int64(math.MaxInt64)
 	for i := range r.OpenAI.Rows {
-		maximum := int64(math.MaxInt64)
-		r.OpenAI.Rows[i].Total = report.Total{Turns: maximum, Usage: map[string]report.Metric{
-			"input_tokens":       {Sum: &maximum, ReportedTurns: maximum},
-			"output_tokens":      {Sum: &maximum, ReportedTurns: maximum},
-			"cached_tokens":      {},
-			"cache_write_tokens": {},
-			"reasoning_tokens":   {},
-			"total_tokens":       {},
-		}}
+		r.OpenAI.Rows[i].Total = openAIExactTotal(maximum, maximum, maximum)
 	}
-	text := commandOutput(t, r, false)
-	const combined = "18,446,744,073,709,551,614"
-	if !hasTableRow(text, "2026-09-01", "Total", combined, combined, combined, "—", "—") {
-		t.Fatalf("period total overflowed independently valid model rows:\n%s", text)
+	for _, details := range []bool{false, true} {
+		t.Run(fmt.Sprintf("details=%t", details), func(t *testing.T) {
+			_, text, err := commandResult(t, r, details, false)
+			if err == nil || !strings.Contains(err.Error(), "terminal text period subtotal exceeds int64") {
+				t.Fatalf("text overflow error = %v", err)
+			}
+			if text != "" {
+				t.Fatalf("text overflow emitted stdout:\n%s", text)
+			}
+		})
+	}
+
+	body, text, err := commandResult(t, r, true, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text != string(body)+"\n" {
+		t.Fatal("JSON did not preserve the independently valid original response")
+	}
+}
+
+func TestCommandPeriodTotalRejectsMetricSumOverflow(t *testing.T) {
+	maximum := int64(math.MaxInt64)
+	for _, tc := range []struct {
+		name, field string
+		details     bool
+		mutate      func(*report.Report)
+	}{
+		{
+			name:  "compact primary sum",
+			field: "Input sum",
+			mutate: func(r *report.Report) {
+				r.OpenAI.Rows[0].Total = openAIExactTotal(1, maximum, 0)
+				r.OpenAI.Rows[1].Total = openAIExactTotal(1, 1, 0)
+			},
+		},
+		{
+			name:    "details secondary sum",
+			field:   "Reasoning sum",
+			details: true,
+			mutate: func(r *report.Report) {
+				first, second := openAIExactTotal(1, 0, 0), openAIExactTotal(1, 0, 0)
+				first.Usage["reasoning_tokens"] = report.Metric{Sum: number(maximum), ReportedTurns: 1}
+				second.Usage["reasoning_tokens"] = report.Metric{Sum: number(1), ReportedTurns: 1}
+				r.OpenAI.Rows[0].Total, r.OpenAI.Rows[1].Total = first, second
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := multiPeriodCommandReport([]string{"alpha", "beta"}, 1, 1, func(int, int) int64 { return 0 })
+			tc.mutate(&r)
+			_, text, err := commandResult(t, r, tc.details, false)
+			if err == nil || !strings.Contains(err.Error(), tc.field) {
+				t.Fatalf("text overflow error = %v, want %q", err, tc.field)
+			}
+			if text != "" {
+				t.Fatalf("text overflow emitted stdout:\n%s", text)
+			}
+		})
+	}
+}
+
+func TestCommandPeriodTotalAcceptsMaxInt64AndPreservesCoverage(t *testing.T) {
+	r := multiPeriodCommandReport([]string{"alpha", "beta"}, 1, 1, func(int, int) int64 { return 0 })
+	maximum := int64(math.MaxInt64)
+	first, second := openAIExactTotal(maximum-1, maximum-1, 0), openAIExactTotal(1, 1, 0)
+	first.Usage["cache_write_tokens"] = report.Metric{Sum: number(0), ReportedTurns: maximum - 1}
+	second.Usage["cache_write_tokens"] = report.Metric{Sum: number(0), ReportedTurns: 1}
+	first.Usage["cached_tokens"] = report.Metric{Sum: number(0), ReportedTurns: maximum - 2}
+	second.Usage["cached_tokens"] = report.Metric{Sum: number(0), ReportedTurns: 1}
+	r.OpenAI.Rows[0].Total, r.OpenAI.Rows[1].Total = first, second
+
+	const maxText = "9,223,372,036,854,775,807"
+	const partialText = "9,223,372,036,854,775,806/9,223,372,036,854,775,807 stored Turns"
+	for _, details := range []bool{false, true} {
+		t.Run(fmt.Sprintf("details=%t", details), func(t *testing.T) {
+			_, text, err := commandResult(t, r, details, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !hasTableRow(text, "2026-09-01", "Total", maxText, maxText, "0", "0", "0*") {
+				t.Fatalf("missing exact MaxInt64 subtotal with reported-zero and partial coverage:\n%s", text)
+			}
+			if !strings.Contains(text, "2026-09-01 / Total — cache read: "+partialText) {
+				t.Fatalf("missing exact partial coverage:\n%s", text)
+			}
+			if details && !hasTableRow(text, "2026-09-01", "Total", maxText, "—", "—") {
+				t.Fatalf("all-NULL secondary subtotal changed:\n%s", text)
+			}
+		})
 	}
 }
 
