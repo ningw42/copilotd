@@ -28,8 +28,8 @@ func TestCommandDetailsGroupsAnthropicNativeSubsetsByPeriod(t *testing.T) {
 	if err := reportcli.Run(context.Background(), client, options, &out); err != nil {
 		t.Fatal(err)
 	}
-	text, openai, found := strings.Cut(out.String(), "OpenAI\n")
-	if !found || !strings.Contains(text, "Anthropic\n") || !strings.Contains(openai, "Reasoning") {
+	text, openai, found := strings.Cut(out.String(), " OpenAI \n")
+	if !found || !strings.Contains(text, " Anthropic \n") || !strings.Contains(openai, "Reasoning") {
 		t.Fatal(out.String())
 	}
 	for _, want := range []string{"Thinking", "Cache create 5m", "Cache create 1h", "thinking: 1/2 stored Turns", "cache create 5m: 1/2 stored Turns"} {

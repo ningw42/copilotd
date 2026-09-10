@@ -62,7 +62,7 @@ func TestUsageExecutableAcceptance(t *testing.T) {
 	base := []string{"usage", "--endpoint", endpoint, "--timezone", "UTC", "--since", "2026-09-01", "--until", "2026-09-02"}
 	t.Run("compact", func(t *testing.T) {
 		out := usageExec(t, binary, nil, 0, append(base, "--model", "Model")...)
-		for _, want := range []string{"Anthropic\n", "OpenAI\n", "│ Day", "│ Model(s)", "Uncached input", "8,012"} {
+		for _, want := range []string{" Anthropic \n", " OpenAI \n", "│ Day", "│ Model(s)", "Uncached input", "8,012"} {
 			if !strings.Contains(out, want) {
 				t.Fatalf("missing %q: %s", want, out)
 			}

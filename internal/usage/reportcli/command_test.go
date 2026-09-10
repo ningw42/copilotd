@@ -261,8 +261,8 @@ func TestCommandRendersAnthropicNativeCoverageWithoutPeriodAnnotations(t *testin
 		t.Fatal(err)
 	}
 	text := out.String()
-	anthropic, openai, found := strings.Cut(text, "OpenAI\n")
-	if !found || !strings.Contains(anthropic, "Anthropic\n") {
+	anthropic, openai, found := strings.Cut(text, " OpenAI \n")
+	if !found || !strings.Contains(anthropic, " Anthropic \n") {
 		t.Fatalf("section ordering: %s", text)
 	}
 	for _, want := range []string{"Day", "Uncached input", "Output", "Cache create", "Cache read", "2,000*", "0*", "—", "cache create: 1/2 stored Turns", "cache read: 1/2 stored Turns", "9,007,199,254,740,993", `a\x1b\n\u202e`, "╭", "╯"} {

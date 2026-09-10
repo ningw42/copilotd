@@ -246,7 +246,7 @@ func TestUsageExactModelConfigurationThroughProductionListener(t *testing.T) {
 						}
 					}
 				}
-				if (surface == "openai" && strings.Contains(text, "Anthropic\n")) || (surface == "anthropic" && strings.Contains(text, "OpenAI\n")) {
+				if (surface == "openai" && strings.Contains(text, " Anthropic \n")) || (surface == "anthropic" && strings.Contains(text, " OpenAI \n")) {
 					t.Fatal("unselected section")
 				}
 			}

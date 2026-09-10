@@ -121,7 +121,8 @@ func surfaceTitleStyle(renderer *lipgloss.Renderer, foreground, background lipgl
 	return renderer.NewStyle().
 		Bold(true).
 		Foreground(foreground).
-		Background(background)
+		Background(background).
+		Padding(0, 1)
 }
 
 type metricColumn struct{ name, label string }

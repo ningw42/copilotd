@@ -28,6 +28,9 @@ func TestSurfaceTitleStylesUseTerminalBaseAndDistinctBrandBackgrounds(t *testing
 			if got := style.GetBackground(); got != tc.background {
 				t.Errorf("background = %v, want %v", got, tc.background)
 			}
+			if top, right, bottom, left := style.GetPadding(); top != 0 || right != 1 || bottom != 0 || left != 1 {
+				t.Errorf("padding = (%d, %d, %d, %d), want (0, 1, 0, 1)", top, right, bottom, left)
+			}
 		})
 	}
 	if anthropicSurfaceColor == openAISurfaceColor {
