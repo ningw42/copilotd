@@ -138,9 +138,14 @@ func (w *timezoneWalk) walk(name string) (string, []string, error) {
 	pending := strings.Split(name, "/")
 	resolved := "/"
 	hops := 0
+	targetPrefix := 0
 	for len(pending) > 0 {
 		part := pending[0]
 		pending = pending[1:]
+		inTarget := targetPrefix > 0
+		if inTarget {
+			targetPrefix--
+		}
 		if part == "" || part == "." {
 			continue
 		}
@@ -156,6 +161,9 @@ func (w *timezoneWalk) walk(name string) (string, []string, error) {
 					return "", nil, localTimezoneError("timezone path changed during discovery")
 				}
 				w.observations[next] = timezoneObservation{}
+				if inTarget {
+					return "", nil, localTimezoneError("missing or unreadable timezone path")
+				}
 				return "", nil, errOptionalTimezonePathAbsent
 			}
 			return "", nil, localTimezoneError("missing or unreadable timezone path")
@@ -184,7 +192,9 @@ func (w *timezoneWalk) walk(name string) (string, []string, error) {
 			if strings.HasPrefix(target, "/") {
 				resolved = "/"
 			}
-			pending = append(strings.Split(target, "/"), pending...)
+			targetParts := strings.Split(target, "/")
+			pending = append(targetParts, pending...)
+			targetPrefix += len(targetParts)
 			paths = append(paths, strings.TrimSuffix(resolved, "/")+"/"+strings.TrimLeft(strings.Join(pending, "/"), "/"))
 			continue
 		}

@@ -241,6 +241,40 @@ func TestCommandChangedUnusedExistingZoneinfoRootSucceeds(t *testing.T) {
 	assertLocalTimezone(t, files, "Europe/Berlin")
 }
 
+func TestCommandInitialTimezoneRootMissingTargetDistinction(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(timezoneFiles)
+		want  string
+	}{
+		{"dangling absolute root target", func(f timezoneFiles) {
+			f.link("/usr/share/lib/zoneinfo", "/missing/zoneinfo")
+		}, ""},
+		{"missing final root target component", func(f timezoneFiles) {
+			f.file("/missing/.keep", nil)
+			f.link("/usr/share/lib/zoneinfo", "/missing/zoneinfo")
+		}, ""},
+		{"nested relative target retains required suffix", func(f timezoneFiles) {
+			f.file("/data/.keep", nil)
+			f.link("/alias", "data")
+			f.link("/usr/share/lib/zoneinfo", "../../../alias/required")
+		}, ""},
+		{"absent ordinary root", func(timezoneFiles) {}, "Europe/Berlin"},
+		{"absent root suffix after parent alias", func(f timezoneFiles) {
+			f.file("/alternate/lib/.keep", nil)
+			f.link("/usr/share/lib", "/alternate/lib")
+		}, "Europe/Berlin"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			files := newTimezoneFiles(t, "linux", nil)
+			files.zone("/usr/share/zoneinfo/Europe/Berlin")
+			files.link("/etc/localtime", "/usr/share/zoneinfo/Europe/Berlin")
+			tc.setup(files)
+			assertLocalTimezone(t, files, tc.want)
+		})
+	}
+}
+
 func TestCommandChangedSelectedDirectoryMetadataSucceeds(t *testing.T) {
 	files := newTimezoneFiles(t, "linux", nil)
 	files.zone("/usr/share/zoneinfo/Europe/Berlin")
