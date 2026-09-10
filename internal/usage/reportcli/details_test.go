@@ -28,8 +28,8 @@ func TestCommandDetailsGroupsAnthropicNativeSubsetsByPeriod(t *testing.T) {
 	if err := reportcli.Run(context.Background(), client, options, &out); err != nil {
 		t.Fatal(err)
 	}
-	text, openai, found := strings.Cut(out.String(), "OpenAI\n")
-	if !found || !strings.Contains(text, "Anthropic\n") || !strings.Contains(openai, "Reasoning") {
+	text, openai, found := strings.Cut(out.String(), " OpenAI \n")
+	if !found || !strings.Contains(text, " Anthropic \n") || !strings.Contains(openai, "Reasoning") {
 		t.Fatal(out.String())
 	}
 	for _, want := range []string{"Thinking", "Cache create 5m", "Cache create 1h", "thinking: 1/2 stored Turns", "cache create 5m: 1/2 stored Turns"} {
@@ -78,7 +78,7 @@ func TestCommandDetailsGroupsOpenAIReportedSecondaryValuesByPeriod(t *testing.T)
 		t.Fatal(err)
 	}
 	text := out.String()
-	for _, want := range []string{"Reasoning", "Reported total", "reasoning: 1/2 stored Turns", "Persisted successful Turns"} {
+	for _, want := range []string{"Reasoning", "Reported total", "reasoning: 1/2 stored Turns"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("missing %q: %s", want, text)
 		}
@@ -90,7 +90,7 @@ func TestCommandDetailsGroupsOpenAIReportedSecondaryValuesByPeriod(t *testing.T)
 			t.Errorf("missing secondary row %q: %s", want, text)
 		}
 	}
-	assertTextExcludes(t, text, "\x1b", "\u202e", `"evil\x1b[31m\n\u202e"`, `├─ "`, `└─ "`, "│ All ", "[clipped]", "[in progress]", "Model totals", "Section total", "│ Range", "reported total: 1/2 stored Turns", "9,223,372,036,854,775,807")
+	assertTextExcludes(t, text, "\x1b", "\u202e", `"evil\x1b[31m\n\u202e"`, `├─ "`, `└─ "`, "│ All ", "[clipped]", "[in progress]", "Model totals", "Section total", "│ Range", "reported total: 1/2 stored Turns", "9,223,372,036,854,775,807", "Persisted successful Turns observed by the Usage meter", "Optional-count coverage refers only to stored Turns")
 	options.Details = false
 	out.Reset()
 	if err := reportcli.Run(context.Background(), client, options, &out); err != nil {

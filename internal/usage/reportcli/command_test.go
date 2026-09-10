@@ -128,7 +128,7 @@ func TestCommandEscapesBoundarySpacesWithoutModelCollisions(t *testing.T) {
 			continue
 		}
 		cells := strings.Split(line, "│")
-		if len(cells) == 9 && strings.TrimSpace(cells[2]) != "Model" {
+		if len(cells) == 9 && strings.TrimSpace(cells[2]) != "Model(s)" {
 			got = append(got, strings.TrimSpace(cells[2]))
 		}
 	}
@@ -261,8 +261,8 @@ func TestCommandRendersAnthropicNativeCoverageWithoutPeriodAnnotations(t *testin
 		t.Fatal(err)
 	}
 	text := out.String()
-	anthropic, openai, found := strings.Cut(text, "OpenAI\n")
-	if !found || !strings.Contains(anthropic, "Anthropic\n") {
+	anthropic, openai, found := strings.Cut(text, " OpenAI \n")
+	if !found || !strings.Contains(anthropic, " Anthropic \n") {
 		t.Fatalf("section ordering: %s", text)
 	}
 	for _, want := range []string{"Day", "Uncached input", "Output", "Cache create", "Cache read", "2,000*", "0*", "—", "cache create: 1/2 stored Turns", "cache read: 1/2 stored Turns", "9,007,199,254,740,993", `a\x1b\n\u202e`, "╭", "╯"} {
@@ -284,8 +284,8 @@ func TestCommandRendersAnthropicNativeCoverageWithoutPeriodAnnotations(t *testin
 	assertTextExcludes(t, text, "\x1b", "\u202e", "Grand total", `├─ "`, `└─ "`, "│ All ", "│ Period ", "[clipped]", "[in progress]")
 	assertTextExcludes(t, anthropic, `"a\x1b\n\u202e"`, `"z"`, "Cache write")
 	assertTextExcludes(t, openai, "Uncached input")
-	if !strings.Contains(openai, "6,000*") || !strings.Contains(openai, "Persisted successful Turns") {
-		t.Fatal("OpenAI/caveat regressed")
+	if !strings.Contains(openai, "6,000*") {
+		t.Fatal("OpenAI section regressed")
 	}
 }
 
@@ -303,12 +303,12 @@ func TestCommandRendersServerValuesSafelyAndReturnsOutputFailures(t *testing.T) 
 		t.Fatal(err)
 	}
 	text := out.String()
-	for _, want := range []string{server.URL, "UTC", "2026-09-01", "OpenAI", "9,007,199,254,740,993", "6,000*", "cache read: 1/2 stored Turns", "—", `evil\x1b[31m\n\u202e`, "Persisted successful Turns observed by the Usage meter; best-effort", "╭", "╯"} {
+	for _, want := range []string{"Usage report — " + server.URL + "\n", "Timezone: UTC", "2026-09-01", "OpenAI", "9,007,199,254,740,993", "6,000*", "cache read: 1/2 stored Turns", "—", `evil\x1b[31m\n\u202e`, "╭", "╯"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("missing %q in:\n%s", want, text)
 		}
 	}
-	assertTextExcludes(t, text, "\x1b", "\u202e", `"evil\x1b[31m\n\u202e"`, `├─ "`, `└─ "`, "│ All ", "Model totals", "Section total", "│ Range")
+	assertTextExcludes(t, text, "\x1b", "\u202e", `Usage report — "`, `Timezone: "UTC"`, `"evil\x1b[31m\n\u202e"`, `├─ "`, `└─ "`, "│ All ", "Model totals", "Section total", "│ Range", "Persisted successful Turns observed by the Usage meter", "Optional-count coverage refers only to stored Turns")
 	if err := reportcli.Run(context.Background(), client, options, brokenOutput{}); err == nil {
 		t.Fatal("output failure succeeded")
 	}

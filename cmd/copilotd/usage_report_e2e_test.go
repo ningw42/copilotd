@@ -53,7 +53,7 @@ func TestAnthropicAndCombinedUsageCommandThroughProductionListener(t *testing.T)
 		return stdout.String()
 	}
 	empty := invoke("")
-	if strings.Count(empty, "No stored Turns in the selected range.") != 2 || !strings.Contains(empty, "Anthropic\n") || !strings.Contains(empty, "OpenAI\n") {
+	if strings.Count(empty, "No stored Turns in the selected range.") != 2 || !strings.Contains(empty, " Anthropic \n") || !strings.Contains(empty, " OpenAI \n") {
 		t.Fatalf("selected empty sections: %s", empty)
 	}
 	for _, path := range []string{"/anthropic/v1/messages", "/openai/v1/responses"} {
@@ -95,25 +95,25 @@ func TestAnthropicAndCombinedUsageCommandThroughProductionListener(t *testing.T)
 			t.Fatalf("invented identity/total/empty data: %s", text)
 		}
 		if surface != "openai" {
-			for _, want := range []string{"Anthropic\n", "Uncached input", "Cache create", "claude-reported", "2,000", "6,000"} {
+			for _, want := range []string{" Anthropic \n", "Uncached input", "Cache create", "claude-reported", "2,000", "6,000"} {
 				if !strings.Contains(text, want) {
 					t.Errorf("missing %q: %s", want, text)
 				}
 			}
-		} else if strings.Contains(text, "Anthropic\n") {
+		} else if strings.Contains(text, " Anthropic \n") {
 			t.Fatal("unselected Anthropic section")
 		}
 		if surface != "anthropic" {
-			for _, want := range []string{"OpenAI\n", "Cache write", "openai-reported", "8,012"} {
+			for _, want := range []string{" OpenAI \n", "Cache write", "openai-reported", "8,012"} {
 				if !strings.Contains(text, want) {
 					t.Errorf("missing %q: %s", want, text)
 				}
 			}
-		} else if strings.Contains(text, "OpenAI\n") || strings.Contains(text, "8,012") {
+		} else if strings.Contains(text, " OpenAI \n") || strings.Contains(text, "8,012") {
 			t.Fatal("unselected OpenAI or synthesized Anthropic input")
 		}
 		if surface == "" || surface == "all" {
-			if strings.Index(text, "Anthropic\n") > strings.Index(text, "OpenAI\n") {
+			if strings.Index(text, " Anthropic \n") > strings.Index(text, " OpenAI \n") {
 				t.Fatalf("native section order: %s", text)
 			}
 			assertTextExcludes(t, text, `├─ "`, `└─ "`, "│ All ", "Model totals", "Section total", "│ Range")
@@ -251,7 +251,7 @@ func TestUsageCalendarConfigurationThroughProductionListener(t *testing.T) {
 		lookup := func(key string) (string, bool) { value, ok := tc.env[key]; return value, ok }
 		var stdout, stderr bytes.Buffer
 		code := run(args, lookup, &stdout, &stderr)
-		if code != 0 || stderr.Len() != 0 || !strings.Contains(stdout.String(), `Timezone: "`+tc.zone+`"`) || !strings.Contains(stdout.String(), "Period: "+tc.period) || !strings.Contains(stdout.String(), "Range: 2020-12-31 to 2021-01-05 (exclusive)") || strings.Count(stdout.String(), "No stored Turns in the selected range.") != 2 {
+		if code != 0 || stderr.Len() != 0 || !strings.Contains(stdout.String(), "Timezone: "+tc.zone) || !strings.Contains(stdout.String(), "Period: "+tc.period) || !strings.Contains(stdout.String(), "Range: 2020-12-31 to 2021-01-05 (exclusive)") || strings.Count(stdout.String(), "No stored Turns in the selected range.") != 2 {
 			t.Fatalf("calendar configuration %s/%s: exit=%d stdout=%s stderr=%s", tc.zone, tc.period, code, stdout.String(), stderr.String())
 		}
 	}

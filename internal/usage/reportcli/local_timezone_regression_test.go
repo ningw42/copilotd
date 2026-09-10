@@ -74,7 +74,7 @@ func assertLocalTimezone(t *testing.T, f timezoneFiles, want string) {
 		}
 		return
 	}
-	if err != nil || len(*requested) != 1 || (*requested)[0] != want || !strings.Contains(out.String(), `Timezone: "`+want+`"`) {
+	if err != nil || len(*requested) != 1 || (*requested)[0] != want || !strings.Contains(out.String(), "Timezone: "+want) {
 		t.Fatalf("want=%s err=%v requests=%v stdout=%s", want, err, *requested, out.String())
 	}
 	// Discovery does not consume a one-time setting; every invocation transmits it.
