@@ -140,7 +140,7 @@ func TestUsageExecutableDiscoversContainerSystemTimezone(t *testing.T) {
 					t.Fatalf("expected exit 1: %v", err)
 				}
 			} else {
-				if err != nil || stderr.Len() != 0 || !strings.Contains(string(stdout), `Timezone: "`+tc.want+`"`) || len(requests) != 1 {
+				if err != nil || stderr.Len() != 0 || !strings.Contains(string(stdout), "Timezone: "+tc.want) || len(requests) != 1 {
 					t.Fatalf("err=%v stdout=%s stderr=%s requests=%d", err, stdout, stderr.String(), len(requests))
 				}
 				if zone := <-requests; zone != tc.want {
@@ -211,7 +211,7 @@ func TestUsageExecutableEmbeddedTimezoneWithoutHostData(t *testing.T) {
 		command := exec.Command(unshare, "-Ur", chroot, root, "/copilotd", "usage", "--endpoint", server.URL, "--timezone", zone, "--period", "month", "--since", "2024-02-29", "--until", "2024-03-01")
 		command.Env = []string{"PATH=/absent", "ZONEINFO=/absent", "GOROOT=/absent", "TZ=invalid/rules"}
 		output, err := command.CombinedOutput()
-		if err != nil || !strings.Contains(string(output), `Timezone: "`+zone+`"`) || !strings.Contains(string(output), "No stored Turns in the selected range.") {
+		if err != nil || !strings.Contains(string(output), "Timezone: "+zone) || !strings.Contains(string(output), "No stored Turns in the selected range.") {
 			t.Fatalf("embedded %s: %v\n%s", zone, err, output)
 		}
 	}

@@ -322,7 +322,7 @@ func TestCommandDiscoversSystemTimezoneSymlink(t *testing.T) {
 	if err := Run(context.Background(), client, options, &out); err != nil {
 		t.Fatal(err)
 	}
-	if len(*requested) != 1 || (*requested)[0] != "Europe/Berlin" || !strings.Contains(out.String(), `Timezone: "Europe/Berlin"`) {
+	if len(*requested) != 1 || (*requested)[0] != "Europe/Berlin" || !strings.Contains(out.String(), "Timezone: Europe/Berlin") {
 		t.Fatalf("requests=%v\n%s", *requested, out.String())
 	}
 }
@@ -393,7 +393,7 @@ func TestCommandUnixTZAllowsOneLeadingColon(t *testing.T) {
 	if err := Run(context.Background(), client, options, &out); err != nil {
 		t.Fatal(err)
 	}
-	if len(*requested) != 1 || (*requested)[0] != "US/Eastern" || !strings.Contains(out.String(), `Timezone: "US/Eastern"`) {
+	if len(*requested) != 1 || (*requested)[0] != "US/Eastern" || !strings.Contains(out.String(), "Timezone: US/Eastern") {
 		t.Fatalf("requests=%v\n%s", *requested, out.String())
 	}
 }
@@ -410,7 +410,7 @@ func TestCommandEmptyUnixTZSelectsConfiguredUTC(t *testing.T) {
 	if err := Run(context.Background(), client, options, &out); err != nil {
 		t.Fatal(err)
 	}
-	if len(*requested) != 1 || (*requested)[0] != "UTC" || !strings.Contains(out.String(), `Timezone: "UTC"`) || !strings.Contains(out.String(), "No stored Turns in the selected range.") {
+	if len(*requested) != 1 || (*requested)[0] != "UTC" || !strings.Contains(out.String(), "Timezone: UTC") || !strings.Contains(out.String(), "No stored Turns in the selected range.") {
 		t.Fatalf("configured UTC: requests=%v\n%s", *requested, out.String())
 	}
 }
@@ -430,7 +430,7 @@ func TestCommandDiscoversNamedUnixTimezoneThroughHTTP(t *testing.T) {
 	if err := Run(context.Background(), client, options, &out); err != nil {
 		t.Fatal(err)
 	}
-	if len(*requested) != 1 || (*requested)[0] != "Europe/Berlin" || !strings.Contains(out.String(), `Timezone: "Europe/Berlin"`) || !strings.Contains(out.String(), "boundary") || strings.Contains(out.String(), `"boundary"`) || !strings.Contains(out.String(), "  17 ") {
+	if len(*requested) != 1 || (*requested)[0] != "Europe/Berlin" || !strings.Contains(out.String(), "Timezone: Europe/Berlin") || !strings.Contains(out.String(), "boundary") || strings.Contains(out.String(), `"boundary"`) || !strings.Contains(out.String(), "  17 ") {
 		t.Fatalf("terminal-local selection: requests=%v\n%s", *requested, out.String())
 	}
 }

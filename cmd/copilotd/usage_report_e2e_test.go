@@ -251,7 +251,7 @@ func TestUsageCalendarConfigurationThroughProductionListener(t *testing.T) {
 		lookup := func(key string) (string, bool) { value, ok := tc.env[key]; return value, ok }
 		var stdout, stderr bytes.Buffer
 		code := run(args, lookup, &stdout, &stderr)
-		if code != 0 || stderr.Len() != 0 || !strings.Contains(stdout.String(), `Timezone: "`+tc.zone+`"`) || !strings.Contains(stdout.String(), "Period: "+tc.period) || !strings.Contains(stdout.String(), "Range: 2020-12-31 to 2021-01-05 (exclusive)") || strings.Count(stdout.String(), "No stored Turns in the selected range.") != 2 {
+		if code != 0 || stderr.Len() != 0 || !strings.Contains(stdout.String(), "Timezone: "+tc.zone) || !strings.Contains(stdout.String(), "Period: "+tc.period) || !strings.Contains(stdout.String(), "Range: 2020-12-31 to 2021-01-05 (exclusive)") || strings.Count(stdout.String(), "No stored Turns in the selected range.") != 2 {
 			t.Fatalf("calendar configuration %s/%s: exit=%d stdout=%s stderr=%s", tc.zone, tc.period, code, stdout.String(), stderr.String())
 		}
 	}

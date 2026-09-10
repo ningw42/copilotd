@@ -59,7 +59,7 @@ func TestCommandAllPeriodsFromSQLiteThroughHTTPInExplicitNamedZone(t *testing.T)
 			}
 			text := out.String()
 			heading := strings.ToUpper(tc.period[:1]) + tc.period[1:]
-			for _, want := range []string{`Timezone: "Europe/Berlin"`, "Range: 2020-12-31 to 2021-01-05 (exclusive)", "Period: " + tc.period, "Anthropic\n", "OpenAI\n", tc.first, tc.second, "m", "Persisted successful Turns"} {
+			for _, want := range []string{"Timezone: Europe/Berlin", "Range: 2020-12-31 to 2021-01-05 (exclusive)", "Period: " + tc.period, "Anthropic\n", "OpenAI\n", tc.first, tc.second, "m", "Persisted successful Turns"} {
 				if !strings.Contains(text, want) {
 					t.Errorf("missing %q: %s", want, text)
 				}
