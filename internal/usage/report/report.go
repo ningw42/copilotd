@@ -86,15 +86,18 @@ func AnthropicMetrics() []string {
 	return []string{"input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens", "thinking_tokens"}
 }
 
-// Reporter captures only the daemon's absolute path. New does not touch files.
+// Reporter captures the daemon's absolute path and immutable read policy. New
+// does not touch files.
 type Reporter struct {
-	path    string
-	now     func() time.Time
-	closeDB func(*sql.DB) error
+	path              string
+	now               func() time.Time
+	closeDB           func(*sql.DB) error
+	limits            readLimits
+	afterExaminedTurn func(int)
 }
 
 func New(databasePath string) *Reporter {
-	return &Reporter{path: databasePath, now: time.Now, closeDB: (*sql.DB).Close}
+	return &Reporter{path: databasePath, now: time.Now, closeDB: (*sql.DB).Close, limits: productionReadLimits()}
 }
 
 func (r *Reporter) Query(ctx context.Context, q Query) (result Report, err error) {
@@ -122,7 +125,7 @@ func (r *Reporter) Query(ctx context.Context, q Query) (result Report, err error
 	}
 	// Direct callers do not have the HTTP adapter's raw-query cap. Bounding the
 	// filter also ensures the lazy equality predicate cannot read a larger model.
-	if q.Model != nil && len(*q.Model) > MaxModelBytes {
+	if q.Model != nil && len(*q.Model) > r.limits.maxModelBytes {
 		return Report{}, tooLarge()
 	}
 	buckets, start, end, err := calendar(ctx, &q, now)
