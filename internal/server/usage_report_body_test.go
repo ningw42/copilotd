@@ -23,6 +23,11 @@ import (
 	"github.com/ningw42/copilotd/internal/usage/sqlitestore"
 )
 
+// reportBodyFixtureWatchdog bounds test setup and phase coordination that is
+// not itself a latency contract. Keep it wider than the route's real five-second
+// deadline so transient hosted-runner I/O does not fail the fixture first.
+const reportBodyFixtureWatchdog = 10 * time.Second
+
 // orderedReportDeadlineWriter controls notification ordering at the public HTTP
 // boundary, not the handler's five-second deadline values. In the read-first
 // case, defer delivering the native write deadline until the real request-body
@@ -109,6 +114,16 @@ func startReportBodyServer(t *testing.T, query reporthttp.QueryFunc, order strin
 	return listener.Addr().String()
 }
 
+func closeReportBodyFixtureStore(t *testing.T, store *sqlitestore.Store) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), reportBodyFixtureWatchdog)
+	defer cancel()
+	report := store.Close(ctx)
+	if !report.DriverCleanupCompleted || report.FinalFlushLosses != 0 {
+		t.Fatalf("fixture writer did not close within %s: %+v", reportBodyFixtureWatchdog, report)
+	}
+}
+
 // Capture a separately completed, Connection: close exchange on a fresh TCP
 // connection. Its independently checked status/headers/body are the byte oracle
 // for incomplete requests, including HTTP framing. No parser for partial HTTP is
@@ -122,7 +137,7 @@ func reportBodyControl(t *testing.T, addr, method, target string, status int) ([
 		t.Fatal(err)
 	}
 	defer conn.Close()
-	if err := conn.SetDeadline(time.Now().Add(time.Second)); err != nil {
+	if err := conn.SetDeadline(time.Now().Add(reportBodyFixtureWatchdog)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := fmt.Fprintf(conn, "%s %s HTTP/1.1\r\nHost: localhost\r\nX-Request-Id: report-body-fixture\r\nConnection: close\r\n\r\n", method, target); err != nil {
@@ -175,12 +190,7 @@ func TestUsageIncompleteRequestBodiesReleaseReportSlotsWithinWriteBudget(t *test
 			// Legal, small enough not to exhaust TCP buffers, but larger than
 			// net/http's response buffer: Write must flush while holding its slot.
 			store.Record(usage.Turn{At: time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC), Model: strings.Repeat("m", 4096), Transport: usage.TransportBuffered, Usage: usage.OpenAIUsage{InputTokens: 1, OutputTokens: 2}})
-			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-			closed := store.Close(ctx)
-			cancel()
-			if !closed.DriverCleanupCompleted || closed.FinalFlushLosses != 0 {
-				t.Fatalf("fixture writer: %+v", closed)
-			}
+			closeReportBodyFixtureStore(t, store)
 			reader := report.New(path)
 			completed := make(chan struct{}, 2)
 			addr := startReportBodyServer(t, func(ctx context.Context, q report.Query) (report.Report, error) {
@@ -197,7 +207,7 @@ func TestUsageIncompleteRequestBodiesReleaseReportSlotsWithinWriteBudget(t *test
 				return result, err
 			}, framing.order)
 			transport := http.DefaultTransport.(*http.Transport).Clone()
-			client := &http.Client{Transport: transport, Timeout: time.Second}
+			client := &http.Client{Transport: transport, Timeout: reportBodyFixtureWatchdog}
 			t.Cleanup(client.CloseIdleConnections)
 			target := reporthttp.Path + "?timezone=UTC&since=2026-09-01&until=2026-09-02&surface=openai"
 			attackTarget := target + "&model=" + strings.Repeat("m", 4096)
@@ -246,7 +256,7 @@ func TestUsageIncompleteRequestBodiesReleaseReportSlotsWithinWriteBudget(t *test
 			for range 2 {
 				select {
 				case <-completed:
-				case <-time.After(time.Second):
+				case <-time.After(reportBodyFixtureWatchdog):
 					t.Fatal("real query did not materialize before network waiting")
 				}
 			}
@@ -309,12 +319,7 @@ func TestReportIncompleteBodiesBoundFinalFlushAndRecovery(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-			closed := store.Close(ctx)
-			cancel()
-			if !closed.DriverCleanupCompleted {
-				t.Fatal("fixture writer did not close")
-			}
+			closeReportBodyFixtureStore(t, store)
 			reader := report.New(path)
 			completed := make(chan struct{}, 2)
 			var query reporthttp.QueryFunc = func(ctx context.Context, q report.Query) (report.Report, error) {
@@ -387,7 +392,7 @@ func TestReportIncompleteBodiesBoundFinalFlushAndRecovery(t *testing.T) {
 			if tc.invoked {
 				select {
 				case <-completed:
-				case <-time.After(time.Second):
+				case <-time.After(reportBodyFixtureWatchdog):
 					t.Fatal("query did not finish before blocked final flush")
 				}
 			}
