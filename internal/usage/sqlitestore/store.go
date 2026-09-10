@@ -230,48 +230,30 @@ func (s *Store) flushRuntime(batch []usage.Turn) {
 	s.settleCommitted(uint64(len(batch)))
 }
 
-func (s *Store) finish(ctx context.Context, initial []usage.Turn) {
-	batch := append(make([]usage.Turn, 0, batchCapacity), initial...)
+func (s *Store) finish(ctx context.Context, batch []usage.Turn) {
+	defer s.cleanup()
 	if !waitForProducers(ctx, &s.producers) {
-		s.cleanup()
 		return
 	}
 
-	failed := false
 	for {
-		for len(batch) < batchCapacity {
-			select {
-			case turn := <-s.queue:
-				batch = append(batch, turn)
-			default:
-				goto drained
-			}
+		// Admission is closed and producers are quiescent, so no other goroutine
+		// can change the queue length while this sole consumer fills the batch.
+		queued := min(batchCapacity-len(batch), len(s.queue))
+		for range queued {
+			batch = append(batch, <-s.queue)
+		}
+		if len(batch) == 0 {
+			return
 		}
 		if err := s.writeBatch(ctx, batch); err != nil {
 			s.settleFinalFailure(err)
-			failed = true
-			batch = batch[:0]
-			break
+			_ = drainCount(s.queue)
+			return
 		}
 		s.settleCommitted(uint64(len(batch)))
 		batch = batch[:0]
 	}
-
-drained:
-	if !failed && len(batch) > 0 {
-		if err := s.writeBatch(ctx, batch); err != nil {
-			s.settleFinalFailure(err)
-			failed = true
-		} else {
-			s.settleCommitted(uint64(len(batch)))
-		}
-		batch = batch[:0]
-	}
-	if failed || ctx.Err() != nil {
-		_ = drainCount(s.queue)
-	}
-
-	s.cleanup()
 }
 
 func (s *Store) cleanup() {
