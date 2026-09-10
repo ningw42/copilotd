@@ -78,7 +78,7 @@ var (
 func render(renderer *lipgloss.Renderer, endpoint string, r report.Report, details bool) string {
 	var out strings.Builder
 	surfaceTextColor := terminalBackgroundColor(renderer)
-	fmt.Fprintf(&out, "Usage report — %s\nTimezone: %s | Range: %s to %s (exclusive) | Period: %s\nQuery time: %s\n\n", strconv.QuoteToASCII(endpoint), r.Timezone, r.Since, r.Until, r.Period, r.GeneratedAt.Format(time.RFC3339Nano))
+	fmt.Fprintf(&out, "Usage report — %s\nTimezone: %s | Range: %s to %s (exclusive) | Period: %s\nQuery time: %s\n\n", escapeASCII(endpoint), r.Timezone, r.Since, r.Until, r.Period, r.GeneratedAt.Format(time.RFC3339Nano))
 	for _, native := range []struct {
 		title              string
 		background         lipgloss.TerminalColor
@@ -172,6 +172,11 @@ func groupedRows(rows []report.Row, columns []metricColumn) ([][]string, []strin
 		start = end
 	}
 	return renderedGroups, notes
+}
+
+func escapeASCII(value string) string {
+	quoted := strconv.QuoteToASCII(value)
+	return quoted[1 : len(quoted)-1]
 }
 
 func escapeModel(model string) string {

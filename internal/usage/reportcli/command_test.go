@@ -303,12 +303,12 @@ func TestCommandRendersServerValuesSafelyAndReturnsOutputFailures(t *testing.T) 
 		t.Fatal(err)
 	}
 	text := out.String()
-	for _, want := range []string{server.URL, "Timezone: UTC", "2026-09-01", "OpenAI", "9,007,199,254,740,993", "6,000*", "cache read: 1/2 stored Turns", "—", `evil\x1b[31m\n\u202e`, "╭", "╯"} {
+	for _, want := range []string{"Usage report — " + server.URL + "\n", "Timezone: UTC", "2026-09-01", "OpenAI", "9,007,199,254,740,993", "6,000*", "cache read: 1/2 stored Turns", "—", `evil\x1b[31m\n\u202e`, "╭", "╯"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("missing %q in:\n%s", want, text)
 		}
 	}
-	assertTextExcludes(t, text, "\x1b", "\u202e", `Timezone: "UTC"`, `"evil\x1b[31m\n\u202e"`, `├─ "`, `└─ "`, "│ All ", "Model totals", "Section total", "│ Range", "Persisted successful Turns observed by the Usage meter", "Optional-count coverage refers only to stored Turns")
+	assertTextExcludes(t, text, "\x1b", "\u202e", `Usage report — "`, `Timezone: "UTC"`, `"evil\x1b[31m\n\u202e"`, `├─ "`, `└─ "`, "│ All ", "Model totals", "Section total", "│ Range", "Persisted successful Turns observed by the Usage meter", "Optional-count coverage refers only to stored Turns")
 	if err := reportcli.Run(context.Background(), client, options, brokenOutput{}); err == nil {
 		t.Fatal("output failure succeeded")
 	}
