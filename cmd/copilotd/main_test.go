@@ -214,6 +214,29 @@ func TestConfiguredCodexModelsRegistersOnlyForEnabledCatalog(t *testing.T) {
 
 type mainRoundTripFunc func(*http.Request) (*http.Response, error)
 
+type mainFixedPricingSource struct {
+	snapshot *pricing.Snapshot
+}
+
+func (s mainFixedPricingSource) Current(ctx context.Context, limit pricing.ProjectionLimit) (*pricing.Snapshot, pricing.SnapshotStatus, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, pricing.SnapshotStatus{}, err
+	}
+	if s.snapshot.IdentityBytes() > limit.MaxIdentityBytes {
+		return nil, pricing.SnapshotStatus{}, pricing.ErrProjectionLimit
+	}
+	return s.snapshot, pricing.SnapshotStatus{Source: "fallback", Version: "sha256:empty-test-prices"}, nil
+}
+
+func mainTestPricingSource(t testing.TB) pricing.Source {
+	t.Helper()
+	snapshot, err := pricing.ParseSnapshot(context.Background(), []byte(`{"openai":{"id":"openai","models":{}},"anthropic":{"id":"anthropic","models":{}},"google":{"id":"google","models":{}},"xai":{"id":"xai","models":{}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return mainFixedPricingSource{snapshot: snapshot}
+}
+
 func (fn mainRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return fn(req) }
 
 func TestProductionCodexModelsEdgeUsesGitHubAndDedicatedPlainClient(t *testing.T) {

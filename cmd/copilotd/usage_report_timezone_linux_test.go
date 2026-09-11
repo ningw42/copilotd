@@ -109,7 +109,7 @@ func TestUsageExecutableDiscoversContainerSystemTimezone(t *testing.T) {
 		t.Fatalf("fixture: %+v", result)
 	}
 	requests := make(chan string, 10)
-	handler := reporthttp.Handler(report.New(path).Query)
+	handler := reporthttp.Handler(report.New(path, mainTestPricingSource(t)).Query)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests <- r.URL.Query().Get("timezone")
 		handler.ServeHTTP(w, r)
@@ -188,7 +188,7 @@ func TestUsageExecutableEmbeddedTimezoneWithoutHostData(t *testing.T) {
 		t.Fatalf("fixture: %+v", result)
 	}
 	var calls atomic.Int32
-	handler := reporthttp.Handler(report.New(path).Query)
+	handler := reporthttp.Handler(report.New(path, mainTestPricingSource(t)).Query)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls.Add(1); handler.ServeHTTP(w, r) }))
 	defer server.Close()
 	invoke := func(args ...string) (string, error) {

@@ -17,7 +17,7 @@ import (
 // It lets external HTTP-adapter tests drive the approved private native-close
 // fault without exporting a production fault hook or mocking the SQLite read.
 func NewCleanupFailureForTest(path string) *Reporter {
-	reader := New(path)
+	reader := newReporterForTest(path)
 	reader.closeDB = func(db *sql.DB) error {
 		return errors.Join(db.Close(), errors.New("injected native cleanup failure at private/path"))
 	}

@@ -5,8 +5,12 @@ package report
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"time"
 	"unicode/utf8"
+
+	"github.com/ningw42/copilotd/internal/usage/modelmatch"
+	"github.com/ningw42/copilotd/internal/usage/pricing"
 )
 
 // Query selects daemon-owned calendar aggregation in a named timezone.
@@ -28,12 +32,63 @@ type Metric struct {
 	ReportedTurns int64  `json:"reported_turns,string"`
 }
 
+// UnpricedCoverage partitions unpriceable stored Turns by the first applicable
+// reason. Together with Cost.PricedTurns these counts always equal Total.Turns.
+type UnpricedCoverage struct {
+	UnknownModel      int64
+	AmbiguousModel    int64
+	MissingRate       int64
+	MissingUsage      int64
+	InconsistentUsage int64
+}
+
+// Cost is the exact priced-Turn subtotal and complete valuation coverage for one
+// aggregate. Amount is nil only for a nonempty aggregate with no priceable
+// Turns. Empty aggregates and priceable free Turns carry a non-nil exact zero.
+type Cost struct {
+	Amount      *pricing.Amount
+	PricedTurns int64
+	Unpriced    UnpricedCoverage
+}
+
+// PricingMatchStatus describes whether one Reported model selected a Pricing
+// model identity.
+type PricingMatchStatus string
+
+const (
+	PricingMatchMatched   PricingMatchStatus = "matched"
+	PricingMatchUnknown   PricingMatchStatus = "unknown"
+	PricingMatchAmbiguous PricingMatchStatus = "ambiguous"
+)
+
+// PricingMatchMethod identifies the strongest matching policy that selected a
+// Pricing model.
+type PricingMatchMethod string
+
+const (
+	PricingMatchByExact      PricingMatchMethod = "exact"
+	PricingMatchByNormalized PricingMatchMethod = "normalized"
+	PricingMatchByAlias      PricingMatchMethod = "alias"
+	PricingMatchBySuffix     PricingMatchMethod = "suffix"
+	PricingMatchByDated      PricingMatchMethod = "dated"
+)
+
+// PricingMatch is one Reported model's report-wide immutable resolution.
+type PricingMatch struct {
+	Status   PricingMatchStatus
+	Provider string
+	Model    string
+	Method   PricingMatchMethod
+}
+
 type Total struct {
 	Turns int64             `json:"turns,string"`
 	Usage map[string]Metric `json:"usage"`
+	Cost  Cost              `json:"-"`
 }
 type ModelTotal struct {
-	Model string `json:"model"`
+	Model        string       `json:"model"`
+	PricingMatch PricingMatch `json:"-"`
 	Total
 }
 type Row struct {
@@ -54,24 +109,39 @@ type Bucket struct {
 	InProgress   bool      `json:"in_progress"`
 }
 
+// PricingProvenance identifies the original-provider tariff benchmark captured
+// once for a report. LastSuccess is a successful content-fetch time, not a
+// tariff effective date.
+type PricingProvenance struct {
+	Dataset          string
+	Currency         string
+	Basis            string
+	ContextPolicy    string
+	CacheWritePolicy string
+	Version          string
+	Source           string
+	LastSuccess      *time.Time
+}
+
 // Report is an independent materialized snapshot. Generation time is the query
 // clock, not a watermark or a promise that queued observations were persisted.
 type Report struct {
-	SchemaVersion int       `json:"schema_version"`
-	GeneratedAt   time.Time `json:"generated_at"`
-	Timezone      string    `json:"timezone"`
-	Period        string    `json:"period"`
-	Since         string    `json:"since"`
-	Until         string    `json:"until"`
-	WindowStart   time.Time `json:"window_start"`
-	WindowEnd     time.Time `json:"window_end"`
-	Scope         string    `json:"scope"`
-	Collection    string    `json:"collection"`
-	Surface       string    `json:"surface"`
-	Model         *string   `json:"model"`
-	Buckets       []Bucket  `json:"buckets"`
-	Anthropic     *Section  `json:"anthropic,omitempty"`
-	OpenAI        *Section  `json:"openai,omitempty"`
+	SchemaVersion int               `json:"schema_version"`
+	GeneratedAt   time.Time         `json:"generated_at"`
+	Timezone      string            `json:"timezone"`
+	Period        string            `json:"period"`
+	Since         string            `json:"since"`
+	Until         string            `json:"until"`
+	WindowStart   time.Time         `json:"window_start"`
+	WindowEnd     time.Time         `json:"window_end"`
+	Scope         string            `json:"scope"`
+	Collection    string            `json:"collection"`
+	Surface       string            `json:"surface"`
+	Model         *string           `json:"model"`
+	Buckets       []Bucket          `json:"buckets"`
+	Pricing       PricingProvenance `json:"-"`
+	Anthropic     *Section          `json:"anthropic,omitempty"`
+	OpenAI        *Section          `json:"openai,omitempty"`
 }
 
 // OpenAIMetrics names the frozen native projection; subsets are never added to
@@ -90,14 +160,15 @@ func AnthropicMetrics() []string {
 // does not touch files.
 type Reporter struct {
 	path              string
+	pricingSource     pricing.Source
 	now               func() time.Time
 	closeDB           func(*sql.DB) error
 	limits            readLimits
 	afterExaminedTurn func(int)
 }
 
-func New(databasePath string) *Reporter {
-	return &Reporter{path: databasePath, now: time.Now, closeDB: (*sql.DB).Close, limits: productionReadLimits()}
+func New(databasePath string, pricingSource pricing.Source) *Reporter {
+	return &Reporter{path: databasePath, pricingSource: pricingSource, now: time.Now, closeDB: (*sql.DB).Close, limits: productionReadLimits()}
 }
 
 func (r *Reporter) Query(ctx context.Context, q Query) (result Report, err error) {
@@ -132,14 +203,122 @@ func (r *Reporter) Query(ctx context.Context, q Query) (result Report, err error
 	if err != nil {
 		return Report{}, err
 	}
-	result = Report{SchemaVersion: 1, GeneratedAt: now, Timezone: q.Timezone, Period: q.Period, Since: q.Since, Until: q.Until, Surface: q.Surface, Model: q.Model, WindowStart: start, WindowEnd: end, Scope: "configured_database", Collection: "best_effort", Buckets: buckets}
-	sections, err := r.read(ctx, result.Buckets, q.Surface, q.Model)
+	budget := readBudget{limits: r.limits, afterExaminedTurn: r.afterExaminedTurn, identities: map[string]string{}}
+	valuation, status, err := r.capturePricing(ctx, &budget)
+	if err != nil {
+		if errors.Is(err, pricing.ErrProjectionLimit) {
+			return Report{}, tooLarge()
+		}
+		return Report{}, err
+	}
+	result = Report{SchemaVersion: 1, GeneratedAt: now, Timezone: q.Timezone, Period: q.Period, Since: q.Since, Until: q.Until, Surface: q.Surface, Model: q.Model, WindowStart: start, WindowEnd: end, Scope: "configured_database", Collection: "best_effort", Buckets: buckets, Pricing: pricingProvenance(status)}
+	sections, err := r.read(ctx, result.Buckets, q.Surface, q.Model, &budget, valuation)
 	if err != nil {
 		return Report{}, err
 	}
 	result.Anthropic, result.OpenAI = sections["anthropic"], sections["openai"]
 	return result, ctx.Err()
 }
+
+type capturedPricing struct {
+	snapshot *pricing.Snapshot
+	matcher  *modelmatch.Matcher
+	memo     map[string]modelPricing
+}
+
+type modelPricing struct {
+	match PricingMatch
+	rates pricing.Rates
+}
+
+func (r *Reporter) capturePricing(ctx context.Context, budget *readBudget) (*capturedPricing, pricing.SnapshotStatus, error) {
+	if r.pricingSource == nil {
+		return nil, pricing.SnapshotStatus{}, errors.New("pricing source is unavailable")
+	}
+	snapshot, status, err := r.pricingSource.Current(ctx, pricing.ProjectionLimit{MaxIdentityBytes: budget.remainingIdentityBytes()})
+	if err != nil {
+		return nil, pricing.SnapshotStatus{}, err
+	}
+	if snapshot == nil {
+		return nil, pricing.SnapshotStatus{}, errors.New("pricing source returned no snapshot")
+	}
+	if err := budget.retainIdentityBytes(snapshot.IdentityBytes()); err != nil {
+		return nil, pricing.SnapshotStatus{}, err
+	}
+	identities := snapshot.Identities()
+	candidates := make([]modelmatch.Identity, 0, len(identities))
+	for _, identity := range identities {
+		if err := ctx.Err(); err != nil {
+			return nil, pricing.SnapshotStatus{}, err
+		}
+		// Matcher.New retains up to exact, normalized, and dated scoped and
+		// unscoped keys. Debit their worst-case identity bytes before building
+		// any index; values and the candidate slice share snapshot strings.
+		indexBytes := 3*len(identity.Provider) + 6*len(identity.Model) + 6
+		if err := budget.retainIdentityBytes(indexBytes); err != nil {
+			return nil, pricing.SnapshotStatus{}, err
+		}
+		candidates = append(candidates, modelmatch.Identity{Provider: identity.Provider, Model: identity.Model})
+	}
+	matcher, err := modelmatch.New(ctx, candidates)
+	if err != nil {
+		return nil, pricing.SnapshotStatus{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, pricing.SnapshotStatus{}, err
+	}
+	return &capturedPricing{snapshot: snapshot, matcher: matcher, memo: make(map[string]modelPricing)}, status, nil
+}
+
+func (c *capturedPricing) model(ctx context.Context, reported string) (modelPricing, error) {
+	if resolved, ok := c.memo[reported]; ok {
+		return resolved, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return modelPricing{}, err
+	}
+	resolution := c.matcher.Resolve(reported)
+	selected := modelPricing{match: reportPricingMatch(resolution)}
+	if resolution.Status == modelmatch.StatusMatched {
+		selected.rates, _ = c.snapshot.Rates(pricing.Identity{
+			Provider: resolution.Identity.Provider,
+			Model:    resolution.Identity.Model,
+		})
+	}
+	if err := ctx.Err(); err != nil {
+		return modelPricing{}, err
+	}
+	c.memo[reported] = selected
+	return selected, nil
+}
+
+func reportPricingMatch(resolution modelmatch.Resolution) PricingMatch {
+	match := PricingMatch{Status: PricingMatchStatus(resolution.Status)}
+	if resolution.Status == modelmatch.StatusMatched {
+		match.Provider = resolution.Identity.Provider
+		match.Model = resolution.Identity.Model
+		match.Method = PricingMatchMethod(resolution.Method)
+	}
+	return match
+}
+
+func pricingProvenance(status pricing.SnapshotStatus) PricingProvenance {
+	provenance := PricingProvenance{
+		Dataset:          "models.dev/api.json",
+		Currency:         "USD",
+		Basis:            "original_provider",
+		ContextPolicy:    "highest_tier",
+		CacheWritePolicy: "single_rate",
+		Version:          status.Version,
+		Source:           status.Source,
+	}
+	if status.LastSuccess != nil {
+		lastSuccess := *status.LastSuccess
+		provenance.LastSuccess = &lastSuccess
+	}
+	return provenance
+}
+
 func strictDate(value string) (time.Time, error) {
 	date, err := time.Parse(time.DateOnly, value)
 	if err != nil || date.Format(time.DateOnly) != value || value < "1970-01-01" || value > "9999-01-01" {
@@ -149,7 +328,8 @@ func strictDate(value string) (time.Time, error) {
 }
 
 func emptyTotal(names []string) Total {
-	total := Total{Usage: map[string]Metric{}}
+	zeroAmount := pricing.Amount{}
+	total := Total{Usage: map[string]Metric{}, Cost: Cost{Amount: &zeroAmount}}
 	for _, name := range names {
 		total.Usage[name] = Metric{}
 	}

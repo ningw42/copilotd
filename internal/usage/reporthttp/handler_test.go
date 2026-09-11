@@ -38,7 +38,7 @@ func (w *controlledWriter) Write(body []byte) (int, error) {
 }
 
 func TestHandlerInvalidModelUTF8IsAdmittedSemanticsBeforeSQL(t *testing.T) {
-	reader := report.New(filepath.Join(t.TempDir(), "missing", "usage.db"))
+	reader := report.New(filepath.Join(t.TempDir(), "missing", "usage.db"), nil)
 	var calls atomic.Int32
 	entered, release := make(chan struct{}, 2), make(chan struct{})
 	handler := reporthttp.Handler(func(ctx context.Context, q report.Query) (report.Report, error) {

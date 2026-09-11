@@ -18,10 +18,34 @@ import (
 
 	"github.com/ningw42/copilotd/internal/logging"
 	"github.com/ningw42/copilotd/internal/usage"
+	"github.com/ningw42/copilotd/internal/usage/pricing"
 	"github.com/ningw42/copilotd/internal/usage/report"
 	"github.com/ningw42/copilotd/internal/usage/reporthttp"
 	"github.com/ningw42/copilotd/internal/usage/sqlitestore"
 )
+
+type localTimezonePricingSource struct {
+	snapshot *pricing.Snapshot
+}
+
+func (s localTimezonePricingSource) Current(ctx context.Context, limit pricing.ProjectionLimit) (*pricing.Snapshot, pricing.SnapshotStatus, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, pricing.SnapshotStatus{}, err
+	}
+	if s.snapshot.IdentityBytes() > limit.MaxIdentityBytes {
+		return nil, pricing.SnapshotStatus{}, pricing.ErrProjectionLimit
+	}
+	return s.snapshot, pricing.SnapshotStatus{Source: "fallback", Version: "sha256:empty-test-prices"}, nil
+}
+
+func localTimezonePricing(t *testing.T) pricing.Source {
+	t.Helper()
+	snapshot, err := pricing.ParseSnapshot(context.Background(), []byte(`{"openai":{"id":"openai","models":{}},"anthropic":{"id":"anthropic","models":{}},"google":{"id":"google","models":{}},"xai":{"id":"xai","models":{}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return localTimezonePricingSource{snapshot: snapshot}
+}
 
 // A real store and adapter keep discovery assertions at Run's HTTP/output seam.
 func localTimezoneCommand(t *testing.T) (*reporthttp.Client, Options, *[]string) {
@@ -37,7 +61,7 @@ func localTimezoneCommand(t *testing.T) (*reporthttp.Client, Options, *[]string)
 		t.Fatalf("fixture: %+v", result)
 	}
 	var requested []string
-	handler := reporthttp.Handler(report.New(path).Query)
+	handler := reporthttp.Handler(report.New(path, localTimezonePricing(t)).Query)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requested = append(requested, r.URL.Query().Get("timezone"))
 		for _, key := range []string{"Authorization", "X-Api-Key", "Cookie"} {

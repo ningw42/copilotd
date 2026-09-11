@@ -40,10 +40,17 @@ type SnapshotStatus struct {
 	LastSuccess *time.Time
 }
 
+// ProjectionLimit is the caller's maximum provider/model identity bytes for
+// one parsed snapshot projection.
+type ProjectionLimit struct {
+	MaxIdentityBytes int
+}
+
 // Source captures one local immutable pricing snapshot. Current performs no
-// network work.
+// network work. A valid accepted cached value can fail one report's smaller
+// projection limit without invalidating or replacing that value.
 type Source interface {
-	Current(context.Context) (*Snapshot, SnapshotStatus, error)
+	Current(context.Context, ProjectionLimit) (*Snapshot, SnapshotStatus, error)
 }
 
 // Remote is the credential-free HTTP adapter used only by cache refreshes.
@@ -93,9 +100,9 @@ func NewCachedSource(cfg CacheConfig, remote Remote, registry *cache.Registry, l
 
 // Current captures the cache's effective bytes/status atomically and projects
 // only that captured value.
-func (s *CachedSource) Current(ctx context.Context) (*Snapshot, SnapshotStatus, error) {
+func (s *CachedSource) Current(ctx context.Context, limit ProjectionLimit) (*Snapshot, SnapshotStatus, error) {
 	raw, status := s.value.Current()
-	snapshot, err := ParseSnapshot(ctx, raw)
+	snapshot, err := parseSnapshot(ctx, raw, limit.MaxIdentityBytes)
 	if err != nil {
 		return nil, SnapshotStatus{}, err
 	}

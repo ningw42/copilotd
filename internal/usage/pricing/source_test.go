@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -30,7 +31,7 @@ func TestCachedSourceServesValidatedEmbeddedFloorWhenRefreshIsPinned(t *testing.
 	source := pricing.NewCachedSource(pricing.CacheConfig{}, remote, registry, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	registry.Prime(context.Background())
-	snapshot, status, err := source.Current(context.Background())
+	snapshot, status, err := source.Current(context.Background(), pricing.ProjectionLimit{MaxIdentityBytes: int(^uint(0) >> 1)})
 	if err != nil {
 		t.Fatalf("Current() error = %v", err)
 	}
@@ -73,7 +74,7 @@ func TestCachedSourceRefreshReplacesTheWholeSnapshotWithoutCredentials(t *testin
 	source := pricing.NewCachedSource(pricing.CacheConfig{RefreshInterval: time.Hour}, pricing.NewRemote(server.URL, server.Client().Transport), registry, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	registry.Prime(context.Background())
 
-	snapshot, status, err := source.Current(context.Background())
+	snapshot, status, err := source.Current(context.Background(), pricing.ProjectionLimit{MaxIdentityBytes: int(^uint(0) >> 1)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,6 +89,34 @@ func TestCachedSourceRefreshReplacesTheWholeSnapshotWithoutCredentials(t *testin
 	}
 	if requests.Load() != 1 {
 		t.Fatalf("requests after refresh and Current = %d, want 1 (Current must not fetch)", requests.Load())
+	}
+}
+
+func TestCachedSourceProjectionLimitDoesNotRejectAcceptedValue(t *testing.T) {
+	t.Parallel()
+
+	const fetched = `{"openai":{"id":"openai","models":{"retained":{"id":"retained","cost":{"input":1,"output":2}}}},"anthropic":{"id":"anthropic","models":{}},"google":{"id":"google","models":{}},"xai":{"id":"xai","models":{}}}`
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		_, _ = io.WriteString(w, fetched)
+	}))
+	t.Cleanup(server.Close)
+
+	registry := cache.NewRegistry()
+	source := pricing.NewCachedSource(pricing.CacheConfig{RefreshInterval: time.Hour}, pricing.NewRemote(server.URL, server.Client().Transport), registry, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	registry.Prime(context.Background())
+
+	if snapshot, status, err := source.Current(context.Background(), pricing.ProjectionLimit{}); !errors.Is(err, pricing.ErrProjectionLimit) || snapshot != nil || status != (pricing.SnapshotStatus{}) {
+		t.Fatalf("zero-byte report projection = %#v, %#v, %v; want isolated projection-limit failure", snapshot, status, err)
+	}
+	snapshot, status, err := source.Current(context.Background(), pricing.ProjectionLimit{MaxIdentityBytes: int(^uint(0) >> 1)})
+	if err != nil || len(snapshot.Identities()) != 1 || snapshot.IdentityBytes() != len("openai")+len("retained") || status.Source != "fetched" {
+		t.Fatalf("accepted value after small report = %#v, %#v, %v", snapshot, status, err)
+	}
+	observed := registry.Observe()
+	if len(observed) != 1 || observed[0].Source != "fetched" || requests.Load() != 1 {
+		t.Fatalf("small report changed cache acceptance or fetched again: observation=%#v requests=%d", observed, requests.Load())
 	}
 }
 
@@ -109,13 +138,13 @@ func TestCachedSourceRefreshAcceptsReplacementWithDeletedRates(t *testing.T) {
 	registry := cache.NewRegistry()
 	source := pricing.NewCachedSource(pricing.CacheConfig{RefreshInterval: time.Hour}, pricing.NewRemote(server.URL, server.Client().Transport), registry, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	registry.Prime(context.Background())
-	_, firstStatus, err := source.Current(context.Background())
+	_, firstStatus, err := source.Current(context.Background(), pricing.ProjectionLimit{MaxIdentityBytes: int(^uint(0) >> 1)})
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	registry.Prime(context.Background())
-	snapshot, replacementStatus, err := source.Current(context.Background())
+	snapshot, replacementStatus, err := source.Current(context.Background(), pricing.ProjectionLimit{MaxIdentityBytes: int(^uint(0) >> 1)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,12 +194,12 @@ func TestCachedSourceRejectsMalformedRefreshAndHoldsLastGood(t *testing.T) {
 	registry := cache.NewRegistry()
 	source := pricing.NewCachedSource(pricing.CacheConfig{RefreshInterval: time.Hour}, pricing.NewRemote(server.URL, server.Client().Transport), registry, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	registry.Prime(context.Background())
-	first, firstStatus, err := source.Current(context.Background())
+	first, firstStatus, err := source.Current(context.Background(), pricing.ProjectionLimit{MaxIdentityBytes: int(^uint(0) >> 1)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	registry.Prime(context.Background())
-	held, heldStatus, err := source.Current(context.Background())
+	held, heldStatus, err := source.Current(context.Background(), pricing.ProjectionLimit{MaxIdentityBytes: int(^uint(0) >> 1)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -235,7 +264,7 @@ func TestRemoteRefreshRefusesRedirectsAndBoundsDecodedBodies(t *testing.T) {
 				registry := cache.NewRegistry()
 				source := pricing.NewCachedSource(pricing.CacheConfig{RefreshInterval: time.Hour}, pricing.NewRemote(server.URL, server.Client().Transport), registry, slog.New(slog.NewTextHandler(io.Discard, nil)))
 				registry.Prime(context.Background())
-				_, status, err := source.Current(context.Background())
+				_, status, err := source.Current(context.Background(), pricing.ProjectionLimit{MaxIdentityBytes: int(^uint(0) >> 1)})
 				if err != nil {
 					t.Fatalf("Current() error = %v", err)
 				}

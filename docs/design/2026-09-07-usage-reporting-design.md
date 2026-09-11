@@ -48,11 +48,15 @@ be checked against the exact revision rather than inferred from this design.
 ### Non-goals
 
 No browser presentation, charts, watch mode, arbitrary SQL, raw-Turn export,
-pricing, retention, new count projection, Requested-model grouping, multi-user
+retention, new count projection, Requested-model grouping, multi-user
 attribution, daemon-instance filtering, separate listener, authentication,
-automatic daemon discovery, or offline CLI mode. Existing external SQLite tools
-remain supported. HTML and charts can later consume the same report value, but
-v1 introduces no extension framework for them.
+automatic daemon discovery, or offline CLI mode. The original pricing non-goal
+is superseded only by the separate
+[Estimated cost design](2026-09-11-usage-cost-reporting-design.md): #236 adds
+report-time valuation without changing persisted native observations, while its
+HTTP and CLI presentation remain staged for #237 and #238. Existing external
+SQLite tools remain supported. HTML and charts can later consume the same report
+value, but v1 introduces no extension framework for them.
 
 ## 2. Existing contracts and scope change
 
@@ -106,7 +110,7 @@ Illustrative Go interface; names may change without changing the contract:
 
 ```go
 // internal/usage/report
-func New(databasePath string) *Reporter
+func New(databasePath string, pricingSource pricing.Source) *Reporter
 func (r *Reporter) Query(ctx context.Context, q Query) (Report, error)
 
 type Query struct {
@@ -119,11 +123,14 @@ type Query struct {
 }
 ```
 
-`New` captures the absolute, daemon-selected path without opening, creating, or
-migrating files. A private constructor accepts a clock for tests; production
-uses `time.Now`. `Query` does not retain a transaction, mutable result, or file
-handle for its caller to manage. The returned value is independent of later
-writes. Errors are typed/report-specific rather than raw driver errors.
+`New` captures the absolute, daemon-selected path and composition-root pricing
+source without opening, creating, migrating, or fetching. Production supplies
+the source only after the enabled Usage writer and pricing cached value have been
+configured; disabled reporting still passes a nil query function and constructs
+no Reporter. A private clock remains test-only; production uses `time.Now`.
+`Query` does not retain a transaction, mutable result, or file handle for its
+caller to manage. The returned value is independent of later writes and pricing
+refreshes. Errors are typed/report-specific rather than raw driver/source errors.
 
 Suggested ownership:
 

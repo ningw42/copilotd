@@ -27,6 +27,7 @@ import (
 	"github.com/ningw42/copilotd/internal/shim"
 	"github.com/ningw42/copilotd/internal/sse"
 	"github.com/ningw42/copilotd/internal/usage"
+	"github.com/ningw42/copilotd/internal/usage/pricing"
 	"github.com/ningw42/copilotd/internal/usage/sqlitestore"
 )
 
@@ -106,6 +107,9 @@ func startUsageMeterServeHarness(t *testing.T, upstreamURL string, base *slog.Lo
 	if err != nil {
 		t.Fatalf("build serve provider: %v", err)
 	}
+	usagePricing := configuredUsagePricing(cfg, pricing.NewRemote("https://models.invalid/api.json", mainRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("offline pricing fixture was unexpectedly fetched")
+	})), cacheRegistry, base)
 	registry := configuredShimRegistry(cfg, sink)
 	if decorate != nil {
 		registry = decorate(registry)
@@ -131,7 +135,7 @@ func startUsageMeterServeHarness(t *testing.T, upstreamURL string, base *slog.Lo
 	done := make(chan error, 1)
 	harness.done = done
 	go func() {
-		done <- runBoundServe(ctx, cfg, base, mgr, imp, nil, cacheRegistry, registry, ln, store)
+		done <- runBoundServe(ctx, cfg, base, mgr, imp, nil, usagePricing, cacheRegistry, registry, ln, store)
 	}()
 	t.Cleanup(func() { _ = harness.stop() })
 	assertHTTPStatusEventually(t, harness.baseURL+"/healthz", http.StatusOK)

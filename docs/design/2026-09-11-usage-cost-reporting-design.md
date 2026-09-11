@@ -1,6 +1,8 @@
 # Estimated cost in Usage reports
 
-**Status:** draft for review; product direction agreed, implementation not started.
+**Status:** product direction approved; pricing/source, matching, native calculators,
+and daemon-owned report aggregation are implemented through #236. The additive
+HTTP contract and CLI presentation remain staged for #237 and #238.
 **Date:** 2026-09-11
 **Extends:** [Usage reporting](2026-09-07-usage-reporting-design.md)
 
@@ -112,10 +114,13 @@ committed native Turns -> Usage reporting module
 matching rules, models.dev structure, price selection, or token nesting.
 
 The reporter accepts a pricing source supplied by the composition root; it does
-not create an HTTP client. Capture one accepted value and its status at Query
-entry, then derive one immutable pricing snapshot for the whole report. A
-refresh during the database scan cannot change that report's prices or model
-matches. Tests provide fixed data through the same source seam.
+not create an HTTP client. `report.New(databasePath, pricing.Source)` requires
+that dependency explicitly. `Source.Current(ctx, ProjectionLimit)` captures one
+local value and status while applying the caller's provider/model identity-byte
+projection limit; a report-specific limit failure does not reject an accepted
+cached value. Query then derives one immutable pricing/matching snapshot for the
+whole report. A refresh during the database scan cannot change that report's
+prices or model matches. Tests provide fixed data through the same source seam.
 
 Matching and arithmetic are in-process modules. Test them through their
 interfaces with literal data; no adapter abstraction is needed for pure
@@ -412,8 +417,12 @@ calculation job disguised as rendering. Currency is always USD in this version.
 ### Additive JSON extension
 
 Keep `/usage/v1/report` and `schema_version: 1`; preserve every existing field.
-Add a top-level `pricing` object identifying the benchmark and the captured
-snapshot:
+Implementation is deliberately staged: #236 exposes typed pricing provenance,
+cost coverage, and model resolution through `Reporter.Query`, while those new Go
+fields remain `json:"-"`. Thus the existing HTTP bytes stay unchanged until #237
+adds the complete explicit wire mapping and validation atomically; #236 does not
+serve a partial extension. The completed #237 mapping adds a top-level `pricing`
+object identifying the benchmark and the captured snapshot:
 
 ```json
 {

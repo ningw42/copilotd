@@ -173,8 +173,9 @@ _Avoid_: billing meter, usage tracker
 
 **Usage report**:
 A calendar aggregation of persisted Turns by Surface and Reported model, retaining
-the native counts and their reporting coverage. It describes observed history,
-not billing, complete consumption, or per-process attribution.
+the native counts and their reporting coverage and optionally valuing priceable
+Turns as Estimated cost. It describes observed history, not billing, complete
+consumption, or per-process attribution.
 _Avoid_: billing report, request totals (for Turn counts)
 
 **Estimated cost**:

@@ -15,6 +15,10 @@ import (
 
 var selectedProviders = [...]string{"openai", "anthropic", "google", "xai"}
 
+// ErrProjectionLimit reports that a caller's retained-identity budget cannot
+// hold this otherwise valid snapshot projection.
+var ErrProjectionLimit = errors.New("pricing snapshot identity projection exceeds limit")
+
 // Identity names one model in its original-provider namespace.
 type Identity struct {
 	Provider string
@@ -32,12 +36,22 @@ type Rates struct {
 
 // Snapshot is an immutable projection of one complete accepted artifact.
 type Snapshot struct {
-	identities []Identity
-	rates      map[Identity]Rates
+	identities    []Identity
+	identityBytes int
+	rates         map[Identity]Rates
 }
 
-// ParseSnapshot validates and projects one complete models.dev artifact.
+// ParseSnapshot validates and projects one complete models.dev artifact without
+// a report-specific retention limit. Cached-value acceptance uses this path;
+// report-time projection applies its own smaller caller budget independently.
 func ParseSnapshot(ctx context.Context, raw []byte) (*Snapshot, error) {
+	return parseSnapshot(ctx, raw, int(^uint(0)>>1))
+}
+
+func parseSnapshot(ctx context.Context, raw []byte, maxIdentityBytes int) (*Snapshot, error) {
+	if maxIdentityBytes < 0 {
+		return nil, ErrProjectionLimit
+	}
 	if err := unambiguousJSON(ctx, raw); err != nil {
 		return nil, err
 	}
@@ -89,8 +103,13 @@ func ParseSnapshot(ctx context.Context, raw []byte) (*Snapshot, error) {
 			if err := requireMatchingID(model, modelID); err != nil {
 				return nil, fmt.Errorf("model %q/%q: %w", providerID, modelID, err)
 			}
+			identityBytes := len(providerID) + len(modelID)
+			if identityBytes > maxIdentityBytes-snapshot.identityBytes {
+				return nil, ErrProjectionLimit
+			}
 			identity := Identity{Provider: providerID, Model: modelID}
 			snapshot.identities = append(snapshot.identities, identity)
+			snapshot.identityBytes += identityBytes
 			rawCost, priced := model["cost"]
 			if !priced {
 				continue
@@ -294,6 +313,14 @@ func optionalRate(object map[string]json.RawMessage, name string) (*Rate, error)
 		return nil, fmt.Errorf("%s rate is invalid", name)
 	}
 	return &rate, nil
+}
+
+// IdentityBytes returns provider/model bytes retained by this projection.
+func (s *Snapshot) IdentityBytes() int {
+	if s == nil {
+		return 0
+	}
+	return s.identityBytes
 }
 
 // Identities returns a detached, stable-order copy of all projected model

@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ningw42/copilotd/internal/usage/pricing"
 	"github.com/ningw42/copilotd/internal/usage/report"
 	"github.com/ningw42/copilotd/internal/usage/reporthttp"
 )
@@ -64,6 +65,42 @@ func TestHandlerClientPreserveSelectedNativeSections(t *testing.T) {
 				t.Fatal("original native JSON lost")
 			}
 		})
+	}
+}
+
+func TestHandlerClientKeepQueryPricingFieldsOffLegacyWire(t *testing.T) {
+	var result report.Report
+	if err := json.Unmarshal([]byte(emptyJSON), &result); err != nil {
+		t.Fatal(err)
+	}
+	zero := pricing.Amount{}
+	result.Pricing = report.PricingProvenance{
+		Dataset: "models.dev/api.json", Currency: "USD", Basis: "original_provider", ContextPolicy: "highest_tier", CacheWritePolicy: "single_rate",
+		Version: "sha256:internal-only", Source: "fallback",
+	}
+	result.OpenAI.Total.Cost = report.Cost{Amount: &zero}
+
+	server := httptest.NewServer(reporthttp.Handler(func(context.Context, report.Query) (report.Report, error) {
+		return result, nil
+	}))
+	t.Cleanup(server.Close)
+	client, err := reporthttp.NewClient(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := client.Query(context.Background(), clientQuery())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := strings.Replace(emptyJSON, `,"future":{"additive":true}`, "", 1)
+	want = strings.Replace(want,
+		`"input_tokens":{"sum":"0","reported_turns":"0"},"output_tokens":{"sum":"0","reported_turns":"0"},"cached_tokens":{"sum":null,"reported_turns":"0"},"cache_write_tokens":{"sum":null,"reported_turns":"0"}`,
+		`"cache_write_tokens":{"sum":null,"reported_turns":"0"},"cached_tokens":{"sum":null,"reported_turns":"0"},"input_tokens":{"sum":"0","reported_turns":"0"},"output_tokens":{"sum":"0","reported_turns":"0"}`, 1)
+	if string(got.JSON) != want || strings.Contains(string(got.JSON), `"pricing"`) || strings.Contains(string(got.JSON), `"cost"`) || strings.Contains(string(got.JSON), `"pricing_match"`) {
+		t.Fatalf("staged pricing changed legacy wire:\n got %s\nwant %s", got.JSON, want)
+	}
+	if got.Report.Pricing != (report.PricingProvenance{}) || got.Report.OpenAI.Total.Cost.Amount != nil {
+		t.Fatalf("legacy client unexpectedly reconstructed hidden pricing: %+v", got.Report)
 	}
 }
 

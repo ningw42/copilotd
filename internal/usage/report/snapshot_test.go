@@ -81,7 +81,7 @@ func TestQueryBothNativeSectionsShareOneCommittedSnapshot(t *testing.T) {
 		}
 	}()
 	<-ready
-	reporter := report.New(path)
+	reporter := newReporter(t, path)
 	q := selection()
 	q.Surface = "all"
 	overlapped := false
@@ -154,7 +154,7 @@ func TestQueryReadsCommittedHistoryWithoutFlushingOrRetainingWriter(t *testing.T
 		t.Fatal(err)
 	}
 	defer writer.Close(context.Background())
-	reporter := report.New(path)
+	reporter := newReporter(t, path)
 	before, err := reporter.Query(context.Background(), selection())
 	if err != nil {
 		t.Fatal(err)
@@ -222,7 +222,7 @@ func TestQueryRejectsUTF16SchemaWithoutMigration(t *testing.T) {
 	if err = db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	_, err = report.New(path).Query(context.Background(), selection())
+	_, err = newReporter(t, path).Query(context.Background(), selection())
 	if err == nil {
 		t.Fatal("accepted incompatible text encoding")
 	}
@@ -232,7 +232,7 @@ func TestQueryEmptyFutureBucketMetadata(t *testing.T) {
 	q := selection()
 	q.Since = "9998-12-31"
 	q.Until = "9999-01-01"
-	result, err := report.New(stored(t)).Query(context.Background(), q)
+	result, err := newReporter(t, stored(t)).Query(context.Background(), q)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -15,6 +15,7 @@ import (
 
 	"github.com/ningw42/copilotd/internal/logging"
 	"github.com/ningw42/copilotd/internal/usage"
+	"github.com/ningw42/copilotd/internal/usage/pricing"
 	"github.com/ningw42/copilotd/internal/usage/report"
 	"github.com/ningw42/copilotd/internal/usage/sqlitestore"
 )
@@ -68,7 +69,7 @@ func TestQueryCapsNativeLockWaitingByRemainingBudget(t *testing.T) {
 		_, err := conn.ExecContext(context.Background(), "ROLLBACK")
 		released <- err
 	}()
-	_, err = report.New(path).Query(context.Background(), selection())
+	_, err = newReporter(t, path).Query(context.Background(), selection())
 	if releaseErr := <-released; releaseErr != nil {
 		t.Fatal(releaseErr)
 	}
@@ -82,7 +83,7 @@ func TestQueryCapsNativeLockWaitingByRemainingBudget(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Millisecond)
 	defer cancel()
 	started := time.Now()
-	_, err = report.New(path).Query(ctx, selection())
+	_, err = newReporter(t, path).Query(ctx, selection())
 	elapsed := time.Since(started)
 	if err == nil || elapsed > 250*time.Millisecond {
 		t.Fatalf("contended read elapsed=%s err=%v", elapsed, err)
@@ -140,7 +141,7 @@ func TestQueryEnforcesWholeReportResourceLimits(t *testing.T) {
 			if err = db.Close(); err != nil {
 				t.Fatal(err)
 			}
-			reader := report.NewReadLimitsForTest(path, tc.maxRows, tc.maxGroups, tc.maxDistinctModelBytes)
+			reader := report.NewReadLimitsForTest(path, pricingSource(t, `{}`, pricing.SnapshotStatus{Source: "fallback", Version: "sha256:empty-test-prices"}), tc.maxRows, tc.maxGroups, tc.maxDistinctModelBytes)
 			got, err := reader.Query(context.Background(), selection())
 			var failure *report.Error
 			if !errors.As(err, &failure) || failure.Code != report.TooLarge || got.OpenAI != nil {
@@ -181,7 +182,7 @@ func TestQueryEnforcesWholeReportResourceLimits(t *testing.T) {
 			if tc.name == "examined Turns" {
 				ctx, cancel := context.WithCancel(context.Background())
 				defer cancel()
-				interrupted := report.NewReadLimitsForTest(path, tc.maxRows, tc.maxGroups, tc.maxDistinctModelBytes)
+				interrupted := report.NewReadLimitsForTest(path, pricingSource(t, `{}`, pricing.SnapshotStatus{Source: "fallback", Version: "sha256:empty-test-prices"}), tc.maxRows, tc.maxGroups, tc.maxDistinctModelBytes)
 				report.NotifyAfterExaminedTurnForTest(interrupted, func(examined int) {
 					if examined == int(tc.wantAnthropic)+1 {
 						cancel()
@@ -225,7 +226,7 @@ func TestQueryFailsWholeReportOnUnavailableOrExcessiveData(t *testing.T) {
 				for _, zone := range []string{"UTC", "Europe/Berlin"} {
 					q := selection()
 					q.Period, q.Timezone = period, zone
-					got, err := report.New(path).Query(context.Background(), q)
+					got, err := newReporter(t, path).Query(context.Background(), q)
 					var failure *report.Error
 					if !errors.As(err, &failure) || failure.Code != tc.code || got.OpenAI != nil {
 						t.Fatalf("%s/%s: report=%+v err=%v; want %s, no partial report", period, zone, got, err, tc.code)
@@ -238,7 +239,7 @@ func TestQueryFailsWholeReportOnUnavailableOrExcessiveData(t *testing.T) {
 		})
 	}
 	path := filepath.Join(t.TempDir(), "missing", "usage.db")
-	_, err := report.New(path).Query(context.Background(), selection())
+	_, err := newReporter(t, path).Query(context.Background(), selection())
 	var failure *report.Error
 	if !errors.As(err, &failure) || failure.Code != report.Unavailable {
 		t.Fatalf("missing: %v", err)
@@ -249,7 +250,7 @@ func TestQueryFailsWholeReportOnUnavailableOrExcessiveData(t *testing.T) {
 	path = stored(t, turn("2026-09-01T00:00:00Z", "max", usage.OpenAIUsage{InputTokens: math.MaxInt64}))
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	got, err := report.New(path).Query(ctx, selection())
+	got, err := newReporter(t, path).Query(ctx, selection())
 	if !errors.Is(err, context.Canceled) || got.OpenAI != nil {
 		t.Fatalf("canceled: %+v %v", got, err)
 	}
@@ -269,7 +270,7 @@ func TestQueryRejectsUnsupportedSelectionsBeforeOpeningFiles(t *testing.T) {
 	} {
 		q := selection()
 		change(&q)
-		_, err := report.New(path).Query(context.Background(), q)
+		_, err := newReporter(t, path).Query(context.Background(), q)
 		var failure *report.Error
 		if !errors.As(err, &failure) || failure.Code != report.InvalidQuery {
 			t.Errorf("query %+v: %v, want typed invalid_query", q, err)
@@ -278,7 +279,7 @@ func TestQueryRejectsUnsupportedSelectionsBeforeOpeningFiles(t *testing.T) {
 	q := selection()
 	q.Since = "1970-01-01"
 	q.Until = "1981-01-01"
-	_, err := report.New(path).Query(context.Background(), q)
+	_, err := newReporter(t, path).Query(context.Background(), q)
 	var failure *report.Error
 	if !errors.As(err, &failure) || failure.Code != report.TooLarge {
 		t.Fatalf("calendar limit: %v", err)
@@ -299,7 +300,7 @@ func TestQueryDailyOpenAINativeCounts(t *testing.T) {
 		turn("2026-09-01T00:00:00Z", "z", usage.OpenAIUsage{InputTokens: 8012, OutputTokens: 9, CachedTokens: ptr(6000), CacheWriteTokens: ptr(2000), ReasoningTokens: ptr(4), TotalTokens: ptr(8021)}),
 		sse, websocket,
 		turn("2026-09-03T00:00:00Z", "excluded", usage.OpenAIUsage{InputTokens: 1, OutputTokens: 1}))
-	got, err := report.New(path).Query(context.Background(), selection())
+	got, err := newReporter(t, path).Query(context.Background(), selection())
 	if err != nil {
 		t.Fatal(err)
 	}
