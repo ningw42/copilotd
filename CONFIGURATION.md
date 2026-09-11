@@ -176,10 +176,15 @@ validated period/model rows without changing JSON or reconstructing calendar
 rules. Their Turns, sum, and coverage arithmetic is checked int64; overflow of
 inconsistent rows fails the complete text rendering before stdout, while JSON
 continues to emit the independently validated original bytes. Text uses
-comma-separated exact counts, ASCII-escaped model identities,
-`—` for unreported metrics, and `*` plus coverage for partial optional metrics.
-Anthropic renders first with Turns, Uncached input, Output, Cache create, and
-Cache read; OpenAI follows with Turns, Input, Output, Cache write, and Cache read.
+comma-separated exact counts and ASCII-escaped model identities. Every primary
+Surface table places `Est. USD` after `Model(s)` and before `Turns`; supplied exact
+amounts round half up to three fractional digits, and terminal period totals add
+exact amounts before rounding. A partial monetary subtotal has `*`; an entirely
+unpriced nonempty group has `—`; period/model notes list priced/total stored Turns
+and each nonzero exclusion reason. Native `—` still means unreported, and native
+`*` still denotes partial optional-count coverage. Anthropic renders first with
+Turns, Uncached input, Output, Cache create, and Cache read; OpenAI follows with
+Turns, Input, Output, Cache write, and Cache read.
 Each text section groups Reported-model rows by period and labels the first
 column as `Day`, `Week`, `Month`, or `Year`. A period starts with `Total`, followed
 by a horizontal rule and its model breakdown; another rule separates the next
@@ -188,7 +193,10 @@ rendered as duplicate text rows. A reported zero stays zero; an empty
 selection is explicitly labeled, not represented as proof of no consumption.
 
 `--details` adds secondary native tables for the same period totals and
-Reported-model breakdowns: OpenAI **Reasoning** (`reasoning_tokens`) and
+Reported-model breakdowns, plus one de-duplicated terminal-safe list of distinct
+Reported-model → Pricing-model resolutions, matched methods, and explicit
+unknown/ambiguous outcomes. A match alone does not promise usable rates or native
+usage. OpenAI secondary columns are **Reasoning** (`reasoning_tokens`) and
 **Reported total** (`total_tokens`, never inferred); Anthropic **Thinking**
 (`thinking_tokens`),
 **Cache create 5m** (`ephemeral_5m_input_tokens`), and **Cache create 1h**
@@ -217,8 +225,13 @@ strings (or the governed `null` for nonempty groups with zero priceable Turns),
 and the six canonical int64 coverage strings must partition stored Turns exactly.
 Unknown additive fields remain compatible. Errors use stderr and exit 1,
 including partial/short writes or failure to write the final newline; success,
-including empty, exits 0. Text tables remain native-count-only until their
-estimated-cost presentation is added; raw-Turn export, HTML, and charts are not
+including empty, exits 0. Text identifies original-provider/highest-context/
+single-write pricing, fetched versus fallback source, and successful content-fetch
+time when present. It states that valuation uses current accepted rates for
+persisted best-effort observations, may exclude unpriceable Turns, and is not a
+Copilot bill. A wholly absent pricing extension produces the exact older-daemon
+unavailable explanation and `—` cost cells without fabricated exclusions or local
+pricing. Raw-Turn export, HTML, charts, and cross-Surface grand totals are not
 provided.
 
 The same listener serves exactly `GET`/`HEAD /usage/v1/report` without inference
@@ -420,8 +433,9 @@ value and never fetch pricing.
 
 **Enabling this flag also exposes unauthenticated aggregate Usage reports on
 `serve --addr`, including non-loopback/public bindings.** Anyone with network
-reachability can read models and activity history at `/usage/v1/report`.
-Inference API keys do not protect this local path, and neither missing CORS nor
+reachability can read models, activity history, estimated current valuation, and
+pricing coverage at `/usage/v1/report`. Inference API keys do not protect this
+local path, and neither missing CORS nor
 private SQLite files are HTTP access controls. Other local users, DNS rebinding,
 and reachable browser/local-network actors remain part of this deliberate
 exposure. Protect the listener/path with binding, firewall, or reverse-proxy

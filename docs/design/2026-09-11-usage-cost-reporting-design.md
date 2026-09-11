@@ -1,8 +1,9 @@
 # Estimated cost in Usage reports
 
-**Status:** product direction approved; pricing/source, matching, native calculators,
-daemon-owned report aggregation, and the additive HTTP contract are implemented
-through #237. CLI cost presentation remains staged for #238.
+**Status:** implemented through #238: pricing/source, matching, native calculators,
+daemon-owned aggregation, additive HTTP transport, CLI presentation, and local
+synthetic executable acceptance. Final full-suite/race/flake and same-revision
+native-platform certification remain release gates, not inferred from this status.
 **Date:** 2026-09-11
 **Extends:** [Usage reporting](2026-09-07-usage-reporting-design.md)
 

@@ -53,9 +53,9 @@ attribution, daemon-instance filtering, separate listener, authentication,
 automatic daemon discovery, or offline CLI mode. The original pricing non-goal
 is superseded only by the separate
 [Estimated cost design](2026-09-11-usage-cost-reporting-design.md): #236 adds
-report-time valuation without changing persisted native observations and #237
-publishes its atomic additive HTTP extension; CLI cost presentation remains
-staged for #238. Existing external
+report-time valuation without changing persisted native observations, #237
+publishes its atomic additive HTTP extension, and #238 presents costs in the CLI
+and adds deterministic local-source executable acceptance. Existing external
 SQLite tools remain supported. HTML and charts can later consume the same report
 value, but v1 introduces no extension framework for them.
 

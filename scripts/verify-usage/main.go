@@ -224,6 +224,7 @@ func (v *verification) checkoutBytes() error {
 	var mismatches []error
 	for i, path := range []string{
 		"internal/catalog/codexdata/models.json",
+		"internal/usage/pricing/modelsdevdata/api.json",
 		"internal/shim/testdata/usage/openai-responses-sse.recorded.sse",
 		"internal/shim/testdata/usage/anthropic-messages-sse-cumulative.synthetic.sse",
 	} {
@@ -390,13 +391,19 @@ func nativeNotApplicable(goos string) map[string]string {
 func mandatoryTests(goos string) []string {
 	var required []string
 	groups := map[string][]string{
+		"internal/usage/pricing": {
+			"TestCachedSourceServesValidatedEmbeddedFloorWhenRefreshIsPinned", "TestCachedSourceRefreshReplacesTheWholeSnapshotWithoutCredentials",
+			"TestCachedSourceRejectsMalformedRefreshAndHoldsLastGood", "TestRemoteRefreshRefusesRedirectsAndBoundsDecodedBodies",
+		},
 		"internal/usage/report": {
 			"TestPinnedDriverFirstReadOnlyWALConnections", "TestPinnedDriverReadOnlyGuardAndInterruptCleanup", "TestQueryCapsNativeLockWaitingByRemainingBudget",
 			"TestQueryBothNativeSectionsShareOneCommittedSnapshot", "TestQueryReadsCommittedHistoryWithoutFlushingOrRetainingWriter", "TestQueryRejectsReportWhenNativeCleanupFails",
+			"TestQueryRepricesAndRematchesEachCapturedSourceRevision", "TestQueryUsesOneCapturedPricingRevisionAcrossBothSurfaces",
 			"TestQueryExactFilterExcludesOversizedUnrelatedIdentity", "TestQueryEnforcesWholeReportResourceLimits", "TestQueryIndexedStreamingNativeEvidence",
 			"TestRealSQLiteFailuresUseGenericHTTPResponsesAndReleaseAdmission", "TestInterruptedRealSQLiteScanUsesHTTPDeadlinePrecedenceAndReleasesAdmission",
 		},
 		"internal/server": {
+			"TestReportBypassesReadinessAndOnlyMatchesExactLocalPath", "TestForcedServerCloseCancelsActiveReportWork",
 			"TestUsageIncompleteRequestBodiesReleaseReportSlotsWithinWriteBudget/content_length", "TestUsageIncompleteRequestBodiesReleaseReportSlotsWithinWriteBudget/chunked",
 			"TestReportIncompleteBodiesBoundFinalFlushAndRecovery/small_success", "TestReportIncompleteBodiesBoundFinalFlushAndRecovery/head",
 			"TestReportIncompleteBodiesBoundFinalFlushAndRecovery/method", "TestReportIncompleteBodiesBoundFinalFlushAndRecovery/disabled",
@@ -405,9 +412,18 @@ func mandatoryTests(goos string) []string {
 		"internal/usage/reporthttp": {
 			"TestHandlerBodylessWorkTimeoutSurvivesDeadlineScheduling", "TestHandlerMapsAggregationOverflowAndReleasesAdmission", "TestClientDefaultTLSRejectsUntrustedCertificateBeforeHTTP",
 		},
+		"internal/usage/reportcli": {
+			"TestCommandPlacesEstimatedUSDOnlyInBothPrimarySurfaceTables", "TestCommandRoundsExactUSDHalfUpToThreeFractionalDigits",
+			"TestCommandSumsExactServerAmountsBeforeRoundingPeriodTotals", "TestCommandMarksAndExplainsPartialAndEntirelyUnpricedCosts",
+			"TestCommandShowsPricingProvenanceAndEstimateCaveat", "TestCommandDetailsListsDistinctTerminalSafePricingResolutions",
+			"TestCommandPresentsPricingEnabledEmptySectionWithoutInventedRows", "TestCommandExplainsOlderDaemonWithoutInventingCostCoverage",
+			"TestCommandPricingJSONPreservesLiteralWireBytesIndependentOfDetails",
+			"TestCommandCostSubtotalOverflowEmitsNothingWhileJSONStaysOriginal",
+		},
 		"internal/usage/sqlitestore": {"TestStoreRecoveredWriteFailureDoesNotPoisonLaterOrFinalLevels"},
 		"internal/wsforward":         {"TestProxyWriteTimeoutTearsDownSlowReaderSession"},
 		"cmd/copilotd": {
+			"TestConfiguredUsagePricingRegistersOnlyForEnabledMeter", "TestDisabledReportDoesNotOpenHistoryOrValidateTimezone", "TestUsageCostExecutableAcceptance",
 			"TestUsageReportDeadlinesDoNotLeakIntoReusedInferenceConnections", "TestUsageExecutableReadsGenericRecovery",
 			"TestUsageExecutableAcceptance/closed_stdout_pipe/compact", "TestUsageExecutableAcceptance/closed_stdout_pipe/--details", "TestUsageExecutableAcceptance/closed_stdout_pipe/--json",
 			"TestUsageNativeRuntime", "TestUsageExecutableAcceptance", "TestUsageExecutableAcceptance/process_timezone", "TestUsageExecutableAcceptance/system_timezone", "TestUsageExecutableAcceptance/observed_inference_to_executable",

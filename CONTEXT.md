@@ -179,10 +179,16 @@ consumption, or per-process attribution.
 _Avoid_: billing report, request totals (for Turn counts)
 
 **Estimated cost**:
-A USD valuation of priceable persisted Turns using the daemon's current accepted
-original-provider rates. It is not a Copilot bill, invoice, or proof of complete
-consumption.
+A USD valuation of fully priceable persisted Turns using the daemon's current
+accepted original-provider rates. It is not a Copilot bill, invoice, or proof of
+complete consumption.
 _Avoid_: billed cost, charge, spend
+
+**Pricing coverage**:
+The partition of stored Turns between fully priceable Turns and explicit reasons
+that valuation excluded the rest. It describes stored evidence, not billing or
+consumption completeness.
+_Avoid_: billing coverage, cost completeness
 
 **Pricing model**:
 The original-provider/model pair selected to value a Reported model. It is

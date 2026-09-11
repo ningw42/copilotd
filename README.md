@@ -62,7 +62,8 @@ Copilot is reachable.
 
 **Enabling `serve --shim-usage-meter-enabled` also exposes aggregate history
 without authentication on the existing `--addr` listener.** Anyone who can reach
-`GET /usage/v1/report` can read model identities and activity patterns. Inference
+`GET /usage/v1/report` can read model identities, activity patterns, estimated
+current valuation, and pricing coverage. Inference
 API keys, missing CORS headers, and private database permissions do not protect
 this HTTP path; use bind/firewall/reverse-proxy policy. HTTP is plain TCP unless
 an operator supplies a TLS reverse proxy or tunnel.
@@ -98,10 +99,14 @@ copilotd usage --timezone UTC --period month --since 2026-01-01 --json
 appending `/usage/v1/report`. The command is an HTTP client, never an offline
 SQLite reader. It shows exact native counts and stored-Turn coverage in
 Reported-model rows grouped by period, with a `Day`, `Week`, `Month`, or `Year`
-first-column heading. Each period starts with a terminal-only `Total` derived
-from its validated model rows and separated from the model breakdown. Text uses
-checked int64 subtotal arithmetic and fails before stdout if inconsistent rows
-would overflow; `--json` still emits the independently validated original bytes.
+first-column heading. Each primary Surface table places **Est. USD** immediately
+after `Model(s)` and before `Turns`; secondary native tables do not repeat money.
+Amounts use exact daemon-supplied USD values rounded half up to three fractional
+digits. Each period starts with a terminal-only `Total` derived from its validated
+model rows and separated from the model breakdown. Text sums exact amounts before
+rounding, uses checked int64 coverage/native subtotal arithmetic, and fails before
+stdout if inconsistent rows or monetary addition would overflow; `--json` still
+emits the independently validated original bytes.
 Whole-range per-model and section totals remain in JSON but are not repeated in
 the text tables. Anthropic appears first with **Uncached input**,
 Output, Cache create, and Cache read; OpenAI retains complete Input, Output, Cache write,
@@ -144,8 +149,10 @@ cross-builds alone.
 `--model` selects an exact non-empty valid UTF-8 **Reported model**, preserving
 case, whitespace, and Unicode without Catalog alias expansion or Requested-model
 substitution. Unknown identities succeed empty. `--details` adds native reasoning
-and reported-total counts for OpenAI, and thinking/cache-TTL counts for Anthropic,
-for the same period totals and Reported-model breakdowns. Text safely ASCII-escapes
+and reported-total counts for OpenAI, thinking/cache-TTL counts for Anthropic,
+and a distinct Reported-model → Pricing-model resolution list with method or
+explicit unknown/ambiguous status. A match does not by itself establish that a
+Turn is priceable. Text safely ASCII-escapes
 model identities without surrounding quotes, including boundary spaces. `—` means unreported, `0` means reported
 zero, and `*` shows partial stored-Turn coverage. Static tables use rounded Lip Gloss borders without color
 or interactive terminal control; `range_partial` and `in_progress` remain
@@ -158,9 +165,15 @@ older daemon, but rejects partial or dangling recognized fields. Cost amounts ar
 exact nonnegative decimal strings; `null` means a nonempty aggregate has no
 priceable Turns, while empty and priceable-free aggregates carry `"0"`. Coverage
 partitions stored Turns into priced Turns and five explicit exclusion reasons.
-The current text tables remain native-count-only; estimated-cost columns and the
-older-daemon explanatory text are not yet rendered. `--details` does not change
-JSON or make another request. There is no raw-Turn export, HTML, or chart output.
+In text, a partial priced subtotal has `*`, a wholly unpriced nonempty group has
+`—`, and compact period/model notes list priced/total stored Turns plus every
+nonzero exclusion reason. The header identifies fetched/fallback provenance and
+successful fetch time when present, followed by the current-rate approximation
+and non-billing caveat. A new CLI talking to an older daemon keeps native counts
+usable and says `Estimated cost unavailable (daemon does not provide prices)`;
+it never prices locally. `--details` does not change JSON or make another request.
+There is no raw-Turn export, HTML, chart output, or cross-Surface monetary/token
+grand total.
 [Contention and lifecycle integration evidence](docs/research/2026-09-08-usage-reporting-concurrency.md)
 includes real blocked TCP output and native SQLite cleanup; the
 [release verification guide](docs/verification/usage-reporting.md) separates

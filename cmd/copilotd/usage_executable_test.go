@@ -16,16 +16,19 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/ningw42/copilotd/internal/catalog"
+	"github.com/ningw42/copilotd/internal/config"
 	"github.com/ningw42/copilotd/internal/forward"
 	"github.com/ningw42/copilotd/internal/identity"
 	"github.com/ningw42/copilotd/internal/logging"
 	"github.com/ningw42/copilotd/internal/server"
 	"github.com/ningw42/copilotd/internal/usage"
+	"github.com/ningw42/copilotd/internal/usage/pricing"
 	"github.com/ningw42/copilotd/internal/usage/report"
 	"github.com/ningw42/copilotd/internal/usage/reporthttp"
 	"github.com/ningw42/copilotd/internal/usage/sqlitestore"
@@ -464,6 +467,271 @@ func TestUsageExecutableAcceptance(t *testing.T) {
 			}
 		}
 	})
+}
+
+const usageCostArtifactFirst = `{
+  "openai":{"id":"openai","models":{
+    "gpt-tiered":{"id":"gpt-tiered","cost":{"input":1,"output":1,"cache_read":1,"cache_write":1,"tiers":[{"input":3,"output":5,"cache_read":2,"cache_write":7,"tier":{"type":"context","size":200}},{"input":2,"output":4,"cache_read":1,"cache_write":6,"tier":{"type":"context","size":100}}]}},
+    "rematch":{"id":"rematch","cost":{"input":1,"output":2}},
+    "shared":{"id":"shared","cost":{"input":99,"output":99}}
+  }},
+  "anthropic":{"id":"anthropic","models":{
+    "claude-tiered":{"id":"claude-tiered","cost":{"input":1,"output":1,"cache_read":1,"cache_write":1,"tiers":[{"input":2,"output":4,"cache_read":1,"cache_write":6,"tier":{"type":"context","size":100}},{"input":3,"output":5,"cache_read":2,"cache_write":7,"tier":{"type":"context","size":200}}]}},
+    "shared":{"id":"shared","cost":{"input":88,"output":88}}
+  }},
+  "google":{"id":"google","models":{}},
+  "xai":{"id":"xai","models":{}},
+  "github-copilot":{"id":"github-copilot","models":{"gpt-tiered":{"id":"gpt-tiered","cost":{"input":999,"output":999}}}}
+}`
+
+const usageCostArtifactSecond = `{
+  "openai":{"id":"openai","models":{
+    "gpt-tiered":{"id":"gpt-tiered","cost":{"input":1,"output":1,"cache_read":1,"cache_write":1,"tiers":[{"input":6,"output":10,"cache_read":4,"cache_write":14,"tier":{"type":"context","size":200}},{"input":2,"output":4,"cache_read":1,"cache_write":6,"tier":{"type":"context","size":100}}]}},
+    "rematch-20260901":{"id":"rematch-20260901","cost":{"input":4,"output":6}},
+    "shared":{"id":"shared","cost":{"input":99,"output":99}}
+  }},
+  "anthropic":{"id":"anthropic","models":{
+    "claude-tiered":{"id":"claude-tiered","cost":{"input":1,"output":1,"cache_read":1,"cache_write":1,"tiers":[{"input":2,"output":4,"cache_read":1,"cache_write":6,"tier":{"type":"context","size":100}},{"input":6,"output":10,"cache_read":4,"cache_write":14,"tier":{"type":"context","size":200}}]}},
+    "shared":{"id":"shared","cost":{"input":88,"output":88}}
+  }},
+  "google":{"id":"google","models":{}},
+  "xai":{"id":"xai","models":{}}
+}`
+
+func TestUsageCostExecutableAcceptance(t *testing.T) {
+	binary := usageAcceptanceBinary(t)
+	var artifact atomic.Value
+	artifact.Store(usageCostArtifactFirst)
+	var priceCalls atomic.Int32
+	refreshEntered := make(chan struct{})
+	releaseRefresh := make(chan struct{})
+	var releaseOnce sync.Once
+	prices := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		call := priceCalls.Add(1)
+		if r.Method != http.MethodGet || r.Header.Get("Authorization") != "" || r.Header.Get("Cookie") != "" || r.Header.Get("Editor-Version") != "" || r.Header.Get("Editor-Plugin-Version") != "" || r.Header.Get("Copilot-Integration-Id") != "" {
+			t.Errorf("pricing source request carried method/credentials/impersonation: %s %#v", r.Method, r.Header)
+		}
+		if call == 2 {
+			close(refreshEntered)
+			<-releaseRefresh
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, artifact.Load().(string))
+	}))
+	t.Cleanup(prices.Close)
+
+	h := startUsageMeterServeHarnessWithPricing(t, "http://127.0.0.1:1", discardLogger(t), func(cfg *config.ServeConfig) {
+		cfg.UsagePricingRefreshInterval = time.Hour
+	}, nil, pricing.NewRemote(prices.URL, prices.Client().Transport))
+	// Registered after the harness so a fatal assertion releases a blocked
+	// refresh before server/cache cleanup waits for its goroutines.
+	t.Cleanup(func() { releaseOnce.Do(func() { close(releaseRefresh) }) })
+	waitForUsagePriceSource(t, h, "fetched")
+	if priceCalls.Load() != 1 {
+		t.Fatalf("startup pricing fetch calls = %d, want 1", priceCalls.Load())
+	}
+
+	million, zero := int64(1_000_000), int64(0)
+	at := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	for _, turn := range []usage.Turn{
+		{At: at, Model: "gpt-tiered", Transport: usage.TransportBuffered, Usage: usage.OpenAIUsage{InputTokens: 3 * million, OutputTokens: million, CachedTokens: &million, CacheWriteTokens: &million}},
+		{At: at, Model: "rematch", Transport: usage.TransportBuffered, Usage: usage.OpenAIUsage{InputTokens: million, OutputTokens: million, CachedTokens: &zero, CacheWriteTokens: &zero}},
+		{At: at, Model: "shared", Transport: usage.TransportBuffered, Usage: usage.OpenAIUsage{InputTokens: million, OutputTokens: million, CachedTokens: &zero, CacheWriteTokens: &zero}},
+		{At: at, Model: "unknown", Transport: usage.TransportBuffered, Usage: usage.OpenAIUsage{InputTokens: million, OutputTokens: million, CachedTokens: &zero, CacheWriteTokens: &zero}},
+		{At: at, Model: "claude-tiered", Transport: usage.TransportBuffered, Usage: usage.AnthropicUsage{InputTokens: million, OutputTokens: million, CacheCreationInputTokens: &million, CacheReadInputTokens: &million, Ephemeral5mInputTokens: usageInt64(400_000), Ephemeral1hInputTokens: usageInt64(600_000)}},
+		// Surface does not select the benchmark provider: this Anthropic-native Turn
+		// intentionally resolves the OpenAI original-provider identity.
+		{At: at, Model: "gpt-tiered", Transport: usage.TransportBuffered, Usage: usage.AnthropicUsage{InputTokens: million, OutputTokens: million, CacheCreationInputTokens: &million, CacheReadInputTokens: &million}},
+	} {
+		h.store.Record(turn)
+	}
+
+	query := report.Query{Timezone: "UTC", Since: "2026-09-01", Until: "2026-09-02", Surface: "all"}
+	waitForUsageTurns(t, h.baseURL, query, 2, 4)
+	argsFor := func(surface string) []string {
+		return []string{"usage", "--endpoint", h.baseURL, "--timezone", "UTC", "--since", "2026-09-01", "--until", "2026-09-02", "--surface", surface, "--json"}
+	}
+	args := argsFor("all")
+	first := decodeUsageCostExecutable(t, usageExec(t, binary, nil, 0, args...))
+	assertUsageCostRevision(t, first, "17", "3", "17", "rematch", "exact", "20", "34")
+	openAIOnly := decodeUsageCostExecutable(t, usageExec(t, binary, nil, 0, argsFor("openai")...))
+	if len(openAIOnly.OpenAI.Rows) != 4 || len(openAIOnly.Anthropic.Rows) != 0 || openAIOnly.OpenAI.Total.Cost.Amount == nil || *openAIOnly.OpenAI.Total.Cost.Amount != "20" {
+		t.Fatalf("OpenAI-only actual executable history = %+v", openAIOnly)
+	}
+	anthropicOnly := decodeUsageCostExecutable(t, usageExec(t, binary, nil, 0, argsFor("anthropic")...))
+	if len(anthropicOnly.Anthropic.Rows) != 2 || len(anthropicOnly.OpenAI.Rows) != 0 || anthropicOnly.Anthropic.Total.Cost.Amount == nil || *anthropicOnly.Anthropic.Total.Cost.Amount != "34" {
+		t.Fatalf("Anthropic-only actual executable history = %+v", anthropicOnly)
+	}
+
+	text := usageExec(t, binary, nil, 0, "usage", "--endpoint", h.baseURL, "--timezone", "UTC", "--since", "2026-09-01", "--until", "2026-09-02", "--details")
+	for _, want := range []string{"Est. USD", "20.000*", "34.000", "Pricing model resolutions (Reported → Pricing)", "gpt-tiered → openai/gpt-tiered (exact)", "shared → ambiguous", "unknown → unknown"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("actual executable text missing %q: %s", want, text)
+		}
+	}
+
+	artifact.Store(usageCostArtifactSecond)
+	primeDone := make(chan struct{})
+	go func() {
+		h.caches.Prime(context.Background())
+		close(primeDone)
+	}()
+	select {
+	case <-refreshEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("replacement pricing refresh did not reach local source")
+	}
+	// A report never joins the blocked fetch and stays entirely on the previously
+	// captured revision. The source call count also proves report-time no-network.
+	during := decodeUsageCostExecutable(t, usageExec(t, binary, nil, 0, args...))
+	assertUsageCostRevision(t, during, "17", "3", "17", "rematch", "exact", "20", "34")
+	if priceCalls.Load() != 2 {
+		t.Fatalf("report triggered pricing network calls: %d", priceCalls.Load())
+	}
+	releaseOnce.Do(func() { close(releaseRefresh) })
+	select {
+	case <-primeDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("replacement pricing refresh did not finish")
+	}
+	waitForUsagePriceSource(t, h, "fetched")
+	if priceCalls.Load() != 2 {
+		t.Fatalf("replacement pricing fetch calls = %d, want 2", priceCalls.Load())
+	}
+	second := decodeUsageCostExecutable(t, usageExec(t, binary, nil, 0, args...))
+	assertUsageCostRevision(t, second, "34", "10", "34", "rematch-20260901", "dated", "44", "68")
+	if first.Pricing.Version == second.Pricing.Version || first.OpenAI.Total.Turns != second.OpenAI.Total.Turns || first.Anthropic.Total.Turns != second.Anthropic.Total.Turns {
+		t.Fatalf("repricing did not change only the captured tariff/match revision: first=%+v second=%+v", first, second)
+	}
+	t.Log("local synthetic models.dev source -> shared cache lifecycle -> production reporter/HTTP -> actual CLI; highest-context, aggregate cache-write, original-provider, unknown/ambiguous, report-time no-network and price/identity repricing verified without new database writes")
+}
+
+type usageCostExecutableWire struct {
+	Pricing struct {
+		Version     string     `json:"version"`
+		Source      string     `json:"source"`
+		LastSuccess *time.Time `json:"last_success"`
+	} `json:"pricing"`
+	Anthropic usageCostExecutableSection `json:"anthropic"`
+	OpenAI    usageCostExecutableSection `json:"openai"`
+}
+
+type usageCostExecutableSection struct {
+	Rows  []usageCostExecutableRow `json:"rows"`
+	Total struct {
+		Turns string   `json:"turns"`
+		Cost  wireCost `json:"cost"`
+	} `json:"total"`
+}
+
+type usageCostExecutableRow struct {
+	Model        string    `json:"model"`
+	Cost         wireCost  `json:"cost"`
+	PricingMatch wireMatch `json:"pricing_match"`
+}
+
+type wireCost struct {
+	Amount      *string `json:"amount"`
+	PricedTurns string  `json:"priced_turns"`
+	Unpriced    struct {
+		UnknownModel   string `json:"unknown_model"`
+		AmbiguousModel string `json:"ambiguous_model"`
+	} `json:"unpriced"`
+}
+
+type wireMatch struct {
+	Status   string `json:"status"`
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
+	Method   string `json:"method"`
+}
+
+func decodeUsageCostExecutable(t *testing.T, output string) usageCostExecutableWire {
+	t.Helper()
+	var wire usageCostExecutableWire
+	if err := json.Unmarshal([]byte(output), &wire); err != nil {
+		t.Fatal(err)
+	}
+	if wire.Pricing.Source != "fetched" || wire.Pricing.Version == "" || wire.Pricing.LastSuccess == nil {
+		t.Fatalf("actual executable pricing provenance = %+v", wire.Pricing)
+	}
+	return wire
+}
+
+func assertUsageCostRevision(t *testing.T, wire usageCostExecutableWire, tiered, rematch, anthropicTiered, rematchModel, rematchMethod, openAITotal, anthropicTotal string) {
+	t.Helper()
+	openAI := usageCostRowsByModel(wire.OpenAI.Rows)
+	anthropic := usageCostRowsByModel(wire.Anthropic.Rows)
+	for model, want := range map[string]string{"gpt-tiered": tiered, "rematch": rematch} {
+		row, ok := openAI[model]
+		if !ok || row.Cost.Amount == nil || *row.Cost.Amount != want || row.Cost.PricedTurns != "1" || row.PricingMatch.Status != "matched" || row.PricingMatch.Provider != "openai" {
+			t.Fatalf("OpenAI %s revision row = %+v", model, row)
+		}
+	}
+	if row := openAI["rematch"]; row.PricingMatch.Model != rematchModel || row.PricingMatch.Method != rematchMethod {
+		t.Fatalf("rematch resolution = %+v, want %s/%s", row.PricingMatch, rematchModel, rematchMethod)
+	}
+	if row := openAI["shared"]; row.Cost.Amount != nil || row.Cost.Unpriced.AmbiguousModel != "1" || row.PricingMatch.Status != "ambiguous" {
+		t.Fatalf("ambiguous row = %+v", row)
+	}
+	if row := openAI["unknown"]; row.Cost.Amount != nil || row.Cost.Unpriced.UnknownModel != "1" || row.PricingMatch.Status != "unknown" {
+		t.Fatalf("unknown row = %+v", row)
+	}
+	for model, provider := range map[string]string{"claude-tiered": "anthropic", "gpt-tiered": "openai"} {
+		row, ok := anthropic[model]
+		if !ok || row.Cost.Amount == nil || *row.Cost.Amount != anthropicTiered || row.PricingMatch.Provider != provider || row.PricingMatch.Status != "matched" {
+			t.Fatalf("Anthropic %s original-provider row = %+v", model, row)
+		}
+	}
+	if wire.OpenAI.Total.Cost.Amount == nil || *wire.OpenAI.Total.Cost.Amount != openAITotal || wire.OpenAI.Total.Cost.PricedTurns != "2" || wire.OpenAI.Total.Turns != "4" || wire.Anthropic.Total.Cost.Amount == nil || *wire.Anthropic.Total.Cost.Amount != anthropicTotal || wire.Anthropic.Total.Cost.PricedTurns != "2" || wire.Anthropic.Total.Turns != "2" {
+		t.Fatalf("combined section totals = OpenAI %+v Anthropic %+v", wire.OpenAI.Total, wire.Anthropic.Total)
+	}
+}
+
+func usageCostRowsByModel(rows []usageCostExecutableRow) map[string]usageCostExecutableRow {
+	result := make(map[string]usageCostExecutableRow, len(rows))
+	for _, row := range rows {
+		result[row.Model] = row
+	}
+	return result
+}
+
+func usageInt64(value int64) *int64 { return &value }
+
+func waitForUsageTurns(t *testing.T, endpoint string, query report.Query, anthropic, openAI int64) {
+	t.Helper()
+	client, err := reporthttp.NewClient(endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		result, err := client.Query(context.Background(), query)
+		if err == nil && result.Report.Anthropic.Total.Turns == anthropic && result.Report.OpenAI.Total.Turns == openAI {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("synthetic history did not become visible: result=%+v err=%v", result.Report, err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func waitForUsagePriceSource(t *testing.T, h *usageMeterServeHarness, source string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		statuses := h.caches.Observe()
+		for _, status := range statuses {
+			if status.Name == "usage_prices" && status.Source == source && status.LastSuccess != nil && status.LastAttemptResult != nil {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("pricing source did not reach %s: %+v", source, statuses)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 func TestUsageExecutableReadsGenericRecovery(t *testing.T) {
