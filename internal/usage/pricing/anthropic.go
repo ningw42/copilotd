@@ -35,29 +35,11 @@ func CalculateAnthropic(native usage.AnthropicUsage, rates Rates) (Contribution,
 		return Contribution{Reason: ExclusionInconsistentUsage}, nil
 	}
 
-	lines := []struct {
-		tokens int64
-		rate   *Rate
-	}{
+	lines := []pricedLine{
 		{tokens: native.InputTokens, rate: rates.Input},
 		{tokens: native.OutputTokens, rate: rates.Output},
 		{tokens: cacheRead, rate: rates.CacheRead},
 		{tokens: cacheCreation, rate: rates.CacheWrite},
 	}
-
-	var total Amount
-	for _, line := range lines {
-		if line.tokens == 0 {
-			continue
-		}
-		part, err := line.rate.ForTokens(line.tokens)
-		if err != nil {
-			return Contribution{}, err
-		}
-		total, err = total.Add(part)
-		if err != nil {
-			return Contribution{}, err
-		}
-	}
-	return Contribution{Amount: total}, nil
+	return sumPricedLines(lines)
 }

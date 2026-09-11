@@ -36,29 +36,11 @@ func CalculateOpenAI(native usage.OpenAIUsage, rates Rates) (Contribution, error
 	}
 
 	ordinaryInput := native.InputTokens - cached - cacheWrite
-	lines := []struct {
-		tokens int64
-		rate   *Rate
-	}{
+	lines := []pricedLine{
 		{tokens: ordinaryInput, rate: rates.Input},
 		{tokens: native.OutputTokens, rate: rates.Output},
 		{tokens: cached, rate: rates.CacheRead},
 		{tokens: cacheWrite, rate: rates.CacheWrite},
 	}
-
-	var total Amount
-	for _, line := range lines {
-		if line.tokens == 0 {
-			continue
-		}
-		part, err := line.rate.ForTokens(line.tokens)
-		if err != nil {
-			return Contribution{}, err
-		}
-		total, err = total.Add(part)
-		if err != nil {
-			return Contribution{}, err
-		}
-	}
-	return Contribution{Amount: total}, nil
+	return sumPricedLines(lines)
 }
