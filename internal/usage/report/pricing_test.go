@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http/httptest"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -104,11 +105,11 @@ func withoutAmountRepresentation(input report.Report) (report.Report, []observed
 			return nil
 		}
 		stripped := *section
-		stripped.Rows = append([]report.Row(nil), section.Rows...)
+		stripped.Rows = slices.Clone(section.Rows)
 		for index := range stripped.Rows {
 			stripped.Rows[index].Cost, amounts = publicCost(stripped.Rows[index].Cost, amounts)
 		}
-		stripped.Models = append([]report.ModelTotal(nil), section.Models...)
+		stripped.Models = slices.Clone(section.Models)
 		for index := range stripped.Models {
 			stripped.Models[index].Cost, amounts = publicCost(stripped.Models[index].Cost, amounts)
 		}
