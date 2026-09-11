@@ -177,6 +177,17 @@ the native counts and their reporting coverage. It describes observed history,
 not billing, complete consumption, or per-process attribution.
 _Avoid_: billing report, request totals (for Turn counts)
 
+**Estimated cost**:
+A USD valuation of priceable persisted Turns using the daemon's current accepted
+original-provider rates. It is not a Copilot bill, invoice, or proof of complete
+consumption.
+_Avoid_: billed cost, charge, spend
+
+**Pricing model**:
+The original-provider/model pair selected to value a Reported model. It is
+independent of Surface, Requested model, forwarding targets, and Catalog metadata.
+_Avoid_: billed model, resolved model, provider model
+
 **Requested model**:
 The explicit model string in the upstream-bound HTTP inference request after
 request-side Shims, not necessarily the original client selection or proof of

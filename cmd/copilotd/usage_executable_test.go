@@ -673,7 +673,7 @@ func startUsageExecutable(t *testing.T, binary, database string, enabled bool) s
 	addr := reservation.Addr().String()
 	_ = reservation.Close()
 	args := []string{"serve", "--addr", addr, "--apikey", "synthetic-inbound-key", "--github-oauth-token", "synthetic-not-a-github-token", "--usage-db-path", database,
-		fmt.Sprintf("--shim-usage-meter-enabled=%t", enabled), "--impersonation-refresh-interval=0", "--codex-catalog-refresh-interval=0", "--startup-mint-retries=0", "--shutdown-timeout=2s"}
+		fmt.Sprintf("--shim-usage-meter-enabled=%t", enabled), "--impersonation-refresh-interval=0", "--codex-catalog-refresh-interval=0", "--usage-pricing-refresh-interval=0", "--startup-mint-retries=0", "--shutdown-timeout=2s"}
 	command := exec.Command(binary, args...)
 	env := map[string]string{"HTTPS_PROXY": proxy.URL, "HTTP_PROXY": proxy.URL}
 	if runtime.GOOS == "windows" {

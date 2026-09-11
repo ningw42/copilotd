@@ -75,6 +75,8 @@ func startUsageMeterServeHarness(t *testing.T, upstreamURL string, base *slog.Lo
 	// of bounded forced shutdown override it explicitly below.
 	cfg.ShutdownTimeout = usageMeterFixtureShutdownTimeout
 	cfg.ImpersonationRefreshInterval = 0
+	// Meter-enabled integration fixtures must never acquire a live pricing edge.
+	cfg.UsagePricingRefreshInterval = 0
 	cfg.WebSocketHandshakeTimeout = 5 * time.Second
 	cfg.ShimUsageMeterEnabled = true
 	cfg.UsageDBPath = filepath.Join(t.TempDir(), "usage", "usage.db")
@@ -218,7 +220,7 @@ func TestRunServeUsageStoreFailurePrecedesBindAndDisabledServeCreatesNothing(t *
 			"serve", "--apikey", testAPIKey, "--github-oauth-token", "gho-local",
 			"--addr", held.Addr().String(), "--shim-usage-meter-enabled=true",
 			"--usage-db-path", dbPath, "--log-file", logPath,
-			"--impersonation-refresh-interval", "0",
+			"--impersonation-refresh-interval", "0", "--usage-pricing-refresh-interval", "0",
 		}, noEnv(), io.Discard, io.Discard)
 		if code != 1 {
 			t.Fatalf("exit code = %d, want 1", code)
@@ -278,7 +280,7 @@ func TestRunServeFinalizesOpenedUsageStoreOnBindFailure(t *testing.T) {
 		"serve", "--apikey", testAPIKey, "--github-oauth-token", "gho-local",
 		"--addr", held.Addr().String(), "--shim-usage-meter-enabled=true",
 		"--usage-db-path", dbPath, "--log-file", logPath,
-		"--impersonation-refresh-interval", "0",
+		"--impersonation-refresh-interval", "0", "--usage-pricing-refresh-interval", "0",
 	}, noEnv(), io.Discard, io.Discard)
 	if code != 1 {
 		t.Fatalf("exit code = %d, want bind failure", code)

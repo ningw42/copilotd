@@ -49,6 +49,7 @@ const (
 	defaultShimNopEnabled                              = false
 	defaultShimResponsesItemIDStabilizerEnabled        = false
 	defaultShimUsageMeterEnabled                       = false
+	defaultUsagePricingRefreshInterval                 = 24 * time.Hour
 	defaultShimHookOverrunThreshold                    = time.Second
 	defaultCodexCatalogEnabled                         = false
 	defaultCodexAutoReviewModel                        = ""
@@ -147,6 +148,10 @@ type ServeConfig struct {
 	// its private local SQLite destination. Both settings are serve-only.
 	ShimUsageMeterEnabled bool
 	UsageDBPath           string
+
+	// UsagePricingRefreshInterval controls best-effort refresh of the models.dev
+	// pricing cached value. Zero pins the embedded floor.
+	UsagePricingRefreshInterval time.Duration
 
 	// ShimHookOverrunThreshold is the global duration after which an executing
 	// post-commit shim hook is reported. Zero disables monitoring.
@@ -310,6 +315,7 @@ func serveSpecs() ([]spec[ServeConfig], *configPathField[ServeConfig]) {
 		boolField("shim-responses-item-id-stabilizer-enabled", defaultShimResponsesItemIDStabilizerEnabled, func(c *ServeConfig) *bool { return &c.ShimResponsesItemIDStabilizerEnabled }, "stabilize churning OpenAI Responses item ids (opt-in)"),
 		boolField("shim-usage-meter-enabled", defaultShimUsageMeterEnabled, func(c *ServeConfig) *bool { return &c.ShimUsageMeterEnabled }, "persist native Turns; exposes unauthenticated reports on --addr (opt-in)"),
 		stringField("usage-db-path", defaultUsageDBPath(), func(c *ServeConfig) *string { return &c.UsageDBPath }, validUsageDBPath, "path to the private local usage SQLite database"),
+		durationField("usage-pricing-refresh-interval", defaultUsagePricingRefreshInterval, inHours, func(c *ServeConfig) *time.Duration { return &c.UsagePricingRefreshInterval }, nonNegative, "models.dev pricing refresh cadence (0 pins the embedded floor)"),
 		durationField("shim-hook-overrun-threshold", defaultShimHookOverrunThreshold, inSeconds, func(c *ServeConfig) *time.Duration { return &c.ShimHookOverrunThreshold }, nonNegative, "warn when a post-commit shim hook remains in flight (0 disables monitoring)"),
 		boolField("codex-catalog-enabled", defaultCodexCatalogEnabled, func(c *ServeConfig) *bool { return &c.CodexCatalogEnabled }, "enable the Codex client-shaped catalog"),
 		stringMapField("codex-catalog-model-aliases", func(c *ServeConfig) *map[string]string { return &c.CodexCatalogModelAliases }, parseCodexCatalogModelAliases, "Codex catalog aliases (live-alias=metadata-source,...)"),

@@ -34,6 +34,7 @@ import (
 	"github.com/ningw42/copilotd/internal/shim"
 	"github.com/ningw42/copilotd/internal/upstream"
 	"github.com/ningw42/copilotd/internal/usage"
+	"github.com/ningw42/copilotd/internal/usage/pricing"
 	"github.com/ningw42/copilotd/internal/usage/report"
 	"github.com/ningw42/copilotd/internal/usage/reportcli"
 	"github.com/ningw42/copilotd/internal/usage/reporthttp"
@@ -355,6 +356,7 @@ func runServe(ctx context.Context, flags *config.ServeFlags, lookupEnv func(stri
 		return errServeFailed
 	}
 	codexModels := configuredCodexModels(cfg, productionCodexModelsEdge(), cacheRegistry, base)
+	configuredUsagePricing(cfg, pricing.NewRemote(pricing.ModelsDevURL, nil), cacheRegistry, base)
 
 	var usageStore *sqlitestore.Store
 	var sink usage.Sink
@@ -591,6 +593,17 @@ func configuredCodexModels(cfg config.ServeConfig, edge catalog.ModelsEdge, regi
 	return catalog.NewModelsCache(catalog.ModelsCacheConfig{
 		RefreshInterval: cfg.CodexCatalogRefreshInterval,
 	}, edge, registry, logging.ForComponent(base, "internal/cache"))
+}
+
+// configuredUsagePricing keeps pricing refresh behind the Usage meter's opt-in
+// boundary. Registration completes before runBoundServe starts registry priming.
+func configuredUsagePricing(cfg config.ServeConfig, remote pricing.Remote, registry *cache.Registry, base *slog.Logger) pricing.Source {
+	if !cfg.ShimUsageMeterEnabled {
+		return nil
+	}
+	return pricing.NewCachedSource(pricing.CacheConfig{
+		RefreshInterval: cfg.UsagePricingRefreshInterval,
+	}, remote, registry, logging.ForComponent(base, "internal/cache"))
 }
 
 // newDiscoveryClient returns a dedicated plain client for the two public

@@ -67,6 +67,16 @@ API keys, missing CORS headers, and private database permissions do not protect
 this HTTP path; use bind/firewall/reverse-proxy policy. HTTP is plain TCP unless
 an operator supplies a TLS reverse proxy or tunnel.
 
+An enabled Usage meter also registers a memory-only `models.dev/api.json`
+pricing cached value. Its identified vendored floor is immediately available;
+best-effort refresh uses a credential-free, redirect-refusing public request and
+holds last-good on failure. Original-provider rates are limited to OpenAI,
+Anthropic, Google, and xAI and select the highest structured context tier, then
+the legacy long-context row, then base. Prices are neither persisted nor a
+Copilot bill, and source failure does not gate readiness or native reports. Set
+`--usage-pricing-refresh-interval=0` to pin the embedded floor. The cached
+pricing foundation does not by itself add report fields or terminal rendering.
+
 Reports support Anthropic and OpenAI, separately or together (the default), with
 daily, Monday-weekly, monthly, or yearly groups in a named timezone:
 
@@ -138,8 +148,9 @@ or interactive terminal control; `range_partial` and `in_progress` remain
 available in JSON.
 `--json` emits the complete validated original response plus a newline, preserving
 exact decimal count strings, Unicode, and additive fields. `--details` does not
-change JSON or make another request. There is no pricing, raw-Turn export, HTML,
-or chart output. [Contention and lifecycle integration evidence](docs/research/2026-09-08-usage-reporting-concurrency.md)
+change JSON or make another request. The cached pricing foundation does not yet
+expose estimated-cost report fields; there is no raw-Turn export, HTML, or chart
+output. [Contention and lifecycle integration evidence](docs/research/2026-09-08-usage-reporting-concurrency.md)
 includes real blocked TCP output and native SQLite cleanup; the
 [release verification guide](docs/verification/usage-reporting.md) separates
 implemented behavior from the required native release gate.
@@ -190,8 +201,8 @@ WebSocket requested-model attribution remains absent. With the flag off,
 
 The owner-only GitHub OAuth token file remains the only other persisted
 application state; an injected GitHub OAuth token needs no file. Copilot tokens
-and best-effort cached values stay in memory, with embedded fallbacks and no
-disk persistence
+and best-effort cached values, including the models.dev pricing snapshot, stay
+in memory with embedded fallbacks and no disk persistence
 ([ADR-0009](docs/adr/0009-refresh-codex-models-from-latest-release-in-memory.md)).
 Optional configuration files and log destinations are operator inputs/outputs,
 not additional application state stores.
@@ -215,6 +226,7 @@ handlers instead fetch support data and render their own representations.
 | Inference shims | `internal/shim` | Ordered hook contract for opt-in parity transforms and read-only observers, including the Responses item-id stabilizer and Usage meter completion observation on all five supported Surface/transport paths |
 | Usage persistence | `internal/usage`, `internal/usage/sqlitestore` | Standard-library usage contract plus private local SQLite writer, migrations, bounded loss reporting, and finalization |
 | Usage reporting | `internal/usage/report`, `internal/usage/reporthttp`, `internal/usage/reportcli` | Bounded snapshot aggregation, local HTTP contract and strict client validation, safe terminal presentation |
+| Usage pricing | `internal/usage/pricing` | Validated original-provider pricing snapshots, exact rate/amount arithmetic, and the memory-only models.dev source |
 | Catalogs | `internal/catalog` | Provider-shaped and Codex model catalogs |
 | Observability | `internal/logging`, `internal/requestsummary`, component-owned counters | Structured logs, request correlation, terminal summaries, metric scaffolding |
 | Build and distribution | `flake.nix`, `.github/workflows/` | Reproducible builds, verification, release archives and checksums |

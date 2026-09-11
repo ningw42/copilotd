@@ -211,7 +211,8 @@ identities. Schema, effective selections, native metric presence, arrays, int64
 counts, and sum/coverage relationships (including empty sections) must validate
 before any stdout output. Errors use stderr and exit 1, including partial/short
 writes or failure to write the final newline; success, including empty, exits 0.
-No pricing, raw-Turn export, HTML, or charts are provided.
+The cached pricing foundation does not yet expose estimated-cost fields;
+raw-Turn export, HTML, and charts are not provided.
 
 The same listener serves exactly `GET`/`HEAD /usage/v1/report` without inference
 authentication or readiness/upstream work. A disabled meter returns
@@ -248,6 +249,7 @@ file/schema replacement remains unsupported.
 | [`--shim-responses-item-id-stabilizer-enabled=<BOOL>`](#--shim-responses-item-id-stabilizer-enabled) | `COPILOTD_SHIM_RESPONSES_ITEM_ID_STABILIZER_ENABLED` | `shim-responses-item-id-stabilizer-enabled` | `false` |
 | [`--shim-usage-meter-enabled=<BOOL>`](#--shim-usage-meter-enabled) | `COPILOTD_SHIM_USAGE_METER_ENABLED` | `shim-usage-meter-enabled` | `false` |
 | [`--usage-db-path <PATH>`](#--usage-db-path) | `COPILOTD_USAGE_DB_PATH` | `usage-db-path` | Unix: `<user config dir>/copilotd/usage.db`; Windows: `%LOCALAPPDATA%\\copilotd\\usage.db` |
+| [`--usage-pricing-refresh-interval <DURATION>`](#--usage-pricing-refresh-interval) | `COPILOTD_USAGE_PRICING_REFRESH_INTERVAL` | `usage-pricing-refresh-interval` | `24h` |
 | [`--shim-nop-enabled=<BOOL>`](#--shim-nop-enabled) | `COPILOTD_SHIM_NOP_ENABLED` | `shim-nop-enabled` | `false` |
 | [`--shim-hook-overrun-threshold <DURATION>`](#--shim-hook-overrun-threshold) | `COPILOTD_SHIM_HOOK_OVERRUN_THRESHOLD` | `shim-hook-overrun-threshold` | `1s` |
 | [`--anthropic-catalog-model-id-normalization-enabled=<BOOL>`](#--anthropic-catalog-model-id-normalization-enabled) | `COPILOTD_ANTHROPIC_CATALOG_MODEL_ID_NORMALIZATION_ENABLED` | `anthropic-catalog-model-id-normalization-enabled` | `false` |
@@ -392,8 +394,19 @@ byte-for-byte verbatim.
 
 Enables best-effort recording of native token counts to the SQLite file selected
 by [`--usage-db-path`](#--usage-db-path). It is off by default: disabled `serve`
-and `login` do not open a database, create usage files, start a usage writer, or
-install a metering hook.
+and `login` do not open a database, create usage files, start a usage writer,
+install a metering hook, register pricing, or make a models.dev request.
+
+When enabled, `serve` registers the memory-only `usage_prices` cached value before
+cache priming. It starts from the identified vendored `models.dev/api.json` floor,
+refreshes best effort, and retains last-good on fetch or validation failure. The
+selected original-provider namespaces are OpenAI, Anthropic, Google, and xAI;
+standard prices choose the greatest structured context threshold, then the
+legacy long-context row, then base without filling omitted optional rates.
+Prices are current benchmark inputs, never persisted tariff history or Copilot
+billing. Refresh failure is visible in `/readyz` but does not change readiness,
+inference, or native Usage report availability. The cached value does not yet
+add estimated-cost fields to the report protocol.
 
 **Enabling this flag also exposes unauthenticated aggregate Usage reports on
 `serve --addr`, including non-loopback/public bindings.** Anyone with network
@@ -505,8 +518,9 @@ GitHub OAuth tokens, or Copilot tokens.
 
 The GitHub Copilot Surface, raw `/models`, provider/Codex Catalogs, and
 `/v1/messages/count_tokens` are not metered. Built-in calendar native-Surface aggregation
-is available through [`usage`](#usage); pricing/billing reconciliation, automatic
-pruning, per-key attribution, and non-token usage projection remain out of scope.
+is available through [`usage`](#usage); Copilot billing reconciliation,
+historical tariffs, automatic pruning, per-key attribution, and non-token usage
+projection remain out of scope.
 External SQLite tooling still supports either native table, for example:
 
 ```sh
@@ -606,6 +620,21 @@ or an earlier runtime log are included, while later calls are outside that
 snapshot. The SQLite/native wait is bounded, but synchronous `slog.Handler` I/O
 is not deadline-aware. There are no public queue-depth or flush-interval tuning
 settings.
+
+### `--usage-pricing-refresh-interval`
+
+Sets the best-effort cadence for refreshing the public
+`https://models.dev/api.json` pricing cached value while the Usage meter is
+enabled. The default is `24h`; `0` pins the identified embedded floor and makes
+no pricing request. Negative values are rejected before binding. When
+`--shim-usage-meter-enabled=false`, no pricing value is registered and this
+staged setting causes no request.
+
+Each attempt uses a dedicated credential-free, redirect-refusing HTTP client, a
+five-second request context, and an 8 MiB decoded-body limit. Accepted bytes must
+contain all four selected original-provider sections and satisfy the bounded
+identity, decimal, and tier projection. Failure holds last-good (or the floor
+when cold), remains non-readiness-gating, and does not persist runtime bytes.
 
 ### `--shim-hook-overrun-threshold`
 
