@@ -4,6 +4,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -68,15 +69,15 @@ func TestHandlerClientPreserveSelectedNativeSections(t *testing.T) {
 	}
 }
 
-func TestHandlerClientKeepQueryPricingFieldsOffLegacyWire(t *testing.T) {
+func TestHandlerClientPublishCompleteEmptyPricingExtension(t *testing.T) {
 	var result report.Report
 	if err := json.Unmarshal([]byte(emptyJSON), &result); err != nil {
 		t.Fatal(err)
 	}
 	zero := pricing.Amount{}
-	result.Pricing = report.PricingProvenance{
+	result.Pricing = &report.PricingProvenance{
 		Dataset: "models.dev/api.json", Currency: "USD", Basis: "original_provider", ContextPolicy: "highest_tier", CacheWritePolicy: "single_rate",
-		Version: "sha256:internal-only", Source: "fallback",
+		Version: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", Source: "fallback",
 	}
 	result.OpenAI.Total.Cost = report.Cost{Amount: &zero}
 
@@ -92,15 +93,127 @@ func TestHandlerClientKeepQueryPricingFieldsOffLegacyWire(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := strings.Replace(emptyJSON, `,"future":{"additive":true}`, "", 1)
-	want = strings.Replace(want,
-		`"input_tokens":{"sum":"0","reported_turns":"0"},"output_tokens":{"sum":"0","reported_turns":"0"},"cached_tokens":{"sum":null,"reported_turns":"0"},"cache_write_tokens":{"sum":null,"reported_turns":"0"}`,
-		`"cache_write_tokens":{"sum":null,"reported_turns":"0"},"cached_tokens":{"sum":null,"reported_turns":"0"},"input_tokens":{"sum":"0","reported_turns":"0"},"output_tokens":{"sum":"0","reported_turns":"0"}`, 1)
-	if string(got.JSON) != want || strings.Contains(string(got.JSON), `"pricing"`) || strings.Contains(string(got.JSON), `"cost"`) || strings.Contains(string(got.JSON), `"pricing_match"`) {
-		t.Fatalf("staged pricing changed legacy wire:\n got %s\nwant %s", got.JSON, want)
+	if !strings.Contains(string(got.JSON), `"pricing":{"dataset":"models.dev/api.json","currency":"USD","basis":"original_provider","context_policy":"highest_tier","cache_write_policy":"single_rate","version":"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","source":"fallback","last_success":null}`) ||
+		!strings.Contains(string(got.JSON), `"cost":{"amount":"0","priced_turns":"0","unpriced":{"unknown_model":"0","ambiguous_model":"0","missing_rate":"0","missing_usage":"0","inconsistent_usage":"0"}}`) {
+		t.Fatalf("complete empty pricing extension missing: %s", got.JSON)
 	}
-	if got.Report.Pricing != (report.PricingProvenance{}) || got.Report.OpenAI.Total.Cost.Amount != nil {
-		t.Fatalf("legacy client unexpectedly reconstructed hidden pricing: %+v", got.Report)
+	if got.Report.Pricing.Version != result.Pricing.Version || got.Report.OpenAI.Total.Cost.Amount == nil || got.Report.OpenAI.Total.Cost.Amount.String() != "0" {
+		t.Fatalf("complete empty pricing extension not decoded: %+v", got.Report)
+	}
+	request, err := http.NewRequest(http.MethodHead, server.URL+reporthttp.Path+"?timezone=UTC&surface=openai&period=day&since=2026-09-01&until=2026-09-02", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := server.Client().Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, readErr := io.ReadAll(response.Body)
+	closeErr := response.Body.Close()
+	if err := errors.Join(readErr, closeErr); err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusOK || len(body) != 0 || response.Header.Get("Content-Type") != "application/json" || response.Header.Get("Cache-Control") != "no-store" || response.Header.Get("X-Content-Type-Options") != "nosniff" {
+		t.Fatalf("complete extension HEAD response: status=%d headers=%v body=%q", response.StatusCode, response.Header, body)
+	}
+}
+
+func TestHandlerClientPublishCompletePricingAtEveryAggregateLevel(t *testing.T) {
+	amount := func(value string) *pricing.Amount {
+		parsed, err := pricing.ParseAmount(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return &parsed
+	}
+	nativeTotal := func(names []string, turns int64, cost report.Cost) report.Total {
+		metrics := make(map[string]report.Metric, len(names))
+		for _, name := range names {
+			metrics[name] = report.Metric{}
+		}
+		input, output := turns*10, turns*2
+		metrics["input_tokens"] = report.Metric{Sum: &input, ReportedTurns: turns}
+		metrics["output_tokens"] = report.Metric{Sum: &output, ReportedTurns: turns}
+		return report.Total{Turns: turns, Usage: metrics, Cost: cost}
+	}
+	models := []struct {
+		name   string
+		match  report.PricingMatch
+		cost   report.Cost
+		native string
+	}{
+		{"ambiguous", report.PricingMatch{Status: report.PricingMatchAmbiguous}, report.Cost{Unpriced: report.UnpricedCoverage{AmbiguousModel: 1}}, "anthropic"},
+		{"dated", report.PricingMatch{Status: report.PricingMatchMatched, Provider: "anthropic", Model: "dated-20260901", Method: report.PricingMatchByDated}, report.Cost{Amount: amount("0.03"), PricedTurns: 1, Unpriced: report.UnpricedCoverage{MissingUsage: 1}}, "anthropic"},
+		{"unpriced", report.PricingMatch{Status: report.PricingMatchMatched, Provider: "anthropic", Model: "unpriced", Method: report.PricingMatchByAlias}, report.Cost{Unpriced: report.UnpricedCoverage{MissingRate: 1}}, "anthropic"},
+		{"exact", report.PricingMatch{Status: report.PricingMatchMatched, Provider: "openai", Model: "exact", Method: report.PricingMatchByExact}, report.Cost{Amount: amount("0.01"), PricedTurns: 1}, "openai"},
+		{"free", report.PricingMatch{Status: report.PricingMatchMatched, Provider: "openai", Model: "free", Method: report.PricingMatchByNormalized}, report.Cost{Amount: amount("0"), PricedTurns: 1}, "openai"},
+		{"suffix", report.PricingMatch{Status: report.PricingMatchMatched, Provider: "openai", Model: "suffix-base", Method: report.PricingMatchBySuffix}, report.Cost{Amount: amount("0.02"), PricedTurns: 1}, "openai"},
+		{"unknown", report.PricingMatch{Status: report.PricingMatchUnknown}, report.Cost{Unpriced: report.UnpricedCoverage{UnknownModel: 1}}, "openai"},
+	}
+	start := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	lastSuccess := start.Add(-time.Hour)
+	result := report.Report{
+		SchemaVersion: 1, GeneratedAt: start.Add(12 * time.Hour), Timezone: "UTC", Period: "day",
+		Since: "2026-09-01", Until: "2026-09-02", WindowStart: start, WindowEnd: start.AddDate(0, 0, 1),
+		Scope: "configured_database", Collection: "best_effort", Surface: "all",
+		Buckets: []report.Bucket{{StartDate: "2026-09-01", UntilDate: "2026-09-02", RangeStart: start, RangeEnd: start.AddDate(0, 0, 1)}},
+		Pricing: &report.PricingProvenance{
+			Dataset: "models.dev/api.json", Currency: "USD", Basis: "original_provider", ContextPolicy: "highest_tier", CacheWritePolicy: "single_rate",
+			Version: "sha256:abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd", Source: "fallback", LastSuccess: &lastSuccess,
+		},
+		Anthropic: &report.Section{Rows: []report.Row{}, Models: []report.ModelTotal{}},
+		OpenAI:    &report.Section{Rows: []report.Row{}, Models: []report.ModelTotal{}},
+	}
+	for _, fixture := range models {
+		turns := int64(1)
+		if fixture.name == "dated" {
+			turns = 2
+		}
+		total := nativeTotal(report.OpenAIMetrics(), turns, fixture.cost)
+		section := result.OpenAI
+		if fixture.native == "anthropic" {
+			total = nativeTotal(report.AnthropicMetrics(), turns, fixture.cost)
+			section = result.Anthropic
+		}
+		model := report.ModelTotal{Model: fixture.name, PricingMatch: fixture.match, Total: total}
+		section.Rows = append(section.Rows, report.Row{BucketStart: "2026-09-01", ModelTotal: model})
+		section.Models = append(section.Models, model)
+	}
+	result.Anthropic.Total = nativeTotal(report.AnthropicMetrics(), 4, report.Cost{Amount: amount("0.03"), PricedTurns: 1, Unpriced: report.UnpricedCoverage{AmbiguousModel: 1, MissingRate: 1, MissingUsage: 1}})
+	result.OpenAI.Total = nativeTotal(report.OpenAIMetrics(), 4, report.Cost{Amount: amount("0.03"), PricedTurns: 3, Unpriced: report.UnpricedCoverage{UnknownModel: 1}})
+
+	server := httptest.NewServer(reporthttp.Handler(func(context.Context, report.Query) (report.Report, error) { return result, nil }))
+	t.Cleanup(server.Close)
+	client, err := reporthttp.NewClient(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := clientQuery()
+	query.Surface = "all"
+	got, err := client.Query(context.Background(), query)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Report.Pricing == nil || got.Report.Pricing.Source != "fallback" || got.Report.Pricing.LastSuccess == nil || !got.Report.Pricing.LastSuccess.Equal(lastSuccess) {
+		t.Fatalf("fallback successful-fetch provenance = %+v", got.Report.Pricing)
+	}
+	for _, section := range []*report.Section{got.Report.Anthropic, got.Report.OpenAI} {
+		if section == nil || len(section.Rows) == 0 || len(section.Models) == 0 || section.Total.Cost.Amount == nil {
+			t.Fatalf("missing complete aggregate extension: %+v", section)
+		}
+		for index := range section.Rows {
+			if section.Rows[index].PricingMatch.Status == "" || section.Rows[index].Cost.PricedTurns+section.Rows[index].Cost.Unpriced.UnknownModel+section.Rows[index].Cost.Unpriced.AmbiguousModel+section.Rows[index].Cost.Unpriced.MissingRate+section.Rows[index].Cost.Unpriced.MissingUsage+section.Rows[index].Cost.Unpriced.InconsistentUsage != section.Rows[index].Turns {
+				t.Fatalf("row extension incomplete: %+v", section.Rows[index])
+			}
+			if section.Models[index].PricingMatch != section.Rows[index].PricingMatch || section.Models[index].Turns != section.Rows[index].Turns {
+				t.Fatalf("model extension changed: row=%+v model=%+v", section.Rows[index], section.Models[index])
+			}
+		}
+	}
+	for _, fragment := range []string{`"pricing_match":{"status":"matched"`, `"pricing_match":{"status":"unknown"}`, `"pricing_match":{"status":"ambiguous"}`, `"method":"exact"`, `"method":"normalized"`, `"method":"alias"`, `"method":"suffix"`, `"method":"dated"`, `"amount":null`, `"amount":"0"`} {
+		if !strings.Contains(string(got.JSON), fragment) {
+			t.Errorf("wire missing %s: %s", fragment, got.JSON)
+		}
 	}
 }
 

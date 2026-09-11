@@ -68,6 +68,9 @@ func Handler(query QueryFunc) http.Handler {
 			return
 		}
 		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
 			writeFailure(w, r, err)
 			return
 		}
@@ -77,6 +80,9 @@ func Handler(query QueryFunc) http.Handler {
 			return
 		}
 		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
 			writeFailure(w, r, err)
 			return
 		}

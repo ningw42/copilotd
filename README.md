@@ -74,8 +74,12 @@ holds last-good on failure. Original-provider rates are limited to OpenAI,
 Anthropic, Google, and xAI and select the highest structured context tier, then
 the legacy long-context row, then base. Prices are neither persisted nor a
 Copilot bill, and source failure does not gate readiness or native reports. Set
-`--usage-pricing-refresh-interval=0` to pin the embedded floor. The cached
-pricing foundation does not by itself add report fields or terminal rendering.
+`--usage-pricing-refresh-interval=0` to pin the embedded floor. Each report uses
+one captured local snapshot; report requests perform no pricing network work.
+The version-1 HTTP response identifies that snapshot under `pricing`, adds exact
+USD `cost` and priced/unpriced Turn coverage to every row/model/section total,
+and adds `pricing_match` to rows and range-model entries. Unpriceable Turns remain
+successful native report data.
 
 Reports support Anthropic and OpenAI, separately or together (the default), with
 daily, Monday-weekly, monthly, or yearly groups in a named timezone:
@@ -147,10 +151,17 @@ zero, and `*` shows partial stored-Turn coverage. Static tables use rounded Lip 
 or interactive terminal control; `range_partial` and `in_progress` remain
 available in JSON.
 `--json` emits the complete validated original response plus a newline, preserving
-exact decimal count strings, Unicode, and additive fields. `--details` does not
-change JSON or make another request. The cached pricing foundation does not yet
-expose estimated-cost report fields; there is no raw-Turn export, HTML, or chart
-output. [Contention and lifecycle integration evidence](docs/research/2026-09-08-usage-reporting-concurrency.md)
+exact decimal count and amount strings, Unicode, pricing fields, and unknown
+additive fields. Pricing provenance and every nested cost/match object are an
+atomic additive extension: the client accepts a wholly absent extension as an
+older daemon, but rejects partial or dangling recognized fields. Cost amounts are
+exact nonnegative decimal strings; `null` means a nonempty aggregate has no
+priceable Turns, while empty and priceable-free aggregates carry `"0"`. Coverage
+partitions stored Turns into priced Turns and five explicit exclusion reasons.
+The current text tables remain native-count-only; estimated-cost columns and the
+older-daemon explanatory text are not yet rendered. `--details` does not change
+JSON or make another request. There is no raw-Turn export, HTML, or chart output.
+[Contention and lifecycle integration evidence](docs/research/2026-09-08-usage-reporting-concurrency.md)
 includes real blocked TCP output and native SQLite cleanup; the
 [release verification guide](docs/verification/usage-reporting.md) separates
 implemented behavior from the required native release gate.

@@ -1,8 +1,8 @@
 # Estimated cost in Usage reports
 
 **Status:** product direction approved; pricing/source, matching, native calculators,
-and daemon-owned report aggregation are implemented through #236. The additive
-HTTP contract and CLI presentation remain staged for #237 and #238.
+daemon-owned report aggregation, and the additive HTTP contract are implemented
+through #237. CLI cost presentation remains staged for #238.
 **Date:** 2026-09-11
 **Extends:** [Usage reporting](2026-09-07-usage-reporting-design.md)
 
@@ -427,12 +427,11 @@ calculation job disguised as rendering. Currency is always USD in this version.
 ### Additive JSON extension
 
 Keep `/usage/v1/report` and `schema_version: 1`; preserve every existing field.
-Implementation is deliberately staged: #236 exposes typed pricing provenance,
-cost coverage, and model resolution through `Reporter.Query`, while those new Go
-fields remain `json:"-"`. Thus the existing HTTP bytes stay unchanged until #237
-adds the complete explicit wire mapping and validation atomically; #236 does not
-serve a partial extension. The completed #237 mapping adds a top-level `pricing`
-object identifying the benchmark and the captured snapshot:
+#236 exposed typed pricing provenance, cost coverage, and model resolution through
+`Reporter.Query` while keeping the fields `json:"-"`. #237 now publishes the
+complete extension atomically through explicit bounded HTTP adapter mappings;
+direct domain-struct marshaling remains intentionally native-only. The mapping
+adds a top-level `pricing` object identifying the benchmark and captured snapshot:
 
 ```json
 {

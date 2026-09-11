@@ -40,7 +40,7 @@ func (s reportBodyPricingSource) Current(ctx context.Context, limit pricing.Proj
 	if s.snapshot.IdentityBytes() > limit.MaxIdentityBytes {
 		return nil, pricing.SnapshotStatus{}, pricing.ErrProjectionLimit
 	}
-	return s.snapshot, pricing.SnapshotStatus{Source: "fallback", Version: "sha256:empty-test-prices"}, nil
+	return s.snapshot, pricing.SnapshotStatus{Source: "fallback", Version: "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"}, nil
 }
 
 func reportBodyPricing(t *testing.T) pricing.Source {

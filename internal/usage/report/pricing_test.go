@@ -80,7 +80,7 @@ func pricingSourceRaw(t *testing.T, raw string, status pricing.SnapshotStatus) *
 
 func newReporter(t *testing.T, path string) *report.Reporter {
 	t.Helper()
-	return report.New(path, pricingSource(t, `{}`, pricing.SnapshotStatus{Source: "fallback", Version: "sha256:empty-test-prices"}))
+	return report.New(path, pricingSource(t, `{}`, pricing.SnapshotStatus{Source: "fallback", Version: "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"}))
 }
 
 func amount(t *testing.T, value string) *pricing.Amount {
@@ -205,7 +205,7 @@ func TestQueryValuesCompleteOpenAIReportFromOnePricingSnapshot(t *testing.T) {
 			{StartDate: "2026-09-01", UntilDate: "2026-09-02", RangeStart: time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC), RangeEnd: time.Date(2026, 9, 2, 0, 0, 0, 0, time.UTC)},
 			{StartDate: "2026-09-02", UntilDate: "2026-09-03", RangeStart: time.Date(2026, 9, 2, 0, 0, 0, 0, time.UTC), RangeEnd: time.Date(2026, 9, 3, 0, 0, 0, 0, time.UTC), InProgress: true},
 		},
-		Pricing: report.PricingProvenance{
+		Pricing: &report.PricingProvenance{
 			Dataset: "models.dev/api.json", Currency: "USD", Basis: "original_provider", ContextPolicy: "highest_tier", CacheWritePolicy: "single_rate",
 			Version: "sha256:openai-fixture", Source: "fetched", LastSuccess: &lastSuccess,
 		},
@@ -335,7 +335,7 @@ func TestQueryValuesBothNativeSurfacesByReportedModelOnly(t *testing.T) {
 			{StartDate: "2026-09-01", UntilDate: "2026-09-02", RangeStart: time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC), RangeEnd: time.Date(2026, 9, 2, 0, 0, 0, 0, time.UTC)},
 			{StartDate: "2026-09-02", UntilDate: "2026-09-03", RangeStart: time.Date(2026, 9, 2, 0, 0, 0, 0, time.UTC), RangeEnd: time.Date(2026, 9, 3, 0, 0, 0, 0, time.UTC)},
 		},
-		Pricing:   report.PricingProvenance{Dataset: "models.dev/api.json", Currency: "USD", Basis: "original_provider", ContextPolicy: "highest_tier", CacheWritePolicy: "single_rate", Version: "sha256:combined", Source: "fetched"},
+		Pricing:   &report.PricingProvenance{Dataset: "models.dev/api.json", Currency: "USD", Basis: "original_provider", ContextPolicy: "highest_tier", CacheWritePolicy: "single_rate", Version: "sha256:combined", Source: "fetched"},
 		Anthropic: section(anthropicTotal), OpenAI: section(openAITotal),
 	}
 	assertReportEqual(t, got, want)
@@ -415,9 +415,9 @@ func TestQueryUsesOneCapturedPricingRevisionAcrossBothSurfaces(t *testing.T) {
 }
 
 func TestQueryPreservesTurnCorrelationWhenRatesAreDeleted(t *testing.T) {
-	pricedSource := pricingSource(t, `{"mixed":{"id":"mixed","cost":{"input":1,"output":2,"cache_read":3,"cache_write":4}}}`, pricing.SnapshotStatus{Source: "fetched", Version: "sha256:correlated-priced"})
-	deletedCacheReadSource := pricingSource(t, `{"mixed":{"id":"mixed","cost":{"input":1,"output":2,"cache_write":4}}}`, pricing.SnapshotStatus{Source: "fetched", Version: "sha256:correlated-cache-read-deleted"})
-	deletedOutputSource := pricingSource(t, `{"mixed":{"id":"mixed","cost":{"input":1,"cache_read":3,"cache_write":4}}}`, pricing.SnapshotStatus{Source: "fetched", Version: "sha256:correlated-output-deleted"})
+	pricedSource := pricingSource(t, `{"mixed":{"id":"mixed","cost":{"input":1,"output":2,"cache_read":3,"cache_write":4}}}`, pricing.SnapshotStatus{Source: "fetched", Version: "sha256:1111111111111111111111111111111111111111111111111111111111111111"})
+	deletedCacheReadSource := pricingSource(t, `{"mixed":{"id":"mixed","cost":{"input":1,"output":2,"cache_write":4}}}`, pricing.SnapshotStatus{Source: "fetched", Version: "sha256:2222222222222222222222222222222222222222222222222222222222222222"})
+	deletedOutputSource := pricingSource(t, `{"mixed":{"id":"mixed","cost":{"input":1,"cache_read":3,"cache_write":4}}}`, pricing.SnapshotStatus{Source: "fetched", Version: "sha256:3333333333333333333333333333333333333333333333333333333333333333"})
 	source := &mutablePricingSource{current: pricedSource}
 	path := stored(t,
 		turn("2026-09-01T01:00:00Z", "mixed", usage.OpenAIUsage{InputTokens: 10, OutputTokens: 2, CachedTokens: ptr(3), CacheWriteTokens: ptr(5)}),
@@ -428,6 +428,7 @@ func TestQueryPreservesTurnCorrelationWhenRatesAreDeleted(t *testing.T) {
 		anthropicTurn("2026-09-02T01:00:00Z", "mixed", usage.AnthropicUsage{InputTokens: 10, OutputTokens: 2, CacheCreationInputTokens: ptr(5)}),
 	)
 	reader := report.New(path, source)
+	report.SetNowForTest(reader, time.Date(2026, 9, 4, 0, 0, 0, 0, time.UTC))
 	q := selection()
 	q.Surface = "all"
 
@@ -509,8 +510,9 @@ func TestQueryPreservesTurnCorrelationWhenRatesAreDeleted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if text := strings.ToLower(string(wire.JSON)); strings.Contains(text, "pricing") || strings.Contains(text, "cost") || wire.Report.Anthropic == nil || len(wire.Report.Anthropic.Rows) != 2 || wire.Report.OpenAI == nil || len(wire.Report.OpenAI.Models) != 1 {
-		t.Fatalf("populated legacy wire changed: %s", wire.JSON)
+	assertReportEqual(t, wire.Report, priced)
+	if text := strings.ToLower(string(wire.JSON)); !strings.Contains(text, `"pricing"`) || !strings.Contains(text, `"pricing_match"`) || strings.Count(text, `"cost"`) != 8 || wire.Report.Anthropic == nil || len(wire.Report.Anthropic.Rows) != 2 || wire.Report.OpenAI == nil || len(wire.Report.OpenAI.Models) != 1 {
+		t.Fatalf("complete populated pricing extension missing: %s", wire.JSON)
 	}
 
 	source.set(deletedCacheReadSource)
@@ -548,10 +550,10 @@ func TestQueryPreservesTurnCorrelationWhenRatesAreDeleted(t *testing.T) {
 	}
 	assertDeleted("OpenAI", deleted.OpenAI, openAIRangeUsage, openAIDay1Usage, openAIDay2Usage)
 	assertDeleted("Anthropic", deleted.Anthropic, anthropicRangeUsage, anthropicDay1Usage, anthropicDay2Usage)
-	if optionalDeleted.Pricing.Version != "sha256:correlated-cache-read-deleted" || deleted.Pricing.Version != "sha256:correlated-output-deleted" || source.callCount() != 4 {
+	if optionalDeleted.Pricing.Version != "sha256:2222222222222222222222222222222222222222222222222222222222222222" || deleted.Pricing.Version != "sha256:3333333333333333333333333333333333333333333333333333333333333333" || source.callCount() != 4 {
 		t.Fatalf("deleted-rate provenance/calls = %+v/%d", deleted.Pricing, source.callCount())
 	}
-	if priced.Pricing.Version != "sha256:correlated-priced" || priced.OpenAI.Total.Cost.Amount == nil || priced.OpenAI.Total.Cost.Amount.String() != "0.000035" || priced.Anthropic.Total.Cost.Amount == nil || priced.Anthropic.Total.Cost.Amount.String() != "0.000043" {
+	if priced.Pricing.Version != "sha256:1111111111111111111111111111111111111111111111111111111111111111" || priced.OpenAI.Total.Cost.Amount == nil || priced.OpenAI.Total.Cost.Amount.String() != "0.000035" || priced.Anthropic.Total.Cost.Amount == nil || priced.Anthropic.Total.Cost.Amount.String() != "0.000043" {
 		t.Fatal("rate deletion mutated the prior materialized report")
 	}
 }

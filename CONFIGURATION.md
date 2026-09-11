@@ -209,10 +209,17 @@ replace required member names, duplicate names after unescaping are rejected at
 every level, and invalid UTF-8/unpaired surrogates are errors rather than repaired
 identities. Schema, effective selections, native metric presence, arrays, int64
 counts, and sum/coverage relationships (including empty sections) must validate
-before any stdout output. Errors use stderr and exit 1, including partial/short
-writes or failure to write the final newline; success, including empty, exits 0.
-The cached pricing foundation does not yet expose estimated-cost fields;
-raw-Turn export, HTML, and charts are not provided.
+before any stdout output. Pricing provenance, cost coverage at every aggregate,
+and row/model matches form one atomic additive extension. A wholly absent
+extension identifies an older daemon; partial or dangling recognized pricing
+fields are protocol errors. Amounts are canonical exact nonnegative decimal
+strings (or the governed `null` for nonempty groups with zero priceable Turns),
+and the six canonical int64 coverage strings must partition stored Turns exactly.
+Unknown additive fields remain compatible. Errors use stderr and exit 1,
+including partial/short writes or failure to write the final newline; success,
+including empty, exits 0. Text tables remain native-count-only until their
+estimated-cost presentation is added; raw-Turn export, HTML, and charts are not
+provided.
 
 The same listener serves exactly `GET`/`HEAD /usage/v1/report` without inference
 authentication or readiness/upstream work. A disabled meter returns
@@ -405,8 +412,11 @@ standard prices choose the greatest structured context threshold, then the
 legacy long-context row, then base without filling omitted optional rates.
 Prices are current benchmark inputs, never persisted tariff history or Copilot
 billing. Refresh failure is visible in `/readyz` but does not change readiness,
-inference, or native Usage report availability. The cached value does not yet
-add estimated-cost fields to the report protocol.
+inference, or native Usage report availability. The existing version-1 report
+protocol exposes the captured dataset/content identity/source/success time,
+exact USD priced-Turn subtotals and exclusion coverage at all aggregate levels,
+and row/model pricing matches. Report requests use the already captured local
+value and never fetch pricing.
 
 **Enabling this flag also exposes unauthenticated aggregate Usage reports on
 `serve --addr`, including non-loopback/public bindings.** Anyone with network
@@ -627,8 +637,8 @@ Sets the best-effort cadence for refreshing the public
 `https://models.dev/api.json` pricing cached value while the Usage meter is
 enabled. The default is `24h`; `0` pins the identified embedded floor and makes
 no pricing request. Negative values are rejected before binding. When
-`--shim-usage-meter-enabled=false`, no pricing value is registered and this
-staged setting causes no request.
+`--shim-usage-meter-enabled=false`, no pricing value is registered and no
+pricing request or report extension is produced.
 
 Each attempt uses a dedicated credential-free, redirect-refusing HTTP client, a
 five-second request context, and an 8 MiB decoded-body limit. Accepted bytes must

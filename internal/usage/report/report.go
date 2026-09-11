@@ -126,22 +126,24 @@ type PricingProvenance struct {
 // Report is an independent materialized snapshot. Generation time is the query
 // clock, not a watermark or a promise that queued observations were persisted.
 type Report struct {
-	SchemaVersion int               `json:"schema_version"`
-	GeneratedAt   time.Time         `json:"generated_at"`
-	Timezone      string            `json:"timezone"`
-	Period        string            `json:"period"`
-	Since         string            `json:"since"`
-	Until         string            `json:"until"`
-	WindowStart   time.Time         `json:"window_start"`
-	WindowEnd     time.Time         `json:"window_end"`
-	Scope         string            `json:"scope"`
-	Collection    string            `json:"collection"`
-	Surface       string            `json:"surface"`
-	Model         *string           `json:"model"`
-	Buckets       []Bucket          `json:"buckets"`
-	Pricing       PricingProvenance `json:"-"`
-	Anthropic     *Section          `json:"anthropic,omitempty"`
-	OpenAI        *Section          `json:"openai,omitempty"`
+	SchemaVersion int       `json:"schema_version"`
+	GeneratedAt   time.Time `json:"generated_at"`
+	Timezone      string    `json:"timezone"`
+	Period        string    `json:"period"`
+	Since         string    `json:"since"`
+	Until         string    `json:"until"`
+	WindowStart   time.Time `json:"window_start"`
+	WindowEnd     time.Time `json:"window_end"`
+	Scope         string    `json:"scope"`
+	Collection    string    `json:"collection"`
+	Surface       string    `json:"surface"`
+	Model         *string   `json:"model"`
+	Buckets       []Bucket  `json:"buckets"`
+	// Pricing is always non-nil for Reporter.Query results. A nil value is
+	// reserved for a client's validated all-absent response from an older daemon.
+	Pricing   *PricingProvenance `json:"-"`
+	Anthropic *Section           `json:"anthropic,omitempty"`
+	OpenAI    *Section           `json:"openai,omitempty"`
 }
 
 // OpenAIMetrics names the frozen native projection; subsets are never added to
@@ -301,8 +303,8 @@ func reportPricingMatch(resolution modelmatch.Resolution) PricingMatch {
 	return match
 }
 
-func pricingProvenance(status pricing.SnapshotStatus) PricingProvenance {
-	provenance := PricingProvenance{
+func pricingProvenance(status pricing.SnapshotStatus) *PricingProvenance {
+	provenance := &PricingProvenance{
 		Dataset:          "models.dev/api.json",
 		Currency:         "USD",
 		Basis:            "original_provider",
