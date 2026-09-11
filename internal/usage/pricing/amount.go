@@ -106,16 +106,5 @@ func powerOfTen(exponent int) *big.Int {
 
 // String returns the canonical non-exponent decimal spelling of the amount.
 func (a Amount) String() string {
-	if a.coefficient == nil || a.coefficient.Sign() == 0 {
-		return "0"
-	}
-	digits := a.coefficient.String()
-	if a.scale == 0 {
-		return digits
-	}
-	if len(digits) <= a.scale {
-		return "0." + strings.Repeat("0", a.scale-len(digits)) + digits
-	}
-	cut := len(digits) - a.scale
-	return digits[:cut] + "." + digits[cut:]
+	return formatNonnegativeScaledDecimal(a.coefficient, a.scale)
 }

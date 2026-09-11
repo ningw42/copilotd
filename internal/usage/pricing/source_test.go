@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/ningw42/copilotd/internal/cache"
+	"github.com/ningw42/copilotd/internal/logging"
 	"github.com/ningw42/copilotd/internal/usage/pricing"
 )
 
@@ -247,6 +249,108 @@ func TestCachedSourceRejectsMalformedRefreshAndHoldsLastGood(t *testing.T) {
 	observed := registry.Observe()
 	if len(observed) != 1 || observed[0].LastAttemptResult == nil || *observed[0].LastAttemptResult != cache.AttemptFailure {
 		t.Fatalf("observation = %#v, want failed malformed refresh", observed)
+	}
+}
+
+func TestCachedSourceRejectsArtifactSizedIdentitiesWithoutArtifactSizedDiagnostics(t *testing.T) {
+	const good = `{"openai":{"id":"openai","models":{"kept":{"id":"kept","cost":{"input":1,"output":2}}}},"anthropic":{"id":"anthropic","models":{}},"google":{"id":"google","models":{}},"xai":{"id":"xai","models":{}}}`
+
+	tests := []struct {
+		name        string
+		warm        bool
+		invalid     func(string) string
+		wantContext string
+		wantReason  string
+		wantSource  string
+	}{
+		{
+			name: "oversized selected model key holds floor",
+			invalid: func(attacker string) string {
+				return `{"openai":{"id":"openai","models":{"` + attacker + `":{"id":"kept"}}},"anthropic":{"id":"anthropic","models":{}},"google":{"id":"google","models":{}},"xai":{"id":"xai","models":{}}}`
+			},
+			wantContext: `provider "openai"`,
+			wantReason:  "keyed identity must be non-empty valid UTF-8 of at most 1024 bytes",
+			wantSource:  "fallback",
+		},
+		{
+			name: "mismatched model id holds last good",
+			warm: true,
+			invalid: func(attacker string) string {
+				return `{"openai":{"id":"openai","models":{"kept":{"id":"` + attacker + `"}}},"anthropic":{"id":"anthropic","models":{}},"google":{"id":"google","models":{}},"xai":{"id":"xai","models":{}}}`
+			},
+			wantContext: `model "openai"/"kept"`,
+			wantReason:  "does not match keyed identity",
+			wantSource:  "fetched",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var diagnostics []string
+			for _, size := range []int{2 << 10, 1 << 20} {
+				attacker := strings.Repeat("x", size)
+				invalid := test.invalid(attacker)
+				var request atomic.Int32
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					if test.warm && request.Add(1) == 1 {
+						_, _ = io.WriteString(w, good)
+						return
+					}
+					_, _ = io.WriteString(w, invalid)
+				}))
+				t.Cleanup(server.Close)
+
+				var logs bytes.Buffer
+				logger := logging.ForComponent(slog.New(slog.NewJSONHandler(&logs, nil)), "internal/cache")
+				registry := cache.NewRegistry()
+				source := pricing.NewCachedSource(pricing.CacheConfig{RefreshInterval: time.Hour}, pricing.NewRemote(server.URL, server.Client().Transport), registry, logger)
+				if test.warm {
+					registry.Prime(context.Background())
+					logs.Reset()
+				}
+				registry.Prime(context.Background())
+
+				snapshot, status, err := source.Current(context.Background(), pricing.ProjectionLimit{MaxIdentityBytes: int(^uint(0) >> 1)})
+				if err != nil {
+					t.Fatalf("Current() error = %v", err)
+				}
+				if status.Source != test.wantSource {
+					t.Fatalf("effective source = %q, want held %s", status.Source, test.wantSource)
+				}
+				if test.warm {
+					want := []pricing.Identity{{Provider: "openai", Model: "kept"}}
+					if got := snapshot.Identities(); !reflect.DeepEqual(got, want) {
+						t.Fatalf("identities after rejected refresh = %#v, want last-good %#v", got, want)
+					}
+				}
+				observed := registry.Observe()
+				if len(observed) != 1 || observed[0].Source != test.wantSource || observed[0].LastAttemptResult == nil || *observed[0].LastAttemptResult != cache.AttemptFailure {
+					t.Fatalf("cache observation = %#v, want failed attempt holding %s", observed, test.wantSource)
+				}
+
+				var record map[string]any
+				decoder := json.NewDecoder(&logs)
+				if err := decoder.Decode(&record); err != nil {
+					t.Fatalf("decode refresh failure log: %v", err)
+				}
+				if record["msg"] != "cached value refresh failed" || record["component"] != "internal/cache" || record["cached_value"] != "usage_prices" {
+					t.Fatalf("refresh failure log = %#v", record)
+				}
+				diagnostic, ok := record["error"].(string)
+				if !ok {
+					t.Fatalf("refresh failure diagnostic = %#v, want string", record["error"])
+				}
+				if !strings.Contains(diagnostic, test.wantContext) || !strings.Contains(diagnostic, test.wantReason) {
+					t.Fatalf("refresh failure diagnostic = %q, want bounded context %q and reason %q", diagnostic, test.wantContext, test.wantReason)
+				}
+				if strings.Contains(diagnostic, attacker) {
+					t.Fatal("refresh failure diagnostic retained the complete rejected identity")
+				}
+				diagnostics = append(diagnostics, diagnostic)
+			}
+			if diagnostics[0] != diagnostics[1] {
+				t.Fatalf("refresh failure diagnostic grew with rejected identity: small bytes=%d large bytes=%d", len(diagnostics[0]), len(diagnostics[1]))
+			}
+		})
 	}
 }
 

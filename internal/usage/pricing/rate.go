@@ -3,7 +3,6 @@ package pricing
 import (
 	"errors"
 	"math/big"
-	"strings"
 )
 
 // Rate is an immutable exact USD-per-million-token decimal.
@@ -111,16 +110,5 @@ func ParseRate(raw string) (Rate, error) {
 
 // String returns the canonical, non-exponent decimal spelling of the rate.
 func (r Rate) String() string {
-	if r.coefficient == nil || r.coefficient.Sign() == 0 {
-		return "0"
-	}
-	digits := r.coefficient.String()
-	if r.scale == 0 {
-		return digits
-	}
-	if len(digits) <= r.scale {
-		return "0." + strings.Repeat("0", r.scale-len(digits)) + digits
-	}
-	cut := len(digits) - r.scale
-	return digits[:cut] + "." + digits[cut:]
+	return formatNonnegativeScaledDecimal(r.coefficient, r.scale)
 }

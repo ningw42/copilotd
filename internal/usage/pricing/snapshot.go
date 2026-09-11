@@ -149,7 +149,7 @@ func requireMatchingID(object map[string]json.RawMessage, want string) error {
 		return errors.New("id is not a string")
 	}
 	if got != want {
-		return fmt.Errorf("id %q does not match keyed identity", got)
+		return errors.New("id does not match keyed identity")
 	}
 	return nil
 }
@@ -177,7 +177,13 @@ func unambiguousJSON(ctx context.Context, raw []byte, maxIdentityBytes int) erro
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			return fmt.Errorf("invalid models.dev JSON: %w", err)
+			// jsontext syntax errors can retain remote member names in their
+			// JSON pointers. Keep the source-local reason without retaining the
+			// rejected document through the cache's last-attempt error.
+			if errors.Is(err, jsontext.ErrDuplicateName) {
+				return errors.New("invalid models.dev JSON: duplicate object member")
+			}
+			return errors.New("invalid models.dev JSON syntax or encoding")
 		}
 		if token.Kind() == '"' && decoder.StackDepth() == 3 {
 			kind, index := decoder.StackIndex(3)
@@ -186,7 +192,7 @@ func unambiguousJSON(ctx context.Context, raw []byte, maxIdentityBytes int) erro
 				if providerID != "" {
 					modelID := token.String()
 					if err := validateIdentity(modelID); err != nil {
-						return fmt.Errorf("model %q/%q: %w", providerID, modelID, err)
+						return fmt.Errorf("model in provider %q: %w", providerID, err)
 					}
 					retained := len(providerID) + len(modelID)
 					if retained > maxIdentityBytes-identityBytes {
