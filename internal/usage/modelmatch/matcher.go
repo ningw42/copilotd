@@ -2,8 +2,13 @@ package modelmatch
 
 import (
 	"context"
+	"errors"
 	"time"
 )
+
+// ErrRetentionLimit reports that the caller's retained-identity budget cannot
+// hold the matcher keys actually required by the supplied candidates.
+var ErrRetentionLimit = errors.New("model matcher retained identities exceed limit")
 
 var recognizedProviders = map[string]struct{}{
 	"anthropic": {},
@@ -44,11 +49,17 @@ type Resolution struct {
 	Method   Method
 }
 
+// RetentionLimit bounds key bytes retained by one matcher.
+type RetentionLimit struct {
+	MaxIdentityBytes int
+}
+
 // Matcher is an immutable index of original-provider candidate identities.
 type Matcher struct {
-	exact           map[string]selection
-	normalized      map[string]selection
-	datedNormalized map[string]selection
+	exact                 map[string]selection
+	normalized            map[string]selection
+	datedNormalized       map[string]selection
+	retainedIdentityBytes int
 }
 
 type selection struct {
@@ -56,12 +67,21 @@ type selection struct {
 	ambiguous bool
 }
 
-// New builds an immutable matcher over the supplied candidate identities.
-func New(ctx context.Context, candidates []Identity) (*Matcher, error) {
+// New builds an immutable matcher over the supplied candidate identities. It
+// charges only keys newly retained in its indexes; duplicates and collisions do
+// not debit phantom copies. Retained candidate strings share their caller-owned
+// source identity storage.
+func New(ctx context.Context, candidates []Identity, limit RetentionLimit) (*Matcher, error) {
+	if limit.MaxIdentityBytes < 0 {
+		return nil, ErrRetentionLimit
+	}
 	matcher := &Matcher{
 		exact:           make(map[string]selection),
 		normalized:      make(map[string]selection),
 		datedNormalized: make(map[string]selection),
+	}
+	add := func(index map[string]selection, key string, candidate Identity) error {
+		return matcher.addSelection(index, key, candidate, limit.MaxIdentityBytes)
 	}
 	for _, candidate := range candidates {
 		if err := ctx.Err(); err != nil {
@@ -70,21 +90,42 @@ func New(ctx context.Context, candidates []Identity) (*Matcher, error) {
 		if _, recognized := recognizedProviders[candidate.Provider]; !recognized {
 			continue
 		}
-		addSelection(matcher.exact, lookupKey("", candidate.Model), candidate)
-		addSelection(matcher.exact, lookupKey(candidate.Provider, candidate.Model), candidate)
+		if err := add(matcher.exact, lookupKey("", candidate.Model), candidate); err != nil {
+			return nil, err
+		}
+		if err := add(matcher.exact, lookupKey(candidate.Provider, candidate.Model), candidate); err != nil {
+			return nil, err
+		}
 		normalized := normalize(candidate.Model)
-		addSelection(matcher.normalized, lookupKey("", normalized), candidate)
-		addSelection(matcher.normalized, lookupKey(candidate.Provider, normalized), candidate)
+		if err := add(matcher.normalized, lookupKey("", normalized), candidate); err != nil {
+			return nil, err
+		}
+		if err := add(matcher.normalized, lookupKey(candidate.Provider, normalized), candidate); err != nil {
+			return nil, err
+		}
 		if stem, dated := stripDate(candidate.Model); dated {
 			normalizedStem := normalize(stem)
-			addSelection(matcher.datedNormalized, lookupKey("", normalizedStem), candidate)
-			addSelection(matcher.datedNormalized, lookupKey(candidate.Provider, normalizedStem), candidate)
+			if err := add(matcher.datedNormalized, lookupKey("", normalizedStem), candidate); err != nil {
+				return nil, err
+			}
+			if err := add(matcher.datedNormalized, lookupKey(candidate.Provider, normalizedStem), candidate); err != nil {
+				return nil, err
+			}
 		}
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	return matcher, nil
+}
+
+// RetainedIdentityBytes returns the key bytes retained by this matcher's
+// indexes. Candidate identity strings themselves remain shared with the source.
+func (m *Matcher) RetainedIdentityBytes() int {
+	if m == nil {
+		return 0
+	}
+	return m.retainedIdentityBytes
 }
 
 // Resolve matches a Reported model without modifying its spelling.
@@ -146,16 +187,21 @@ func (m *Matcher) Resolve(reportedModel string) Resolution {
 	return Resolution{Status: StatusUnknown}
 }
 
-func addSelection(index map[string]selection, key string, identity Identity) {
+func (m *Matcher) addSelection(index map[string]selection, key string, identity Identity, maxIdentityBytes int) error {
 	selected, found := index[key]
 	if !found {
+		if len(key) > maxIdentityBytes-m.retainedIdentityBytes {
+			return ErrRetentionLimit
+		}
 		index[key] = selection{identity: identity}
-		return
+		m.retainedIdentityBytes += len(key)
+		return nil
 	}
 	if selected.identity != identity {
 		selected.ambiguous = true
 		index[key] = selected
 	}
+	return nil
 }
 
 func mergeSelections(left, right selection) selection {

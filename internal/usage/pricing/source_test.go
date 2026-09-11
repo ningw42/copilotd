@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -89,6 +91,39 @@ func TestCachedSourceRefreshReplacesTheWholeSnapshotWithoutCredentials(t *testin
 	}
 	if requests.Load() != 1 {
 		t.Fatalf("requests after refresh and Current = %d, want 1 (Current must not fetch)", requests.Load())
+	}
+}
+
+func TestCachedSourceProjectionLimitStopsBeforeSelectedKeyAllocationGrows(t *testing.T) {
+	largeArtifact := selectedModelsArtifact(2_000, 1_024)
+	if len(largeArtifact) > 8<<20 {
+		t.Fatalf("large artifact is %d bytes, exceeds remote acceptance cap", len(largeArtifact))
+	}
+	small := cachedSourceForArtifact(t, selectedModelsArtifact(8, 1_024))
+	large := cachedSourceForArtifact(t, largeArtifact)
+
+	projectionAllocations := func(source *pricing.CachedSource) float64 {
+		t.Helper()
+		var snapshot *pricing.Snapshot
+		var status pricing.SnapshotStatus
+		var err error
+		allocations := testing.AllocsPerRun(5, func() {
+			snapshot, status, err = source.Current(context.Background(), pricing.ProjectionLimit{})
+		})
+		if !errors.Is(err, pricing.ErrProjectionLimit) || snapshot != nil || status != (pricing.SnapshotStatus{}) {
+			t.Fatalf("zero-byte projection = %#v, %#v, %v; want projection-limit rejection", snapshot, status, err)
+		}
+		return allocations
+	}
+
+	smallAllocations := projectionAllocations(small)
+	largeAllocations := projectionAllocations(large)
+	t.Logf("zero-byte Current allocation counts: 8 selected models=%.0f, 2,000 selected models=%.0f", smallAllocations, largeAllocations)
+	// This is allocation-count evidence, not a peak-live-memory bound. A broad
+	// fixed margin allows runtime bookkeeping noise while rejecting work that
+	// grows with all 2,000 selected keys before applying the zero-byte limit.
+	if largeAllocations > smallAllocations+200 {
+		t.Fatalf("zero-byte Current allocations grew with unselected remainder: small=%.0f large=%.0f", smallAllocations, largeAllocations)
 	}
 }
 
@@ -326,6 +361,40 @@ func TestRemoteRefreshOwnsFiveSecondContextAndHonorsCancellation(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("registry prime did not return after cancellation")
 	}
+}
+
+func cachedSourceForArtifact(t *testing.T, artifact []byte) *pricing.CachedSource {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(artifact)
+	}))
+	t.Cleanup(server.Close)
+	registry := cache.NewRegistry()
+	source := pricing.NewCachedSource(pricing.CacheConfig{RefreshInterval: time.Hour}, pricing.NewRemote(server.URL, server.Client().Transport), registry, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	registry.Prime(context.Background())
+	status := registry.Observe()
+	if len(status) != 1 || status[0].Source != "fetched" {
+		t.Fatalf("artifact was not accepted before report projection: %#v", status)
+	}
+	return source
+}
+
+func selectedModelsArtifact(count, identityBytes int) []byte {
+	var models strings.Builder
+	models.WriteByte('{')
+	for index := range count {
+		if index != 0 {
+			models.WriteByte(',')
+		}
+		prefix := strconv.Itoa(index) + "-"
+		name := prefix + strings.Repeat("x", identityBytes-len(prefix))
+		models.WriteString(strconv.Quote(name))
+		models.WriteString(`:{"id":`)
+		models.WriteString(strconv.Quote(name))
+		models.WriteByte('}')
+	}
+	models.WriteByte('}')
+	return []byte(`{"openai":{"id":"openai","models":` + models.String() + `},"anthropic":{"id":"anthropic","models":{}},"google":{"id":"google","models":{}},"xai":{"id":"xai","models":{}}}`)
 }
 
 func validDecodedSnapshot(size int) []byte {

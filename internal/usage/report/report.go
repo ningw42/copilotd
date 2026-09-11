@@ -181,6 +181,11 @@ func (r *Reporter) Query(ctx context.Context, q Query) (result Report, err error
 	if err = ctx.Err(); err != nil {
 		return Report{}, err
 	}
+	budget := readBudget{limits: r.limits, afterExaminedTurn: r.afterExaminedTurn, identities: map[string]string{}}
+	valuation, status, captureErr := r.capturePricing(ctx, &budget)
+	if err = ctx.Err(); err != nil {
+		return Report{}, err
+	}
 	now := r.now().UTC()
 	if q.Period == "" {
 		q.Period = "day"
@@ -203,13 +208,11 @@ func (r *Reporter) Query(ctx context.Context, q Query) (result Report, err error
 	if err != nil {
 		return Report{}, err
 	}
-	budget := readBudget{limits: r.limits, afterExaminedTurn: r.afterExaminedTurn, identities: map[string]string{}}
-	valuation, status, err := r.capturePricing(ctx, &budget)
-	if err != nil {
-		if errors.Is(err, pricing.ErrProjectionLimit) {
+	if captureErr != nil {
+		if errors.Is(captureErr, pricing.ErrProjectionLimit) || errors.Is(captureErr, modelmatch.ErrRetentionLimit) {
 			return Report{}, tooLarge()
 		}
-		return Report{}, err
+		return Report{}, captureErr
 	}
 	result = Report{SchemaVersion: 1, GeneratedAt: now, Timezone: q.Timezone, Period: q.Period, Since: q.Since, Until: q.Until, Surface: q.Surface, Model: q.Model, WindowStart: start, WindowEnd: end, Scope: "configured_database", Collection: "best_effort", Buckets: buckets, Pricing: pricingProvenance(status)}
 	sections, err := r.read(ctx, result.Buckets, q.Surface, q.Model, &budget, valuation)
@@ -251,17 +254,13 @@ func (r *Reporter) capturePricing(ctx context.Context, budget *readBudget) (*cap
 		if err := ctx.Err(); err != nil {
 			return nil, pricing.SnapshotStatus{}, err
 		}
-		// Matcher.New retains up to exact, normalized, and dated scoped and
-		// unscoped keys. Debit their worst-case identity bytes before building
-		// any index; values and the candidate slice share snapshot strings.
-		indexBytes := 3*len(identity.Provider) + 6*len(identity.Model) + 6
-		if err := budget.retainIdentityBytes(indexBytes); err != nil {
-			return nil, pricing.SnapshotStatus{}, err
-		}
 		candidates = append(candidates, modelmatch.Identity{Provider: identity.Provider, Model: identity.Model})
 	}
-	matcher, err := modelmatch.New(ctx, candidates)
+	matcher, err := modelmatch.New(ctx, candidates, modelmatch.RetentionLimit{MaxIdentityBytes: budget.remainingIdentityBytes()})
 	if err != nil {
+		return nil, pricing.SnapshotStatus{}, err
+	}
+	if err := budget.retainIdentityBytes(matcher.RetainedIdentityBytes()); err != nil {
 		return nil, pricing.SnapshotStatus{}, err
 	}
 	if err := ctx.Err(); err != nil {

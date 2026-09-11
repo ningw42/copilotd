@@ -41,7 +41,8 @@ type SnapshotStatus struct {
 }
 
 // ProjectionLimit is the caller's maximum provider/model identity bytes for
-// one parsed snapshot projection.
+// one parsed snapshot projection. It is enforced during the initial strict JSON
+// member walk, before the complete selected-key map can be retained.
 type ProjectionLimit struct {
 	MaxIdentityBytes int
 }
@@ -99,7 +100,7 @@ func NewCachedSource(cfg CacheConfig, remote Remote, registry *cache.Registry, l
 }
 
 // Current captures the cache's effective bytes/status atomically and projects
-// only that captured value.
+// only that captured value. Projection limits do not alter cache acceptance.
 func (s *CachedSource) Current(ctx context.Context, limit ProjectionLimit) (*Snapshot, SnapshotStatus, error) {
 	raw, status := s.value.Current()
 	snapshot, err := parseSnapshot(ctx, raw, limit.MaxIdentityBytes)

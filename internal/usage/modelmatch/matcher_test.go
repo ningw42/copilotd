@@ -655,13 +655,87 @@ func TestResolveSupportsConcurrentImmutableReads(t *testing.T) {
 	}
 }
 
+func TestNewChargesOnlyActuallyRetainedUndatedKeys(t *testing.T) {
+	t.Parallel()
+
+	// Synthetic resource-policy fixture. openai/model retains four keys:
+	// unscoped/scoped exact and unscoped/scoped normalized, totaling 36 bytes.
+	candidate := modelmatch.Identity{Provider: "openai", Model: "model"}
+	matcher, err := modelmatch.New(context.Background(), []modelmatch.Identity{candidate}, modelmatch.RetentionLimit{MaxIdentityBytes: 36})
+	if err != nil {
+		t.Fatalf("New() at literal retained-key boundary: %v", err)
+	}
+	if got := matcher.RetainedIdentityBytes(); got != 36 {
+		t.Fatalf("RetainedIdentityBytes() = %d, want 36", got)
+	}
+	want := modelmatch.Resolution{Status: modelmatch.StatusMatched, Identity: candidate, Method: modelmatch.MethodExact}
+	if got := matcher.Resolve("model"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("Resolve() = %#v, want %#v", got, want)
+	}
+
+	limited, err := modelmatch.New(context.Background(), []modelmatch.Identity{candidate}, modelmatch.RetentionLimit{MaxIdentityBytes: 35})
+	if limited != nil || !errors.Is(err, modelmatch.ErrRetentionLimit) {
+		t.Fatalf("New() below literal retained-key boundary = %#v, %v; want nil retention-limit error", limited, err)
+	}
+}
+
+func TestNewAccountsForDuplicateCollisionAndDatedKeysActuallyRetained(t *testing.T) {
+	t.Parallel()
+
+	// Synthetic literal key-retention fixtures. Expectations count only keys
+	// actually inserted into the three public matcher's indexes.
+	for _, fixture := range []struct {
+		name       string
+		candidates []modelmatch.Identity
+		wantBytes  int
+	}{
+		{
+			name: "duplicate pair",
+			candidates: []modelmatch.Identity{
+				{Provider: "openai", Model: "model"},
+				{Provider: "openai", Model: "model"},
+				{Provider: "openai", Model: "model"},
+			},
+			wantBytes: 36,
+		},
+		{
+			name: "normalized collision",
+			candidates: []modelmatch.Identity{
+				{Provider: "openai", Model: "base"},
+				{Provider: "openai", Model: "BASE"},
+			},
+			wantBytes: 48,
+		},
+		{
+			name:       "dated keys use shorter stem",
+			candidates: []modelmatch.Identity{{Provider: "openai", Model: "base-20260301"}},
+			wantBytes:  84,
+		},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			t.Parallel()
+			matcher, err := modelmatch.New(context.Background(), fixture.candidates, modelmatch.RetentionLimit{MaxIdentityBytes: fixture.wantBytes})
+			if err != nil {
+				t.Fatalf("New() at %d-byte boundary: %v", fixture.wantBytes, err)
+			}
+			if got := matcher.RetainedIdentityBytes(); got != fixture.wantBytes {
+				t.Fatalf("RetainedIdentityBytes() = %d, want %d", got, fixture.wantBytes)
+			}
+			limited, err := modelmatch.New(context.Background(), fixture.candidates, modelmatch.RetentionLimit{MaxIdentityBytes: fixture.wantBytes - 1})
+			if limited != nil || !errors.Is(err, modelmatch.ErrRetentionLimit) {
+				t.Fatalf("New() below %d-byte boundary = %#v, %v", fixture.wantBytes, limited, err)
+			}
+		})
+	}
+}
+
 func TestNewHonorsCanceledIndexConstruction(t *testing.T) {
 	t.Parallel()
 
 	// Synthetic constructor fixture.
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	matcher, err := modelmatch.New(ctx, []modelmatch.Identity{{Provider: "openai", Model: "model"}})
+	matcher, err := modelmatch.New(ctx, []modelmatch.Identity{{Provider: "openai", Model: "model"}}, unlimitedRetention())
 	if matcher != nil || !errors.Is(err, context.Canceled) {
 		t.Fatalf("New() = %#v, %v; want nil, context canceled", matcher, err)
 	}
@@ -747,7 +821,7 @@ func TestNewDetachesCandidateSlice(t *testing.T) {
 
 	// Synthetic immutability fixture.
 	candidates := []modelmatch.Identity{{Provider: "xai", Model: "grok-model"}}
-	matcher, err := modelmatch.New(context.Background(), candidates)
+	matcher, err := modelmatch.New(context.Background(), candidates, unlimitedRetention())
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -765,9 +839,13 @@ func TestNewDetachesCandidateSlice(t *testing.T) {
 
 func newMatcher(t *testing.T, candidates ...modelmatch.Identity) *modelmatch.Matcher {
 	t.Helper()
-	matcher, err := modelmatch.New(context.Background(), candidates)
+	matcher, err := modelmatch.New(context.Background(), candidates, unlimitedRetention())
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
 	return matcher
+}
+
+func unlimitedRetention() modelmatch.RetentionLimit {
+	return modelmatch.RetentionLimit{MaxIdentityBytes: int(^uint(0) >> 1)}
 }

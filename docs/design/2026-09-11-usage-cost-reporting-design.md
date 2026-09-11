@@ -115,12 +115,17 @@ matching rules, models.dev structure, price selection, or token nesting.
 
 The reporter accepts a pricing source supplied by the composition root; it does
 not create an HTTP client. `report.New(databasePath, pricing.Source)` requires
-that dependency explicitly. `Source.Current(ctx, ProjectionLimit)` captures one
-local value and status while applying the caller's provider/model identity-byte
-projection limit; a report-specific limit failure does not reject an accepted
-cached value. Query then derives one immutable pricing/matching snapshot for the
-whole report. A refresh during the database scan cannot change that report's
-prices or model matches. Tests provide fixed data through the same source seam.
+that dependency explicitly. At Query entry, before timezone/date resolution and
+bucket construction, Query calls `Source.Current(ctx, ProjectionLimit)` exactly
+once to capture one local value and status while applying the caller's
+provider/model identity-byte projection limit. It defers a non-cancellation
+capture failure until semantic/calendar validation completes, so invalid query
+input keeps its established precedence; context cancellation remains
+authoritative. A report-specific limit failure does not reject an accepted cached
+value. Query then derives one immutable pricing/matching snapshot for the whole
+report. A refresh during later calendar or database work cannot change that
+report's prices or model matches. Tests provide fixed data through the same
+source seam.
 
 Matching and arithmetic are in-process modules. Test them through their
 interfaces with literal data; no adapter abstraction is needed for pure
@@ -224,8 +229,13 @@ func (m *Matcher) Resolve(reportedModel string) Resolution
 
 `Resolution` is either a matched identity plus method, `unknown`, or `ambiguous`.
 The matcher owns its indexes and all selection rules; it does no I/O, pricing,
-count interpretation, mutation, or Catalog lookup. It is immutable after
-construction and safe to share. Candidate order must not affect results.
+count interpretation, mutation, or Catalog lookup. The implemented constructor
+also receives the report's remaining identity-byte limit, checks bytes for only
+keys it actually retains (including shorter dated stems and duplicate/collision
+behavior), and exposes that retained charge to the reporter's request-wide
+balance. The reporter does not duplicate or estimate the matcher's private index
+layout. The matcher is immutable after construction and safe to share. Candidate
+order must not affect results.
 
 Returned identities retain their source spelling. Approximation changes only
 lookup keys, never stored observations, report identity, or inference requests.
@@ -566,9 +576,13 @@ permission to serve invented zeros. Reuse report-unavailable/timeout errors with
 safe public messages; no source bodies, credentials, or local paths are exposed.
 Exact monetary overflow follows the report's existing whole-request overflow
 policy. Source/index work and larger result fields must remain within existing
-query, identity-retention, admission, and encoding limits. Limit projected source
-provider/model identifiers to 1 KiB each and reject larger selected identities
-at acceptance, before they can enlarge report fragments.
+query, identity-retention, admission, and encoding limits. Apply the selected
+source-identity budget during the initial strict JSON member walk, before a
+complete selected-key map is allocated; the separate 8 MiB raw-artifact cap still
+governs accepted bytes and this retained-identity limit is not a claim about all
+transient allocations. Limit projected source provider/model identifiers to 1
+KiB each and reject larger selected identities at acceptance, before they can
+enlarge report fragments.
 
 ## 10. Acceptance and implementation order after approval
 

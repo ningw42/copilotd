@@ -52,7 +52,7 @@ func parseSnapshot(ctx context.Context, raw []byte, maxIdentityBytes int) (*Snap
 	if maxIdentityBytes < 0 {
 		return nil, ErrProjectionLimit
 	}
-	if err := unambiguousJSON(ctx, raw); err != nil {
+	if err := unambiguousJSON(ctx, raw, maxIdentityBytes); err != nil {
 		return nil, err
 	}
 	var root map[string]json.RawMessage
@@ -137,8 +137,8 @@ func parseSnapshot(ctx context.Context, raw []byte, maxIdentityBytes int) (*Snap
 }
 
 func requireMatchingID(object map[string]json.RawMessage, want string) error {
-	if want == "" || len(want) > 1024 || !utf8.ValidString(want) {
-		return errors.New("keyed identity must be non-empty valid UTF-8 of at most 1024 bytes")
+	if err := validateIdentity(want); err != nil {
+		return err
 	}
 	raw, present := object["id"]
 	if !present {
@@ -154,17 +154,47 @@ func requireMatchingID(object map[string]json.RawMessage, want string) error {
 	return nil
 }
 
-func unambiguousJSON(ctx context.Context, raw []byte) error {
+func validateIdentity(identity string) error {
+	if identity == "" || len(identity) > 1024 || !utf8.ValidString(identity) {
+		return errors.New("keyed identity must be non-empty valid UTF-8 of at most 1024 bytes")
+	}
+	return nil
+}
+
+// unambiguousJSON applies the selected-identity budget during the same strict
+// token walk that detects duplicate decoded names and invalid Unicode. The
+// decoder therefore stops before its duplicate-name state can retain every key
+// in an oversized selected models object.
+func unambiguousJSON(ctx context.Context, raw []byte, maxIdentityBytes int) error {
 	decoder := jsontext.NewDecoder(bytes.NewReader(raw))
+	identityBytes := 0
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if _, err := decoder.ReadToken(); err != nil {
+		token, err := decoder.ReadToken()
+		if err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
 			return fmt.Errorf("invalid models.dev JSON: %w", err)
+		}
+		if token.Kind() == '"' && decoder.StackDepth() == 3 {
+			kind, index := decoder.StackIndex(3)
+			if kind == '{' && index%2 == 1 {
+				providerID := selectedModelsProvider(decoder.StackPointer().Parent())
+				if providerID != "" {
+					modelID := token.String()
+					if err := validateIdentity(modelID); err != nil {
+						return fmt.Errorf("model %q/%q: %w", providerID, modelID, err)
+					}
+					retained := len(providerID) + len(modelID)
+					if retained > maxIdentityBytes-identityBytes {
+						return ErrProjectionLimit
+					}
+					identityBytes += retained
+				}
+			}
 		}
 		if decoder.StackDepth() == 0 {
 			break
@@ -177,6 +207,21 @@ func unambiguousJSON(ctx context.Context, raw []byte) error {
 		return errors.New("invalid models.dev trailing JSON data")
 	}
 	return ctx.Err()
+}
+
+func selectedModelsProvider(pointer jsontext.Pointer) string {
+	switch pointer {
+	case "/openai/models":
+		return "openai"
+	case "/anthropic/models":
+		return "anthropic"
+	case "/google/models":
+		return "google"
+	case "/xai/models":
+		return "xai"
+	default:
+		return ""
+	}
 }
 
 func parseCost(ctx context.Context, raw json.RawMessage) (Rates, error) {

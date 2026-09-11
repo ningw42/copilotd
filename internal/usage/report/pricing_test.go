@@ -2,7 +2,9 @@ package report_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http/httptest"
 	"reflect"
 	"strings"
 	"sync"
@@ -12,6 +14,7 @@ import (
 	"github.com/ningw42/copilotd/internal/usage"
 	"github.com/ningw42/copilotd/internal/usage/pricing"
 	"github.com/ningw42/copilotd/internal/usage/report"
+	"github.com/ningw42/copilotd/internal/usage/reporthttp"
 )
 
 type fixedPricingSource struct {
@@ -81,14 +84,69 @@ func newReporter(t *testing.T, path string) *report.Reporter {
 
 func amount(t *testing.T, value string) *pricing.Amount {
 	t.Helper()
-	if value == "0" {
-		return &pricing.Amount{}
-	}
 	parsed, err := pricing.ParseAmount(value)
 	if err != nil {
 		t.Fatalf("parse expected amount %q: %v", value, err)
 	}
 	return &parsed
+}
+
+type observedAmount struct {
+	present bool
+	value   string
+}
+
+func withoutAmountRepresentation(input report.Report) (report.Report, []observedAmount) {
+	result := input
+	var amounts []observedAmount
+	stripSection := func(section *report.Section) *report.Section {
+		if section == nil {
+			return nil
+		}
+		stripped := *section
+		stripped.Rows = append([]report.Row(nil), section.Rows...)
+		for index := range stripped.Rows {
+			stripped.Rows[index].Cost, amounts = publicCost(stripped.Rows[index].Cost, amounts)
+		}
+		stripped.Models = append([]report.ModelTotal(nil), section.Models...)
+		for index := range stripped.Models {
+			stripped.Models[index].Cost, amounts = publicCost(stripped.Models[index].Cost, amounts)
+		}
+		stripped.Total.Cost, amounts = publicCost(stripped.Total.Cost, amounts)
+		return &stripped
+	}
+	result.Anthropic = stripSection(input.Anthropic)
+	result.OpenAI = stripSection(input.OpenAI)
+	return result, amounts
+}
+
+func publicCost(cost report.Cost, amounts []observedAmount) (report.Cost, []observedAmount) {
+	observed := observedAmount{}
+	if cost.Amount != nil {
+		observed.present = true
+		observed.value = cost.Amount.String()
+	}
+	amounts = append(amounts, observed)
+	cost.Amount = nil
+	return cost, amounts
+}
+
+func assertCostEqual(t *testing.T, got, want report.Cost) {
+	t.Helper()
+	gotWithoutAmount, gotAmounts := publicCost(got, nil)
+	wantWithoutAmount, wantAmounts := publicCost(want, nil)
+	if gotAmounts[0] != wantAmounts[0] || gotWithoutAmount != wantWithoutAmount {
+		t.Fatalf("cost = %+v (amount %#v), want %+v (amount %#v)", gotWithoutAmount, gotAmounts[0], wantWithoutAmount, wantAmounts[0])
+	}
+}
+
+func assertReportEqual(t *testing.T, got, want report.Report) {
+	t.Helper()
+	gotWithoutAmounts, gotAmounts := withoutAmountRepresentation(got)
+	wantWithoutAmounts, wantAmounts := withoutAmountRepresentation(want)
+	if !reflect.DeepEqual(gotAmounts, wantAmounts) || !reflect.DeepEqual(gotWithoutAmounts, wantWithoutAmounts) {
+		t.Fatalf("complete report mismatch\n got: %#v\nwant: %#v\npublic amounts: %#v want %#v", gotWithoutAmounts, wantWithoutAmounts, gotAmounts, wantAmounts)
+	}
 }
 
 func TestQueryValuesCompleteOpenAIReportFromOnePricingSnapshot(t *testing.T) {
@@ -159,9 +217,7 @@ func TestQueryValuesCompleteOpenAIReportFromOnePricingSnapshot(t *testing.T) {
 			Total:  rangeTotal,
 		},
 	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("complete report mismatch\n got: %#v\nwant: %#v", got, want)
-	}
+	assertReportEqual(t, got, want)
 	if got.OpenAI.Rows[0].Cost.Amount == got.OpenAI.Rows[1].Cost.Amount || got.OpenAI.Rows[0].Cost.Amount == got.OpenAI.Models[0].Cost.Amount || got.OpenAI.Models[0].Cost.Amount == got.OpenAI.Total.Cost.Amount {
 		t.Fatal("aggregate amounts share mutable result pointers")
 	}
@@ -212,15 +268,18 @@ func TestQueryReportsEveryExclusivePricingOutcomeWithRequiredPrecedence(t *testi
 	for index, want := range wantModels {
 		model := got.OpenAI.Models[index]
 		row := got.OpenAI.Rows[index]
-		if model.Model != want.name || row.Model != want.name || !reflect.DeepEqual(model.PricingMatch, want.match) || !reflect.DeepEqual(row.PricingMatch, want.match) || !reflect.DeepEqual(model.Cost, want.cost) || !reflect.DeepEqual(row.Cost, want.cost) {
-			t.Fatalf("pricing outcome %d = row %+v model %+v; want %s %+v %+v", index, row, model, want.name, want.match, want.cost)
+		if model.Model != want.name || row.Model != want.name || !reflect.DeepEqual(model.PricingMatch, want.match) || !reflect.DeepEqual(row.PricingMatch, want.match) {
+			t.Fatalf("pricing outcome %d = row %+v model %+v; want %s %+v", index, row, model, want.name, want.match)
 		}
+		assertCostEqual(t, model.Cost, want.cost)
+		assertCostEqual(t, row.Cost, want.cost)
 	}
 	wantTotalCost := report.Cost{
 		Amount: amount(t, "0"), PricedTurns: 1,
 		Unpriced: report.UnpricedCoverage{UnknownModel: 1, AmbiguousModel: 1, MissingRate: 1, MissingUsage: 1, InconsistentUsage: 1},
 	}
-	if !reflect.DeepEqual(got.OpenAI.Total.Cost, wantTotalCost) || got.OpenAI.Total.Turns != 6 || *got.OpenAI.Total.Usage["input_tokens"].Sum != 31 || *got.OpenAI.Total.Usage["output_tokens"].Sum != 26 || *got.OpenAI.Total.Usage["cached_tokens"].Sum != 8 || got.OpenAI.Total.Usage["cached_tokens"].ReportedTurns != 2 || *got.OpenAI.Total.Usage["cache_write_tokens"].Sum != 5 || got.OpenAI.Total.Usage["cache_write_tokens"].ReportedTurns != 2 {
+	assertCostEqual(t, got.OpenAI.Total.Cost, wantTotalCost)
+	if got.OpenAI.Total.Turns != 6 || *got.OpenAI.Total.Usage["input_tokens"].Sum != 31 || *got.OpenAI.Total.Usage["output_tokens"].Sum != 26 || *got.OpenAI.Total.Usage["cached_tokens"].Sum != 8 || got.OpenAI.Total.Usage["cached_tokens"].ReportedTurns != 2 || *got.OpenAI.Total.Usage["cache_write_tokens"].Sum != 5 || got.OpenAI.Total.Usage["cache_write_tokens"].ReportedTurns != 2 {
 		t.Fatalf("mixed pricing/native total = %+v", got.OpenAI.Total)
 	}
 }
@@ -278,9 +337,7 @@ func TestQueryValuesBothNativeSurfacesByReportedModelOnly(t *testing.T) {
 		Pricing:   report.PricingProvenance{Dataset: "models.dev/api.json", Currency: "USD", Basis: "original_provider", ContextPolicy: "highest_tier", CacheWritePolicy: "single_rate", Version: "sha256:combined", Source: "fetched"},
 		Anthropic: section(anthropicTotal), OpenAI: section(openAITotal),
 	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("complete combined report mismatch\n got: %#v\nwant: %#v", got, want)
-	}
+	assertReportEqual(t, got, want)
 }
 
 func TestQueryRepricesAndRematchesEachCapturedSourceRevision(t *testing.T) {
@@ -356,6 +413,148 @@ func TestQueryUsesOneCapturedPricingRevisionAcrossBothSurfaces(t *testing.T) {
 	}
 }
 
+func TestQueryPreservesTurnCorrelationWhenRatesAreDeleted(t *testing.T) {
+	pricedSource := pricingSource(t, `{"mixed":{"id":"mixed","cost":{"input":1,"output":2,"cache_read":3,"cache_write":4}}}`, pricing.SnapshotStatus{Source: "fetched", Version: "sha256:correlated-priced"})
+	deletedCacheReadSource := pricingSource(t, `{"mixed":{"id":"mixed","cost":{"input":1,"output":2,"cache_write":4}}}`, pricing.SnapshotStatus{Source: "fetched", Version: "sha256:correlated-cache-read-deleted"})
+	deletedOutputSource := pricingSource(t, `{"mixed":{"id":"mixed","cost":{"input":1,"cache_read":3,"cache_write":4}}}`, pricing.SnapshotStatus{Source: "fetched", Version: "sha256:correlated-output-deleted"})
+	source := &mutablePricingSource{current: pricedSource}
+	path := stored(t,
+		turn("2026-09-01T01:00:00Z", "mixed", usage.OpenAIUsage{InputTokens: 10, OutputTokens: 2, CachedTokens: ptr(3), CacheWriteTokens: ptr(5)}),
+		turn("2026-09-01T02:00:00Z", "mixed", usage.OpenAIUsage{InputTokens: 10, OutputTokens: 2, CachedTokens: ptr(3)}),
+		turn("2026-09-02T01:00:00Z", "mixed", usage.OpenAIUsage{InputTokens: 10, OutputTokens: 2, CacheWriteTokens: ptr(5)}),
+		anthropicTurn("2026-09-01T01:00:00Z", "mixed", usage.AnthropicUsage{InputTokens: 10, OutputTokens: 2, CacheReadInputTokens: ptr(3), CacheCreationInputTokens: ptr(5)}),
+		anthropicTurn("2026-09-01T02:00:00Z", "mixed", usage.AnthropicUsage{InputTokens: 10, OutputTokens: 2, CacheReadInputTokens: ptr(3)}),
+		anthropicTurn("2026-09-02T01:00:00Z", "mixed", usage.AnthropicUsage{InputTokens: 10, OutputTokens: 2, CacheCreationInputTokens: ptr(5)}),
+	)
+	reader := report.New(path, source)
+	q := selection()
+	q.Surface = "all"
+
+	priced, err := reader.Query(context.Background(), q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantMatch := report.PricingMatch{Status: report.PricingMatchMatched, Provider: "openai", Model: "mixed", Method: report.PricingMatchByExact}
+	openAIRangeUsage := map[string]report.Metric{
+		"input_tokens": {Sum: ptr(30), ReportedTurns: 3}, "output_tokens": {Sum: ptr(6), ReportedTurns: 3},
+		"cached_tokens": {Sum: ptr(6), ReportedTurns: 2}, "cache_write_tokens": {Sum: ptr(10), ReportedTurns: 2},
+		"reasoning_tokens": {}, "total_tokens": {},
+	}
+	openAIDay1Usage := map[string]report.Metric{
+		"input_tokens": {Sum: ptr(20), ReportedTurns: 2}, "output_tokens": {Sum: ptr(4), ReportedTurns: 2},
+		"cached_tokens": {Sum: ptr(6), ReportedTurns: 2}, "cache_write_tokens": {Sum: ptr(5), ReportedTurns: 1},
+		"reasoning_tokens": {}, "total_tokens": {},
+	}
+	openAIDay2Usage := map[string]report.Metric{
+		"input_tokens": {Sum: ptr(10), ReportedTurns: 1}, "output_tokens": {Sum: ptr(2), ReportedTurns: 1},
+		"cached_tokens": {}, "cache_write_tokens": {Sum: ptr(5), ReportedTurns: 1},
+		"reasoning_tokens": {}, "total_tokens": {},
+	}
+	anthropicRangeUsage := map[string]report.Metric{
+		"input_tokens": {Sum: ptr(30), ReportedTurns: 3}, "output_tokens": {Sum: ptr(6), ReportedTurns: 3},
+		"cache_creation_input_tokens": {Sum: ptr(10), ReportedTurns: 2}, "cache_read_input_tokens": {Sum: ptr(6), ReportedTurns: 2},
+		"ephemeral_5m_input_tokens": {}, "ephemeral_1h_input_tokens": {}, "thinking_tokens": {},
+	}
+	anthropicDay1Usage := map[string]report.Metric{
+		"input_tokens": {Sum: ptr(20), ReportedTurns: 2}, "output_tokens": {Sum: ptr(4), ReportedTurns: 2},
+		"cache_creation_input_tokens": {Sum: ptr(5), ReportedTurns: 1}, "cache_read_input_tokens": {Sum: ptr(6), ReportedTurns: 2},
+		"ephemeral_5m_input_tokens": {}, "ephemeral_1h_input_tokens": {}, "thinking_tokens": {},
+	}
+	anthropicDay2Usage := map[string]report.Metric{
+		"input_tokens": {Sum: ptr(10), ReportedTurns: 1}, "output_tokens": {Sum: ptr(2), ReportedTurns: 1},
+		"cache_creation_input_tokens": {Sum: ptr(5), ReportedTurns: 1}, "cache_read_input_tokens": {},
+		"ephemeral_5m_input_tokens": {}, "ephemeral_1h_input_tokens": {}, "thinking_tokens": {},
+	}
+
+	assertCorrelated := func(name string, section *report.Section, amount string, rangeUsage, day1Usage, day2Usage map[string]report.Metric) {
+		t.Helper()
+		if section == nil || len(section.Rows) != 2 || len(section.Models) != 1 || section.Models[0].Model != "mixed" || section.Models[0].PricingMatch != wantMatch || section.Rows[0].PricingMatch != wantMatch || section.Rows[1].PricingMatch != wantMatch {
+			t.Fatalf("%s pricing rows/models = %+v", name, section)
+		}
+		for level, total := range map[string]report.Total{"section": section.Total, "model": section.Models[0].Total} {
+			if total.Turns != 3 || total.Cost.Amount == nil || total.Cost.Amount.String() != amount || total.Cost.PricedTurns != 1 || total.Cost.Unpriced != (report.UnpricedCoverage{MissingUsage: 2}) || !reflect.DeepEqual(total.Usage, rangeUsage) {
+				t.Fatalf("%s %s correlated total = %+v", name, level, total)
+			}
+		}
+		if first := section.Rows[0].Total; first.Turns != 2 || first.Cost.Amount == nil || first.Cost.Amount.String() != amount || first.Cost.PricedTurns != 1 || first.Cost.Unpriced != (report.UnpricedCoverage{MissingUsage: 1}) || !reflect.DeepEqual(first.Usage, day1Usage) {
+			t.Fatalf("%s day-1 correlated total = %+v", name, first)
+		}
+		if second := section.Rows[1].Total; second.Turns != 1 || second.Cost.Amount != nil || second.Cost.PricedTurns != 0 || second.Cost.Unpriced != (report.UnpricedCoverage{MissingUsage: 1}) || !reflect.DeepEqual(second.Usage, day2Usage) {
+			t.Fatalf("%s day-2 correlated total = %+v", name, second)
+		}
+	}
+	assertCorrelated("OpenAI", priced.OpenAI, "0.000035", openAIRangeUsage, openAIDay1Usage, openAIDay2Usage)
+	assertCorrelated("Anthropic", priced.Anthropic, "0.000043", anthropicRangeUsage, anthropicDay1Usage, anthropicDay2Usage)
+
+	for name, value := range map[string]any{
+		"report": priced, "row": priced.OpenAI.Rows[0], "model": priced.Anthropic.Models[0], "section total": priced.OpenAI.Total,
+		"embedded row": struct{ report.Row }{Row: priced.Anthropic.Rows[0]},
+	} {
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if text := strings.ToLower(string(encoded)); strings.Contains(text, "pricing") || strings.Contains(text, "cost") {
+			t.Fatalf("%s leaked staged pricing fields: %s", name, encoded)
+		}
+	}
+	server := httptest.NewServer(reporthttp.Handler(reader.Query))
+	t.Cleanup(server.Close)
+	client, err := reporthttp.NewClient(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire, err := client.Query(context.Background(), q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text := strings.ToLower(string(wire.JSON)); strings.Contains(text, "pricing") || strings.Contains(text, "cost") || wire.Report.Anthropic == nil || len(wire.Report.Anthropic.Rows) != 2 || wire.Report.OpenAI == nil || len(wire.Report.OpenAI.Models) != 1 {
+		t.Fatalf("populated legacy wire changed: %s", wire.JSON)
+	}
+
+	source.set(deletedCacheReadSource)
+	optionalDeleted, err := reader.Query(context.Background(), q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, section := range map[string]*report.Section{"OpenAI": optionalDeleted.OpenAI, "Anthropic": optionalDeleted.Anthropic} {
+		if section == nil || section.Models[0].PricingMatch != wantMatch || section.Total.Cost.Amount != nil || section.Total.Cost.PricedTurns != 0 || section.Total.Cost.Unpriced != (report.UnpricedCoverage{MissingRate: 2, MissingUsage: 1}) || section.Rows[0].Cost.Unpriced != (report.UnpricedCoverage{MissingRate: 2}) || section.Rows[1].Cost.Unpriced != (report.UnpricedCoverage{MissingUsage: 1}) {
+			t.Fatalf("%s optional-rate deletion = %+v", name, section)
+		}
+	}
+
+	source.set(deletedOutputSource)
+	deleted, err := reader.Query(context.Background(), q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertDeleted := func(name string, section *report.Section, rangeUsage, day1Usage, day2Usage map[string]report.Metric) {
+		t.Helper()
+		if section == nil || len(section.Rows) != 2 || len(section.Models) != 1 || section.Models[0].PricingMatch != wantMatch || section.Rows[0].PricingMatch != wantMatch || section.Rows[1].PricingMatch != wantMatch {
+			t.Fatalf("%s deleted-rate matches = %+v", name, section)
+		}
+		for level, total := range map[string]report.Total{"section": section.Total, "model": section.Models[0].Total} {
+			if total.Turns != 3 || total.Cost.Amount != nil || total.Cost.PricedTurns != 0 || total.Cost.Unpriced != (report.UnpricedCoverage{MissingRate: 3}) || !reflect.DeepEqual(total.Usage, rangeUsage) {
+				t.Fatalf("%s %s deleted-rate total = %+v", name, level, total)
+			}
+		}
+		if first := section.Rows[0].Total; first.Turns != 2 || first.Cost.Amount != nil || first.Cost.PricedTurns != 0 || first.Cost.Unpriced != (report.UnpricedCoverage{MissingRate: 2}) || !reflect.DeepEqual(first.Usage, day1Usage) {
+			t.Fatalf("%s day-1 deleted-rate total = %+v", name, first)
+		}
+		if second := section.Rows[1].Total; second.Turns != 1 || second.Cost.Amount != nil || second.Cost.PricedTurns != 0 || second.Cost.Unpriced != (report.UnpricedCoverage{MissingRate: 1}) || !reflect.DeepEqual(second.Usage, day2Usage) {
+			t.Fatalf("%s day-2 deleted-rate total = %+v", name, second)
+		}
+	}
+	assertDeleted("OpenAI", deleted.OpenAI, openAIRangeUsage, openAIDay1Usage, openAIDay2Usage)
+	assertDeleted("Anthropic", deleted.Anthropic, anthropicRangeUsage, anthropicDay1Usage, anthropicDay2Usage)
+	if optionalDeleted.Pricing.Version != "sha256:correlated-cache-read-deleted" || deleted.Pricing.Version != "sha256:correlated-output-deleted" || source.callCount() != 4 {
+		t.Fatalf("deleted-rate provenance/calls = %+v/%d", deleted.Pricing, source.callCount())
+	}
+	if priced.Pricing.Version != "sha256:correlated-priced" || priced.OpenAI.Total.Cost.Amount == nil || priced.OpenAI.Total.Cost.Amount.String() != "0.000035" || priced.Anthropic.Total.Cost.Amount == nil || priced.Anthropic.Total.Cost.Amount.String() != "0.000043" {
+		t.Fatal("rate deletion mutated the prior materialized report")
+	}
+}
+
 func TestQueryDistinguishesEmptyAndAllUnpriceableCostAmounts(t *testing.T) {
 	source := pricingSource(t, `{"known-unpriced":{"id":"known-unpriced"}}`, pricing.SnapshotStatus{Source: "fallback", Version: "sha256:unpriced"})
 	path := stored(t, turn("2026-09-01T01:00:00Z", "known-unpriced", usage.OpenAIUsage{InputTokens: 1, OutputTokens: 2}))
@@ -380,6 +579,20 @@ func TestQueryDistinguishesEmptyAndAllUnpriceableCostAmounts(t *testing.T) {
 	}
 }
 
+func TestQueryAcceptsActualMatcherRetentionWithinSharedLimit(t *testing.T) {
+	// Synthetic resource fixture: 180 distinct undated 1,000-byte models retain
+	// 181,080 source identity bytes and 722,880 matcher key bytes. Their literal
+	// 903,960-byte total is below the public 1 MiB request-wide limit.
+	source := pricingSourceRaw(t, string(selectedPricingArtifact(180, 1_000)), pricing.SnapshotStatus{Source: "fetched", Version: "sha256:actual-matcher-retention"})
+	got, err := report.New(stored(t), source).Query(context.Background(), selection())
+	if err != nil {
+		t.Fatalf("in-budget empty real-SQLite Query: %v", err)
+	}
+	if got.OpenAI == nil || got.OpenAI.Total.Turns != 0 || got.OpenAI.Total.Cost.Amount == nil || got.OpenAI.Total.Cost.Amount.String() != "0" {
+		t.Fatalf("in-budget empty report = %+v", got)
+	}
+}
+
 func TestQuerySharesIdentityRetentionAcrossSourceIndexMemoAndNativeSections(t *testing.T) {
 	source := pricingSource(t, `{"model":{"id":"model","cost":{"input":1,"output":1}}}`, pricing.SnapshotStatus{Source: "fallback", Version: "sha256:budget"})
 	zero := int64(0)
@@ -393,7 +606,7 @@ func TestQuerySharesIdentityRetentionAcrossSourceIndexMemoAndNativeSections(t *t
 	for _, tc := range []struct {
 		name  string
 		limit int
-	}{{"source projection", 10}, {"matcher index", 64}, {"memoized Reported model", 69}} {
+	}{{"source projection", 10}, {"matcher index", 46}, {"memoized Reported model", 51}} {
 		t.Run(tc.name, func(t *testing.T) {
 			tooSmall := report.NewReadLimitsForTest(path, source, report.MaxRows, report.MaxGroups, tc.limit)
 			failed, err := tooSmall.Query(context.Background(), q)
@@ -404,7 +617,7 @@ func TestQuerySharesIdentityRetentionAcrossSourceIndexMemoAndNativeSections(t *t
 		})
 	}
 
-	exact := report.NewReadLimitsForTest(path, source, report.MaxRows, report.MaxGroups, 70)
+	exact := report.NewReadLimitsForTest(path, source, report.MaxRows, report.MaxGroups, 52)
 	got, err := exact.Query(context.Background(), q)
 	if err != nil {
 		t.Fatal(err)
@@ -412,6 +625,43 @@ func TestQuerySharesIdentityRetentionAcrossSourceIndexMemoAndNativeSections(t *t
 	if got.Anthropic.Total.Turns != 1 || got.OpenAI.Total.Turns != 1 || got.Anthropic.Models[0].Model != "model" || got.OpenAI.Models[0].Model != "model" || got.Anthropic.Total.Cost.PricedTurns != 1 || got.OpenAI.Total.Cost.PricedTurns != 1 {
 		t.Fatalf("exact shared retention report = %+v", got)
 	}
+}
+
+func TestQueryDefersCaptureFailureUntilValidationButCancellationRemainsAuthoritative(t *testing.T) {
+	path := stored(t)
+	private := errors.New("private pricing failure")
+
+	t.Run("invalid calendar wins over capture failure", func(t *testing.T) {
+		calls := 0
+		source := pricingSourceFunc(func(context.Context, pricing.ProjectionLimit) (*pricing.Snapshot, pricing.SnapshotStatus, error) {
+			calls++
+			return nil, pricing.SnapshotStatus{}, private
+		})
+		q := selection()
+		q.Since = "2026-02-30"
+		got, err := report.New(path, source).Query(context.Background(), q)
+		var failure *report.Error
+		if calls != 1 || !errors.As(err, &failure) || failure.Code != report.InvalidQuery || !reflect.DeepEqual(got, report.Report{}) || strings.Contains(err.Error(), "private") {
+			t.Fatalf("invalid-calendar precedence calls=%d report=%+v error=%v", calls, got, err)
+		}
+	})
+
+	t.Run("context cancellation wins over invalid calendar", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		calls := 0
+		source := pricingSourceFunc(func(context.Context, pricing.ProjectionLimit) (*pricing.Snapshot, pricing.SnapshotStatus, error) {
+			calls++
+			cancel()
+			return nil, pricing.SnapshotStatus{}, private
+		})
+		q := selection()
+		q.Since = "2026-02-30"
+		got, err := report.New(path, source).Query(ctx, q)
+		var failure *report.Error
+		if calls != 1 || !errors.Is(err, context.Canceled) || !errors.As(err, &failure) || failure.Code != report.Unavailable || !reflect.DeepEqual(got, report.Report{}) {
+			t.Fatalf("cancellation precedence calls=%d report=%+v error=%v", calls, got, err)
+		}
+	})
 }
 
 func TestQuerySafelyTranslatesSourceFailureAndProjectionCancellation(t *testing.T) {
