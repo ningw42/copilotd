@@ -116,17 +116,19 @@ matching rules, models.dev structure, price selection, or token nesting.
 
 The reporter accepts a pricing source supplied by the composition root; it does
 not create an HTTP client. `report.New(databasePath, pricing.Source)` requires
-that dependency explicitly. At Query entry, before timezone/date resolution and
-bucket construction, Query calls `Source.Current(ctx, ProjectionLimit)` exactly
-once to capture one local value and status while applying the caller's
-provider/model identity-byte projection limit. It defers a non-cancellation
-capture failure until semantic/calendar validation completes, so invalid query
-input keeps its established precedence; context cancellation remains
-authoritative. A report-specific limit failure does not reject an accepted cached
-value. Query then derives one immutable pricing/matching snapshot for the whole
-report. A refresh during later calendar or database work cannot change that
-report's prices or model matches. Tests provide fixed data through the same
-source seam.
+that dependency explicitly. The source retains one immutable parsed projection
+for its effective content hash while the generic cached value remains the owner
+of the authoritative raw bytes and refresh lifecycle. At Query entry, before
+timezone/date resolution and bucket construction, Query calls
+`Source.Current(ctx, ProjectionLimit)` exactly once to capture that local value
+and the current status while applying the caller's provider/model identity-byte
+projection limit. It defers a non-cancellation capture failure until
+semantic/calendar validation completes, so invalid query input keeps its
+established precedence; context cancellation remains authoritative. A
+report-specific limit failure does not reject an accepted cached value. Query
+then derives one immutable report-local matching snapshot for the whole report.
+A refresh during later calendar or database work cannot change that report's
+prices or model matches. Tests provide fixed data through the same source seam.
 
 Matching and arithmetic are in-process modules. Test them through their
 interfaces with literal data; no adapter abstraction is needed for pure
@@ -203,12 +205,18 @@ integer and 18 fractional digits after expansion; reject an unsupported rate
 rather than rounding it or allowing an exponent to cause unbounded allocation.
 Unknown price fields are ignored; malformed recognized fields reject the fetch.
 
-Parse accepted bytes once per report, build the pricing/matching index once, and
-memoize each distinct Reported model's resolution within that report. Do not
-parse or search the full artifact per Turn, or memoize only by model name across
-snapshot revisions. The current artifact is about 4.6 MB; do not assume Codex's
-small parsed model count applies. Include snapshot parsing in the existing report
-work budget and check cancellation during projection/index construction.
+Parse accepted bytes into one immutable derived projection per effective content
+hash, not once per report. Seed the embedded-floor projection only when an
+enabled pricing source is constructed; after a changed accepted value is
+published, the first `Current` observation builds and atomically replaces the
+one-entry derived projection. Cache hits still enforce each report's identity
+budget, and a limit or cancellation failure never publishes a partial
+projection. Build the report-local matching index once and memoize each distinct
+Reported model's resolution within that report. Do not parse or search the full
+artifact per Turn, or memoize only by model name across snapshot revisions. The
+current artifact is about 4.6 MB; do not assume Codex's small parsed model count
+applies. Include cold/version-change projection in the initiating work context
+and check cancellation during projection/index construction.
 
 A valid newer dataset can remove a model or its rate. Do not merge deleted
 entries from an older dataset into the new one: that would create a mixed,
@@ -566,9 +574,11 @@ short explanatory text, not a new interactive presentation.
 ## 9. Failure and resource behavior
 
 Price-source failures cannot interrupt inference, turn off readiness, or request
-a writer flush. A report uses one local pricing snapshot and one database read
-snapshot; neither is retained while writing the HTTP response. Unpriced Turns
-are successful report data, not HTTP failures.
+a writer flush. A report uses one captured immutable pricing projection and one
+database read snapshot. Report-local matching/memo state and the database
+snapshot are not retained while writing the HTTP response; the pricing source
+may retain its current content-hash-keyed parsed projection as derived cache
+state. Unpriced Turns are successful report data, not HTTP failures.
 
 Malformed fetched data never replaces accepted bytes. An unexpected failure to
 interpret the validated effective snapshot is an internal report failure, not

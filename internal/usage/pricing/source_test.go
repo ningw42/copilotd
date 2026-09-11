@@ -58,6 +58,37 @@ func TestCachedSourceServesValidatedEmbeddedFloorWhenRefreshIsPinned(t *testing.
 	}
 }
 
+func TestCachedSourceReusesParsedSnapshotForContentVersion(t *testing.T) {
+	t.Parallel()
+
+	const artifact = `{"openai":{"id":"openai","models":{"cached":{"id":"cached","cost":{"input":1,"output":2}}}},"anthropic":{"id":"anthropic","models":{}},"google":{"id":"google","models":{}},"xai":{"id":"xai","models":{}}}`
+	source := cachedSourceForArtifact(t, []byte(artifact))
+	limit := pricing.ProjectionLimit{MaxIdentityBytes: 1 << 20}
+
+	first, firstStatus, err := source.Current(context.Background(), limit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, secondStatus, err := source.Current(context.Background(), limit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != second {
+		t.Fatal("unchanged pricing content was parsed into a second immutable snapshot")
+	}
+	if !reflect.DeepEqual(secondStatus, firstStatus) {
+		t.Fatalf("reused snapshot status = %#v, want current %#v", secondStatus, firstStatus)
+	}
+	if snapshot, status, err := source.Current(context.Background(), pricing.ProjectionLimit{}); !errors.Is(err, pricing.ErrProjectionLimit) || snapshot != nil || status != (pricing.SnapshotStatus{}) {
+		t.Fatalf("cached snapshot under zero-byte limit = %#v, %#v, %v; want projection-limit rejection", snapshot, status, err)
+	}
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if snapshot, status, err := source.Current(cancelled, limit); !errors.Is(err, context.Canceled) || snapshot != nil || status != (pricing.SnapshotStatus{}) {
+		t.Fatalf("cached snapshot under canceled context = %#v, %#v, %v; want cancellation", snapshot, status, err)
+	}
+}
+
 func TestCachedSourceRefreshReplacesTheWholeSnapshotWithoutCredentials(t *testing.T) {
 	t.Parallel()
 
@@ -175,7 +206,7 @@ func TestCachedSourceRefreshAcceptsReplacementWithDeletedRates(t *testing.T) {
 	registry := cache.NewRegistry()
 	source := pricing.NewCachedSource(pricing.CacheConfig{RefreshInterval: time.Hour}, pricing.NewRemote(server.URL, server.Client().Transport), registry, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	registry.Prime(context.Background())
-	_, firstStatus, err := source.Current(context.Background(), pricing.ProjectionLimit{MaxIdentityBytes: int(^uint(0) >> 1)})
+	firstSnapshot, firstStatus, err := source.Current(context.Background(), pricing.ProjectionLimit{MaxIdentityBytes: int(^uint(0) >> 1)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -195,6 +226,9 @@ func TestCachedSourceRefreshAcceptsReplacementWithDeletedRates(t *testing.T) {
 	}
 	if replacementStatus.Source != "fetched" || replacementStatus.Version == firstStatus.Version || replacementStatus.LastSuccess == nil {
 		t.Fatalf("replacement status = %#v, first = %#v; want successful distinct fetched replacement", replacementStatus, firstStatus)
+	}
+	if snapshot == firstSnapshot {
+		t.Fatal("distinct pricing content reused the previous parsed snapshot")
 	}
 	deleted, ok := snapshot.Rates(pricing.Identity{Provider: "openai", Model: "deleted"})
 	if !ok || rateString(deleted.Input) != "1" || deleted.Output != nil {
