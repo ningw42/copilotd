@@ -4,11 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"encoding/json/jsontext"
 	"errors"
 	"io"
 	"strconv"
 	"time"
-	"unicode/utf8"
 
 	"github.com/ningw42/copilotd/internal/usage/report"
 )
@@ -244,94 +244,31 @@ func (d *wireDecoder) total(o object, section bool, names []string) report.Total
 	return total
 }
 
-// encoding/json repairs invalid UTF-8 and lone surrogate escapes. Reject those
-// before tokenization, and reject duplicate decoded member names at every depth.
+// jsontext validates strict Unicode and unique decoded member names by default.
 func unambiguousJSON(ctx context.Context, body []byte) error {
-	if !utf8.Valid(body) || !json.Valid(body) {
-		return errProtocol
-	}
-	for i := 0; i < len(body); i++ {
-		if i%4096 == 0 && ctx.Err() != nil {
-			return ctx.Err()
+	decoder := jsontext.NewDecoder(bytes.NewReader(body))
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
 		}
-		if body[i] != '"' {
-			continue
+		if _, err := decoder.ReadToken(); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return errProtocol
 		}
-		for i++; i < len(body) && body[i] != '"'; i++ {
-			if body[i] != '\\' {
-				continue
-			}
-			i++
-			if body[i] != 'u' {
-				continue
-			}
-			n, _ := strconv.ParseUint(string(body[i+1:i+5]), 16, 16)
-			i += 4
-			if n >= 0xdc00 && n <= 0xdfff {
-				return errProtocol
-			}
-			if n >= 0xd800 && n <= 0xdbff {
-				if i+6 >= len(body) || body[i+1] != '\\' || body[i+2] != 'u' {
-					return errProtocol
-				}
-				low, e := strconv.ParseUint(string(body[i+3:i+7]), 16, 16)
-				if e != nil || low < 0xdc00 || low > 0xdfff {
-					return errProtocol
-				}
-				i += 6
-			}
+		if decoder.StackDepth() == 0 {
+			break
 		}
 	}
-	decoder := json.NewDecoder(bytes.NewReader(body))
-	decoder.UseNumber()
-	if err := uniqueValue(ctx, decoder); err != nil {
+	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if _, err := decoder.Token(); err != io.EOF {
-		return errProtocol
-	}
-	return nil
-}
-func uniqueValue(ctx context.Context, d *json.Decoder) error {
-	if ctx.Err() != nil {
-		return ctx.Err()
-	}
-	token, err := d.Token()
-	if err != nil {
-		return errProtocol
-	}
-	delim, ok := token.(json.Delim)
-	if !ok {
-		return nil
-	}
-	switch delim {
-	case '{':
-		names := map[string]bool{}
-		for d.More() {
-			key, err := d.Token()
-			if err != nil {
-				return errProtocol
-			}
-			name, ok := key.(string)
-			if !ok || names[name] {
-				return errProtocol
-			}
-			names[name] = true
-			if err := uniqueValue(ctx, d); err != nil {
-				return err
-			}
+	if _, err := decoder.ReadToken(); err != io.EOF {
+		if ctx.Err() != nil {
+			return ctx.Err()
 		}
-	case '[':
-		for d.More() {
-			if err := uniqueValue(ctx, d); err != nil {
-				return err
-			}
-		}
-	default:
 		return errProtocol
 	}
-	if _, err := d.Token(); err != nil {
-		return errProtocol
-	}
-	return nil
+	return ctx.Err()
 }

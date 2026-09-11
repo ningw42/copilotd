@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -153,7 +154,39 @@ func TestCommandUnverifiableZoneinfoRootFailsBeforeHTTP(t *testing.T) {
 		}
 		return os.Lstat(files.path(name))
 	}
+	files.system.open = func(string) (*os.File, error) {
+		t.Fatal("fatal root traversal reached zone file open")
+		return nil, nil
+	}
 	assertLocalTimezone(t, files, "")
+}
+
+func TestCommandPreviouslyObservedZoneinfoRootMissingFailsBeforeFileOpen(t *testing.T) {
+	files := newTimezoneFiles(t, "linux", nil)
+	files.zone("/usr/share/zoneinfo/Europe/Berlin")
+	files.link("/etc/localtime", "/usr/share/zoneinfo/Europe/Berlin")
+	rootObservations := 0
+	files.system.lstat = func(name string) (os.FileInfo, error) {
+		if name == "/usr/share/zoneinfo" {
+			rootObservations++
+			if rootObservations == 2 {
+				return nil, os.ErrNotExist
+			}
+		}
+		return os.Lstat(files.path(name))
+	}
+	opened := false
+	files.system.open = func(name string) (*os.File, error) {
+		opened = true
+		return os.Open(files.path(name))
+	}
+	client, options, requested := localTimezoneCommand(t)
+	options.localSystem = files.system
+	var out bytes.Buffer
+	err := Run(context.Background(), client, options, &out)
+	if err == nil || !strings.Contains(err.Error(), "cannot determine a named local timezone") || strings.Contains(err.Error(), "/usr/share/zoneinfo") || strings.Contains(err.Error(), os.ErrNotExist.Error()) || rootObservations != 2 || opened || len(*requested) != 0 || out.Len() != 0 {
+		t.Fatalf("err=%v root observations=%d opened=%t requests=%v stdout=%s", err, rootObservations, opened, *requested, out.String())
+	}
 }
 
 func TestCommandPreservesMacOSVersionedRootAliasSuffix(t *testing.T) {
@@ -172,21 +205,118 @@ func TestCommandPreservesMacOSVersionedRootAliasSuffix(t *testing.T) {
 	}
 }
 
-func TestCommandChangedZoneinfoRootSetFailsBeforeHTTP(t *testing.T) {
+func TestCommandChangedUnusedAbsentZoneinfoRootSucceeds(t *testing.T) {
 	files := newTimezoneFiles(t, "linux", nil)
 	files.zone("/usr/share/zoneinfo/Europe/Berlin")
 	files.link("/etc/localtime", "/usr/share/zoneinfo/Europe/Berlin")
-	// Change an initially absent recognized root while the final file is opened.
-	// Keep parent directory metadata stable so the changed root itself matters.
-	etc, err := os.Stat(files.path("/etc"))
+	changed := false
+	files.system.open = func(name string) (*os.File, error) {
+		if !changed {
+			changed = true
+			files.link("/etc/zoneinfo", "/usr/share/zoneinfo")
+		}
+		return os.Open(files.path(name))
+	}
+	assertLocalTimezone(t, files, "Europe/Berlin")
+}
+
+func TestCommandChangedUnusedExistingZoneinfoRootSucceeds(t *testing.T) {
+	files := newTimezoneFiles(t, "linux", nil)
+	files.zone("/usr/share/zoneinfo/Europe/Berlin")
+	files.file("/unused/first/.keep", nil)
+	files.file("/unused/second/.keep", nil)
+	files.link("/usr/share/lib/zoneinfo", "/unused/first")
+	files.link("/etc/localtime", "/usr/share/zoneinfo/Europe/Berlin")
+	changed := false
+	files.system.open = func(name string) (*os.File, error) {
+		if !changed {
+			changed = true
+			if err := os.Remove(files.path("/usr/share/lib/zoneinfo")); err != nil {
+				t.Fatal(err)
+			}
+			files.link("/usr/share/lib/zoneinfo", "/unused/second")
+		}
+		return os.Open(files.path(name))
+	}
+	assertLocalTimezone(t, files, "Europe/Berlin")
+}
+
+func TestCommandInitialTimezoneRootMissingTargetDistinction(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(timezoneFiles)
+		want  string
+	}{
+		{"dangling absolute root target", func(f timezoneFiles) {
+			f.link("/usr/share/lib/zoneinfo", "/missing/zoneinfo")
+		}, ""},
+		{"missing final root target component", func(f timezoneFiles) {
+			f.file("/missing/.keep", nil)
+			f.link("/usr/share/lib/zoneinfo", "/missing/zoneinfo")
+		}, ""},
+		{"nested relative target retains required suffix", func(f timezoneFiles) {
+			f.file("/data/.keep", nil)
+			f.link("/alias", "data")
+			f.link("/usr/share/lib/zoneinfo", "../../../alias/required")
+		}, ""},
+		{"absent ordinary root", func(timezoneFiles) {}, "Europe/Berlin"},
+		{"absent root suffix after parent alias", func(f timezoneFiles) {
+			f.file("/alternate/lib/.keep", nil)
+			f.link("/usr/share/lib", "/alternate/lib")
+		}, "Europe/Berlin"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			files := newTimezoneFiles(t, "linux", nil)
+			files.zone("/usr/share/zoneinfo/Europe/Berlin")
+			files.link("/etc/localtime", "/usr/share/zoneinfo/Europe/Berlin")
+			tc.setup(files)
+			assertLocalTimezone(t, files, tc.want)
+		})
+	}
+}
+
+func TestCommandChangedSelectedDirectoryMetadataSucceeds(t *testing.T) {
+	files := newTimezoneFiles(t, "linux", nil)
+	files.zone("/usr/share/zoneinfo/Europe/Berlin")
+	files.link("/etc/localtime", "/usr/share/zoneinfo/Europe/Berlin")
+	root, err := os.Stat(files.path("/usr/share/zoneinfo"))
 	if err != nil {
 		t.Fatal(err)
 	}
+	changed := false
 	files.system.open = func(name string) (*os.File, error) {
-		files.link("/etc/zoneinfo", "/usr/share/zoneinfo")
-		if err := os.Chtimes(files.path("/etc"), etc.ModTime(), etc.ModTime()); err != nil {
+		if !changed {
+			changed = true
+			files.file("/usr/share/zoneinfo/unrelated", nil)
+			modified := root.ModTime().Add(time.Hour)
+			if err := os.Chtimes(files.path("/usr/share/zoneinfo"), modified, modified); err != nil {
+				t.Fatal(err)
+			}
+			current, err := os.Stat(files.path("/usr/share/zoneinfo"))
+			if err != nil || current.ModTime().Equal(root.ModTime()) {
+				t.Fatalf("directory metadata did not change: before=%v after=%v err=%v", root.ModTime(), current.ModTime(), err)
+			}
+		}
+		return os.Open(files.path(name))
+	}
+	assertLocalTimezone(t, files, "Europe/Berlin")
+}
+
+func TestCommandChangedSelectedRootAliasFailsBeforeHTTP(t *testing.T) {
+	files := newTimezoneFiles(t, "linux", nil)
+	first := "/nix/store/first-tzdata/share/zoneinfo"
+	second := "/nix/store/second-tzdata/share/zoneinfo"
+	files.zone(first + "/Europe/Berlin")
+	files.zone(second + "/Europe/Berlin")
+	files.link("/etc/zoneinfo", first)
+	// The source path reaches the store directly. Only the root walk observes
+	// the alias that establishes the Europe/Berlin suffix.
+	files.link("/etc/localtime", first+"/Europe/Berlin")
+	files.system.open = func(name string) (*os.File, error) {
+		if err := os.Remove(files.path("/etc/zoneinfo")); err != nil {
 			t.Fatal(err)
 		}
+		files.link("/etc/zoneinfo", second)
 		return os.Open(files.path(name))
 	}
 	assertLocalTimezone(t, files, "")
@@ -211,6 +341,55 @@ func TestCommandInconsistentOpenedZoneFileFailsBeforeHTTP(t *testing.T) {
 	files.link("/etc/localtime", "/usr/share/zoneinfo/Europe/Berlin")
 	files.system.open = func(string) (*os.File, error) { return os.Open(files.path("/replacement")) }
 	assertLocalTimezone(t, files, "")
+}
+
+func TestCommandChangedSelectedTZifFailsBeforeHTTP(t *testing.T) {
+	for _, replace := range []bool{false, true} {
+		t.Run(fmt.Sprintf("replace=%t", replace), func(t *testing.T) {
+			files := newTimezoneFiles(t, "linux", nil)
+			selected := "/usr/share/zoneinfo/Europe/Berlin"
+			files.zone(selected)
+			files.zone("/replacement")
+			files.link("/etc/localtime", selected)
+			opened := false
+			files.system.open = func(name string) (*os.File, error) {
+				file, err := os.Open(files.path(name))
+				opened = err == nil
+				return file, err
+			}
+			changed := false
+			files.system.lstat = func(name string) (os.FileInfo, error) {
+				if opened && !changed && name == selected {
+					changed = true
+					if replace {
+						return os.Lstat(files.path("/replacement"))
+					}
+					before, err := os.Stat(files.path(selected))
+					if err != nil {
+						t.Fatal(err)
+					}
+					file, err := os.OpenFile(files.path(selected), os.O_WRONLY, 0)
+					if err != nil {
+						t.Fatal(err)
+					}
+					_, writeErr := file.WriteAt([]byte{'X'}, 0)
+					closeErr := file.Close()
+					if writeErr != nil || closeErr != nil {
+						t.Fatalf("mutate TZif: write=%v close=%v", writeErr, closeErr)
+					}
+					modified := before.ModTime().Add(time.Hour)
+					if err := os.Chtimes(files.path(selected), modified, modified); err != nil {
+						t.Fatal(err)
+					}
+				}
+				return os.Lstat(files.path(name))
+			}
+			assertLocalTimezone(t, files, "")
+			if !changed {
+				t.Fatal("selected TZif was not changed")
+			}
+		})
+	}
 }
 
 func TestCommandChangedSystemTimezoneFailsBeforeHTTP(t *testing.T) {

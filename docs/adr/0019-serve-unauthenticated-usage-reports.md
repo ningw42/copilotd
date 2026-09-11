@@ -55,7 +55,13 @@ not an inference-authentication exemption accidentally inherited from probes.
   interference but are not resource isolation from untrusted traffic.
 - The CLI defaults to the terminal host's named timezone and sends it explicitly.
   Ambiguous local detection requires `--timezone`; neither a current UTC offset
-  nor the daemon's local clock silently replaces that choice.
+  nor the daemon's local clock silently replaces that choice. Filesystem
+  discovery initially evaluates every recognized root for ambiguity, forbidden
+  provenance, and unreadable evidence. After one name is selected, its final
+  consistency check is deliberately limited to the selected filename path and
+  the root alias that established that name. Selected directory identity/type,
+  symlink, and TZif changes still fail; unrelated directory size/mtime activity
+  and later changes to unused roots do not.
 - The CLI requires a running reachable daemon; offline history and reporting
   while the Usage meter is disabled remain outside this design.
 - The HTTP handler has no upstream dependency and is not a project Endpoint,
@@ -78,7 +84,10 @@ detailed native period/range tables, and original-byte JSON output now share the
 same report and client validator. Terminal tables derive a presentation-only
 `Total` for each period from its validated Reported-model rows; this does not
 change or replace the server's per-model and whole-range aggregates or the
-original-byte JSON. No Catalog normalization or Requested-model substitution is
-introduced. External SQLite inspection remains supported alongside the new
+original-byte JSON. Those terminal-only Turns, sum, and coverage accumulations
+use checked int64 arithmetic. Overflow in independently valid but inconsistent
+rows fails text rendering before stdout; JSON still emits its validated original
+bytes. No Catalog normalization or Requested-model substitution is introduced.
+External SQLite inspection remains supported alongside the new
 bounded HTTP path. [#212 contention/lifecycle evidence](../research/2026-09-08-usage-reporting-concurrency.md)
 and #213's native release gate remain distinct from feature implementation.

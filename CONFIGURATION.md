@@ -109,10 +109,14 @@ second precedence order.
   containing `zoneinfo`. macOS additionally recognizes Apple's final `zoneinfo`
   directory component in versioned/resolved layouts. Preserve the name suffix;
   distinct candidate names are ambiguous rather than silently canonicalized.
-- Reject `right/` and `posix/` subtrees, loops, missing/unreadable targets, ordinary
-  copied/custom files, and changed path observations. Read at most 1 MiB of TZif
-  evidence and recheck path/file identity; do not reverse-match bytes, current
-  offsets/abbreviations, `time.Local`, or stale `/etc/timezone` metadata.
+- Reject `right/` and `posix/` subtrees, loops, missing/unreadable targets, and
+  ordinary copied/custom files. Initial discovery checks every recognized root
+  for unreadable evidence, candidate ambiguity, and forbidden provenance.
+- Read at most 1 MiB of TZif evidence. After selecting one name, recheck its
+  filename path and the root alias that established it: selected symlink and TZif
+  changes, or selected directory identity/type changes, fail. Unrelated directory
+  size/mtime activity and later changes to unused roots do not. Do not reverse-match
+  bytes, current offsets/abbreviations, `time.Local`, or stale `/etc/timezone` metadata.
 - Native Windows always requires `--timezone`, `COPILOTD_TIMEZONE`, or selected
   TOML `timezone`. No registry/CLDR mapping or Windows `TZ` inference is used.
   WSL follows Linux. Explicit named loading retains the embedded fallback on
@@ -169,7 +173,10 @@ floating point. The client validates case-sensitive required fields, duplicate
 names, Unicode, integer ranges, and metric coverage before any output, while
 allowing additive fields. Text derives terminal-only period totals from the
 validated period/model rows without changing JSON or reconstructing calendar
-rules. It uses comma-separated exact counts, ASCII-escaped model identities,
+rules. Their Turns, sum, and coverage arithmetic is checked int64; overflow of
+inconsistent rows fails the complete text rendering before stdout, while JSON
+continues to emit the independently validated original bytes. Text uses
+comma-separated exact counts, ASCII-escaped model identities,
 `—` for unreported metrics, and `*` plus coverage for partial optional metrics.
 Anthropic renders first with Turns, Uncached input, Output, Cache create, and
 Cache read; OpenAI follows with Turns, Input, Output, Cache write, and Cache read.

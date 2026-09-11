@@ -85,7 +85,9 @@ appending `/usage/v1/report`. The command is an HTTP client, never an offline
 SQLite reader. It shows exact native counts and stored-Turn coverage in
 Reported-model rows grouped by period, with a `Day`, `Week`, `Month`, or `Year`
 first-column heading. Each period starts with a terminal-only `Total` derived
-from its validated model rows and separated from the model breakdown.
+from its validated model rows and separated from the model breakdown. Text uses
+checked int64 subtotal arithmetic and fails before stdout if inconsistent rows
+would overflow; `--json` still emits the independently validated original bytes.
 Whole-range per-model and section totals remain in JSON but are not repeated in
 the text tables. Anthropic appears first with **Uncached input**,
 Output, Cache create, and Cache read; OpenAI retains complete Input, Output, Cache write,

@@ -257,8 +257,9 @@ untrusted diagnostic text.
 
 `--json` validates the bounded response before writing its original JSON bytes
 plus a final newline; this preserves unknown additive fields and exact numbers.
-Build/validate the whole report before any terminal output. A stdout write error
-can still leave partial output; it never turns into success. Signal cancellation
+Build/validate the whole report and complete text rendering before any terminal
+output. A stdout write error can still leave partial output; it never turns into
+success. Signal cancellation
 uses the command context; it does not request daemon shutdown.
 
 ## 5. Timezone and calendar policy
@@ -345,11 +346,19 @@ rules snapshot would add build/data ownership without guaranteeing that a
 terminal's custom rules match the daemon. Custom automatic-discovery inputs are
 rejected instead. Newer-than-bundled names may require a newer daemon; never
 mislabel that error as UTC. #210 implements the Unix discovery procedure with
-40-hop component-aware traversal, bounded TZif verification (at most 1 MiB), and
-path/file observation rechecks. Public-command fixtures cover Linux/macOS layouts
-and Windows explicit-only behavior; Linux static-executable isolation also covers
-system discovery and embedded loading. Native execution remains a revision-specific
-release-verification obligation; deterministic fixtures are not certification.
+40-hop component-aware traversal and bounded TZif verification (at most 1 MiB).
+Initial discovery still walks every recognized root: unreadable evidence fails,
+and all roots participate in candidate ambiguity and `right/`/`posix/` provenance
+classification. Each root walk begins with the selected filename observations;
+once exactly one name remains, the first root that establishes it owns the
+consistency proof. The final recheck covers that filename path, the establishing
+root alias, selected directory identity/type, symlink targets, and regular TZif
+identity/mode/size/mtime. Directory size/mtime alone and later changes to unused
+or initially absent alternative roots are deliberately outside that proof.
+Public-command fixtures cover Linux/macOS layouts and Windows explicit-only
+behavior; Linux static-executable isolation also covers system discovery and
+embedded loading. Native execution remains a revision-specific release-verification
+obligation; deterministic fixtures are not certification.
 See the [verification pipeline and evidence guide](../verification/usage-reporting.md).
 
 ### Range and buckets
@@ -809,10 +818,14 @@ Within each section, label the first column with the selected grouping
 (`Day`, `Week`, `Month`, or `Year`). Derive a terminal-only `Total` from each
 period's validated Reported-model rows, show the period label on that row, and put
 a horizontal table rule before its multiline model breakdown. Another rule
-separates the breakdown from the next period. Sum metric values and their
-reported-Turn coverage independently so NULL, reported zero, and partial
-coverage retain their meaning. Do not add tree markers or an `All` row, and do
-not change the HTTP/JSON representation. Do not render the whole-range per-model
+separates the breakdown from the next period. Sum Turns, metric values, and
+reported-Turn coverage independently with checked int64 arithmetic so NULL,
+reported zero, and partial coverage retain their meaning. If independently
+valid but inconsistent model rows overflow a text subtotal, fail the complete
+text rendering before stdout rather than wrapping, saturating, or using floating
+point. This text-only policy does not alter validated original-byte JSON. Do not
+add tree markers or an `All` row, and do not change the HTTP/JSON representation.
+Do not render the whole-range per-model
 or section totals as duplicate terminal rows; they remain in JSON. Do not sum
 unlike Surface inputs into a grand total. Model strings are rendered verbatim in
 identity but escaped for terminal safety: quote/escape controls, newlines, escape
