@@ -3,6 +3,7 @@ package pricing
 import (
 	"context"
 	"crypto/sha256"
+	_ "embed"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -13,7 +14,6 @@ import (
 	"time"
 
 	"github.com/ningw42/copilotd/internal/cache"
-	"github.com/ningw42/copilotd/internal/usage/pricing/modelsdevdata"
 )
 
 const (
@@ -25,7 +25,8 @@ const (
 	decodedResponseLimit = 8 << 20
 )
 
-var embeddedArtifact = modelsdevdata.Artifact()
+//go:embed modelsdevdata/api.json
+var embeddedArtifact []byte
 
 var embeddedParsedSnapshot = sync.OnceValue(func() *Snapshot {
 	snapshot, err := ParseSnapshot(context.Background(), embeddedArtifact)

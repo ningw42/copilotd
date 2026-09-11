@@ -1,5 +1,5 @@
-// Package modelsdevdata embeds the audited models.dev pricing floor and its
-// independently recorded identities.
+// Package modelsdevdata embeds the audited models.dev license and the
+// independently recorded artifact and source identities.
 package modelsdevdata
 
 import (
@@ -27,9 +27,6 @@ type Record struct {
 	} `json:"source_audit"`
 }
 
-//go:embed api.json
-var artifact []byte
-
 //go:embed LICENSE
 var license []byte
 
@@ -37,9 +34,6 @@ var license []byte
 var identityJSON []byte
 
 var identity = mustIdentity(identityJSON)
-
-// Artifact returns a copy of the unchanged bytes fetched from models.dev.
-func Artifact() []byte { return append([]byte(nil), artifact...) }
 
 // License returns a copy of the applicable vendored license.
 func License() []byte { return append([]byte(nil), license...) }
