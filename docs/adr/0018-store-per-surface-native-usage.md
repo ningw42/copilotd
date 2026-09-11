@@ -71,8 +71,9 @@ Estimated-cost reporting consumes this frozen native evidence without changing
 it: OpenAI cache counts remain subsets of complete input, Anthropic cache counts
 remain additive, reasoning/thinking/TTL subsets are not charged again, and one
 aggregate cache-creation count uses the selected single cache-write rate. Missing
-or inconsistent evidence excludes the whole Turn from the monetary subtotal
-rather than normalizing or fabricating counters.
+required pricing or native-formula evidence, or an invalid chargeable
+relationship, excludes the whole Turn from the monetary subtotal. Rates for
+known-zero counts and ignored reasoning/thinking/TTL details are not required.
 
 ## Observer policy
 

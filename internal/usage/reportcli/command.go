@@ -449,9 +449,6 @@ func formatUSD(amount pricing.Amount) string {
 	if fraction[3] >= '5' {
 		digits = incrementDecimal(digits)
 	}
-	if len(digits) <= 3 {
-		digits = strings.Repeat("0", 4-len(digits)) + digits
-	}
 	return digits[:len(digits)-3] + "." + digits[len(digits)-3:]
 }
 
