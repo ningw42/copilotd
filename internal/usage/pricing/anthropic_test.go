@@ -250,23 +250,144 @@ func TestCalculateAnthropicAppliesExclusionPrecedence(t *testing.T) {
 	}
 }
 
-func TestCalculateAnthropicIgnoresTTLSubdivisionsAndThinking(t *testing.T) {
+func TestCalculateAnthropicTTLSubdivisionsDoNotAffectAmountOrEligibility(t *testing.T) {
 	t.Parallel()
 
 	cacheRead, cacheCreation := int64(6000), int64(2000)
-	fiveMinutes, oneHour, thinking := int64(750), int64(1250), int64(4)
-	tooManyFiveMinutes, tooManyOneHour, thinkingExceedsOutput := int64(3000), int64(4000), int64(10)
-	unsupported := int64(-1)
-	tests := []struct {
+	zero, negativeCreation := int64(0), int64(-1)
+	thinking := int64(4)
+	fiveMinutes, oneHour := int64(750), int64(1250)
+	tooManyFiveMinutes, tooManyOneHour := int64(3000), int64(4000)
+	unsupportedFiveMinutes, unsupportedOneHour := int64(-1), int64(-1)
+
+	type ttlVariation struct {
 		name       string
 		fiveMinute *int64
 		oneHour    *int64
-		thinking   *int64
+	}
+	absentTTL := ttlVariation{name: "absent TTL details"}
+	matchingTTL := ttlVariation{name: "plausible TTL total", fiveMinute: &fiveMinutes, oneHour: &oneHour}
+	partialTTL := ttlVariation{name: "one TTL detail absent", fiveMinute: &fiveMinutes}
+	inconsistentTTL := ttlVariation{name: "TTL total inconsistent with aggregate", fiveMinute: &tooManyFiveMinutes, oneHour: &tooManyOneHour}
+	unsupportedTTL := ttlVariation{name: "unsupported negative TTL details", fiveMinute: &unsupportedFiveMinutes, oneHour: &unsupportedOneHour}
+
+	rateOne := mustRate(t, "1")
+	rateTwo := mustRate(t, "2")
+	rateFive := mustRate(t, "5")
+	cacheReadRate := mustRate(t, "0.1")
+	cacheWriteRate := mustRate(t, "1.25")
+	positiveUsage := usage.AnthropicUsage{
+		InputTokens:              12,
+		OutputTokens:             9,
+		CacheReadInputTokens:     &cacheRead,
+		CacheCreationInputTokens: &cacheCreation,
+		ThinkingTokens:           &thinking,
+	}
+	positiveRates := pricing.Rates{
+		Input:      rateOne,
+		Output:     rateTwo,
+		CacheRead:  cacheReadRate,
+		CacheWrite: cacheWriteRate,
+	}
+
+	tests := []struct {
+		name       string
+		native     usage.AnthropicUsage
+		rates      pricing.Rates
+		variations []ttlVariation
+		wantAmount string
+		wantReason pricing.ExclusionReason
+	}{
+		{
+			name:       "positive aggregate is valued only once",
+			native:     positiveUsage,
+			rates:      positiveRates,
+			variations: []ttlVariation{absentTTL, matchingTTL, partialTTL, inconsistentTTL, unsupportedTTL},
+			wantAmount: "0.00313",
+		},
+		{
+			name: "known-zero aggregates need no optional rates",
+			native: usage.AnthropicUsage{
+				InputTokens:              3,
+				OutputTokens:             4,
+				CacheReadInputTokens:     &zero,
+				CacheCreationInputTokens: &zero,
+				ThinkingTokens:           &thinking,
+			},
+			rates:      pricing.Rates{Input: rateTwo, Output: rateFive},
+			variations: []ttlVariation{absentTTL, matchingTTL, inconsistentTTL},
+			wantAmount: "0.000026",
+		},
+		{
+			name: "TTL total cannot reconstruct missing aggregate",
+			native: usage.AnthropicUsage{
+				InputTokens:          12,
+				OutputTokens:         9,
+				CacheReadInputTokens: &cacheRead,
+				ThinkingTokens:       &thinking,
+			},
+			rates:      positiveRates,
+			variations: []ttlVariation{absentTTL, matchingTTL},
+			wantAmount: "0",
+			wantReason: pricing.ExclusionMissingUsage,
+		},
+		{
+			name:       "positive aggregate still needs cache-write rate",
+			native:     positiveUsage,
+			rates:      pricing.Rates{Input: rateOne, Output: rateTwo, CacheRead: cacheReadRate},
+			variations: []ttlVariation{absentTTL, matchingTTL},
+			wantAmount: "0",
+			wantReason: pricing.ExclusionMissingRate,
+		},
+		{
+			name: "TTL details cannot repair inconsistent aggregate",
+			native: usage.AnthropicUsage{
+				InputTokens:              12,
+				OutputTokens:             9,
+				CacheReadInputTokens:     &cacheRead,
+				CacheCreationInputTokens: &negativeCreation,
+				ThinkingTokens:           &thinking,
+			},
+			rates:      positiveRates,
+			variations: []ttlVariation{absentTTL, matchingTTL},
+			wantAmount: "0",
+			wantReason: pricing.ExclusionInconsistentUsage,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, variation := range tc.variations {
+				t.Run(variation.name, func(t *testing.T) {
+					native := tc.native
+					native.Ephemeral5mInputTokens = variation.fiveMinute
+					native.Ephemeral1hInputTokens = variation.oneHour
+					contribution, err := pricing.CalculateAnthropic(native, tc.rates)
+					if err != nil {
+						t.Fatalf("CalculateAnthropic() error = %v", err)
+					}
+					if contribution.Amount.String() != tc.wantAmount || contribution.Reason != tc.wantReason {
+						t.Fatalf("contribution = {amount:%s reason:%q}, want literal amount %s and reason %q", contribution.Amount.String(), contribution.Reason, tc.wantAmount, tc.wantReason)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestCalculateAnthropicThinkingDetailsDoNotAffectAmount(t *testing.T) {
+	t.Parallel()
+
+	cacheRead, cacheCreation := int64(6000), int64(2000)
+	fiveMinutes, oneHour := int64(750), int64(1250)
+	thinking, thinkingExceedsOutput, unsupported := int64(4), int64(10), int64(-1)
+	tests := []struct {
+		name     string
+		thinking *int64
 	}{
 		{name: "missing"},
-		{name: "reported", fiveMinute: &fiveMinutes, oneHour: &oneHour, thinking: &thinking},
-		{name: "inconsistent", fiveMinute: &tooManyFiveMinutes, oneHour: &tooManyOneHour, thinking: &thinkingExceedsOutput},
-		{name: "unsupported negative values", fiveMinute: &unsupported, oneHour: &unsupported, thinking: &unsupported},
+		{name: "reported", thinking: &thinking},
+		{name: "exceeds output", thinking: &thinkingExceedsOutput},
+		{name: "unsupported negative value", thinking: &unsupported},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -275,8 +396,8 @@ func TestCalculateAnthropicIgnoresTTLSubdivisionsAndThinking(t *testing.T) {
 				OutputTokens:             9,
 				CacheReadInputTokens:     &cacheRead,
 				CacheCreationInputTokens: &cacheCreation,
-				Ephemeral5mInputTokens:   tc.fiveMinute,
-				Ephemeral1hInputTokens:   tc.oneHour,
+				Ephemeral5mInputTokens:   &fiveMinutes,
+				Ephemeral1hInputTokens:   &oneHour,
 				ThinkingTokens:           tc.thinking,
 			}, pricing.Rates{
 				Input:      mustRate(t, "1"),
@@ -287,8 +408,8 @@ func TestCalculateAnthropicIgnoresTTLSubdivisionsAndThinking(t *testing.T) {
 			if err != nil {
 				t.Fatalf("CalculateAnthropic() error = %v", err)
 			}
-			if contribution.Reason != "" || contribution.Amount.String() != "0.00313" {
-				t.Fatalf("contribution = {amount:%s reason:%q}, want unchanged amount 0.00313 and no exclusion", contribution.Amount.String(), contribution.Reason)
+			if contribution.Amount.String() != "0.00313" || contribution.Reason != "" {
+				t.Fatalf("contribution = {amount:%s reason:%q}, want literal amount 0.00313 and no exclusion", contribution.Amount.String(), contribution.Reason)
 			}
 		})
 	}
