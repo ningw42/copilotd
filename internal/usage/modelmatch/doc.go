@@ -35,9 +35,12 @@
 // literal spelling before its normalized spelling. Because the two removable
 // suffix forms are disjoint and terminal, each removal count has at most one
 // retained stem; it is therefore also the longest normalized retained stem at
-// that rank. The final dated stage applies the same literal-before-normalized and
-// fewer-transformations ordering. A supplied date disables that final stage, so
-// it cannot jump to another date; -fast is never stripped from candidates.
+// that rank. The final dated stage instead combines the complete eligible
+// identity set across the normalized original stem and, when permitted, its
+// one-fast-removed normalized stem. It selects only one unique identity across
+// those lookups; multiple distinct identities are ambiguous. A supplied date
+// disables that final stage, so it cannot jump to another date; -fast is never
+// stripped from candidates.
 //
 // Every lookup bucket stores only one identity plus an ambiguity bit. Multiple
 // distinct identities at a reached stage and rank therefore return Ambiguous

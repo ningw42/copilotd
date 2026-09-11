@@ -48,7 +48,6 @@ type Resolution struct {
 type Matcher struct {
 	exact           map[string]selection
 	normalized      map[string]selection
-	datedLiteral    map[string]selection
 	datedNormalized map[string]selection
 }
 
@@ -62,7 +61,6 @@ func New(ctx context.Context, candidates []Identity) (*Matcher, error) {
 	matcher := &Matcher{
 		exact:           make(map[string]selection),
 		normalized:      make(map[string]selection),
-		datedLiteral:    make(map[string]selection),
 		datedNormalized: make(map[string]selection),
 	}
 	for _, candidate := range candidates {
@@ -78,8 +76,6 @@ func New(ctx context.Context, candidates []Identity) (*Matcher, error) {
 		addSelection(matcher.normalized, lookupKey("", normalized), candidate)
 		addSelection(matcher.normalized, lookupKey(candidate.Provider, normalized), candidate)
 		if stem, dated := stripDate(candidate.Model); dated {
-			addSelection(matcher.datedLiteral, lookupKey("", stem), candidate)
-			addSelection(matcher.datedLiteral, lookupKey(candidate.Provider, stem), candidate)
 			normalizedStem := normalize(stem)
 			addSelection(matcher.datedNormalized, lookupKey("", normalizedStem), candidate)
 			addSelection(matcher.datedNormalized, lookupKey(candidate.Provider, normalizedStem), candidate)
@@ -133,19 +129,18 @@ func (m *Matcher) Resolve(reportedModel string) Resolution {
 		}
 	}
 	if !hasDateSuffix(model) {
-		if selected, found := m.datedLiteral[lookupKey(provider, model)]; found {
-			return selected.resolution(MethodDated)
-		}
-		if selected, found := m.datedNormalized[lookupKey(provider, normalize(model))]; found {
-			return selected.resolution(MethodDated)
-		}
+		selected, found := m.datedNormalized[lookupKey(provider, normalize(model))]
 		if stem, stripped := stripFast(model); stripped {
-			if selected, found := m.datedLiteral[lookupKey(provider, stem)]; found {
-				return selected.resolution(MethodDated)
+			if alternative, exists := m.datedNormalized[lookupKey(provider, normalize(stem))]; exists {
+				if found {
+					selected = mergeSelections(selected, alternative)
+				} else {
+					selected, found = alternative, true
+				}
 			}
-			if selected, found := m.datedNormalized[lookupKey(provider, normalize(stem))]; found {
-				return selected.resolution(MethodDated)
-			}
+		}
+		if found {
+			return selected.resolution(MethodDated)
 		}
 	}
 	return Resolution{Status: StatusUnknown}
@@ -161,6 +156,13 @@ func addSelection(index map[string]selection, key string, identity Identity) {
 		selected.ambiguous = true
 		index[key] = selected
 	}
+}
+
+func mergeSelections(left, right selection) selection {
+	if left.ambiguous || right.ambiguous || left.identity != right.identity {
+		left.ambiguous = true
+	}
+	return left
 }
 
 func (s selection) resolution(method Method) Resolution {

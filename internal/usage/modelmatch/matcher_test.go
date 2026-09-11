@@ -210,6 +210,127 @@ func TestResolveUndatedModelWithMultipleDatesIsAmbiguous(t *testing.T) {
 	}
 }
 
+func TestResolveFinalDatedStageRequiresUniqueIdentity(t *testing.T) {
+	t.Parallel()
+
+	// Synthetic policy fixtures: final dated matching requires one identity
+	// across every eligible normalized stem, scope, and Reported fast removal.
+	ambiguous := modelmatch.Resolution{Status: modelmatch.StatusAmbiguous}
+	for _, fixture := range []struct {
+		name       string
+		reported   string
+		candidates []modelmatch.Identity
+		want       modelmatch.Resolution
+	}{
+		{
+			name:     "Claude normalized stems with different dates",
+			reported: "claude-haiku-4-5",
+			candidates: []modelmatch.Identity{
+				{Provider: "anthropic", Model: "claude-haiku-4-5-20251001"},
+				{Provider: "anthropic", Model: "claude-haiku-4.5-20251101"},
+			},
+			want: ambiguous,
+		},
+		{
+			name:     "Claude normalized stems with the same date",
+			reported: "claude-haiku-4-5",
+			candidates: []modelmatch.Identity{
+				{Provider: "anthropic", Model: "claude-haiku-4-5-20251001"},
+				{Provider: "anthropic", Model: "claude-haiku-4.5-20251001"},
+			},
+			want: ambiguous,
+		},
+		{
+			name:     "ASCII normalized stems with different dates",
+			reported: "base",
+			candidates: []modelmatch.Identity{
+				{Provider: "openai", Model: "base-20260301"},
+				{Provider: "openai", Model: "BASE-20260401"},
+			},
+			want: ambiguous,
+		},
+		{
+			name:     "ASCII normalized stems with the same date",
+			reported: "base",
+			candidates: []modelmatch.Identity{
+				{Provider: "openai", Model: "base-20260301"},
+				{Provider: "openai", Model: "BASE-20260301"},
+			},
+			want: ambiguous,
+		},
+		{
+			name:     "recognized provider scope isolates one identity",
+			reported: "openai/base",
+			candidates: []modelmatch.Identity{
+				{Provider: "openai", Model: "base-20260301"},
+				{Provider: "google", Model: "BASE-20260401"},
+			},
+			want: modelmatch.Resolution{
+				Status:   modelmatch.StatusMatched,
+				Identity: modelmatch.Identity{Provider: "openai", Model: "base-20260301"},
+				Method:   modelmatch.MethodDated,
+			},
+		},
+		{
+			name:     "unqualified query intersects original providers",
+			reported: "base",
+			candidates: []modelmatch.Identity{
+				{Provider: "openai", Model: "base-20260301"},
+				{Provider: "google", Model: "BASE-20260401"},
+			},
+			want: ambiguous,
+		},
+		{
+			name:     "original and fast-removed stems are one eligible set",
+			reported: "base-fast",
+			candidates: []modelmatch.Identity{
+				{Provider: "openai", Model: "base-fast-20260301"},
+				{Provider: "openai", Model: "base-20260401"},
+			},
+			want: ambiguous,
+		},
+		{
+			name:     "normalized collision remains eligible after fast removal",
+			reported: "base-FAST",
+			candidates: []modelmatch.Identity{
+				{Provider: "openai", Model: "base-20260301"},
+				{Provider: "openai", Model: "BASE-20260401"},
+			},
+			want: ambiguous,
+		},
+		{
+			name:     "duplicate identical pair remains one identity",
+			reported: "BASE",
+			candidates: []modelmatch.Identity{
+				{Provider: "openai", Model: "base-20260301"},
+				{Provider: "openai", Model: "base-20260301"},
+			},
+			want: modelmatch.Resolution{
+				Status:   modelmatch.StatusMatched,
+				Identity: modelmatch.Identity{Provider: "openai", Model: "base-20260301"},
+				Method:   modelmatch.MethodDated,
+			},
+		},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			for _, order := range []string{"forward", "reverse"} {
+				t.Run(order, func(t *testing.T) {
+					candidates := append([]modelmatch.Identity(nil), fixture.candidates...)
+					if order == "reverse" {
+						for left, right := 0, len(candidates)-1; left < right; left, right = left+1, right-1 {
+							candidates[left], candidates[right] = candidates[right], candidates[left]
+						}
+					}
+					matcher := newMatcher(t, candidates...)
+					if got := matcher.Resolve(fixture.reported); !reflect.DeepEqual(got, fixture.want) {
+						t.Fatalf("Resolve() = %#v, want %#v", got, fixture.want)
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestResolveDatedModelDoesNotJumpSidewaysToAnotherDate(t *testing.T) {
 	t.Parallel()
 
