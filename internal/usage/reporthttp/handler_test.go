@@ -138,7 +138,7 @@ func TestHandlerEncodingBudgetIsSharedBetweenNativeSections(t *testing.T) {
 	}
 }
 
-func TestHandlerCancellationBeforePricingExtensionEncodingCommitsNothing(t *testing.T) {
+func TestHandlerCancellationBeforePricingExtensionEncodingReturnsSafeFailure(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	result := report.Report{Pricing: &report.PricingProvenance{
 		Dataset: "models.dev/api.json", Currency: "USD", Basis: "original_provider", ContextPolicy: "highest_tier", CacheWritePolicy: "single_rate",
@@ -150,8 +150,12 @@ func TestHandlerCancellationBeforePricingExtensionEncodingCommitsNothing(t *test
 	})
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, reporthttp.Path+"?timezone=UTC", nil).WithContext(ctx))
-	if rr.Body.Len() != 0 || rr.Flushed {
-		t.Fatalf("canceled extension committed response: status=%d body=%s", rr.Code, rr.Body.String())
+	const want = `{"schema_version":1,"error":{"code":"usage_unavailable","message":"Usage data is unavailable on this daemon."}}`
+	if rr.Code != http.StatusServiceUnavailable || rr.Body.String() != want {
+		t.Fatalf("canceled extension response: status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if rr.Header().Get("Content-Type") != "application/json" || rr.Header().Get("Cache-Control") != "no-store" || rr.Header().Get("X-Content-Type-Options") != "nosniff" {
+		t.Fatalf("canceled extension headers: %v", rr.Header())
 	}
 }
 

@@ -309,8 +309,13 @@ func TestClientValidatesPricingDecimalAndCoverageBounds(t *testing.T) {
 		{"missing reason", false, "section", func(cost map[string]any) { delete(cost["unpriced"].(map[string]any), "unknown_model") }},
 		{"int64 overflow", false, "row", func(cost map[string]any) { cost["priced_turns"] = "9223372036854775808" }},
 		{"reason sum overflow", false, "model", func(cost map[string]any) {
-			cost["priced_turns"] = "9223372036854775807"
-			cost["unpriced"].(map[string]any)["unknown_model"] = "1"
+			cost["priced_turns"] = "1"
+			unpriced := cost["unpriced"].(map[string]any)
+			unpriced["unknown_model"] = "9223372036854775807"
+			unpriced["ambiguous_model"] = "9223372036854775807"
+			unpriced["missing_rate"] = "3"
+			unpriced["missing_usage"] = "0"
+			unpriced["inconsistent_usage"] = "0"
 		}},
 		{"reason sum mismatch", false, "section", func(cost map[string]any) { cost["unpriced"].(map[string]any)["missing_usage"] = "0" }},
 		{"negative count", false, "row", func(cost map[string]any) { cost["priced_turns"] = "-1" }},

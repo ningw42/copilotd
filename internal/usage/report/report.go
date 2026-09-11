@@ -110,8 +110,8 @@ type Bucket struct {
 }
 
 // PricingProvenance identifies the original-provider tariff benchmark captured
-// once for a report. LastSuccess is a successful content-fetch time, not a
-// tariff effective date.
+// once for a report. LastSuccess is a UTC copy of the successful content-fetch
+// time, not a tariff effective date; the captured source status is not mutated.
 type PricingProvenance struct {
 	Dataset          string
 	Currency         string
@@ -314,7 +314,7 @@ func pricingProvenance(status pricing.SnapshotStatus) *PricingProvenance {
 		Source:           status.Source,
 	}
 	if status.LastSuccess != nil {
-		lastSuccess := *status.LastSuccess
+		lastSuccess := status.LastSuccess.UTC()
 		provenance.LastSuccess = &lastSuccess
 	}
 	return provenance

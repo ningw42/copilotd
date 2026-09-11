@@ -147,7 +147,7 @@ func TestHandlerClientPublishCompletePricingAtEveryAggregateLevel(t *testing.T) 
 		{"unpriced", report.PricingMatch{Status: report.PricingMatchMatched, Provider: "anthropic", Model: "unpriced", Method: report.PricingMatchByAlias}, report.Cost{Unpriced: report.UnpricedCoverage{MissingRate: 1}}, "anthropic"},
 		{"exact", report.PricingMatch{Status: report.PricingMatchMatched, Provider: "openai", Model: "exact", Method: report.PricingMatchByExact}, report.Cost{Amount: amount("0.01"), PricedTurns: 1}, "openai"},
 		{"free", report.PricingMatch{Status: report.PricingMatchMatched, Provider: "openai", Model: "free", Method: report.PricingMatchByNormalized}, report.Cost{Amount: amount("0"), PricedTurns: 1}, "openai"},
-		{"suffix", report.PricingMatch{Status: report.PricingMatchMatched, Provider: "openai", Model: "suffix-base", Method: report.PricingMatchBySuffix}, report.Cost{Amount: amount("0.02"), PricedTurns: 1}, "openai"},
+		{"suffix", report.PricingMatch{Status: report.PricingMatchMatched, Provider: "openai", Model: "suffix-base", Method: report.PricingMatchBySuffix}, report.Cost{Unpriced: report.UnpricedCoverage{InconsistentUsage: 1}}, "openai"},
 		{"unknown", report.PricingMatch{Status: report.PricingMatchUnknown}, report.Cost{Unpriced: report.UnpricedCoverage{UnknownModel: 1}}, "openai"},
 	}
 	start := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
@@ -180,7 +180,7 @@ func TestHandlerClientPublishCompletePricingAtEveryAggregateLevel(t *testing.T) 
 		section.Models = append(section.Models, model)
 	}
 	result.Anthropic.Total = nativeTotal(report.AnthropicMetrics(), 4, report.Cost{Amount: amount("0.03"), PricedTurns: 1, Unpriced: report.UnpricedCoverage{AmbiguousModel: 1, MissingRate: 1, MissingUsage: 1}})
-	result.OpenAI.Total = nativeTotal(report.OpenAIMetrics(), 4, report.Cost{Amount: amount("0.03"), PricedTurns: 3, Unpriced: report.UnpricedCoverage{UnknownModel: 1}})
+	result.OpenAI.Total = nativeTotal(report.OpenAIMetrics(), 4, report.Cost{Amount: amount("0.01"), PricedTurns: 2, Unpriced: report.UnpricedCoverage{UnknownModel: 1, InconsistentUsage: 1}})
 
 	server := httptest.NewServer(reporthttp.Handler(func(context.Context, report.Query) (report.Report, error) { return result, nil }))
 	t.Cleanup(server.Close)
@@ -197,20 +197,76 @@ func TestHandlerClientPublishCompletePricingAtEveryAggregateLevel(t *testing.T) 
 	if got.Report.Pricing == nil || got.Report.Pricing.Source != "fallback" || got.Report.Pricing.LastSuccess == nil || !got.Report.Pricing.LastSuccess.Equal(lastSuccess) {
 		t.Fatalf("fallback successful-fetch provenance = %+v", got.Report.Pricing)
 	}
-	for _, section := range []*report.Section{got.Report.Anthropic, got.Report.OpenAI} {
-		if section == nil || len(section.Rows) == 0 || len(section.Models) == 0 || section.Total.Cost.Amount == nil {
-			t.Fatalf("missing complete aggregate extension: %+v", section)
+	type expectedModel struct {
+		name          string
+		turns         int64
+		match         report.PricingMatch
+		amount        string
+		amountPresent bool
+		pricedTurns   int64
+		unpriced      report.UnpricedCoverage
+	}
+	type expectedSection struct {
+		name        string
+		got         *report.Section
+		amount      string
+		pricedTurns int64
+		unpriced    report.UnpricedCoverage
+		models      []expectedModel
+	}
+	expected := []expectedSection{
+		{
+			name: "anthropic", got: got.Report.Anthropic, amount: "0.03", pricedTurns: 1,
+			unpriced: report.UnpricedCoverage{AmbiguousModel: 1, MissingRate: 1, MissingUsage: 1},
+			models: []expectedModel{
+				{name: "ambiguous", turns: 1, match: report.PricingMatch{Status: report.PricingMatchAmbiguous}, unpriced: report.UnpricedCoverage{AmbiguousModel: 1}},
+				{name: "dated", turns: 2, match: report.PricingMatch{Status: report.PricingMatchMatched, Provider: "anthropic", Model: "dated-20260901", Method: report.PricingMatchByDated}, amount: "0.03", amountPresent: true, pricedTurns: 1, unpriced: report.UnpricedCoverage{MissingUsage: 1}},
+				{name: "unpriced", turns: 1, match: report.PricingMatch{Status: report.PricingMatchMatched, Provider: "anthropic", Model: "unpriced", Method: report.PricingMatchByAlias}, unpriced: report.UnpricedCoverage{MissingRate: 1}},
+			},
+		},
+		{
+			name: "openai", got: got.Report.OpenAI, amount: "0.01", pricedTurns: 2,
+			unpriced: report.UnpricedCoverage{UnknownModel: 1, InconsistentUsage: 1},
+			models: []expectedModel{
+				{name: "exact", turns: 1, match: report.PricingMatch{Status: report.PricingMatchMatched, Provider: "openai", Model: "exact", Method: report.PricingMatchByExact}, amount: "0.01", amountPresent: true, pricedTurns: 1},
+				{name: "free", turns: 1, match: report.PricingMatch{Status: report.PricingMatchMatched, Provider: "openai", Model: "free", Method: report.PricingMatchByNormalized}, amount: "0", amountPresent: true, pricedTurns: 1},
+				{name: "suffix", turns: 1, match: report.PricingMatch{Status: report.PricingMatchMatched, Provider: "openai", Model: "suffix-base", Method: report.PricingMatchBySuffix}, unpriced: report.UnpricedCoverage{InconsistentUsage: 1}},
+				{name: "unknown", turns: 1, match: report.PricingMatch{Status: report.PricingMatchUnknown}, unpriced: report.UnpricedCoverage{UnknownModel: 1}},
+			},
+		},
+	}
+	assertCost := func(label string, cost report.Cost, amountValue string, amountPresent bool, pricedTurns int64, unpriced report.UnpricedCoverage) {
+		t.Helper()
+		if cost.PricedTurns != pricedTurns || cost.Unpriced != unpriced || (cost.Amount != nil) != amountPresent {
+			t.Fatalf("%s cost = %+v, want amount %q present=%t priced=%d unpriced=%+v", label, cost, amountValue, amountPresent, pricedTurns, unpriced)
 		}
-		for index := range section.Rows {
-			if section.Rows[index].PricingMatch.Status == "" || section.Rows[index].Cost.PricedTurns+section.Rows[index].Cost.Unpriced.UnknownModel+section.Rows[index].Cost.Unpriced.AmbiguousModel+section.Rows[index].Cost.Unpriced.MissingRate+section.Rows[index].Cost.Unpriced.MissingUsage+section.Rows[index].Cost.Unpriced.InconsistentUsage != section.Rows[index].Turns {
-				t.Fatalf("row extension incomplete: %+v", section.Rows[index])
+		if amountPresent && cost.Amount.String() != amountValue {
+			t.Fatalf("%s amount = %q, want %q", label, cost.Amount.String(), amountValue)
+		}
+	}
+	for _, section := range expected {
+		if section.got == nil || len(section.got.Rows) != len(section.models) || len(section.got.Models) != len(section.models) || section.got.Total.Turns != 4 {
+			t.Fatalf("%s aggregate shape = %+v", section.name, section.got)
+		}
+		assertCost(section.name+" total", section.got.Total.Cost, section.amount, true, section.pricedTurns, section.unpriced)
+		for index, want := range section.models {
+			observed := []struct {
+				label string
+				value report.ModelTotal
+			}{
+				{label: "row", value: section.got.Rows[index].ModelTotal},
+				{label: "model", value: section.got.Models[index]},
 			}
-			if section.Models[index].PricingMatch != section.Rows[index].PricingMatch || section.Models[index].Turns != section.Rows[index].Turns {
-				t.Fatalf("model extension changed: row=%+v model=%+v", section.Rows[index], section.Models[index])
+			for _, gotModel := range observed {
+				label := section.name + " " + gotModel.label + " " + want.name
+				if gotModel.value.Model != want.name || gotModel.value.Turns != want.turns || gotModel.value.PricingMatch != want.match {
+					t.Fatalf("%s = %+v, want model=%q turns=%d match=%+v", label, gotModel.value, want.name, want.turns, want.match)
+				}
+				assertCost(label, gotModel.value.Cost, want.amount, want.amountPresent, want.pricedTurns, want.unpriced)
 			}
 		}
 	}
-	for _, fragment := range []string{`"pricing_match":{"status":"matched"`, `"pricing_match":{"status":"unknown"}`, `"pricing_match":{"status":"ambiguous"}`, `"method":"exact"`, `"method":"normalized"`, `"method":"alias"`, `"method":"suffix"`, `"method":"dated"`, `"amount":null`, `"amount":"0"`} {
+	for _, fragment := range []string{`"pricing_match":{"status":"matched"`, `"pricing_match":{"status":"unknown"}`, `"pricing_match":{"status":"ambiguous"}`, `"method":"exact"`, `"method":"normalized"`, `"method":"alias"`, `"method":"suffix"`, `"method":"dated"`, `"amount":null`, `"amount":"0"`, `"inconsistent_usage":"1"`} {
 		if !strings.Contains(string(got.JSON), fragment) {
 			t.Errorf("wire missing %s: %s", fragment, got.JSON)
 		}

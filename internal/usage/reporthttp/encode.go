@@ -8,7 +8,6 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/ningw42/copilotd/internal/usage/pricing"
 	"github.com/ningw42/copilotd/internal/usage/report"
 )
 
@@ -200,13 +199,6 @@ func validateCostExtension(total report.Total, present bool) error {
 	}
 	if covered != total.Turns {
 		return errInvalidPricingExtension
-	}
-	if cost.Amount != nil {
-		amount := cost.Amount.String()
-		parsed, err := pricing.ParseAmount(amount)
-		if err != nil || parsed.String() != amount {
-			return errInvalidPricingExtension
-		}
 	}
 	if total.Turns == 0 {
 		if cost.Amount == nil || cost.Amount.String() != "0" {
