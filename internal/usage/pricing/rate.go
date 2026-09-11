@@ -56,10 +56,6 @@ func ParseRate(raw string) (Rate, error) {
 		}
 		fraction = raw[start:index]
 	}
-	if len(integer)+len(fraction) > 2*maxDigits {
-		return Rate{}, errors.New("rate has excessive precision")
-	}
-
 	exponent := 0
 	if index < len(raw) && (raw[index] == 'e' || raw[index] == 'E') {
 		index++
@@ -101,9 +97,6 @@ func ParseRate(raw string) (Rate, error) {
 		scale--
 	}
 	if coefficient.Sign() == 0 {
-		if len(integer) > maxDigits || len(fraction) > maxDigits {
-			return Rate{}, errors.New("zero rate has excessive expanded precision")
-		}
 		scale = 0
 	}
 	integerDigits := len(coefficient.String()) - scale

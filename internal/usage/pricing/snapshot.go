@@ -21,11 +21,11 @@ type Identity struct {
 	Model    string
 }
 
-// Rates is the selected standard USD-per-million-token rate vector. Nil optional
-// rates remain distinct from explicitly reported zero rates.
+// Rates is the selected standard USD-per-million-token rate vector. Each nil
+// rate is absent; a non-nil zero remains an explicitly reported zero.
 type Rates struct {
-	Input      Rate
-	Output     Rate
+	Input      *Rate
+	Output     *Rate
 	CacheRead  *Rate
 	CacheWrite *Rate
 }
@@ -45,6 +45,9 @@ func ParseSnapshot(ctx context.Context, raw []byte) (*Snapshot, error) {
 	if err := json.Unmarshal(raw, &root); err != nil || root == nil {
 		return nil, errors.New("decode models.dev root object")
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	snapshot := &Snapshot{rates: make(map[Identity]Rates)}
 	for _, providerID := range selectedProviders {
@@ -59,12 +62,18 @@ func ParseSnapshot(ctx context.Context, raw []byte) (*Snapshot, error) {
 		if err := json.Unmarshal(rawProvider, &provider); err != nil || provider == nil {
 			return nil, fmt.Errorf("decode models.dev provider %q", providerID)
 		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if err := requireMatchingID(provider, providerID); err != nil {
 			return nil, fmt.Errorf("provider %q: %w", providerID, err)
 		}
 		var models map[string]json.RawMessage
 		if err := json.Unmarshal(provider["models"], &models); err != nil || models == nil {
 			return nil, fmt.Errorf("provider %q models are missing or invalid", providerID)
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
 		for modelID, rawModel := range models {
 			if err := ctx.Err(); err != nil {
@@ -73,6 +82,9 @@ func ParseSnapshot(ctx context.Context, raw []byte) (*Snapshot, error) {
 			var model map[string]json.RawMessage
 			if err := json.Unmarshal(rawModel, &model); err != nil || model == nil {
 				return nil, fmt.Errorf("decode model %q/%q", providerID, modelID)
+			}
+			if err := ctx.Err(); err != nil {
+				return nil, err
 			}
 			if err := requireMatchingID(model, modelID); err != nil {
 				return nil, fmt.Errorf("model %q/%q: %w", providerID, modelID, err)
@@ -83,12 +95,15 @@ func ParseSnapshot(ctx context.Context, raw []byte) (*Snapshot, error) {
 			if !priced {
 				continue
 			}
-			rates, err := parseCost(rawCost)
+			rates, err := parseCost(ctx, rawCost)
 			if err != nil {
 				return nil, fmt.Errorf("model %q/%q cost: %w", providerID, modelID, err)
 			}
 			snapshot.rates[identity] = rates
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	slices.SortFunc(snapshot.identities, func(a, b Identity) int {
 		if order := bytes.Compare([]byte(a.Provider), []byte(b.Provider)); order != 0 {
@@ -96,6 +111,9 @@ func ParseSnapshot(ctx context.Context, raw []byte) (*Snapshot, error) {
 		}
 		return bytes.Compare([]byte(a.Model), []byte(b.Model))
 	})
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	return snapshot, nil
 }
 
@@ -142,10 +160,16 @@ func unambiguousJSON(ctx context.Context, raw []byte) error {
 	return ctx.Err()
 }
 
-func parseCost(raw json.RawMessage) (Rates, error) {
+func parseCost(ctx context.Context, raw json.RawMessage) (Rates, error) {
+	if err := ctx.Err(); err != nil {
+		return Rates{}, err
+	}
 	var base map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &base); err != nil || base == nil {
 		return Rates{}, errors.New("cost is not an object")
+	}
+	if err := ctx.Err(); err != nil {
+		return Rates{}, err
 	}
 	baseRates, err := parseCostRow(base)
 	if err != nil {
@@ -157,6 +181,9 @@ func parseCost(raw json.RawMessage) (Rates, error) {
 		var row map[string]json.RawMessage
 		if err := json.Unmarshal(legacy, &row); err != nil || row == nil {
 			return Rates{}, errors.New("context_over_200k is not an object")
+		}
+		if err := ctx.Err(); err != nil {
+			return Rates{}, err
 		}
 		parsed, err := parseCostRow(row)
 		if err != nil {
@@ -170,10 +197,16 @@ func parseCost(raw json.RawMessage) (Rates, error) {
 		if err := json.Unmarshal(rawTiers, &tiers); err != nil || tiers == nil {
 			return Rates{}, errors.New("tiers is not an array")
 		}
+		if err := ctx.Err(); err != nil {
+			return Rates{}, err
+		}
 		var selected *Rates
 		var highest uint64
 		seen := make(map[uint64]struct{}, len(tiers))
 		for index, rawTier := range tiers {
+			if err := ctx.Err(); err != nil {
+				return Rates{}, err
+			}
 			var tier map[string]json.RawMessage
 			if err := json.Unmarshal(rawTier, &tier); err != nil || tier == nil {
 				return Rates{}, fmt.Errorf("tiers[%d] is not an object", index)
@@ -195,8 +228,14 @@ func parseCost(raw json.RawMessage) (Rates, error) {
 			}
 		}
 		if selected != nil {
+			if err := ctx.Err(); err != nil {
+				return Rates{}, err
+			}
 			return *selected, nil
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		return Rates{}, err
 	}
 	if legacyRates != nil {
 		return *legacyRates, nil
@@ -229,35 +268,20 @@ func contextThreshold(row map[string]json.RawMessage) (uint64, error) {
 }
 
 func parseCostRow(object map[string]json.RawMessage) (Rates, error) {
-	input, err := requiredRate(object, "input")
-	if err != nil {
-		return Rates{}, err
-	}
-	output, err := requiredRate(object, "output")
-	if err != nil {
-		return Rates{}, err
-	}
-	optional := make(map[string]*Rate, 5)
-	for _, name := range []string{"reasoning", "cache_read", "cache_write", "input_audio", "output_audio"} {
+	parsed := make(map[string]*Rate, 7)
+	for _, name := range []string{"input", "output", "reasoning", "cache_read", "cache_write", "input_audio", "output_audio"} {
 		rate, err := optionalRate(object, name)
 		if err != nil {
 			return Rates{}, err
 		}
-		optional[name] = rate
+		parsed[name] = rate
 	}
-	return Rates{Input: input, Output: output, CacheRead: optional["cache_read"], CacheWrite: optional["cache_write"]}, nil
-}
-
-func requiredRate(object map[string]json.RawMessage, name string) (Rate, error) {
-	raw, present := object[name]
-	if !present {
-		return Rate{}, fmt.Errorf("%s rate is missing", name)
-	}
-	rate, err := ParseRate(string(raw))
-	if err != nil {
-		return Rate{}, fmt.Errorf("%s rate is invalid", name)
-	}
-	return rate, nil
+	return Rates{
+		Input:      parsed["input"],
+		Output:     parsed["output"],
+		CacheRead:  parsed["cache_read"],
+		CacheWrite: parsed["cache_write"],
+	}, nil
 }
 
 func optionalRate(object map[string]json.RawMessage, name string) (*Rate, error) {
@@ -281,12 +305,28 @@ func (s *Snapshot) Identities() []Identity {
 	return append([]Identity(nil), s.identities...)
 }
 
-// Rates returns the selected rate vector for an identity. False means that the
-// identity is unpriced or absent from this snapshot.
+// Rates returns a detached selected rate vector for an identity. Nil fields
+// preserve absent prices. False means the identity has no cost object or is
+// absent from this snapshot.
 func (s *Snapshot) Rates(identity Identity) (Rates, bool) {
 	if s == nil {
 		return Rates{}, false
 	}
 	rates, ok := s.rates[identity]
-	return rates, ok
+	if !ok {
+		return Rates{}, false
+	}
+	rates.Input = detachedRate(rates.Input)
+	rates.Output = detachedRate(rates.Output)
+	rates.CacheRead = detachedRate(rates.CacheRead)
+	rates.CacheWrite = detachedRate(rates.CacheWrite)
+	return rates, true
+}
+
+func detachedRate(rate *Rate) *Rate {
+	if rate == nil {
+		return nil
+	}
+	detached := *rate // Rate's shared big integer is immutable.
+	return &detached
 }

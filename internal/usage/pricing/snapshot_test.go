@@ -2,9 +2,13 @@ package pricing_test
 
 import (
 	"context"
+	"errors"
 	"reflect"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/ningw42/copilotd/internal/usage/pricing"
 )
@@ -39,11 +43,65 @@ func TestSnapshotProjectsAllowedProviderIdentitiesAndPreservesUnpricedModels(t *
 	if !ok {
 		t.Fatal("priced identity has no selected rates")
 	}
-	if priced.Input.String() != "1.25" || priced.Output.String() != "10" || priced.CacheRead == nil || priced.CacheRead.String() != "0" || priced.CacheWrite != nil {
+	if optionalRateString(priced.Input) != "1.25" || optionalRateString(priced.Output) != "10" || optionalRateString(priced.CacheRead) != "0" || priced.CacheWrite != nil {
 		t.Fatalf("selected rates = %#v, want input=1.25 output=10 cache_read=0 and absent cache_write", priced)
 	}
 	if _, ok := snapshot.Rates(pricing.Identity{Provider: "openai", Model: "gpt-unpriced"}); ok {
 		t.Fatal("unpriced identity reported selected rates")
+	}
+}
+
+func TestSnapshotRatesAreDetachedForConcurrentCallers(t *testing.T) {
+	t.Parallel()
+
+	snapshot, err := pricing.ParseSnapshot(context.Background(), snapshotFixture(`{"input":1,"output":2,"cache_read":0.5,"cache_write":3}`))
+	if err != nil {
+		t.Fatalf("ParseSnapshot() error = %v", err)
+	}
+	identity := pricing.Identity{Provider: "openai", Model: "model"}
+	replacement, err := pricing.ParseRate("99")
+	if err != nil {
+		t.Fatalf("ParseRate() error = %v", err)
+	}
+
+	first, ok := snapshot.Rates(identity)
+	if !ok || first.Input == nil || first.Output == nil || first.CacheRead == nil || first.CacheWrite == nil {
+		t.Fatalf("Rates() = %#v, %t; want complete vector", first, ok)
+	}
+	*first.Input = replacement
+	*first.Output = replacement
+	*first.CacheRead = replacement
+	*first.CacheWrite = replacement
+	later, ok := snapshot.Rates(identity)
+	if !ok || optionalRateString(later.Input) != "1" || optionalRateString(later.Output) != "2" || optionalRateString(later.CacheRead) != "0.5" || optionalRateString(later.CacheWrite) != "3" {
+		t.Fatalf("Rates() after returned-vector mutation = %#v, %t; want original vector", later, ok)
+	}
+
+	const callers = 32
+	var wait sync.WaitGroup
+	failures := make(chan struct{}, callers)
+	for range callers {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			got, ok := snapshot.Rates(identity)
+			if !ok || optionalRateString(got.Input) != "1" || optionalRateString(got.Output) != "2" || optionalRateString(got.CacheRead) != "0.5" || optionalRateString(got.CacheWrite) != "3" {
+				failures <- struct{}{}
+				return
+			}
+			*got.Input = replacement
+			*got.Output = replacement
+			*got.CacheRead = replacement
+			*got.CacheWrite = replacement
+		}()
+	}
+	wait.Wait()
+	if len(failures) != 0 {
+		t.Fatalf("%d concurrent callers observed a mutated vector", len(failures))
+	}
+	final, ok := snapshot.Rates(identity)
+	if !ok || optionalRateString(final.Input) != "1" || optionalRateString(final.Output) != "2" || optionalRateString(final.CacheRead) != "0.5" || optionalRateString(final.CacheWrite) != "3" {
+		t.Fatalf("Rates() after concurrent returned-vector mutation = %#v, %t; want original vector", final, ok)
 	}
 }
 
@@ -78,8 +136,8 @@ func TestSnapshotSelectsHighestStructuredTierThenLegacyThenBase(t *testing.T) {
 		if !ok {
 			t.Fatalf("%s has no selected rates", model)
 		}
-		if got.Input.String() != input || got.Output.String() != output || optionalRateString(got.CacheRead) != optionalString(cacheRead) || optionalRateString(got.CacheWrite) != optionalString(cacheWrite) {
-			t.Fatalf("%s rates = input %s output %s read %q write %q; want %s/%s/%q/%q", model, got.Input.String(), got.Output.String(), optionalRateString(got.CacheRead), optionalRateString(got.CacheWrite), input, output, optionalString(cacheRead), optionalString(cacheWrite))
+		if optionalRateString(got.Input) != input || optionalRateString(got.Output) != output || optionalRateString(got.CacheRead) != optionalString(cacheRead) || optionalRateString(got.CacheWrite) != optionalString(cacheWrite) {
+			t.Fatalf("%s rates = input %q output %q read %q write %q; want %q/%q/%q/%q", model, optionalRateString(got.Input), optionalRateString(got.Output), optionalRateString(got.CacheRead), optionalRateString(got.CacheWrite), input, output, optionalString(cacheRead), optionalString(cacheWrite))
 		}
 	}
 	read04, write8, read015 := "0.4", "8", "0.15"
@@ -130,11 +188,14 @@ func TestSnapshotValidatesEveryRecognizedStandardCostFieldAndTier(t *testing.T) 
 	}{
 		{name: "all recognized rates", cost: `{"input":1,"output":2,"reasoning":3,"cache_read":4,"cache_write":5,"input_audio":6,"output_audio":7}`, ok: true},
 		{name: "unknown price field is additive", cost: `{"input":1,"output":2,"future_price":{"anything":true}}`, ok: true},
+		{name: "empty rate row is valid", cost: `{}`, ok: true},
 		{name: "negative rate", cost: `{"input":-1,"output":2}`},
+		{name: "excessive rate", cost: `{"input":1000000000000000000}`},
 		{name: "wrong rate type", cost: `{"input":1,"output":"2"}`},
+		{name: "null input rate", cost: `{"input":null,"output":2}`},
 		{name: "null optional rate", cost: `{"input":1,"output":2,"cache_read":null}`},
 		{name: "malformed recognized unselected rate", cost: `{"input":1,"output":2,"reasoning":{},"tiers":[{"input":3,"output":4,"tier":{"type":"context","size":100}}]}`},
-		{name: "missing required output", cost: `{"input":1}`},
+		{name: "missing output is valid", cost: `{"input":1}`, ok: true},
 		{name: "tiers wrong type", cost: `{"input":1,"output":2,"tiers":{}}`},
 		{name: "tier descriptor missing", cost: `{"input":1,"output":2,"tiers":[{"input":3,"output":4}]}`},
 		{name: "tier type unknown", cost: `{"input":1,"output":2,"tiers":[{"input":3,"output":4,"tier":{"type":"other","size":100}}]}`},
@@ -158,6 +219,34 @@ func TestSnapshotValidatesEveryRecognizedStandardCostFieldAndTier(t *testing.T) 
 	}
 }
 
+func TestSnapshotCancellationInterruptsLargeTierProjection(t *testing.T) {
+	raw := highCardinalitySnapshot(100_000)
+	if len(raw) > 8<<20 {
+		t.Fatalf("cancellation fixture is %d bytes, exceeds remote decoded-body contract", len(raw))
+	}
+
+	started := time.Now()
+	if _, err := pricing.ParseSnapshot(context.Background(), raw); err != nil {
+		t.Fatalf("baseline ParseSnapshot() error = %v", err)
+	}
+	baseline := time.Since(started)
+
+	// ParseSnapshot has no progress callback by design. Calibrating cancellation
+	// against the same bounded fixture avoids a fixed host-speed deadline, but
+	// this remains overlap evidence rather than a deterministic latency proof.
+	ctx, cancel := context.WithCancel(context.Background())
+	timer := time.AfterFunc(baseline/2, cancel)
+	defer timer.Stop()
+	snapshot, err := pricing.ParseSnapshot(ctx, raw)
+	if ctx.Err() == nil {
+		cancel()
+		t.Fatal("fixture completed before calibrated cancellation; cancellation overlap was not established")
+	}
+	if !errors.Is(err, context.Canceled) || snapshot != nil {
+		t.Fatalf("ParseSnapshot() after mid-projection cancellation = %#v, %v; want nil, context canceled", snapshot, err)
+	}
+}
+
 func TestSnapshotComparesBoundedExactExponentThresholds(t *testing.T) {
 	t.Parallel()
 
@@ -167,7 +256,7 @@ func TestSnapshotComparesBoundedExactExponentThresholds(t *testing.T) {
 		t.Fatalf("ParseSnapshot() error = %v", err)
 	}
 	rates, ok := snapshot.Rates(pricing.Identity{Provider: "openai", Model: "model"})
-	if !ok || rates.Input.String() != "5" || rates.Output.String() != "6" {
+	if !ok || optionalRateString(rates.Input) != "5" || optionalRateString(rates.Output) != "6" {
 		t.Fatalf("selected rates = %#v, %t; want threshold 2e2 row", rates, ok)
 	}
 
@@ -183,6 +272,22 @@ func TestSnapshotComparesBoundedExactExponentThresholds(t *testing.T) {
 
 func snapshotFixture(cost string) []byte {
 	return []byte(`{"openai":{"id":"openai","models":{"model":{"id":"model","cost":` + cost + `}}},"anthropic":{"id":"anthropic","models":{}},"google":{"id":"google","models":{}},"xai":{"id":"xai","models":{}}}`)
+}
+
+func highCardinalitySnapshot(tiers int) []byte {
+	var raw strings.Builder
+	raw.Grow(tiers * 64)
+	raw.WriteString(`{"openai":{"id":"openai","models":{}},"anthropic":{"id":"anthropic","models":{}},"google":{"id":"google","models":{}},"xai":{"id":"xai","models":{"large":{"id":"large","cost":{"input":1,"output":2,"tiers":[`)
+	for index := range tiers {
+		if index != 0 {
+			raw.WriteByte(',')
+		}
+		raw.WriteString(`{"input":1,"output":2,"tier":{"type":"context","size":`)
+		raw.WriteString(strconv.Itoa(index))
+		raw.WriteString(`}}`)
+	}
+	raw.WriteString(`]}}}}}`)
+	return []byte(raw.String())
 }
 
 func optionalRateString(rate *pricing.Rate) string {

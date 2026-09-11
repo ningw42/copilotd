@@ -11,7 +11,8 @@
 
 These facts identify the vendored artifact. The live response does not contain a
 source commit, and the service did not expose an immutable artifact URL during
-this observation.
+this observation. The response has no terminal newline; the repository's EOF
+fixer excludes exactly this path so normal hooks preserve the identified bytes.
 
 ## Separate source and license audit
 
@@ -31,11 +32,12 @@ is deliberately **not** claimed as the source identity of the separately
 fetched live `api.json` bytes.
 
 The selected projection follows the observed schema names: root provider keys,
-provider `id` and `models`, model `id` and optional `cost`, standard
-`input`/`output` plus optional `reasoning`, `cache_read`, `cache_write`,
-`input_audio`, and `output_audio`, structured `tiers[].tier` context `size`, and
-the generated legacy `context_over_200k` row. Experimental mode prices are not
-part of the standard selected projection.
+provider `id` and `models`, model `id` and optional `cost`, recognized `input`,
+`output`, `reasoning`, `cache_read`, `cache_write`, `input_audio`, and
+`output_audio` rates, structured `tiers[].tier` context `size`, and the generated
+legacy `context_over_200k` row. Each chargeable rate keeps its source presence;
+an absent selected-row rate is not filled from another row. Experimental mode
+prices are not part of the standard selected projection.
 
 ## Bumping the floor
 

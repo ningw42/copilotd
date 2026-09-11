@@ -26,12 +26,6 @@ const (
 
 var embeddedArtifact = modelsdevdata.Artifact()
 
-func init() {
-	if _, err := ParseSnapshot(context.Background(), embeddedArtifact); err != nil {
-		panic(fmt.Sprintf("decode embedded models.dev pricing floor: %v", err))
-	}
-}
-
 // CacheConfig supplies the memory-only pricing refresh cadence. A nonpositive
 // interval pins the embedded floor.
 type CacheConfig struct {

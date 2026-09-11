@@ -38,7 +38,7 @@ func TestCachedSourceServesValidatedEmbeddedFloorWhenRefreshIsPinned(t *testing.
 		t.Fatalf("embedded projected identities = %d, want literal audited count 113", got)
 	}
 	rates, ok := snapshot.Rates(pricing.Identity{Provider: "openai", Model: "gpt-5.6-sol"})
-	if !ok || rates.Input.String() != "8" || rates.Output.String() != "30" || rates.CacheRead == nil || rates.CacheRead.String() != "0.8" || rates.CacheWrite == nil || rates.CacheWrite.String() != "10" {
+	if !ok || rateString(rates.Input) != "8" || rateString(rates.Output) != "30" || rateString(rates.CacheRead) != "0.8" || rateString(rates.CacheWrite) != "10" {
 		t.Fatalf("embedded gpt-5.6-sol selected rates = %#v, %t; want audited highest-tier 8/30/0.8/10", rates, ok)
 	}
 	if status.Source != "fallback" || status.Version != "sha256:db685655368231dce789b060e493a21899cb861c9930cc52521795776ab6e3b5" || status.LastSuccess != nil {
@@ -88,6 +88,63 @@ func TestCachedSourceRefreshReplacesTheWholeSnapshotWithoutCredentials(t *testin
 	}
 	if requests.Load() != 1 {
 		t.Fatalf("requests after refresh and Current = %d, want 1 (Current must not fetch)", requests.Load())
+	}
+}
+
+func TestCachedSourceRefreshAcceptsReplacementWithDeletedRates(t *testing.T) {
+	t.Parallel()
+
+	const complete = `{"openai":{"id":"openai","models":{"deleted":{"id":"deleted","cost":{"input":1,"output":2}}}},"anthropic":{"id":"anthropic","models":{}},"google":{"id":"google","models":{}},"xai":{"id":"xai","models":{}}}`
+	const replacement = `{"openai":{"id":"openai","models":{"deleted":{"id":"deleted","cost":{"input":1}},"absent-base":{"id":"absent-base","cost":{"cache_read":0}},"tiered":{"id":"tiered","cost":{"input":7,"output":8,"tiers":[{"input":3,"output":4,"tier":{"type":"context","size":100}},{"output":5,"tier":{"type":"context","size":200}}]}}}},"anthropic":{"id":"anthropic","models":{}},"google":{"id":"google","models":{}},"xai":{"id":"xai","models":{}}}`
+	var request atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if request.Add(1) == 1 {
+			_, _ = io.WriteString(w, complete)
+			return
+		}
+		_, _ = io.WriteString(w, replacement)
+	}))
+	t.Cleanup(server.Close)
+
+	registry := cache.NewRegistry()
+	source := pricing.NewCachedSource(pricing.CacheConfig{RefreshInterval: time.Hour}, pricing.NewRemote(server.URL, server.Client().Transport), registry, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	registry.Prime(context.Background())
+	_, firstStatus, err := source.Current(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	registry.Prime(context.Background())
+	snapshot, replacementStatus, err := source.Current(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantIdentities := []pricing.Identity{
+		{Provider: "openai", Model: "absent-base"},
+		{Provider: "openai", Model: "deleted"},
+		{Provider: "openai", Model: "tiered"},
+	}
+	if got := snapshot.Identities(); !reflect.DeepEqual(got, wantIdentities) {
+		t.Fatalf("replacement identities = %#v, want %#v", got, wantIdentities)
+	}
+	if replacementStatus.Source != "fetched" || replacementStatus.Version == firstStatus.Version || replacementStatus.LastSuccess == nil {
+		t.Fatalf("replacement status = %#v, first = %#v; want successful distinct fetched replacement", replacementStatus, firstStatus)
+	}
+	deleted, ok := snapshot.Rates(pricing.Identity{Provider: "openai", Model: "deleted"})
+	if !ok || rateString(deleted.Input) != "1" || deleted.Output != nil {
+		t.Fatalf("rate-deleted model = %#v, %t; want input 1 and absent output", deleted, ok)
+	}
+	absentBase, ok := snapshot.Rates(pricing.Identity{Provider: "openai", Model: "absent-base"})
+	if !ok || absentBase.Input != nil || absentBase.Output != nil || rateString(absentBase.CacheRead) != "0" || absentBase.CacheWrite != nil {
+		t.Fatalf("absent-base model = %#v, %t; want absent input/output/write and explicit-zero read", absentBase, ok)
+	}
+	tiered, ok := snapshot.Rates(pricing.Identity{Provider: "openai", Model: "tiered"})
+	if !ok || tiered.Input != nil || rateString(tiered.Output) != "5" || tiered.CacheRead != nil || tiered.CacheWrite != nil {
+		t.Fatalf("incomplete highest tier = %#v, %t; want authoritative absent input and output 5 without backfill", tiered, ok)
+	}
+	observed := registry.Observe()
+	if len(observed) != 1 || observed[0].LastAttemptResult == nil || *observed[0].LastAttemptResult != cache.AttemptSuccess {
+		t.Fatalf("observation = %#v, want successful rate-deleting replacement", observed)
 	}
 }
 
@@ -151,26 +208,51 @@ func TestRemoteRefreshRefusesRedirectsAndBoundsDecodedBodies(t *testing.T) {
 	})
 
 	t.Run("decoded body cap", func(t *testing.T) {
-		var compressed bytes.Buffer
-		writer := gzip.NewWriter(&compressed)
-		if _, err := writer.Write(bytes.Repeat([]byte{'x'}, (8<<20)+1)); err != nil {
-			t.Fatal(err)
-		}
-		if err := writer.Close(); err != nil {
-			t.Fatal(err)
-		}
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			w.Header().Set("Content-Encoding", "gzip")
-			_, _ = w.Write(compressed.Bytes())
-		}))
-		t.Cleanup(server.Close)
+		for _, test := range []struct {
+			name     string
+			size     int
+			accepted bool
+		}{
+			{name: "exactly at cap", size: 8 << 20, accepted: true},
+			{name: "one byte over cap", size: (8 << 20) + 1},
+		} {
+			t.Run(test.name, func(t *testing.T) {
+				decoded := validDecodedSnapshot(test.size)
+				var compressed bytes.Buffer
+				writer := gzip.NewWriter(&compressed)
+				if _, err := writer.Write(decoded); err != nil {
+					t.Fatal(err)
+				}
+				if err := writer.Close(); err != nil {
+					t.Fatal(err)
+				}
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					w.Header().Set("Content-Encoding", "gzip")
+					_, _ = w.Write(compressed.Bytes())
+				}))
+				t.Cleanup(server.Close)
 
-		registry := cache.NewRegistry()
-		pricing.NewCachedSource(pricing.CacheConfig{RefreshInterval: time.Hour}, pricing.NewRemote(server.URL, server.Client().Transport), registry, slog.New(slog.NewTextHandler(io.Discard, nil)))
-		registry.Prime(context.Background())
-		observed := registry.Observe()
-		if len(observed) != 1 || observed[0].LastAttemptResult == nil || *observed[0].LastAttemptResult != cache.AttemptFailure || observed[0].Source != "fallback" {
-			t.Fatalf("observation = %#v, want oversized decoded response rejected at fallback", observed)
+				registry := cache.NewRegistry()
+				source := pricing.NewCachedSource(pricing.CacheConfig{RefreshInterval: time.Hour}, pricing.NewRemote(server.URL, server.Client().Transport), registry, slog.New(slog.NewTextHandler(io.Discard, nil)))
+				registry.Prime(context.Background())
+				_, status, err := source.Current(context.Background())
+				if err != nil {
+					t.Fatalf("Current() error = %v", err)
+				}
+				observed := registry.Observe()
+				if len(observed) != 1 || observed[0].LastAttemptResult == nil {
+					t.Fatalf("observation = %#v, want one completed decoded-cap attempt", observed)
+				}
+				if test.accepted {
+					if *observed[0].LastAttemptResult != cache.AttemptSuccess || status.Source != "fetched" {
+						t.Fatalf("status=%#v observation=%#v; want valid at-cap response accepted", status, observed)
+					}
+					return
+				}
+				if *observed[0].LastAttemptResult != cache.AttemptFailure || status.Source != "fallback" {
+					t.Fatalf("status=%#v observation=%#v; want valid over-cap response rejected at fallback", status, observed)
+				}
+			})
 		}
 	})
 }
@@ -217,6 +299,27 @@ func TestRemoteRefreshOwnsFiveSecondContextAndHonorsCancellation(t *testing.T) {
 	}
 }
 
+func validDecodedSnapshot(size int) []byte {
+	const prefix = `{"padding":"`
+	const suffix = `","openai":{"id":"openai","models":{}},"anthropic":{"id":"anthropic","models":{}},"google":{"id":"google","models":{}},"xai":{"id":"xai","models":{}}}`
+	padding := size - len(prefix) - len(suffix)
+	if padding < 0 {
+		panic("requested decoded snapshot is too small")
+	}
+	decoded := make([]byte, 0, size)
+	decoded = append(decoded, prefix...)
+	decoded = append(decoded, bytes.Repeat([]byte{'x'}, padding)...)
+	decoded = append(decoded, suffix...)
+	return decoded
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (fn roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return fn(req) }
+
+func rateString(rate *pricing.Rate) string {
+	if rate == nil {
+		return "<absent>"
+	}
+	return rate.String()
+}
