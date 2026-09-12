@@ -2,6 +2,38 @@ package pricing
 
 import "github.com/ningw42/copilotd/internal/usage"
 
+// CalculateAnthropic selects this tariff's rate vector from complete Anthropic
+// input and values one persisted Anthropic-native Turn. Complete input is the
+// checked sum of uncached input, aggregate cache creation, and cache read;
+// output, thinking, and cache TTL subdivisions never influence tier selection.
+func (t Tariff) CalculateAnthropic(native usage.AnthropicUsage) (Contribution, error) {
+	completeInput, reason := anthropicCompleteInput(native)
+	if reason != "" {
+		return Contribution{Reason: reason}, nil
+	}
+	return CalculateAnthropic(native, t.Rates(completeInput))
+}
+
+func anthropicCompleteInput(native usage.AnthropicUsage) (uint64, ExclusionReason) {
+	if native.CacheReadInputTokens == nil || native.CacheCreationInputTokens == nil {
+		return 0, ExclusionMissingUsage
+	}
+	cacheRead := *native.CacheReadInputTokens
+	cacheCreation := *native.CacheCreationInputTokens
+	if native.InputTokens < 0 || cacheRead < 0 || cacheCreation < 0 {
+		return 0, ExclusionInconsistentUsage
+	}
+	total := uint64(native.InputTokens)
+	for _, count := range []int64{cacheCreation, cacheRead} {
+		value := uint64(count)
+		if value > ^uint64(0)-total {
+			return 0, ExclusionInconsistentUsage
+		}
+		total += value
+	}
+	return total, ""
+}
+
 // CalculateAnthropic values one persisted Anthropic-native Turn at the supplied
 // selected original-provider rates; it does not select rates or resolve a
 // model. InputTokens is the uncached remainder, so cache-read and aggregate

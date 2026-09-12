@@ -8,6 +8,68 @@ import (
 	"github.com/ningw42/copilotd/internal/usage/pricing"
 )
 
+func TestTariffCalculatesAnthropicWithCheckedAdditiveInputContext(t *testing.T) {
+	t.Parallel()
+
+	tariff := tariffFromCost(t, `{
+		"input":1,"output":1,"cache_read":1,"cache_write":1,
+		"tiers":[{"input":2,"output":2,"cache_read":2,"cache_write":2,"tier":{"type":"context","size":100}}]
+	}`)
+	creation := int64(40)
+	atBoundary, aboveBoundary := int64(59), int64(60)
+	tests := []struct {
+		name       string
+		cacheRead  *int64
+		wantAmount string
+	}{
+		{name: "cache-heavy input equal to threshold uses base", cacheRead: &atBoundary, wantAmount: "0.0001"},
+		{name: "cache-heavy input above threshold uses tier", cacheRead: &aboveBoundary, wantAmount: "0.000202"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			contribution, err := tariff.CalculateAnthropic(usage.AnthropicUsage{
+				InputTokens:              1,
+				CacheCreationInputTokens: &creation,
+				CacheReadInputTokens:     tc.cacheRead,
+			})
+			if err != nil {
+				t.Fatalf("Tariff.CalculateAnthropic() error = %v", err)
+			}
+			if contribution.Reason != "" || contribution.Amount.String() != tc.wantAmount {
+				t.Fatalf("contribution = {amount:%s reason:%q}, want amount %s and no exclusion", contribution.Amount.String(), contribution.Reason, tc.wantAmount)
+			}
+		})
+	}
+
+	t.Run("missing additive evidence is unpriceable", func(t *testing.T) {
+		contribution, err := tariff.CalculateAnthropic(usage.AnthropicUsage{
+			InputTokens:              1,
+			CacheCreationInputTokens: &creation,
+		})
+		if err != nil {
+			t.Fatalf("Tariff.CalculateAnthropic() error = %v", err)
+		}
+		if contribution.Reason != pricing.ExclusionMissingUsage {
+			t.Fatalf("exclusion = %q, want %q", contribution.Reason, pricing.ExclusionMissingUsage)
+		}
+	})
+
+	t.Run("additive context overflow is unpriceable", func(t *testing.T) {
+		maximum := int64(math.MaxInt64)
+		contribution, err := tariff.CalculateAnthropic(usage.AnthropicUsage{
+			InputTokens:              maximum,
+			CacheCreationInputTokens: &maximum,
+			CacheReadInputTokens:     &maximum,
+		})
+		if err != nil {
+			t.Fatalf("Tariff.CalculateAnthropic() error = %v", err)
+		}
+		if contribution.Reason != pricing.ExclusionInconsistentUsage {
+			t.Fatalf("exclusion = %q, want %q", contribution.Reason, pricing.ExclusionInconsistentUsage)
+		}
+	})
+}
+
 func TestCalculateAnthropicValuesAdditiveInputAndCompleteOutput(t *testing.T) {
 	t.Parallel()
 

@@ -2,6 +2,16 @@ package pricing
 
 import "github.com/ningw42/copilotd/internal/usage"
 
+// CalculateOpenAI selects this tariff's rate vector from complete OpenAI input
+// and values one persisted OpenAI-native Turn. Output, reasoning, reported
+// total, and cache subsets never influence context-tier selection.
+func (t Tariff) CalculateOpenAI(native usage.OpenAIUsage) (Contribution, error) {
+	if native.InputTokens < 0 {
+		return Contribution{Reason: ExclusionInconsistentUsage}, nil
+	}
+	return CalculateOpenAI(native, t.Rates(uint64(native.InputTokens)))
+}
+
 // CalculateOpenAI values one persisted OpenAI-native Turn at the supplied
 // selected original-provider rates; it does not select rates or resolve a
 // model. InputTokens is complete input, so its cached and cache-write subsets
