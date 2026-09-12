@@ -3,6 +3,7 @@ package pricing
 import (
 	"context"
 	"crypto/sha256"
+	_ "embed"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -13,7 +14,6 @@ import (
 	"time"
 
 	"github.com/ningw42/copilotd/internal/cache"
-	"github.com/ningw42/copilotd/internal/usage/pricing/modelsdevdata"
 )
 
 const (
@@ -25,7 +25,8 @@ const (
 	decodedResponseLimit = 8 << 20
 )
 
-var embeddedArtifact = modelsdevdata.Artifact()
+//go:embed modelsdevdata/api.json
+var embeddedArtifact []byte
 
 var embeddedParsedSnapshot = sync.OnceValue(func() *Snapshot {
 	snapshot, err := ParseSnapshot(context.Background(), embeddedArtifact)
@@ -91,8 +92,8 @@ func NewRemote(url string, transport http.RoundTripper) Remote {
 type CachedSource struct {
 	value *cache.Value[[]byte]
 
-	parsedMu sync.Mutex
-	parsed   *parsedSnapshot
+	parsedGate chan struct{}
+	parsed     *parsedSnapshot
 }
 
 type parsedSnapshot struct {
@@ -117,7 +118,8 @@ func NewCachedSource(cfg CacheConfig, remote Remote, registry *cache.Registry, l
 	})
 	registry.Register(value)
 	return &CachedSource{
-		value: value,
+		value:      value,
+		parsedGate: make(chan struct{}, 1),
 		parsed: &parsedSnapshot{
 			version:  fallbackVersion,
 			snapshot: embeddedParsedSnapshot(),
@@ -135,8 +137,12 @@ func (s *CachedSource) Current(ctx context.Context, limit ProjectionLimit) (*Sna
 		return nil, SnapshotStatus{}, err
 	}
 
-	s.parsedMu.Lock()
-	defer s.parsedMu.Unlock()
+	select {
+	case s.parsedGate <- struct{}{}:
+		defer func() { <-s.parsedGate }()
+	case <-ctx.Done():
+		return nil, SnapshotStatus{}, ctx.Err()
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, SnapshotStatus{}, err
 	}

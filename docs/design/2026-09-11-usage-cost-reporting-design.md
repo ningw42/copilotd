@@ -7,6 +7,15 @@ native-platform certification remain release gates, not inferred from this statu
 **Date:** 2026-09-11
 **Extends:** [Usage reporting](2026-09-07-usage-reporting-design.md)
 
+**Snapshot-policy amendment:** The maintainer confirmed
+[`8bb205a`](https://github.com/ningw42/copilotd/commit/8bb205a7dc2a158e250e3270ef7b5b90cf232d60)
+as superseding the epic-linked `0d761b6` per-report parsing policy and associated
+work-accounting/lifetime requirements. The source owns a reusable immutable
+projection keyed by content hash, seeds the floor during enabled construction
+outside report work, and may retain parsed state across reports and HTTP response
+writing. Projection misses use the calling report's work context; each report
+still applies its identity budget and cancellation.
+
 ## 1. Agreed direction
 
 Add estimated cost to `copilotd usage` without turning the Usage report into a

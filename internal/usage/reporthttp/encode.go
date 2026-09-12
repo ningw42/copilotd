@@ -4,9 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"math"
 	"time"
-	"unicode/utf8"
 
 	"github.com/ningw42/copilotd/internal/usage/report"
 )
@@ -14,11 +12,14 @@ import (
 const MaxBodyBytes = 8 << 20
 
 // Encode only bounded fragments, never the complete report in encoding/json's
-// unbounded internal buffer. Each model-bearing fragment contains one guarded
-// identity; repeated identities cannot cause a whole-report allocation.
+// unbounded internal buffer. Each model-bearing fragment guards its Reported
+// and Pricing model identities before marshal.
 func encodeReport(ctx context.Context, result report.Report) ([]byte, error) {
 	out := boundedJSON{ctx: ctx}
-	if err := validatePricingExtension(ctx, result); err != nil {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := validatePricingProvenance(result.Pricing); err != nil {
 		return nil, err
 	}
 	// The effective filter is also an identity-bearing fragment. Check before
@@ -57,9 +58,10 @@ func encodeReport(ctx context.Context, result report.Report) ([]byte, error) {
 			if i > 0 {
 				out.append([]byte(","))
 			}
-			out.model(row.Model, wireRow{
+			model := modelTotalForWire(row.ModelTotal, result.Pricing != nil)
+			out.model(model, wireRow{
 				BucketStart:    row.BucketStart,
-				wireModelTotal: modelTotalForWire(row.ModelTotal, result.Pricing != nil),
+				wireModelTotal: model,
 			})
 		}
 		out.append([]byte(`],"models":[`))
@@ -67,7 +69,8 @@ func encodeReport(ctx context.Context, result report.Report) ([]byte, error) {
 			if i > 0 {
 				out.append([]byte(","))
 			}
-			out.model(model.Model, modelTotalForWire(model, result.Pricing != nil))
+			wire := modelTotalForWire(model, result.Pricing != nil)
+			out.model(wire, wire)
 		}
 		out.append([]byte(`],"total":`))
 		out.value(totalForWire(native.section.Total, result.Pricing != nil))
@@ -126,123 +129,22 @@ type wireRow struct {
 	wireModelTotal
 }
 
-var errInvalidPricingExtension = errors.New("invalid pricing report extension")
+var errInvalidPricingProvenance = errors.New("invalid pricing report provenance")
 
-func validatePricingExtension(ctx context.Context, result report.Report) error {
-	present := result.Pricing != nil
-	if present {
-		provenance := result.Pricing
-		if provenance.Dataset != "models.dev/api.json" || provenance.Currency != "USD" || provenance.Basis != "original_provider" || provenance.ContextPolicy != "highest_tier" || provenance.CacheWritePolicy != "single_rate" || !validContentVersion(provenance.Version) || provenance.Source != "fallback" && provenance.Source != "fetched" {
-			return errInvalidPricingExtension
-		}
-		if provenance.LastSuccess != nil {
-			_, offset := provenance.LastSuccess.Zone()
-			if provenance.LastSuccess.IsZero() || offset != 0 || provenance.LastSuccess.Year() < 0 || provenance.LastSuccess.Year() > 9999 {
-				return errInvalidPricingExtension
-			}
-		}
-	}
-	for _, section := range []*report.Section{result.Anthropic, result.OpenAI} {
-		if section == nil {
-			continue
-		}
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		for _, row := range section.Rows {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			if err := validateCostExtension(row.Total, present); err != nil {
-				return err
-			}
-			if err := validatePricingMatchExtension(row.PricingMatch, present); err != nil {
-				return err
-			}
-		}
-		for _, model := range section.Models {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			if err := validateCostExtension(model.Total, present); err != nil {
-				return err
-			}
-			if err := validatePricingMatchExtension(model.PricingMatch, present); err != nil {
-				return err
-			}
-		}
-		if err := validateCostExtension(section.Total, present); err != nil {
-			return err
-		}
-	}
-	return ctx.Err()
-}
-
-func validateCostExtension(total report.Total, present bool) error {
-	cost := total.Cost
-	hasCost := cost.Amount != nil || cost.PricedTurns != 0 || cost.Unpriced != (report.UnpricedCoverage{})
-	if !present {
-		if hasCost {
-			return errInvalidPricingExtension
-		}
+// Keep provenance strings bounded before marshaling the header. Cost and match
+// semantics are established by Reporter.Query, not revalidated by the encoder.
+func validatePricingProvenance(provenance *report.PricingProvenance) error {
+	if provenance == nil {
 		return nil
 	}
-	if total.Turns < 0 || cost.PricedTurns < 0 || cost.Unpriced.UnknownModel < 0 || cost.Unpriced.AmbiguousModel < 0 || cost.Unpriced.MissingRate < 0 || cost.Unpriced.MissingUsage < 0 || cost.Unpriced.InconsistentUsage < 0 {
-		return errInvalidPricingExtension
+	if provenance.Dataset != "models.dev/api.json" || provenance.Currency != "USD" || provenance.Basis != "original_provider" || provenance.ContextPolicy != "highest_tier" || provenance.CacheWritePolicy != "single_rate" || !validContentVersion(provenance.Version) || provenance.Source != "fallback" && provenance.Source != "fetched" {
+		return errInvalidPricingProvenance
 	}
-	covered := cost.PricedTurns
-	for _, count := range []int64{cost.Unpriced.UnknownModel, cost.Unpriced.AmbiguousModel, cost.Unpriced.MissingRate, cost.Unpriced.MissingUsage, cost.Unpriced.InconsistentUsage} {
-		if count > math.MaxInt64-covered {
-			return errInvalidPricingExtension
+	if provenance.LastSuccess != nil {
+		_, offset := provenance.LastSuccess.Zone()
+		if provenance.LastSuccess.IsZero() || offset != 0 || provenance.LastSuccess.Year() < 0 || provenance.LastSuccess.Year() > 9999 {
+			return errInvalidPricingProvenance
 		}
-		covered += count
-	}
-	if covered != total.Turns {
-		return errInvalidPricingExtension
-	}
-	if total.Turns == 0 {
-		if cost.Amount == nil || cost.Amount.String() != "0" {
-			return errInvalidPricingExtension
-		}
-	} else if cost.PricedTurns == 0 {
-		if cost.Amount != nil {
-			return errInvalidPricingExtension
-		}
-	} else if cost.Amount == nil {
-		return errInvalidPricingExtension
-	}
-	return nil
-}
-
-func validatePricingMatchExtension(match report.PricingMatch, present bool) error {
-	hasMatch := match.Status != "" || match.Provider != "" || match.Model != "" || match.Method != ""
-	if !present {
-		if hasMatch {
-			return errInvalidPricingExtension
-		}
-		return nil
-	}
-	switch match.Status {
-	case report.PricingMatchUnknown, report.PricingMatchAmbiguous:
-		if match.Provider != "" || match.Model != "" || match.Method != "" {
-			return errInvalidPricingExtension
-		}
-	case report.PricingMatchMatched:
-		for _, identity := range []string{match.Provider, match.Model} {
-			if len(identity) > 1024 {
-				return &report.Error{Code: report.TooLarge, Message: "Pricing identity exceeds the report size limit."}
-			}
-			if identity == "" || !utf8.ValidString(identity) {
-				return errInvalidPricingExtension
-			}
-		}
-		switch match.Method {
-		case report.PricingMatchByExact, report.PricingMatchByNormalized, report.PricingMatchByAlias, report.PricingMatchBySuffix, report.PricingMatchByDated:
-		default:
-			return errInvalidPricingExtension
-		}
-	default:
-		return errInvalidPricingExtension
 	}
 	return nil
 }
@@ -322,9 +224,16 @@ func (b *boundedJSON) value(value any) {
 	}
 	b.append(fragment)
 }
-func (b *boundedJSON) model(model string, value any) {
-	if len(model) > report.MaxModelBytes {
+func (b *boundedJSON) model(model wireModelTotal, value any) {
+	if b.err != nil {
+		return
+	}
+	if len(model.Model) > report.MaxModelBytes {
 		b.err = &report.Error{Code: report.TooLarge, Message: "Model exceeds the report size limit."}
+		return
+	}
+	if match := model.PricingMatch; match != nil && (len(match.Provider) > 1024 || len(match.Model) > 1024) {
+		b.err = &report.Error{Code: report.TooLarge, Message: "Pricing identity exceeds the report size limit."}
 		return
 	}
 	b.value(value)

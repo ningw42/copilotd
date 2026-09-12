@@ -60,5 +60,6 @@ prices are not part of the standard selected projection.
    nix develop -c go test ./internal/usage/pricing -count=1
    ```
 
-The identity test must hash the actual embedded bytes; a manifest-only update is
-not evidence of a successful bump.
+The pricing package's identity test hashes its private production embed of
+`modelsdevdata/api.json`; the modelsdevdata tests verify the manifest and license
+separately. A manifest-only update is not evidence of a successful bump.

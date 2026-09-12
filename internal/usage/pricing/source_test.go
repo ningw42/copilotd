@@ -13,6 +13,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -86,6 +87,105 @@ func TestCachedSourceReusesParsedSnapshotForContentVersion(t *testing.T) {
 	cancel()
 	if snapshot, status, err := source.Current(cancelled, limit); !errors.Is(err, context.Canceled) || snapshot != nil || status != (pricing.SnapshotStatus{}) {
 		t.Fatalf("cached snapshot under canceled context = %#v, %#v, %v; want cancellation", snapshot, status, err)
+	}
+}
+
+func TestCachedSourceConcurrentMissDoesNotBlockCanceledWaiter(t *testing.T) {
+	const artifact = `{"openai":{"id":"openai","models":{"cached":{"id":"cached","cost":{"input":1,"output":2}}}},"anthropic":{"id":"anthropic","models":{}},"google":{"id":"google","models":{}},"xai":{"id":"xai","models":{}}}`
+	limit := pricing.ProjectionLimit{MaxIdentityBytes: 1 << 20}
+	for _, test := range []struct {
+		name   string
+		limit  pricing.ProjectionLimit
+		cancel bool
+		err    error
+	}{
+		{name: "successful projection", limit: limit},
+		{name: "canceled projection", limit: limit, cancel: true, err: context.Canceled},
+		{name: "limited projection", err: pricing.ErrProjectionLimit},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			source := cachedSourceForArtifact(t, []byte(artifact))
+			type result struct {
+				snapshot *pricing.Snapshot
+				status   pricing.SnapshotStatus
+				err      error
+			}
+			var workers sync.WaitGroup
+			start := func(ctx context.Context, limit pricing.ProjectionLimit) <-chan result {
+				done := make(chan result, 1)
+				workers.Add(1)
+				go func() {
+					defer workers.Done()
+					snapshot, status, err := source.Current(ctx, limit)
+					done <- result{snapshot, status, err}
+				}()
+				return done
+			}
+
+			leaderBase, cancelLeader := context.WithCancel(context.Background())
+			release := make(chan struct{})
+			releaseLeader := sync.OnceFunc(func() { close(release) })
+			t.Cleanup(func() {
+				cancelLeader()
+				releaseLeader()
+				workers.Wait()
+			})
+			// Current checks cancellation before and after acquisition. Pause
+			// the next checkpoint, inside projection of the tiny accepted miss.
+			leader := &currentCheckpointContext{Context: leaderBase, at: 3, entered: make(chan struct{}), release: release}
+			leaderDone := start(leader, test.limit)
+			<-leader.entered
+
+			waiterBase, cancelWaiter := context.WithCancel(context.Background())
+			t.Cleanup(cancelWaiter)
+			waiter := &currentCheckpointContext{Context: waiterBase, at: 1, entered: make(chan struct{})}
+			waiterDone := start(waiter, limit)
+			<-waiter.entered
+			// The waiter's initial Err already sampled nil. Cancellation must
+			// therefore interrupt acquisition, not take the pre-canceled path.
+			cancelWaiter()
+			select {
+			case got := <-waiterDone:
+				if !errors.Is(got.err, context.Canceled) || got.snapshot != nil || got.status != (pricing.SnapshotStatus{}) {
+					t.Fatalf("canceled waiter = %#v; want no snapshot/status and context.Canceled", got)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("canceled waiter did not return while the first projection remained paused")
+			}
+
+			follower := &currentCheckpointContext{Context: context.Background(), at: 1, entered: make(chan struct{})}
+			followerDone := start(follower, limit)
+			<-follower.entered
+			if test.cancel {
+				cancelLeader()
+			}
+			releaseLeader()
+			first, next := <-leaderDone, <-followerDone
+			if !errors.Is(first.err, test.err) {
+				t.Fatalf("first projection error = %v, want %v", first.err, test.err)
+			}
+			if test.err != nil && (first.snapshot != nil || first.status != (pricing.SnapshotStatus{})) {
+				t.Fatalf("failed projection returned partial data: %#v", first)
+			}
+			if next.err != nil || next.snapshot == nil || next.status.Source != "fetched" || next.status.LastSuccess == nil {
+				t.Fatalf("successful follower = %#v", next)
+			}
+			wantIdentities := []pricing.Identity{{Provider: "openai", Model: "cached"}}
+			if got := next.snapshot.Identities(); !reflect.DeepEqual(got, wantIdentities) {
+				t.Fatalf("follower identities = %#v, want complete projection %#v", got, wantIdentities)
+			}
+			rates, ok := next.snapshot.Rates(wantIdentities[0])
+			if !ok || rateString(rates.Input) != "1" || rateString(rates.Output) != "2" {
+				t.Fatalf("follower reused incomplete rates: %#v, %t", rates, ok)
+			}
+			if test.err == nil && (first.snapshot != next.snapshot || !reflect.DeepEqual(first.status, next.status)) {
+				t.Fatal("successful concurrent misses did not reuse the same immutable snapshot/status")
+			}
+			again, status, err := source.Current(context.Background(), limit)
+			if err != nil || again != next.snapshot || !reflect.DeepEqual(status, next.status) {
+				t.Fatalf("unchanged Current = %p, %#v, %v; want reused %p, %#v", again, status, err, next.snapshot, next.status)
+			}
+		})
 	}
 }
 
@@ -547,6 +647,29 @@ func validDecodedSnapshot(size int) []byte {
 	decoded = append(decoded, bytes.Repeat([]byte{'x'}, padding)...)
 	decoded = append(decoded, suffix...)
 	return decoded
+}
+
+// currentCheckpointContext synchronizes concurrent Current calls using only
+// their public context. Sampling Err before notification prevents a cancellation
+// handshake from accidentally testing only Current's pre-canceled fast path.
+// The optional pause holds projection independently of fixture size or speed.
+type currentCheckpointContext struct {
+	context.Context
+	at      int32
+	checks  atomic.Int32
+	entered chan struct{}
+	release <-chan struct{}
+}
+
+func (c *currentCheckpointContext) Err() error {
+	err := c.Context.Err()
+	if c.checks.Add(1) == c.at {
+		close(c.entered)
+		if c.release != nil {
+			<-c.release
+		}
+	}
+	return err
 }
 
 type roundTripFunc func(*http.Request) (*http.Response, error)

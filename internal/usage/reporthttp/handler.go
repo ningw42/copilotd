@@ -21,6 +21,8 @@ const (
 	WriteTimeout     = 5 * time.Second
 )
 
+// QueryFunc returns a complete, valid report on success, as report.Reporter.Query
+// does. The handler bounds encoding but does not revalidate cost or match semantics.
 type QueryFunc func(context.Context, report.Query) (report.Report, error)
 
 // Handler registers no paths itself. A nil QueryFunc explicitly disables

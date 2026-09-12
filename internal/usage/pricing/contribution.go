@@ -24,3 +24,26 @@ type Contribution struct {
 	Amount Amount
 	Reason ExclusionReason
 }
+
+type pricedLine struct {
+	tokens int64
+	rate   *Rate
+}
+
+func sumPricedLines(lines []pricedLine) (Contribution, error) {
+	var total Amount
+	for _, line := range lines {
+		if line.tokens == 0 {
+			continue
+		}
+		part, err := line.rate.ForTokens(line.tokens)
+		if err != nil {
+			return Contribution{}, err
+		}
+		total, err = total.Add(part)
+		if err != nil {
+			return Contribution{}, err
+		}
+	}
+	return Contribution{Amount: total}, nil
+}

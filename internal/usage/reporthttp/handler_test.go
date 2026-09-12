@@ -159,19 +159,22 @@ func TestHandlerCancellationBeforePricingExtensionEncodingReturnsSafeFailure(t *
 	}
 }
 
-func TestHandlerRejectsMalformedPricingExtensionBeforeSuccess(t *testing.T) {
+func TestHandlerGuardsPricingProvenanceAndIdentitySizes(t *testing.T) {
 	amount, err := pricing.ParseAmount("0.125")
 	if err != nil {
 		t.Fatal(err)
 	}
 	base := func() report.Report {
 		start := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+		one, zero := int64(1), int64(0)
 		total := report.Total{
 			Turns: 1,
 			Usage: map[string]report.Metric{
-				"input_tokens":  {Sum: func() *int64 { value := int64(1); return &value }(), ReportedTurns: 1},
-				"output_tokens": {Sum: func() *int64 { value := int64(1); return &value }(), ReportedTurns: 1},
-				"cached_tokens": {}, "cache_write_tokens": {}, "reasoning_tokens": {}, "total_tokens": {},
+				"input_tokens":       {Sum: &one, ReportedTurns: 1},
+				"output_tokens":      {Sum: &one, ReportedTurns: 1},
+				"cached_tokens":      {Sum: &zero, ReportedTurns: 1},
+				"cache_write_tokens": {Sum: &zero, ReportedTurns: 1},
+				"reasoning_tokens":   {}, "total_tokens": {},
 			},
 			Cost: report.Cost{Amount: &amount, PricedTurns: 1},
 		}
@@ -184,39 +187,85 @@ func TestHandlerRejectsMalformedPricingExtensionBeforeSuccess(t *testing.T) {
 			OpenAI:  &report.Section{Rows: []report.Row{{BucketStart: "2026-09-01", ModelTotal: model}}, Models: []report.ModelTotal{model}, Total: total},
 		}
 	}
-	cases := []struct {
+	type example struct {
 		name   string
 		status int
 		mutate func(*report.Report)
-	}{
+	}
+	cases := []example{
 		{"invalid provenance", 503, func(r *report.Report) { r.Pricing.Currency = "EUR" }},
 		{"short content identity", 503, func(r *report.Report) { r.Pricing.Version = "sha256:test" }},
-		{"coverage mismatch", 503, func(r *report.Report) { r.OpenAI.Rows[0].Cost.PricedTurns = 0 }},
-		{"empty aggregate NULL", 503, func(r *report.Report) {
-			r.OpenAI.Total.Turns, r.OpenAI.Total.Cost.Amount, r.OpenAI.Total.Cost.PricedTurns = 0, nil, 0
-		}},
-		{"malformed unresolved match", 503, func(r *report.Report) { r.OpenAI.Models[0].PricingMatch.Status = report.PricingMatchUnknown }},
-		{"oversized pricing identity", 422, func(r *report.Report) { r.OpenAI.Rows[0].PricingMatch.Model = strings.Repeat("\x01", 1025) }},
-		{"nested extension without top", 503, func(r *report.Report) { r.Pricing = nil }},
+	}
+	for _, level := range []string{"row", "model"} {
+		for _, field := range []string{"provider", "model"} {
+			for _, boundary := range []struct {
+				name, value string
+				status      int
+			}{
+				{"escaped at limit", strings.Repeat("\x01", 1024), 200},
+				{"escaped over limit", strings.Repeat("\x01", 1025), 422},
+				{"UTF8 at byte limit", strings.Repeat("é", 512), 200},
+				{"UTF8 over byte limit", strings.Repeat("é", 512) + "x", 422},
+			} {
+				cases = append(cases, example{level + "/" + field + "/" + boundary.name, boundary.status, func(r *report.Report) {
+					match := &r.OpenAI.Rows[0].PricingMatch
+					if level == "model" {
+						match = &r.OpenAI.Models[0].PricingMatch
+					}
+					if field == "provider" {
+						match.Provider = boundary.value
+					} else {
+						match.Model = boundary.value
+					}
+				}})
+			}
+		}
 	}
 	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			result := base()
-			tc.mutate(&result)
-			handler := reporthttp.Handler(func(context.Context, report.Query) (report.Report, error) { return result, nil })
-			rr := httptest.NewRecorder()
-			handler.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, reporthttp.Path+"?timezone=UTC", nil))
-			if rr.Code != tc.status || strings.Contains(rr.Body.String(), `"openai"`) || strings.Contains(rr.Body.String(), "sha256:test") || strings.Contains(rr.Body.String(), strings.Repeat(`\\u0001`, 20)) {
-				t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
-			}
-			code := "usage_unavailable"
-			if tc.status == 422 {
-				code = "report_too_large"
-			}
-			if !strings.Contains(rr.Body.String(), code) {
-				t.Fatalf("safe failure missing %q: %s", code, rr.Body.String())
-			}
-		})
+		for _, method := range []string{http.MethodGet, http.MethodHead} {
+			t.Run(tc.name+"/"+method, func(t *testing.T) {
+				result := base()
+				tc.mutate(&result)
+				handler := reporthttp.Handler(func(context.Context, report.Query) (report.Report, error) { return result, nil })
+				rr := httptest.NewRecorder()
+				handler.ServeHTTP(rr, httptest.NewRequest(method, reporthttp.Path+"?timezone=UTC", nil))
+				if rr.Code != tc.status {
+					t.Fatalf("status=%d, want %d; body=%s", rr.Code, tc.status, rr.Body.String())
+				}
+				if rr.Header().Get("Content-Type") != "application/json" || rr.Header().Get("Cache-Control") != "no-store" || rr.Header().Get("X-Content-Type-Options") != "nosniff" {
+					t.Fatalf("headers: %v", rr.Header())
+				}
+				if method == http.MethodHead {
+					if rr.Body.Len() != 0 {
+						t.Fatal("HEAD body")
+					}
+					return
+				}
+				if tc.status != http.StatusOK {
+					want := `{"schema_version":1,"error":{"code":"usage_unavailable","message":"Usage data is unavailable on this daemon."}}`
+					if tc.status == http.StatusUnprocessableEntity {
+						want = `{"schema_version":1,"error":{"code":"report_too_large","message":"Pricing identity exceeds the report size limit."}}`
+					}
+					if rr.Body.String() != want {
+						t.Fatalf("unsafe or partial failure: %s; want %s", rr.Body.String(), want)
+					}
+					return
+				}
+				var got struct {
+					OpenAI struct {
+						Rows, Models []struct {
+							PricingMatch report.PricingMatch `json:"pricing_match"`
+						}
+					}
+				}
+				if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+					t.Fatal(err)
+				}
+				if len(got.OpenAI.Rows) != 1 || len(got.OpenAI.Models) != 1 || got.OpenAI.Rows[0].PricingMatch != result.OpenAI.Rows[0].PricingMatch || got.OpenAI.Models[0].PricingMatch != result.OpenAI.Models[0].PricingMatch {
+					t.Fatal("bounded pricing identities were not preserved")
+				}
+			})
+		}
 	}
 }
 
