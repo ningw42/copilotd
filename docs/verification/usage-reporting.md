@@ -65,17 +65,19 @@ existing Nix development shell (native CI uses setup-go).
   Surface-independent original-provider identity, per-Turn context-tier selection
   and one aggregate cache-write rate, a short OpenAI-native Turn valued at base
   rates, a response-`priority` Turn valued with explicit Fast and derived context
-  rates across pricing refreshes, exact current-price and identity repricing without new database writes,
+  rates across pricing refreshes, exact current-price and identity repricing
+  without new database writes,
   report-time no-network behavior, omission of presentation-only
   `pricing.context_policy`, and a coherent old snapshot while replacement refresh
   is deliberately blocked. The ordinary
   actual-`serve` acceptance separately pins refresh to `0` and uses the embedded
   floor; neither path contacts models.dev.
   The buffered, SSE, and WebSocket real-listener fixtures additionally carry
-  synthetic `default`, `priority`, and `fast` completed-response evidence through
-  the production meter, SQLite writer, reporter, and embedded pricing floor while
-  preserving forwarded payloads. A Fast request whose response reports `default`
-  is valued normally. No external pricing or inference service is contacted.
+  synthetic absent/null/empty/unknown/`default`/`priority`/`fast`
+  completed-response evidence through the production meter, SQLite writer,
+  reporter, embedded pricing floor, and actual CLI while preserving forwarded
+  payloads. A Fast request whose response reports `default` is valued normally.
+  No external pricing or inference service is contacted.
   No OS can carry embedded NUL in argv; its identity contract remains tested at
   Go command and HTTP/report seams, not falsely claimed as a native argv case.
 - Windows process cleanup uses `Kill`, not an unsupported `os.Interrupt`; this

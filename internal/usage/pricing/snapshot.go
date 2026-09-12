@@ -41,13 +41,17 @@ type contextTier struct {
 	rates     Rates
 }
 
-// Tariff retains one model's normal rate vectors and optional OpenAI Fast
-// declaration. Its immutable normal contents are exposed through per-input
-// rate selection; service-mode selection remains inside this package.
-type Tariff struct {
+type rateSchedule struct {
 	base  Rates
 	tiers []contextTier
-	fast  *fastTariff
+}
+
+// Tariff retains one model's normal rate schedule and optional OpenAI Fast
+// schedule. Its immutable normal contents are exposed through per-input rate
+// selection; service-mode selection remains inside this package.
+type Tariff struct {
+	normal rateSchedule
+	fast   *rateSchedule
 }
 
 // Rates selects the greatest context threshold strictly below completeInput,
@@ -57,17 +61,17 @@ func (t Tariff) Rates(completeInput uint64) Rates {
 }
 
 func (t Tariff) rates(completeInput uint64) Rates {
-	return selectContextRates(t.base, t.tiers, completeInput)
+	return t.normal.rates(completeInput)
 }
 
-func selectContextRates(base Rates, tiers []contextTier, completeInput uint64) Rates {
-	firstNotBelow := sort.Search(len(tiers), func(index int) bool {
-		return completeInput <= tiers[index].threshold
+func (s rateSchedule) rates(completeInput uint64) Rates {
+	firstNotBelow := sort.Search(len(s.tiers), func(index int) bool {
+		return completeInput <= s.tiers[index].threshold
 	})
 	if firstNotBelow == 0 {
-		return base
+		return s.base
 	}
-	return tiers[firstNotBelow-1].rates
+	return s.tiers[firstNotBelow-1].rates
 }
 
 // Snapshot is an immutable projection of one complete accepted artifact.
@@ -163,14 +167,14 @@ func parseSnapshot(ctx context.Context, raw []byte, maxIdentityBytes int) (*Snap
 					return nil, fmt.Errorf("model %q/%q modes: %w", providerID, modelID, err)
 				}
 				if fast != nil {
-					fast.tiers = make([]contextTier, 0, len(tariff.tiers))
-					for _, tier := range tariff.tiers {
+					fast.tiers = make([]contextTier, 0, len(tariff.normal.tiers))
+					for _, tier := range tariff.normal.tiers {
 						if err := ctx.Err(); err != nil {
 							return nil, err
 						}
 						fast.tiers = append(fast.tiers, contextTier{
 							threshold: tier.threshold,
-							rates:     deriveFastContextRates(tariff.base, fast.base, tier.rates),
+							rates:     deriveFastContextRates(tariff.normal.base, fast.base, tier.rates),
 						})
 					}
 					tariff.fast = fast
@@ -376,7 +380,7 @@ func parseCost(ctx context.Context, raw json.RawMessage) (Tariff, error) {
 	if err := ctx.Err(); err != nil {
 		return Tariff{}, err
 	}
-	return Tariff{base: baseRates, tiers: contextTiers}, nil
+	return Tariff{normal: rateSchedule{base: baseRates, tiers: contextTiers}}, nil
 }
 
 func contextThreshold(row map[string]json.RawMessage) (uint64, error) {

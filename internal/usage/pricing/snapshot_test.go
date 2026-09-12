@@ -443,7 +443,7 @@ func TestSnapshotValidatesEveryRecognizedStandardCostFieldAndTier(t *testing.T) 
 }
 
 func TestSnapshotCancellationInterruptsLargeTierProjection(t *testing.T) {
-	raw := highCardinalitySnapshot(100_000)
+	raw := highCardinalitySnapshot(100_000, false)
 	if len(raw) > 8<<20 {
 		t.Fatalf("cancellation fixture is %d bytes, exceeds remote decoded-body contract", len(raw))
 	}
@@ -472,7 +472,7 @@ func TestSnapshotCancellationInterruptsLargeTierProjection(t *testing.T) {
 
 func TestSnapshotCancellationInterruptsDerivedFastTierConstruction(t *testing.T) {
 	const tiers = 5_000
-	raw := highCardinalityFastSnapshot(tiers)
+	raw := highCardinalitySnapshot(tiers, true)
 	baseline := &countingContext{Context: context.Background()}
 	if _, err := pricing.ParseSnapshot(baseline, raw); err != nil {
 		t.Fatalf("baseline ParseSnapshot() error = %v", err)
@@ -546,7 +546,7 @@ func snapshotModelFixture(model string) []byte {
 	return []byte(`{"openai":{"id":"openai","models":{"model":` + model + `}},"anthropic":{"id":"anthropic","models":{}},"google":{"id":"google","models":{}},"xai":{"id":"xai","models":{}}}`)
 }
 
-func highCardinalityFastSnapshot(tiers int) []byte {
+func highCardinalitySnapshot(tiers int, withFast bool) []byte {
 	var raw strings.Builder
 	raw.Grow(tiers * 64)
 	raw.WriteString(`{"openai":{"id":"openai","models":{"large":{"id":"large","cost":{"input":1,"output":2,"tiers":[`)
@@ -558,23 +558,11 @@ func highCardinalityFastSnapshot(tiers int) []byte {
 		raw.WriteString(strconv.Itoa(index))
 		raw.WriteString(`}}`)
 	}
-	raw.WriteString(`]},"experimental":{"modes":{"fast":{"cost":{"input":2,"output":4}}}}}}},"anthropic":{"id":"anthropic","models":{}},"google":{"id":"google","models":{}},"xai":{"id":"xai","models":{}}}`)
-	return []byte(raw.String())
-}
-
-func highCardinalitySnapshot(tiers int) []byte {
-	var raw strings.Builder
-	raw.Grow(tiers * 64)
-	raw.WriteString(`{"openai":{"id":"openai","models":{}},"anthropic":{"id":"anthropic","models":{}},"google":{"id":"google","models":{}},"xai":{"id":"xai","models":{"large":{"id":"large","cost":{"input":1,"output":2,"tiers":[`)
-	for index := range tiers {
-		if index != 0 {
-			raw.WriteByte(',')
-		}
-		raw.WriteString(`{"input":1,"output":2,"tier":{"type":"context","size":`)
-		raw.WriteString(strconv.Itoa(index))
-		raw.WriteString(`}}`)
+	raw.WriteString(`]}`)
+	if withFast {
+		raw.WriteString(`,"experimental":{"modes":{"fast":{"cost":{"input":2,"output":4}}}}`)
 	}
-	raw.WriteString(`]}}}}}`)
+	raw.WriteString(`}}},"anthropic":{"id":"anthropic","models":{}},"google":{"id":"google","models":{}},"xai":{"id":"xai","models":{}}}`)
 	return []byte(raw.String())
 }
 

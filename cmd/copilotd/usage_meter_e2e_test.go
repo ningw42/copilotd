@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -13,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -29,7 +31,6 @@ import (
 	"github.com/ningw42/copilotd/internal/usage"
 	"github.com/ningw42/copilotd/internal/usage/pricing"
 	"github.com/ningw42/copilotd/internal/usage/report"
-	"github.com/ningw42/copilotd/internal/usage/reporthttp"
 	"github.com/ningw42/copilotd/internal/usage/sqlitestore"
 )
 
@@ -219,10 +220,6 @@ func dialUsageMeterWebSocket(t *testing.T, baseURL, requestID string) *websocket
 
 func assertOpenAICostEventually(t *testing.T, endpoint string, wantTurns int64, wantAmount string) {
 	t.Helper()
-	client, err := reporthttp.NewClient(endpoint)
-	if err != nil {
-		t.Fatal(err)
-	}
 	now := time.Now().UTC()
 	query := report.Query{
 		Timezone: "UTC",
@@ -230,20 +227,25 @@ func assertOpenAICostEventually(t *testing.T, endpoint string, wantTurns int64, 
 		Until:    now.AddDate(0, 0, 2).Format(time.DateOnly),
 		Surface:  "openai",
 	}
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		result, queryErr := client.Query(context.Background(), query)
-		if queryErr == nil && result.Report.OpenAI != nil && result.Report.OpenAI.Total.Turns == wantTurns {
-			cost := result.Report.OpenAI.Total.Cost
-			if cost.Amount == nil || cost.Amount.String() != wantAmount || cost.PricedTurns != wantTurns || cost.Unpriced != (report.UnpricedCoverage{}) {
-				t.Fatalf("OpenAI service-tier cost = %+v, want %d priced Turns and amount %s", cost, wantTurns, wantAmount)
-			}
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("OpenAI service-tier report did not become visible: report=%+v error=%v", result.Report, queryErr)
-		}
-		time.Sleep(20 * time.Millisecond)
+	got := waitForUsageReport(t, endpoint, query, func(got report.Report) bool {
+		return got.OpenAI != nil && got.OpenAI.Total.Turns == wantTurns
+	})
+	cost := got.OpenAI.Total.Cost
+	if cost.Amount == nil || cost.Amount.String() != wantAmount || cost.PricedTurns != wantTurns || cost.Unpriced != (report.UnpricedCoverage{}) {
+		t.Fatalf("OpenAI service-tier cost = %+v, want %d priced Turns and amount %s", cost, wantTurns, wantAmount)
+	}
+
+	binary := usageAcceptanceBinary(t)
+	output := usageExec(t, binary, nil, 0,
+		"usage", "--endpoint", endpoint, "--timezone", "UTC", "--since", query.Since,
+		"--until", query.Until, "--surface", "openai", "--json",
+	)
+	var wire usageCostExecutableWire
+	if err := json.Unmarshal([]byte(output), &wire); err != nil {
+		t.Fatal(err)
+	}
+	if wire.OpenAI.Total.Turns != strconv.FormatInt(wantTurns, 10) || wire.OpenAI.Total.Cost.Amount == nil || *wire.OpenAI.Total.Cost.Amount != wantAmount || wire.OpenAI.Total.Cost.PricedTurns != strconv.FormatInt(wantTurns, 10) {
+		t.Fatalf("actual CLI service-tier total = %+v, want %d priced Turns and amount %s", wire.OpenAI.Total, wantTurns, wantAmount)
 	}
 }
 
@@ -489,6 +491,9 @@ func TestRunBoundServeMetersOpenAIWebSocketCompletionsWithoutChangingMessages(t 
 		{kind: websocket.MessageText, data: bytes.TrimSuffix(recorded, []byte("\n"))},
 		{kind: websocket.MessageBinary, data: []byte(`{"type":"response.incomplete","response":{"id":"incomplete-terminal","model":"not-recorded","status":"incomplete","usage":{"input_tokens":97,"output_tokens":97}}}`)},
 		{kind: websocket.MessageBinary, data: []byte(`{"type":"response.completed","response":{"id":"resp-ws-b","model":"gpt-5.6-sol","status":"completed","service_tier":"fast","usage":{"input_tokens":7,"input_tokens_details":{"cached_tokens":0,"cache_write_tokens":0},"output_tokens":11,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":18}}}`)},
+		{kind: websocket.MessageText, data: []byte(`{"type":"response.completed","response":{"id":"resp-ws-null","model":"gpt-5.6-sol","status":"completed","service_tier":null,"usage":{"input_tokens":1,"input_tokens_details":{"cached_tokens":0,"cache_write_tokens":0},"output_tokens":1,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":2}}}`)},
+		{kind: websocket.MessageText, data: []byte(`{"type":"response.completed","response":{"id":"resp-ws-empty","model":"gpt-5.6-sol","status":"completed","service_tier":"","usage":{"input_tokens":1,"input_tokens_details":{"cached_tokens":0,"cache_write_tokens":0},"output_tokens":2,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":3}}}`)},
+		{kind: websocket.MessageText, data: []byte(`{"type":"response.completed","response":{"id":"resp-ws-unknown","model":"gpt-5.6-sol","status":"completed","service_tier":"future","usage":{"input_tokens":2,"input_tokens_details":{"cached_tokens":0,"cache_write_tokens":0},"output_tokens":1,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":3}}}`)},
 	}
 	bufferedPayload := []byte(`{"id":"resp-shared-http","model":"gpt-5.6-sol","status":"completed","service_tier":"default","usage":{"input_tokens":2,"input_tokens_details":{"cached_tokens":0,"cache_write_tokens":0},"output_tokens":3,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":5}}`)
 	clientMessage := []byte(`{"type":"response.create","model":"requested-model"}`)
@@ -586,7 +591,7 @@ func TestRunBoundServeMetersOpenAIWebSocketCompletionsWithoutChangingMessages(t 
 		t.Errorf("WebSocket close = %v, want normal completion", readErr)
 	}
 	_ = conn.CloseNow()
-	assertOpenAICostEventually(t, harness.baseURL, 4, "0.001236")
+	assertOpenAICostEventually(t, harness.baseURL, 7, "0.001332")
 
 	db, report := externalUsageDB(t, harness)
 	assertCleanUsageReport(t, report)
@@ -629,6 +634,9 @@ func TestRunBoundServeMetersOpenAIWebSocketCompletionsWithoutChangingMessages(t 
 			optionals: [4]int64{0, 0, 12, 32}, optionalsValid: true,
 		},
 		{responseID: "resp-ws-b", model: "gpt-5.6-sol", input: 7, output: 11, optionals: [4]int64{0, 0, 0, 18}, optionalsValid: true, serviceTier: sql.NullString{String: "fast", Valid: true}},
+		{responseID: "resp-ws-null", model: "gpt-5.6-sol", input: 1, output: 1, optionals: [4]int64{0, 0, 0, 2}, optionalsValid: true},
+		{responseID: "resp-ws-empty", model: "gpt-5.6-sol", input: 1, output: 2, optionals: [4]int64{0, 0, 0, 3}, optionalsValid: true, serviceTier: sql.NullString{String: "", Valid: true}},
+		{responseID: "resp-ws-unknown", model: "gpt-5.6-sol", input: 2, output: 1, optionals: [4]int64{0, 0, 0, 3}, optionalsValid: true, serviceTier: sql.NullString{String: "future", Valid: true}},
 	}
 	for i, want := range wantRows {
 		if !rows.Next() {

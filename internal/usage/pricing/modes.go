@@ -12,12 +12,7 @@ import (
 // affect pricing.
 const MaxServiceTierLookupBytes = len("priority")
 
-type fastTariff struct {
-	base  Rates
-	tiers []contextTier
-}
-
-func parseOpenAIFast(ctx context.Context, model map[string]json.RawMessage) (*fastTariff, error) {
+func parseOpenAIFast(ctx context.Context, model map[string]json.RawMessage) (*rateSchedule, error) {
 	rawExperimental, present := model["experimental"]
 	if !present {
 		return nil, nil
@@ -35,7 +30,7 @@ func parseOpenAIFast(ctx context.Context, model map[string]json.RawMessage) (*fa
 		return nil, err
 	}
 
-	var fast *fastTariff
+	var fast *rateSchedule
 	for name, rawMode := range modes {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -87,7 +82,7 @@ func parseOpenAIFast(ctx context.Context, model map[string]json.RawMessage) (*fa
 		if fast != nil {
 			return nil, errors.New("multiple OpenAI Fast mode declarations")
 		}
-		fast = &fastTariff{base: rates}
+		fast = &rateSchedule{base: rates}
 	}
 	return fast, ctx.Err()
 }

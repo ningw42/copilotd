@@ -502,7 +502,7 @@ const usageCostArtifactFirst = `{
 
 const usageCostArtifactSecond = `{
   "openai":{"id":"openai","models":{
-    "gpt-tiered":{"id":"gpt-tiered","cost":{"input":1,"output":1,"cache_read":1,"cache_write":1,"tiers":[{"input":6,"output":10,"cache_read":4,"cache_write":14,"tier":{"type":"context","size":200}},{"input":2,"output":4,"cache_read":1,"cache_write":6,"tier":{"type":"context","size":100}}]},"experimental":{"modes":{"fast":{"cost":{"input":2,"output":2,"cache_read":2,"cache_write":2},"provider":{"body":{"service_tier":"priority"}}}}}},
+    "gpt-tiered":{"id":"gpt-tiered","cost":{"input":1,"output":1,"cache_read":1,"cache_write":1,"tiers":[{"input":6,"output":10,"cache_read":4,"cache_write":14,"tier":{"type":"context","size":200}},{"input":2,"output":4,"cache_read":1,"cache_write":6,"tier":{"type":"context","size":100}}]},"experimental":{"modes":{"fast":{"cost":{"input":3,"output":3,"cache_read":3,"cache_write":3},"provider":{"body":{"service_tier":"priority"}}}}}},
     "rematch-20260901":{"id":"rematch-20260901","cost":{"input":4,"output":6}},
     "shared":{"id":"shared","cost":{"input":99,"output":99}}
   }},
@@ -619,7 +619,7 @@ func TestUsageCostExecutableAcceptance(t *testing.T) {
 		t.Fatalf("replacement pricing fetch calls = %d, want 2", priceCalls.Load())
 	}
 	second := decodeUsageCostExecutable(t, usageExec(t, binary, nil, 0, args...))
-	assertUsageCostRevision(t, second, "68", "10", "34", "rematch-20260901", "dated", "78.0001", "68")
+	assertUsageCostRevision(t, second, "102", "10", "34", "rematch-20260901", "dated", "112.0001", "68")
 	if first.Pricing.Version == second.Pricing.Version || first.OpenAI.Total.Turns != second.OpenAI.Total.Turns || first.Anthropic.Total.Turns != second.Anthropic.Total.Turns {
 		t.Fatalf("repricing did not change only the captured tariff/match revision: first=%+v second=%+v", first, second)
 	}
@@ -726,18 +726,25 @@ func usageInt64(value int64) *int64 { return &value }
 
 func waitForUsageTurns(t *testing.T, endpoint string, query report.Query, anthropic, openAI int64) {
 	t.Helper()
+	waitForUsageReport(t, endpoint, query, func(got report.Report) bool {
+		return got.Anthropic != nil && got.OpenAI != nil && got.Anthropic.Total.Turns == anthropic && got.OpenAI.Total.Turns == openAI
+	})
+}
+
+func waitForUsageReport(t *testing.T, endpoint string, query report.Query, ready func(report.Report) bool) report.Report {
+	t.Helper()
 	client, err := reporthttp.NewClient(endpoint)
 	if err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		result, err := client.Query(context.Background(), query)
-		if err == nil && result.Report.Anthropic.Total.Turns == anthropic && result.Report.OpenAI.Total.Turns == openAI {
-			return
+		result, queryErr := client.Query(context.Background(), query)
+		if queryErr == nil && ready(result.Report) {
+			return result.Report
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("synthetic history did not become visible: result=%+v err=%v", result.Report, err)
+			t.Fatalf("synthetic history did not become visible: result=%+v err=%v", result.Report, queryErr)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
