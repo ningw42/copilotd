@@ -20,6 +20,7 @@ import (
 
 	"github.com/ningw42/copilotd/internal/cache"
 	"github.com/ningw42/copilotd/internal/logging"
+	"github.com/ningw42/copilotd/internal/usage"
 	"github.com/ningw42/copilotd/internal/usage/pricing"
 )
 
@@ -47,6 +48,26 @@ func TestCachedSourceServesValidatedEmbeddedFloorWhenRefreshIsPinned(t *testing.
 	baseRates, contextRates := tariff.Rates(272000), tariff.Rates(272001)
 	if !ok || rateString(baseRates.Input) != "4" || rateString(baseRates.Output) != "20" || rateString(baseRates.CacheRead) != "0.4" || rateString(baseRates.CacheWrite) != "5" || rateString(contextRates.Input) != "8" || rateString(contextRates.Output) != "30" || rateString(contextRates.CacheRead) != "0.8" || rateString(contextRates.CacheWrite) != "10" {
 		t.Fatalf("embedded gpt-5.6-sol tariff = base %#v context %#v, %t; want audited base 4/20/0.4/5 and above-272k 8/30/0.8/10", baseRates, contextRates, ok)
+	}
+	priority := "priority"
+	zero := int64(0)
+	for _, tc := range []struct {
+		name       string
+		input      int64
+		wantAmount string
+	}{
+		{name: "explicit Fast base", input: 272000, wantAmount: "2.176"},
+		{name: "derived Fast context", input: 272001, wantAmount: "4.352016"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			contribution, err := tariff.CalculateOpenAI(usage.OpenAIUsage{InputTokens: tc.input, CachedTokens: &zero, CacheWriteTokens: &zero}, &priority)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if contribution.Reason != "" || contribution.Amount.String() != tc.wantAmount {
+				t.Fatalf("embedded Fast contribution = {amount:%s reason:%q}, want %s", contribution.Amount.String(), contribution.Reason, tc.wantAmount)
+			}
+		})
 	}
 	if status.Source != "fallback" || status.Version != "sha256:db685655368231dce789b060e493a21899cb861c9930cc52521795776ab6e3b5" || status.LastSuccess != nil {
 		t.Fatalf("snapshot status = %#v, want cold identified fallback", status)
@@ -353,6 +374,52 @@ func TestCachedSourceRefreshAcceptsReplacementWithDeletedRates(t *testing.T) {
 	}
 }
 
+func TestCachedSourceReplacesDeletedAndUnpricedFastDeclarationsAuthoritatively(t *testing.T) {
+	t.Parallel()
+
+	artifacts := []string{
+		`{"openai":{"id":"openai","models":{"model":{"id":"model","cost":{"input":1,"output":2},"experimental":{"modes":{"fast":{"cost":{"input":2,"output":4}}}}}}},"anthropic":{"id":"anthropic","models":{}},"google":{"id":"google","models":{}},"xai":{"id":"xai","models":{}}}`,
+		`{"openai":{"id":"openai","models":{"model":{"id":"model","cost":{"input":1,"output":2}}}},"anthropic":{"id":"anthropic","models":{}},"google":{"id":"google","models":{}},"xai":{"id":"xai","models":{}}}`,
+		`{"openai":{"id":"openai","models":{"model":{"id":"model","cost":{"input":1,"output":2},"experimental":{"modes":{"fast":{}}}}}},"anthropic":{"id":"anthropic","models":{}},"google":{"id":"google","models":{}},"xai":{"id":"xai","models":{}}}`,
+	}
+	var request atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		index := int(request.Add(1)) - 1
+		_, _ = io.WriteString(w, artifacts[index])
+	}))
+	t.Cleanup(server.Close)
+	registry := cache.NewRegistry()
+	source := pricing.NewCachedSource(pricing.CacheConfig{RefreshInterval: time.Hour}, pricing.NewRemote(server.URL, server.Client().Transport), registry, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	priority := "priority"
+	zero := int64(0)
+	native := usage.OpenAIUsage{InputTokens: 1, OutputTokens: 1, CachedTokens: &zero, CacheWriteTokens: &zero}
+	for index, want := range []struct {
+		amount string
+		reason pricing.ExclusionReason
+	}{
+		{amount: "0.000006"},
+		{amount: "0.000003"},
+		{amount: "0", reason: pricing.ExclusionMissingRate},
+	} {
+		registry.Prime(context.Background())
+		snapshot, _, err := source.Current(context.Background(), pricing.ProjectionLimit{MaxIdentityBytes: 1 << 20})
+		if err != nil {
+			t.Fatal(err)
+		}
+		tariff, ok := snapshot.Tariff(pricing.Identity{Provider: "openai", Model: "model"})
+		if !ok {
+			t.Fatalf("revision %d has no tariff", index)
+		}
+		contribution, err := tariff.CalculateOpenAI(native, &priority)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if contribution.Amount.String() != want.amount || contribution.Reason != want.reason {
+			t.Fatalf("revision %d contribution = {amount:%s reason:%q}, want {%s %q}", index, contribution.Amount.String(), contribution.Reason, want.amount, want.reason)
+		}
+	}
+}
+
 func TestCachedSourceRejectsMalformedRefreshAndHoldsLastGood(t *testing.T) {
 	t.Parallel()
 
@@ -388,6 +455,55 @@ func TestCachedSourceRejectsMalformedRefreshAndHoldsLastGood(t *testing.T) {
 	observed := registry.Observe()
 	if len(observed) != 1 || observed[0].LastAttemptResult == nil || *observed[0].LastAttemptResult != cache.AttemptFailure {
 		t.Fatalf("observation = %#v, want failed malformed refresh", observed)
+	}
+}
+
+func TestCachedSourceHoldsLastGoodAfterMalformedOpenAIModeRefresh(t *testing.T) {
+	t.Parallel()
+
+	const good = `{"openai":{"id":"openai","models":{"kept":{"id":"kept","cost":{"input":1,"output":2},"experimental":{"modes":{"fast":{"cost":{"input":2,"output":4}}}}}}},"anthropic":{"id":"anthropic","models":{}},"google":{"id":"google","models":{}},"xai":{"id":"xai","models":{}}}`
+	for _, tc := range []struct {
+		name  string
+		model string
+	}{
+		{name: "malformed container", model: `{"id":"kept","cost":{"input":9,"output":9},"experimental":null}`},
+		{name: "contradictory mapping", model: `{"id":"kept","cost":{"input":9,"output":9},"experimental":{"modes":{"fast":{"provider":{"body":{"service_tier":"default"}}}}}}`},
+		{name: "duplicate candidates", model: `{"id":"kept","cost":{"input":9,"output":9},"experimental":{"modes":{"fast":{},"priority":{}}}}`},
+		{name: "unsupported Fast context shape", model: `{"id":"kept","cost":{"input":9,"output":9},"experimental":{"modes":{"fast":{"cost":{"tiers":[]}}}}}`},
+		{name: "invalid ignored mode rate", model: `{"id":"kept","cost":{"input":9,"output":9},"experimental":{"modes":{"batch":{"cost":{"input":null}}}}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			malformed := `{"openai":{"id":"openai","models":{"kept":` + tc.model + `}},"anthropic":{"id":"anthropic","models":{}},"google":{"id":"google","models":{}},"xai":{"id":"xai","models":{}}}`
+			var request atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if request.Add(1) == 1 {
+					_, _ = io.WriteString(w, good)
+					return
+				}
+				_, _ = io.WriteString(w, malformed)
+			}))
+			t.Cleanup(server.Close)
+			registry := cache.NewRegistry()
+			source := pricing.NewCachedSource(pricing.CacheConfig{RefreshInterval: time.Hour}, pricing.NewRemote(server.URL, server.Client().Transport), registry, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			limit := pricing.ProjectionLimit{MaxIdentityBytes: 1 << 20}
+			registry.Prime(context.Background())
+			first, firstStatus, err := source.Current(context.Background(), limit)
+			if err != nil {
+				t.Fatal(err)
+			}
+			registry.Prime(context.Background())
+			held, heldStatus, err := source.Current(context.Background(), limit)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if held != first || heldStatus.Version != firstStatus.Version {
+				t.Fatalf("malformed mode refresh replaced last good: first=%p/%+v held=%p/%+v", first, firstStatus, held, heldStatus)
+			}
+			observed := registry.Observe()
+			if len(observed) != 1 || observed[0].LastAttemptResult == nil || *observed[0].LastAttemptResult != cache.AttemptFailure {
+				t.Fatalf("observation = %#v, want failed refresh retaining last good", observed)
+			}
+		})
 	}
 }
 

@@ -27,8 +27,8 @@ type Identity struct {
 	Model    string
 }
 
-// Rates is one standard USD-per-million-token rate vector. Each nil rate is
-// absent; a non-nil zero remains an explicitly reported zero.
+// Rates is one USD-per-million-token rate vector. Each nil rate is absent; a
+// non-nil zero remains an explicitly reported zero.
 type Rates struct {
 	Input      *Rate
 	Output     *Rate
@@ -41,11 +41,13 @@ type contextTier struct {
 	rates     Rates
 }
 
-// Tariff retains one model's base rate vector and its context tiers. Its
-// immutable contents are exposed only through per-input rate selection.
+// Tariff retains one model's normal rate vectors and optional OpenAI Fast
+// declaration. Its immutable normal contents are exposed through per-input
+// rate selection; service-mode selection remains inside this package.
 type Tariff struct {
 	base  Rates
 	tiers []contextTier
+	fast  *fastTariff
 }
 
 // Rates selects the greatest context threshold strictly below completeInput,
@@ -55,13 +57,17 @@ func (t Tariff) Rates(completeInput uint64) Rates {
 }
 
 func (t Tariff) rates(completeInput uint64) Rates {
-	firstNotBelow := sort.Search(len(t.tiers), func(index int) bool {
-		return completeInput <= t.tiers[index].threshold
+	return selectContextRates(t.base, t.tiers, completeInput)
+}
+
+func selectContextRates(base Rates, tiers []contextTier, completeInput uint64) Rates {
+	firstNotBelow := sort.Search(len(tiers), func(index int) bool {
+		return completeInput <= tiers[index].threshold
 	})
 	if firstNotBelow == 0 {
-		return t.base
+		return base
 	}
-	return t.tiers[firstNotBelow-1].rates
+	return tiers[firstNotBelow-1].rates
 }
 
 // Snapshot is an immutable projection of one complete accepted artifact.
@@ -140,15 +146,40 @@ func parseSnapshot(ctx context.Context, raw []byte, maxIdentityBytes int) (*Snap
 			identity := Identity{Provider: providerID, Model: modelID}
 			snapshot.identities = append(snapshot.identities, identity)
 			snapshot.identityBytes += identityBytes
-			rawCost, priced := model["cost"]
-			if !priced {
-				continue
+
+			var tariff Tariff
+			retained := false
+			if rawCost, present := model["cost"]; present {
+				parsed, err := parseCost(ctx, rawCost)
+				if err != nil {
+					return nil, fmt.Errorf("model %q/%q cost: %w", providerID, modelID, err)
+				}
+				tariff = parsed
+				retained = true
 			}
-			tariff, err := parseCost(ctx, rawCost)
-			if err != nil {
-				return nil, fmt.Errorf("model %q/%q cost: %w", providerID, modelID, err)
+			if providerID == "openai" {
+				fast, err := parseOpenAIFast(ctx, model)
+				if err != nil {
+					return nil, fmt.Errorf("model %q/%q modes: %w", providerID, modelID, err)
+				}
+				if fast != nil {
+					fast.tiers = make([]contextTier, 0, len(tariff.tiers))
+					for _, tier := range tariff.tiers {
+						if err := ctx.Err(); err != nil {
+							return nil, err
+						}
+						fast.tiers = append(fast.tiers, contextTier{
+							threshold: tier.threshold,
+							rates:     deriveFastContextRates(tariff.base, fast.base, tier.rates),
+						})
+					}
+					tariff.fast = fast
+					retained = true
+				}
 			}
-			snapshot.tariffs[identity] = tariff
+			if retained {
+				snapshot.tariffs[identity] = tariff
+			}
 		}
 	}
 	if err := ctx.Err(); err != nil {
@@ -445,7 +476,7 @@ func (s *Snapshot) Identities() []Identity {
 }
 
 // Tariff returns an immutable tariff for an identity. False means the identity
-// has no cost object or is absent from this snapshot.
+// has neither a cost object nor an accepted Fast declaration, or is absent.
 func (s *Snapshot) Tariff(identity Identity) (Tariff, bool) {
 	if s == nil {
 		return Tariff{}, false

@@ -151,19 +151,19 @@ func assertReportEqual(t *testing.T, got, want report.Report) {
 	}
 }
 
-func TestQueryIgnoresStoredOpenAIServiceTierEvidence(t *testing.T) {
+func TestQueryValuesStoredOpenAIServiceTierEvidence(t *testing.T) {
 	source := pricingSource(t, `{"gpt-5.6-sol":{"id":"gpt-5.6-sol","cost":{
 		"input":2,"output":8,"cache_read":0.5,"cache_write":3,
 		"tiers":[{"input":4,"output":16,"cache_read":1,"cache_write":6,"tier":{"type":"context","size":100}}]
-	}}}`, pricing.SnapshotStatus{Source: "fetched", Version: "sha256:service-tier-invariance"})
+	},"experimental":{"modes":{"fast":{"cost":{"input":4,"output":16,"cache_read":1,"cache_write":6},"provider":{"body":{"service_tier":"priority"}}}}}}}`, pricing.SnapshotStatus{Source: "fetched", Version: "sha256:service-tier-valuation"})
 	now := time.Date(2026, 9, 2, 18, 0, 0, 0, time.UTC)
 	for _, tc := range []struct {
-		name       string
-		input      int64
-		wantAmount string
+		name                 string
+		input                int64
+		wantNormal, wantFast string
 	}{
-		{name: "positive base amount", input: 100, wantAmount: "0.000325"},
-		{name: "positive context amount", input: 101, wantAmount: "0.000654"},
+		{name: "base context band", input: 100, wantNormal: "0.000325", wantFast: "0.00065"},
+		{name: "derived context band", input: 101, wantNormal: "0.000654", wantFast: "0.001308"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			base := turn("2026-09-01T12:00:00Z", "gpt-5.6-sol", usage.OpenAIUsage{
@@ -184,16 +184,91 @@ func TestQueryIgnoresStoredOpenAIServiceTierEvidence(t *testing.T) {
 				return got
 			}
 			defaultReport, priorityReport := read(withDefault), read(withPriority)
-			wantCost := report.Cost{Amount: amount(t, tc.wantAmount), PricedTurns: 1}
-			for _, got := range []report.Report{defaultReport, priorityReport} {
-				if got.OpenAI == nil || got.OpenAI.Total.Cost.Amount == nil || got.OpenAI.Total.Cost.Amount.String() == "0" {
-					t.Fatalf("service-tier invariance fixture was not positively valued: %+v", got.OpenAI)
-				}
-				assertCostEqual(t, got.OpenAI.Total.Cost, wantCost)
+			assertCostEqual(t, defaultReport.OpenAI.Total.Cost, report.Cost{Amount: amount(t, tc.wantNormal), PricedTurns: 1})
+			assertCostEqual(t, priorityReport.OpenAI.Total.Cost, report.Cost{Amount: amount(t, tc.wantFast), PricedTurns: 1})
+			if reflect.DeepEqual(defaultReport, priorityReport) {
+				t.Fatal("default and priority response evidence produced identical reports")
 			}
-			assertReportEqual(t, defaultReport, priorityReport)
 		})
 	}
+}
+
+func TestQueryAggregatesMixedOpenAIServiceTiersPerTurn(t *testing.T) {
+	source := pricingSource(t, `{"gpt-mixed":{"id":"gpt-mixed","cost":{
+		"input":1,"output":2,"cache_read":0.1,"cache_write":1.25,
+		"tiers":[{"input":2,"output":3,"cache_read":0.2,"cache_write":2.5,"tier":{"type":"context","size":100}}]
+	},"experimental":{"modes":{"fast":{"cost":{"input":2,"output":4,"cache_read":0.2,"cache_write":2.5}}}}}}`, pricing.SnapshotStatus{Source: "fetched", Version: "sha256:4444444444444444444444444444444444444444444444444444444444444444"})
+	withTier := func(input int64, cached *int64, tier string) usage.Turn {
+		turn := turn("2026-09-01T12:00:00Z", "gpt-mixed", usage.OpenAIUsage{
+			InputTokens: input, OutputTokens: 10, CachedTokens: cached, CacheWriteTokens: ptr(0),
+		})
+		turn.OpenAIServiceTier = &tier
+		return turn
+	}
+	zero := int64(0)
+	reader := report.New(stored(t,
+		withTier(50, &zero, "default"),
+		withTier(50, &zero, "future"),
+		withTier(50, &zero, "priority"),
+		withTier(150, &zero, "fast"),
+		withTier(150, nil, "fast"),
+	), source)
+	report.SetNowForTest(reader, time.Date(2026, 9, 2, 18, 0, 0, 0, time.UTC))
+
+	got, err := reader.Query(context.Background(), selection())
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantCost := report.Cost{
+		Amount:      amount(t, "0.00094"),
+		PricedTurns: 4,
+		Unpriced:    report.UnpricedCoverage{MissingUsage: 1},
+	}
+	assertCostEqual(t, got.OpenAI.Total.Cost, wantCost)
+	assertCostEqual(t, got.OpenAI.Models[0].Cost, wantCost)
+	assertCostEqual(t, got.OpenAI.Rows[0].Cost, wantCost)
+	if got.OpenAI.Total.Turns != 5 || *got.OpenAI.Total.Usage["input_tokens"].Sum != 450 || *got.OpenAI.Total.Usage["output_tokens"].Sum != 50 {
+		t.Fatalf("mixed-tier native total = %+v, want 5 Turns and complete 450/50 input/output", got.OpenAI.Total)
+	}
+	if got.OpenAI.Models[0].Model != "gpt-mixed" || len(got.OpenAI.Models) != 1 || len(got.OpenAI.Rows) != 1 {
+		t.Fatalf("mixed tiers changed report grouping: models=%+v rows=%+v", got.OpenAI.Models, got.OpenAI.Rows)
+	}
+
+	server := httptest.NewServer(reporthttp.Handler(func(context.Context, report.Query) (report.Report, error) {
+		return got, nil
+	}))
+	t.Cleanup(server.Close)
+	client, err := reporthttp.NewClient(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire, err := client.Query(context.Background(), selection())
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertReportEqual(t, wire.Report, got)
+	if encoded := strings.ToLower(string(wire.JSON)); strings.Contains(encoded, "service_tier") || strings.Contains(encoded, "fast") || strings.Contains(encoded, "priority") {
+		t.Fatalf("unchanged HTTP report exposed service-tier provenance: %s", wire.JSON)
+	}
+}
+
+func TestQueryBoundsUnrecognizedOpenAIServiceTierBeforeLookup(t *testing.T) {
+	source := pricingSource(t, `{"gpt-long":{"id":"gpt-long","cost":{
+		"input":1,"output":2,"tiers":[{"input":2,"output":3,"tier":{"type":"context","size":100}}]
+	},"experimental":{"modes":{"fast":{"cost":{"input":2,"output":4}}}}}}`, pricing.SnapshotStatus{Source: "fetched", Version: "sha256:bounded-tier"})
+	longTier := strings.Repeat("x", 1<<20)
+	storedTurn := turn("2026-09-01T12:00:00Z", "gpt-long", usage.OpenAIUsage{
+		InputTokens: 150, OutputTokens: 10, CachedTokens: ptr(0), CacheWriteTokens: ptr(0),
+	})
+	storedTurn.OpenAIServiceTier = &longTier
+	reader := report.New(stored(t, storedTurn), source)
+	report.SetNowForTest(reader, time.Date(2026, 9, 2, 18, 0, 0, 0, time.UTC))
+
+	got, err := reader.Query(context.Background(), selection())
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertCostEqual(t, got.OpenAI.Total.Cost, report.Cost{Amount: amount(t, "0.00033"), PricedTurns: 1})
 }
 
 func TestQueryValuesCompleteOpenAIReportFromOnePricingSnapshot(t *testing.T) {

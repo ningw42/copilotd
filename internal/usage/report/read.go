@@ -156,17 +156,24 @@ func readSection(ctx context.Context, conn *sql.Conn, buckets []Bucket, surface 
 	if surface == "anthropic" {
 		names, table = AnthropicMetrics(), "anthropic_turn"
 	}
-	// Table and columns are exclusively the frozen native projection, never
-	// caller-provided SQL. Preserve timestamp-only indexed ordering and the
-	// lazy byte-length guard before transferring either Surface's identity.
+	// Table and numeric columns are exclusively the frozen native projection,
+	// never caller-provided SQL. OpenAI appends bounded service-tier lookup
+	// evidence separately. Preserve timestamp-only indexed ordering and the lazy
+	// byte-length guard before transferring either Surface's identity.
+	tierProjection := ""
+	args := []any{budget.limits.maxModelBytes}
+	if surface == "openai" {
+		tierProjection = `,CASE WHEN typeof(service_tier)='text' AND octet_length(service_tier)<=? THEN service_tier ELSE NULL END`
+		args = append(args, pricing.MaxServiceTierLookupBytes)
+	}
+	args = append(args, buckets[0].RangeStart.UnixMilli(), buckets[len(buckets)-1].RangeEnd.UnixMilli())
 	predicate := ""
-	args := []any{budget.limits.maxModelBytes, buckets[0].RangeStart.UnixMilli(), buckets[len(buckets)-1].RangeEnd.UnixMilli()}
 	if model != nil {
 		// CASE, not ordinary AND evaluation order, guards identity comparison.
 		predicate = ` AND CASE WHEN octet_length(model)=? THEN model=? COLLATE BINARY ELSE 0 END`
 		args = append(args, len(*model), *model)
 	}
-	rows, err := conn.QueryContext(ctx, `SELECT at_ms,octet_length(model),CASE WHEN octet_length(model)<=? THEN model ELSE NULL END,`+strings.Join(names, ",")+` FROM `+table+` WHERE at_ms>=? AND at_ms<?`+predicate+` ORDER BY at_ms`, args...)
+	rows, err := conn.QueryContext(ctx, `SELECT at_ms,octet_length(model),CASE WHEN octet_length(model)<=? THEN model ELSE NULL END,`+strings.Join(names, ",")+tierProjection+` FROM `+table+` WHERE at_ms>=? AND at_ms<?`+predicate+` ORDER BY at_ms`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -178,11 +185,14 @@ func readSection(ctx context.Context, conn *sql.Conn, buckets []Bucket, surface 
 	// Reuse scan storage for the section, not one destination allocation per
 	// Turn. Accumulation copies numeric values and interns model identities.
 	var at, modelBytes int64
-	var safeModel sql.NullString
+	var safeModel, reportedTier sql.NullString
 	counts := make([]sql.NullInt64, len(names))
 	dest := []any{&at, &modelBytes, &safeModel}
 	for i := range counts {
 		dest = append(dest, &counts[i])
+	}
+	if surface == "openai" {
+		dest = append(dest, &reportedTier)
 	}
 	bucket := 0
 	for rows.Next() {
@@ -225,7 +235,7 @@ func readSection(ctx context.Context, conn *sql.Conn, buckets []Bucket, surface 
 		if err != nil {
 			return nil, err
 		}
-		contribution, err := valueTurn(surface, counts, selectedPricing)
+		contribution, err := valueTurn(surface, counts, nullableString(reportedTier), selectedPricing)
 		if err != nil {
 			if errors.Is(err, pricing.ErrOverflow) {
 				return nil, overflow()
@@ -319,7 +329,7 @@ type turnContribution struct {
 	reason string
 }
 
-func valueTurn(surface string, counts []sql.NullInt64, selected modelPricing) (turnContribution, error) {
+func valueTurn(surface string, counts []sql.NullInt64, reportedTier *string, selected modelPricing) (turnContribution, error) {
 	switch selected.match.Status {
 	case PricingMatchUnknown:
 		return turnContribution{reason: "unknown_model"}, nil
@@ -350,7 +360,7 @@ func valueTurn(surface string, counts []sql.NullInt64, selected modelPricing) (t
 			CacheWriteTokens: nullableCount(counts[3]),
 			ReasoningTokens:  nullableCount(counts[4]),
 			TotalTokens:      nullableCount(counts[5]),
-		})
+		}, reportedTier)
 	}
 	if err != nil {
 		return turnContribution{}, err
@@ -364,6 +374,13 @@ func nullableCount(count sql.NullInt64) *int64 {
 	}
 	value := count.Int64
 	return &value
+}
+
+func nullableString(value sql.NullString) *string {
+	if !value.Valid {
+		return nil
+	}
+	return &value.String
 }
 
 func addCost(cost *Cost, contribution turnContribution) error {

@@ -96,8 +96,12 @@ replacing it; the client tolerates that member from an older daemon as additive
 data. #238 places `Est. USD`
 after `Model(s)` in each primary Surface table, adds exact-before-rounding period
 cost totals, coverage notes, provenance/caveat text, and resolution details without
-repeating money in secondary tables or introducing a cross-Surface total. A new
-client represents a wholly absent extension as an older daemon and rejects
+repeating money in secondary tables or introducing a cross-Surface total. #248
+adds per-Turn OpenAI response-tier valuation inside the pricing module: bounded
+`fast`/`priority` evidence selects accepted explicit Fast base rates and exact
+same-model/same-snapshot derived Fast context rates. It adds no report fields,
+coverage reasons, protocol version, CLI tier details, or report-time network
+work. A new client represents a wholly absent extension as an older daemon and rejects
 recognized partial shapes; unknown additive fields and validated original bytes
 remain intact. Terminal-only native and monetary coverage counters use checked
 int64 arithmetic; monetary amounts use the exact pricing representation. Overflow
