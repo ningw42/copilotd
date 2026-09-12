@@ -311,6 +311,31 @@ func TestSnapshotCancellationInterruptsLargeTierProjection(t *testing.T) {
 	}
 }
 
+func TestSnapshotAcceptsFullUint64ContextThresholds(t *testing.T) {
+	t.Parallel()
+
+	snapshot, err := pricing.ParseSnapshot(context.Background(), snapshotFixture(`{
+		"input":1,"output":2,
+		"tiers":[
+			{"input":3,"output":4,"tier":{"type":"context","size":1000000000000000000}},
+			{"input":5,"output":6,"tier":{"type":"context","size":18446744073709551615}}
+		]
+	}`))
+	if err != nil {
+		t.Fatalf("ParseSnapshot() error = %v", err)
+	}
+	tariff, ok := snapshot.Tariff(pricing.Identity{Provider: "openai", Model: "model"})
+	atFirst := tariff.Rates(1_000_000_000_000_000_000)
+	aboveFirst := tariff.Rates(1_000_000_000_000_000_001)
+	atMaximum := tariff.Rates(^uint64(0))
+	if !ok || optionalRateString(atFirst.Input) != "1" || optionalRateString(aboveFirst.Input) != "3" || optionalRateString(atMaximum.Input) != "3" {
+		t.Fatalf("full-width threshold tariff = at first %#v above first %#v at maximum %#v, %t", atFirst, aboveFirst, atMaximum, ok)
+	}
+	if _, err := pricing.ParseSnapshot(context.Background(), snapshotFixture(`{"tiers":[{"tier":{"type":"context","size":18446744073709551616}}]}`)); err == nil {
+		t.Fatal("ParseSnapshot() accepted a context threshold above uint64")
+	}
+}
+
 func TestSnapshotComparesBoundedExactExponentThresholds(t *testing.T) {
 	t.Parallel()
 

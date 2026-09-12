@@ -9,7 +9,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"slices"
+	"sort"
 	"unicode/utf8"
 )
 
@@ -49,14 +51,17 @@ type Tariff struct {
 // Rates selects the greatest context threshold strictly below completeInput,
 // or the base vector when no threshold matches. The returned vector is detached.
 func (t Tariff) Rates(completeInput uint64) Rates {
-	selected := t.base
-	for _, tier := range t.tiers {
-		if completeInput <= tier.threshold {
-			break
-		}
-		selected = tier.rates
+	return detachedRates(t.rates(completeInput))
+}
+
+func (t Tariff) rates(completeInput uint64) Rates {
+	firstNotBelow := sort.Search(len(t.tiers), func(index int) bool {
+		return completeInput <= t.tiers[index].threshold
+	})
+	if firstNotBelow == 0 {
+		return t.base
 	}
-	return detachedRates(selected)
+	return t.tiers[firstNotBelow-1].rates
 }
 
 // Snapshot is an immutable projection of one complete accepted artifact.
@@ -360,11 +365,37 @@ func contextThreshold(row map[string]json.RawMessage) (uint64, error) {
 	if !present {
 		return 0, errors.New("tier size is missing")
 	}
-	threshold, err := ParseRate(string(rawSize))
-	if err != nil || threshold.scale != 0 || threshold.coefficient == nil || !threshold.coefficient.IsUint64() {
+	threshold, ok := boundedNonnegativeInteger(rawSize)
+	if !ok {
 		return 0, errors.New("tier size is not a bounded nonnegative integer")
 	}
-	return threshold.coefficient.Uint64(), nil
+	return threshold, nil
+}
+
+func boundedNonnegativeInteger(raw json.RawMessage) (uint64, bool) {
+	if len(raw) == 0 || len(raw) > 128 {
+		return 0, false
+	}
+	for index, digit := range raw {
+		if digit != 'e' && digit != 'E' {
+			continue
+		}
+		exponent := raw[index+1:]
+		if len(exponent) > 0 && (exponent[0] == '+' || exponent[0] == '-') {
+			exponent = exponent[1:]
+		}
+		// Any nonzero integer representable by uint64 needs at most a two-digit
+		// decimal exponent. Bound parsing before math/big expands remote input.
+		if len(exponent) == 0 || len(exponent) > 2 {
+			return 0, false
+		}
+		break
+	}
+	value, ok := new(big.Rat).SetString(string(raw))
+	if !ok || value.Sign() < 0 || !value.IsInt() || !value.Num().IsUint64() {
+		return 0, false
+	}
+	return value.Num().Uint64(), true
 }
 
 func parseCostRow(object map[string]json.RawMessage) (Rates, error) {

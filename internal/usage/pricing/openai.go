@@ -7,12 +7,12 @@ import "github.com/ningw42/copilotd/internal/usage"
 // total, and cache subsets never influence context-tier selection.
 func (t Tariff) CalculateOpenAI(native usage.OpenAIUsage) (Contribution, error) {
 	if len(t.tiers) == 0 {
-		return CalculateOpenAI(native, t.Rates(0))
+		return CalculateOpenAI(native, t.rates(0))
 	}
 	if native.InputTokens < 0 {
 		return Contribution{Reason: ExclusionInconsistentUsage}, nil
 	}
-	return CalculateOpenAI(native, t.Rates(uint64(native.InputTokens)))
+	return CalculateOpenAI(native, t.rates(uint64(native.InputTokens)))
 }
 
 // CalculateOpenAI values one persisted OpenAI-native Turn at the supplied

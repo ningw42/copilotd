@@ -176,9 +176,11 @@ priceable Turns, while empty and priceable-free aggregates carry `"0"`. Coverage
 partitions stored Turns into priced Turns and five explicit exclusion reasons.
 In text, a partial priced subtotal has `*`, a wholly unpriced nonempty group has
 `—`, and compact period/model notes list priced/total stored Turns plus every
-nonzero exclusion reason. The header identifies per-Turn context-tier selection,
-fetched/fallback provenance, and successful fetch time when present, followed by
-the current-rate and non-billing caveat. A new CLI talking to an older daemon keeps native counts
+nonzero exclusion reason. The header identifies models.dev standard/context
+rates, fetched/fallback provenance, and successful fetch time when present,
+followed by the current-rate and non-billing caveat. This source-level wording
+also remains accurate for a legacy daemon whose additive `context_policy`
+described highest-tier selection. A new CLI talking to an older daemon keeps native counts
 usable and says `Estimated cost unavailable (daemon does not provide prices)`;
 it never prices locally. `--details` does not change JSON or make another request.
 There is no raw-Turn export, HTML, chart output, or cross-Surface monetary/token

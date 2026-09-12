@@ -597,16 +597,20 @@ rounded cells.
 - A compact note identifies the period/model or `Total`, priced/total stored
   Turns, and nonzero exclusion reasons. Entirely unpriced groups also receive a
   note; unlike optional native metrics, zero monetary coverage needs explanation.
-- A short header identifies original-provider/per-Turn context-tier pricing and
-  whether the effective snapshot is fetched or fallback. Include the successful fetch
+- A short header identifies original-provider models.dev standard/context rates
+  and whether the effective snapshot is fetched or fallback. This remains true
+  when the new client accepts an older daemon's additive highest-tier policy
+  member without interpreting it. Include the successful fetch
   time when available; do not call it the price's effective date.
 - `--details` also lists distinct Reported-model → Pricing-model resolutions and
   methods; unknown/ambiguous matches are explicit. Escape these identities using
   the existing terminal-safe policy.
 
 Always state that this is estimated original-provider cost for persisted,
-best-effort observations; uses current accepted per-Turn context-tier selection
-and a single cache-write rate; is not a Copilot bill; and may exclude unpriceable Turns. This should be
+best-effort observations; uses the daemon's current accepted models.dev
+standard/context and single cache-write rates; is not a Copilot bill; and may
+exclude unpriceable Turns. This wording must remain accurate when reading a
+legacy highest-tier daemon. This should be
 short explanatory text, not a new interactive presentation.
 
 ## 9. Failure and resource behavior

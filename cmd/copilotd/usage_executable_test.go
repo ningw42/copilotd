@@ -121,12 +121,16 @@ func TestUsageExecutableAcceptance(t *testing.T) {
 		assertTextExcludes(t, out, "best-effort and potentially incomplete", "Optional-count coverage refers only to stored Turns")
 	})
 	t.Run("observed_inference_to_executable", func(t *testing.T) {
+		openAIFixture, err := os.ReadFile(filepath.Join("..", "..", "internal", "shim", "testdata", "usage", "openai-responses-buffered.recorded.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
 		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			if strings.Contains(r.URL.Path, "messages") {
 				_, _ = io.WriteString(w, `{"id":"synthetic","type":"message","stop_reason":"end_turn","model":"observed","usage":{"input_tokens":12,"output_tokens":9}}`)
 			} else {
-				_, _ = io.WriteString(w, `{"id":"synthetic","status":"completed","model":"observed","usage":{"input_tokens":8012,"output_tokens":9}}`)
+				_, _ = w.Write(openAIFixture)
 			}
 		}))
 		defer upstream.Close()
@@ -153,8 +157,20 @@ func TestUsageExecutableAcceptance(t *testing.T) {
 			out := usageExec(t, binary, nil, 0, "usage", "--endpoint", h.baseURL, "--timezone", "UTC", "--since", before.Format(time.DateOnly), "--until", time.Now().UTC().AddDate(0, 0, 1).Format(time.DateOnly), "--json")
 			r := usageExecutableReport(t, out)
 			if r.Anthropic.Total.Turns == 1 && r.OpenAI.Total.Turns == 1 {
-				if *r.Anthropic.Total.Usage["input_tokens"].Sum != 12 || *r.OpenAI.Total.Usage["input_tokens"].Sum != 8012 || r.OpenAI.Rows[0].Model != "observed" {
-					t.Fatal("observed counts/identity")
+				openAI := r.OpenAI.Total
+				if *r.Anthropic.Total.Usage["input_tokens"].Sum != 12 || r.OpenAI.Rows[0].Model != "gpt-5.6-sol" ||
+					*openAI.Usage["input_tokens"].Sum != 12 || *openAI.Usage["output_tokens"].Sum != 6 ||
+					*openAI.Usage["cached_tokens"].Sum != 0 || *openAI.Usage["cache_write_tokens"].Sum != 0 ||
+					*openAI.Usage["reasoning_tokens"].Sum != 0 || *openAI.Usage["total_tokens"].Sum != 18 {
+					t.Fatalf("recorded native counts/identity changed: %+v", r.OpenAI)
+				}
+				var priced usageCostExecutableWire
+				if err := json.Unmarshal([]byte(out), &priced); err != nil {
+					t.Fatal(err)
+				}
+				cost := priced.OpenAI.Total.Cost
+				if cost.Amount == nil || *cost.Amount != "0.000168" || cost.PricedTurns != "1" {
+					t.Fatalf("recorded 12-token context did not use gpt-5.6-sol base rates: %+v", cost)
 				}
 				break
 			}
@@ -166,7 +182,7 @@ func TestUsageExecutableAcceptance(t *testing.T) {
 		if err := h.stopAfterClient(client); err != nil {
 			t.Fatal(err)
 		}
-		t.Log("live synthetic inference -> in-process production daemon/meter/writer -> actual usage executable; separate prior-history tests use actual serve executable")
+		t.Log("recorded September OpenAI fixture and synthetic Anthropic inference -> in-process production daemon/meter/writer -> actual usage executable; gpt-5.6-sol short context uses embedded base rates and preserves every native aggregate")
 	})
 	t.Run("details", func(t *testing.T) {
 		out := usageExec(t, binary, nil, 0, append(base, "--model", "Model", "--details")...)
@@ -567,7 +583,7 @@ func TestUsageCostExecutableAcceptance(t *testing.T) {
 	}
 
 	text := usageExec(t, binary, nil, 0, "usage", "--endpoint", h.baseURL, "--timezone", "UTC", "--since", "2026-09-01", "--until", "2026-09-02", "--details")
-	for _, want := range []string{"Est. USD", "20.000*", "34.000", "Pricing: original-provider / per-Turn context tiers / single cache-write rates", "Pricing model resolutions (Reported → Pricing)", "gpt-tiered → openai/gpt-tiered (exact)", "gpt-tiered-fast → openai/gpt-tiered (suffix)", "shared → ambiguous", "unknown → unknown"} {
+	for _, want := range []string{"Est. USD", "20.000*", "34.000", "Pricing: original-provider / models.dev standard + context rates / single cache-write rate", "Pricing model resolutions (Reported → Pricing)", "gpt-tiered → openai/gpt-tiered (exact)", "gpt-tiered-fast → openai/gpt-tiered (suffix)", "shared → ambiguous", "unknown → unknown"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("actual executable text missing %q: %s", want, text)
 		}

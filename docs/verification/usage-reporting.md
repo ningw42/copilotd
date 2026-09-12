@@ -41,11 +41,13 @@ existing Nix development shell (native CI uses setup-go).
   prerequisite API key/GitHub OAuth token values are never live credentials.
   Discovery/refresh is disabled; the initial HTTPS Exchange CONNECT is observed
   and refused by a loopback proxy that never opens a tunnel. Reports still work.
-- `observed_inference_to_executable` separately sends qualifying synthetic
-  Anthropic/OpenAI completions through the **in-process production daemon**,
-  meter and normal asynchronous writer, then invokes the actual CLI executable.
-  This closes the observation-to-output chain without claiming that the prior
-  history setup itself was live inference. Existing buffered/SSE/WebSocket and
+- `observed_inference_to_executable` separately sends a qualifying synthetic
+  Anthropic completion and the recorded September OpenAI buffered fixture through
+  the **in-process production daemon**, meter and normal asynchronous writer,
+  then invokes the actual CLI executable. It verifies every recorded OpenAI native
+  aggregate and the embedded gpt-5.6-sol base-rate valuation for twelve input
+  tokens. This closes the observation-to-output chain without claiming that the
+  prior history setup itself was live inference. Existing buffered/SSE/WebSocket and
   concurrency fixtures remain retained; no public upstream compatibility claim
   follows from synthetic responses.
 - Acceptance includes both Surfaces/all, four periods, independent/default
