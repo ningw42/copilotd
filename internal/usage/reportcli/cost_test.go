@@ -210,9 +210,9 @@ func TestCommandShowsPricingProvenanceAndEstimateCaveat(t *testing.T) {
 				t.Fatal(err)
 			}
 			for _, want := range []string{
-				"Pricing: original-provider / highest-context / single cache-write rates",
+				"Pricing: original-provider / per-Turn context tiers / single cache-write rates",
 				"snapshot: " + tc.source + " (sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef)",
-				"Estimated original-provider cost for persisted best-effort observations using current accepted highest-context/single-write rates; not a Copilot bill; may exclude unpriceable Turns.",
+				"Estimated original-provider cost for persisted best-effort observations using current accepted per-Turn context-tier selection and single cache-write rates; not a Copilot bill; may exclude unpriceable Turns.",
 			} {
 				if !strings.Contains(text, want) {
 					t.Errorf("missing pricing provenance/caveat %q:\n%s", want, text)
@@ -231,7 +231,7 @@ func TestCommandShowsPricingProvenanceAndEstimateCaveat(t *testing.T) {
 
 func TestCommandPresentsPricingEnabledEmptySectionWithoutInventedRows(t *testing.T) {
 	text := commandOutput(t, pricedOpenAICommandReport(t, nil, "0"), true)
-	if strings.Count(text, "No stored Turns in the selected range.") != 1 || !strings.Contains(text, "Pricing: original-provider / highest-context / single cache-write rates") || !strings.Contains(text, "Estimated original-provider cost") {
+	if strings.Count(text, "No stored Turns in the selected range.") != 1 || !strings.Contains(text, "Pricing: original-provider / per-Turn context tiers / single cache-write rates") || !strings.Contains(text, "Estimated original-provider cost") {
 		t.Fatalf("pricing-enabled empty presentation is incomplete:\n%s", text)
 	}
 	assertTextExcludes(t, text, "Est. USD", "estimated cost:", "Pricing model resolutions", "unknown_model=", "missing_usage=")

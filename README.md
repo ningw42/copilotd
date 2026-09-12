@@ -72,9 +72,16 @@ An enabled Usage meter also registers a memory-only `models.dev/api.json`
 pricing cached value. Its identified vendored floor is immediately available;
 best-effort refresh uses a credential-free, redirect-refusing public request and
 holds last-good on failure. Original-provider rates are limited to OpenAI,
-Anthropic, Google, and xAI and select the highest structured context tier, then
-the legacy long-context row, then base. Prices are neither persisted nor a
-Copilot bill, and source failure does not gate readiness or native reports. Set
+Anthropic, Google, and xAI. For each priceable Turn, the resolved Pricing
+model's base rate vector applies unless its complete native input strictly
+exceeds a structured context threshold; the greatest matching threshold then
+selects that tier without filling omitted rates from another row. Structured
+`tiers[].tier.size` is authoritative for every provider. The deprecated
+`context_over_200k` row is a strict 200,000-token compatibility fallback only
+when structured tiers are absent. OpenAI context is complete `input_tokens`;
+Anthropic context is the checked sum of uncached input, cache creation, and
+cache read. Prices are neither persisted nor a Copilot bill, and source failure
+does not gate readiness or native reports. Set
 `--usage-pricing-refresh-interval=0` to pin the embedded floor. Each report uses
 one captured local snapshot; report requests perform no pricing network work.
 The version-1 HTTP response identifies that snapshot under `pricing`, adds exact
@@ -161,15 +168,17 @@ available in JSON.
 exact decimal count and amount strings, Unicode, pricing fields, and unknown
 additive fields. Pricing provenance and every nested cost/match object are an
 atomic additive extension: the client accepts a wholly absent extension as an
-older daemon, but rejects partial or dangling recognized fields. Cost amounts are
+older daemon, but rejects partial or dangling recognized fields. The current
+`pricing` object omits the former presentation-only `context_policy`; clients
+accept that legacy member as unknown additive data. Cost amounts are
 exact nonnegative decimal strings; `null` means a nonempty aggregate has no
 priceable Turns, while empty and priceable-free aggregates carry `"0"`. Coverage
 partitions stored Turns into priced Turns and five explicit exclusion reasons.
 In text, a partial priced subtotal has `*`, a wholly unpriced nonempty group has
 `—`, and compact period/model notes list priced/total stored Turns plus every
-nonzero exclusion reason. The header identifies fetched/fallback provenance and
-successful fetch time when present, followed by the current-rate approximation
-and non-billing caveat. A new CLI talking to an older daemon keeps native counts
+nonzero exclusion reason. The header identifies per-Turn context-tier selection,
+fetched/fallback provenance, and successful fetch time when present, followed by
+the current-rate and non-billing caveat. A new CLI talking to an older daemon keeps native counts
 usable and says `Estimated cost unavailable (daemon does not provide prices)`;
 it never prices locally. `--details` does not change JSON or make another request.
 There is no raw-Turn export, HTML, chart output, or cross-Surface monetary/token

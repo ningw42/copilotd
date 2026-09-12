@@ -59,10 +59,12 @@ existing Nix development shell (native CI uses setup-go).
   source through the existing production source seam, the shared cache registry,
   in-process production daemon/HTTP report path, and actual CLI executable. Its
   fixed OpenAI/Anthropic/combined history covers matched/unknown/ambiguous models,
-  Surface-independent original-provider identity, greatest-context and one
-  aggregate cache-write rates, exact current-price and identity repricing without
-  new database writes, report-time no-network behavior, and a coherent old
-  snapshot while replacement refresh is deliberately blocked. The ordinary
+  Surface-independent original-provider identity, per-Turn context-tier selection
+  and one aggregate cache-write rate, a short OpenAI-native Turn valued at base
+  rates, exact current-price and identity repricing without new database writes,
+  report-time no-network behavior, omission of presentation-only
+  `pricing.context_policy`, and a coherent old snapshot while replacement refresh
+  is deliberately blocked. The ordinary
   actual-`serve` acceptance separately pins refresh to `0` and uses the embedded
   floor; neither path contacts models.dev.
   No OS can carry embedded NUL in argv; its identity contract remains tested at

@@ -89,7 +89,11 @@ same report and client validator. Terminal tables derive a presentation-only
 change or replace the server's per-model and whole-range aggregates or the
 original-byte JSON. The #237 extension preserves the route, schema version, and
 native fields while adding identified pricing provenance, exact USD cost/coverage
-at every aggregate level, and row/model pricing matches. #238 places `Est. USD`
+at every aggregate level, and row/model pricing matches. #241 selects any
+models.dev context tariff per persisted Turn from complete Surface-native input
+and removes the presentation-only `pricing.context_policy` member without
+replacing it; the client tolerates that member from an older daemon as additive
+data. #238 places `Est. USD`
 after `Model(s)` in each primary Surface table, adds exact-before-rounding period
 cost totals, coverage notes, provenance/caveat text, and resolution details without
 repeating money in secondary tables or introducing a cross-Surface total. A new
