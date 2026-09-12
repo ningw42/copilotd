@@ -180,10 +180,8 @@ _Avoid_: billing report, request totals (for Turn counts)
 
 **Estimated cost**:
 A USD valuation of fully priceable persisted Turns using the daemon's current
-accepted original-provider rates and declared valuation policies, including
-context selection from complete Surface-native input and any response-tier
-fallback or derivation. It is not a Copilot bill, invoice, or proof of complete
-consumption.
+accepted original-provider rates and the valuation policies implemented by that
+daemon. It is not a Copilot bill, invoice, or proof of complete consumption.
 _Avoid_: billed cost, charge, spend
 
 **Pricing coverage**:
@@ -198,9 +196,9 @@ independent of Surface, Requested model, forwarding targets, and Catalog metadat
 _Avoid_: billed model, resolved model, provider model
 
 **Derived Fast rates**:
-Estimated Fast rates for a context band, calculated by scaling each category's
-base context rate by the same Pricing model's corresponding Fast-to-base rate
-ratio. They need not be explicitly published rates for that combination.
+Estimated Fast rates for a context band under the approved OpenAI service-tier
+valuation policy. They preserve the selected Pricing model's category-specific
+Fast premium across context bands and need not be published provider rates.
 _Avoid_: official Fast-long prices, universal Fast multiplier
 
 **Reported service tier**:

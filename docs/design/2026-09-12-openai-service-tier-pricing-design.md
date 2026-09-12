@@ -1,6 +1,7 @@
 # OpenAI reported service-tier valuation — Design
 
-**Status:** complete design proposal awaiting full-design approval. Valuation direction is agreed; implementation and feature verification have not started.
+**Status:** approved design; implementation and feature verification have not started.
+**Approval:** 2026-09-12 — Ning Wang approved the complete proposal at [`fda0753`](https://github.com/ningw42/copilotd/blob/fda07534af76444ec1779e15e8be1a818ba5603d/docs/design/2026-09-12-openai-service-tier-pricing-design.md).
 **Issue:** [#248](https://github.com/ningw42/copilotd/issues/248), part of [#242](https://github.com/ningw42/copilotd/issues/242).
 **Depends on:** implemented [#247 capture design](2026-09-12-openai-service-tier-capture-design.md).
 **Extends:** [Estimated-cost reporting](2026-09-11-usage-cost-reporting-design.md).
@@ -29,9 +30,9 @@ The source remains the single current accepted models.dev snapshot; this directi
 
 ### Explicit amendment to the originating issue
 
-The current #248 acceptance criteria prohibit deriving a multiplier and require explicit mode/context rates. The agreed direction above **replaces that prohibition** with a governed same-model/same-snapshot derivation. The maintainer has also explicitly dropped the requested service-tier provenance/coverage extension and related terminal details. No new HTTP fields or client-validation extension are required. These are scope amendments, not claims that the original requirements are satisfied unchanged.
+The originating #248 acceptance criteria prohibited deriving a multiplier and required explicit mode/context rates. The agreed direction above **replaces that prohibition** with a governed same-model/same-snapshot derivation. The maintainer also explicitly dropped the requested service-tier provenance/coverage extension and related terminal details. No new HTTP fields or client-validation extension are required. These are approved scope amendments, not claims that the original requirements were satisfied unchanged.
 
-The GitHub issue has not yet been amended. Align it and the affected current design/ADR documentation when this focused design is approved. Approval of the agreed direction is not blanket approval of the concrete implementation contracts below.
+The GitHub issues are aligned to this approved design. Approval covers the concrete implementation contracts below; implementation and feature verification remain separate work.
 
 ## Evidence and limits
 
@@ -321,7 +322,7 @@ Update the native verification inventory when named executable cases change; nat
 2. **Reporting:** add bounded metadata projection and pass each Turn's lookup candidate into pricing in `report/read.go`. Keep `turnContribution`, `report.Cost`, report metadata, existing coverage, grouping, and model memoization unchanged. Freeze the numeric metric lists; no report-type extension is needed in `report/report.go`.
 3. **Transport and CLI:** retain the existing production encoder and client validator. Add regression coverage for changed valuations using the existing wire shape. In `reportcli/command.go`, only replace the hard-coded normal-pricing wording in the header/caveat with neutral rate wording; retain subtotal logic and output structure. No new fields, flags, configuration, route, authentication, or schema version.
 4. **Documentation:** amend the cost-reporting design's mode exclusion, rate selection, arithmetic, and estimation policy while explicitly preserving its report/coverage/protocol shapes; amend the reporting design's staged metadata-ignored/read-projection statement; update the capture design's staging note without changing its evidence contract. Amend ADR-0018/0019 notes without changing persistence/exposure decisions. Update README, CONFIGURATION, the models.dev projection documentation, and adjacent domain vocabulary. Preserve dated artifact identities; no floor bump is required.
-5. **Issue alignment and approval:** amend #248/#242 to allow the agreed same-model/same-snapshot derivation and remove the requirements for new service-tier provenance, added coverage fields, terminal details, and their additive HTTP extension. Retain numerical, existing-coverage, HTTP/CLI, and executable verification. Link this design at its approved revision. Do not claim approval, publish an approval record, or start feature implementation merely because this plan is complete.
+5. **Issue alignment and approval:** #248/#242 reflect the agreed same-model/same-snapshot derivation and omit requirements for new service-tier provenance, added coverage fields, terminal details, and their additive HTTP extension. They retain numerical, existing-coverage, HTTP/CLI, and executable verification and link this design at its approved revision. Approval authorizes implementation but does not claim implementation or feature verification.
 
 No new ADR is needed: this extends the existing pricing/reporting seams and records the estimator trade-off here and in their amendments. The implementation scope remains the revised #248; new service-tier provenance, raw Turn export, broader service-mode support, invoicing, pricing overrides, additional listeners, and capture redesign are excluded.
 
@@ -339,4 +340,4 @@ These checks validate this proposal and its examples, not feature implementation
 
 ## Approval state
 
-The maintainer has agreed to deriving wherever data suffices, centralizing the calculation, and omitting new service-tier provenance from this design. The remaining contracts above are concrete engineering proposals derived from the existing repository behavior, for review as one implementation-ready design. There are no intentionally deferred design choices or placeholders requiring an implementer to invent policy. Full-design approval and the subsequent implementation/verification remain separate steps.
+Ning Wang approved this complete design on 2026-09-12 at revision [`fda0753`](https://github.com/ningw42/copilotd/blob/fda07534af76444ec1779e15e8be1a818ba5603d/docs/design/2026-09-12-openai-service-tier-pricing-design.md). Approval includes deriving wherever data suffices, centralizing the calculation, omitting new service-tier provenance, and the concrete implementation contracts above. There are no intentionally deferred design choices or placeholders requiring an implementer to invent policy. Implementation and feature verification remain separate steps.
