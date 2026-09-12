@@ -67,6 +67,15 @@ migration must never fabricate zero. Values retain their Surface-native meaning
 even when providers choose asymmetric nesting, and interpretation stays adjacent
 to the Go types rather than being hidden in query-time normalization.
 
+Estimated-cost reporting consumes this frozen native evidence without changing
+it: OpenAI cache counts remain subsets of complete input, Anthropic cache counts
+remain additive, reasoning/thinking/TTL subsets are not charged again, and one
+aggregate cache-creation count uses the selected single cache-write rate. Missing
+required pricing or native-formula evidence, or an invalid chargeable
+relationship, excludes the whole Turn from the monetary subtotal. Optional cache
+rates are unnecessary for known-zero cache counts; ignored
+reasoning/thinking/TTL details are not required for pricing.
+
 ## Observer policy
 
 The existing Shim mechanism admits both parity transforms and read-only

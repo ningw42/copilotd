@@ -341,7 +341,7 @@ func TestUsageGracefulDrainFinishesReportAndInferenceBeforeWriterCutoff(t *testi
 	q := reportSelectionNow()
 	model := "live-openai"
 	q.Model = &model
-	persisted, err := report.New(h.cfg.UsageDBPath).Query(context.Background(), q)
+	persisted, err := report.New(h.cfg.UsageDBPath, mainTestPricingSource(t)).Query(context.Background(), q)
 	if err != nil || persisted.OpenAI.Total.Turns != 1 || *persisted.OpenAI.Total.Usage["input_tokens"].Sum != 8012 {
 		t.Fatalf("drain completion was not admitted and finalized: %+v %v", persisted, err)
 	}

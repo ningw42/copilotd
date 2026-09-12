@@ -28,8 +28,11 @@ native Windows explicit-only. #211 adds exact Reported-model filters, detailed
 native tables, and validated original-byte JSON. #212 retains integrated
 contention/lifecycle evidence. #213 adds executable acceptance and native CI;
 actual target/revision certification is tracked in its retained results, not
-inferred from the pipeline. The persistence, file, and finalization policies below
-remain unchanged.
+inferred from the pipeline. The estimated-cost extension keeps prices and money
+out of SQLite: one current accepted in-memory snapshot values committed native
+observations at report time, so later refresh can revalue history without changing
+stored Turns or adding a migration. The CLI's period cost totals are presentation
+only. The persistence, file, and finalization policies below remain unchanged.
 
 ## Why SQLite
 

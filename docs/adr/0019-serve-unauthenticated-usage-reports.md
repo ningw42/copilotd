@@ -6,8 +6,11 @@ range defaults implemented in #207–#209; #210 adds conservative Unix terminal-
 timezone discovery and the native Windows explicit-only policy. #211 adds exact
 Reported-model filters, detailed native tables, and validated original-byte JSON.
 #212 retains integrated concurrency/lifecycle evidence; #213 adds complete
-executable acceptance and the native pipeline. Actual native release certification
-is recorded per revision on #213, not implied by implementation status. Protocol
+executable acceptance and the native pipeline. The estimated-cost follow-up adds
+daemon-owned valuation in #236 and its atomic additive version-1 HTTP contract in
+#237; #238 adds CLI cost presentation and deterministic executable acceptance.
+Actual native release certification is recorded per revision on #213, not implied
+by implementation status. Protocol
 details and verification gates live in the
 [Usage reporting design](../design/2026-09-07-usage-reporting-design.md).
 
@@ -84,10 +87,22 @@ detailed native period/range tables, and original-byte JSON output now share the
 same report and client validator. Terminal tables derive a presentation-only
 `Total` for each period from its validated Reported-model rows; this does not
 change or replace the server's per-model and whole-range aggregates or the
-original-byte JSON. Those terminal-only Turns, sum, and coverage accumulations
-use checked int64 arithmetic. Overflow in independently valid but inconsistent
-rows fails text rendering before stdout; JSON still emits its validated original
-bytes. No Catalog normalization or Requested-model substitution is introduced.
+original-byte JSON. The #237 extension preserves the route, schema version, and
+native fields while adding identified pricing provenance, exact USD cost/coverage
+at every aggregate level, and row/model pricing matches. #238 places `Est. USD`
+after `Model(s)` in each primary Surface table, adds exact-before-rounding period
+cost totals, coverage notes, provenance/caveat text, and resolution details without
+repeating money in secondary tables or introducing a cross-Surface total. A new
+client represents a wholly absent extension as an older daemon and rejects
+recognized partial shapes; unknown additive fields and validated original bytes
+remain intact. Terminal-only native and monetary coverage counters use checked
+int64 arithmetic; monetary amounts use the exact pricing representation. Overflow
+in independently valid but inconsistent rows fails text rendering before stdout;
+JSON still emits its validated original bytes. No Catalog normalization,
+Requested-model substitution, HTTP-side/CLI-side pricing, or report-time network
+fetch is introduced. Because the report path remains unauthenticated, model
+identities, activity patterns, current valuation, and pricing coverage share the
+same deliberate network disclosure.
 External SQLite inspection remains supported alongside the new
 bounded HTTP path. [#212 contention/lifecycle evidence](../research/2026-09-08-usage-reporting-concurrency.md)
 and #213's native release gate remain distinct from feature implementation.

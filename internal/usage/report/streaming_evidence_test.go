@@ -28,7 +28,7 @@ func TestQueryIndexedStreamingNativeEvidence(t *testing.T) {
 	q := selection()
 	q.Surface = "all"
 	started := time.Now()
-	got, err := report.New(path).Query(context.Background(), q)
+	got, err := newReporter(t, path).Query(context.Background(), q)
 	elapsed := time.Since(started)
 	if err != nil {
 		t.Fatal(err)

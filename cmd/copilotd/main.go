@@ -34,6 +34,7 @@ import (
 	"github.com/ningw42/copilotd/internal/shim"
 	"github.com/ningw42/copilotd/internal/upstream"
 	"github.com/ningw42/copilotd/internal/usage"
+	"github.com/ningw42/copilotd/internal/usage/pricing"
 	"github.com/ningw42/copilotd/internal/usage/report"
 	"github.com/ningw42/copilotd/internal/usage/reportcli"
 	"github.com/ningw42/copilotd/internal/usage/reporthttp"
@@ -355,6 +356,7 @@ func runServe(ctx context.Context, flags *config.ServeFlags, lookupEnv func(stri
 		return errServeFailed
 	}
 	codexModels := configuredCodexModels(cfg, productionCodexModelsEdge(), cacheRegistry, base)
+	usagePricing := configuredUsagePricing(cfg, pricing.NewRemote(pricing.ModelsDevURL, nil), cacheRegistry, base)
 
 	var usageStore *sqlitestore.Store
 	var sink usage.Sink
@@ -399,7 +401,7 @@ func runServe(ctx context.Context, flags *config.ServeFlags, lookupEnv func(stri
 		stop()
 	}()
 
-	if err := runBoundServe(serveCtx, cfg, base, mgr, imp, codexModels, cacheRegistry, registry, ln, usageStore); err != nil {
+	if err := runBoundServe(serveCtx, cfg, base, mgr, imp, codexModels, usagePricing, cacheRegistry, registry, ln, usageStore); err != nil {
 		return errServeFailed
 	}
 	return nil
@@ -413,7 +415,7 @@ func runServe(ctx context.Context, flags *config.ServeFlags, lookupEnv func(stri
 // readiness or request admission. When usageStore is non-nil, admission remains
 // open through Server.Run and is cut off immediately on return, before a serve
 // error is synchronously logged.
-func runBoundServe(ctx context.Context, cfg config.ServeConfig, base *slog.Logger, mgr *identity.Manager, imp *impersonation.Set, codexModels *cache.Value[[]byte], cacheRegistry *cache.Registry, registry shim.Registry, ln net.Listener, usageStore *sqlitestore.Store) error {
+func runBoundServe(ctx context.Context, cfg config.ServeConfig, base *slog.Logger, mgr *identity.Manager, imp *impersonation.Set, codexModels *cache.Value[[]byte], usagePricing pricing.Source, cacheRegistry *cache.Registry, registry shim.Registry, ln net.Listener, usageStore *sqlitestore.Store) error {
 	go runServeStartup(ctx, cacheRegistry, mgr, logging.ForComponent(base, "cmd/copilotd"))
 	catalogs := catalog.RenderDescriptors{
 		Anthropic: catalog.AnthropicRenderConfig{
@@ -447,7 +449,7 @@ func runBoundServe(ctx context.Context, cfg config.ServeConfig, base *slog.Logge
 
 	var reportQuery reporthttp.QueryFunc
 	if usageStore != nil {
-		reportQuery = report.New(cfg.UsageDBPath).Query
+		reportQuery = report.New(cfg.UsageDBPath, usagePricing).Query
 	}
 	reportHandler := reporthttp.Handler(reportQuery)
 	serveErr := server.New(cfg, logging.ForComponent(base, "internal/server"), logging.ForComponent(base, "internal/catalog"), logging.DependencyErrorLog(base, slog.LevelWarn), mgr, server.ReadyObservers{
@@ -591,6 +593,17 @@ func configuredCodexModels(cfg config.ServeConfig, edge catalog.ModelsEdge, regi
 	return catalog.NewModelsCache(catalog.ModelsCacheConfig{
 		RefreshInterval: cfg.CodexCatalogRefreshInterval,
 	}, edge, registry, logging.ForComponent(base, "internal/cache"))
+}
+
+// configuredUsagePricing keeps pricing refresh behind the Usage meter's opt-in
+// boundary. Registration completes before runBoundServe starts registry priming.
+func configuredUsagePricing(cfg config.ServeConfig, remote pricing.Remote, registry *cache.Registry, base *slog.Logger) pricing.Source {
+	if !cfg.ShimUsageMeterEnabled {
+		return nil
+	}
+	return pricing.NewCachedSource(pricing.CacheConfig{
+		RefreshInterval: cfg.UsagePricingRefreshInterval,
+	}, remote, registry, logging.ForComponent(base, "internal/cache"))
 }
 
 // newDiscoveryClient returns a dedicated plain client for the two public

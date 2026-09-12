@@ -259,7 +259,7 @@ func TestUsageCalendarConfigurationThroughProductionListener(t *testing.T) {
 
 func TestUsageHelpDescribesNativeSelectionAndPresentation(t *testing.T) {
 	help := runSuccessfully(t, "usage", "--help")
-	for _, want := range []string{"Anthropic and OpenAI Turns", "native Surface selection: all, anthropic, openai", "day, week, month, year", "current month's first day", "next month's first day", "terminal-local on supported Unix", "native Windows requires explicit", "exact non-empty UTF-8 Reported model", "secondary native tables for period-grouped model rows", "original validated JSON plus newline"} {
+	for _, want := range []string{"Anthropic and OpenAI Turns", "native Surface selection: all, anthropic, openai", "day, week, month, year", "current month's first day", "next month's first day", "terminal-local on supported Unix", "native Windows requires explicit", "exact non-empty UTF-8 Reported model", "secondary native tables and Pricing-model resolutions", "original validated JSON plus newline"} {
 		if !strings.Contains(help, want) {
 			t.Errorf("missing %q in usage help: %s", want, help)
 		}

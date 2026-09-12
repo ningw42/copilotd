@@ -2,12 +2,18 @@
 
 ## Implementation versus certification
 
-The feature contract in [ADR-0019](../adr/0019-serve-unauthenticated-usage-reports.md)
-and the [design](../design/2026-09-07-usage-reporting-design.md) is implemented by
+The native reporting contract in
+[ADR-0019](../adr/0019-serve-unauthenticated-usage-reports.md) and the
+[design](../design/2026-09-07-usage-reporting-design.md) is implemented by
 #207–#211. [#212 evidence](../research/2026-09-08-usage-reporting-concurrency.md)
 retains real inference/report concurrency, native SQLite interruption/cleanup,
 TCP backpressure, and graceful/forced drain tests. #213 adds real-executable
-acceptance, the native pipeline, and final local verification.
+acceptance, the native pipeline, and final local verification. The additive
+[estimated-cost design](../design/2026-09-11-usage-cost-reporting-design.md) is
+implemented through #232–#238, including CLI rendering and deterministic local
+pricing-source executable acceptance. It inherits this same-revision native gate;
+implementation or local Linux evidence alone is not renewed four-platform
+certification.
 
 **A pipeline definition, cross-build, or local Linux pass is not four-platform
 certification.** The authoritative release result is the implementation SHA,
@@ -44,10 +50,21 @@ existing Nix development shell (native CI uses setup-go).
   follows from synthetic responses.
 - Acceptance includes both Surfaces/all, four periods, independent/default
   month bounds, explicit flag/env/TOML and process-discovered zones, exact case/
-  whitespace/Unicode filters, compact/details/JSON, stored-Turn coverage and
-  caveats, scope/help/root/version/operands, prefix-preserving proxying, empty/
-  disabled/unreachable/older-daemon/protocol errors, and real output-write errors.
-  A frozen owned HTTP boundary verifies original JSON bytes and additive fields.
+  whitespace/Unicode filters, compact/details/JSON, native and pricing coverage,
+  provenance/caveats, scope/help/root/version/operands, prefix-preserving proxying,
+  empty/disabled/unreachable/older-daemon/protocol errors, and real output-write
+  errors. A frozen owned HTTP boundary verifies original JSON bytes and additive
+  fields.
+- `TestUsageCostExecutableAcceptance` adds a credential-free local models.dev
+  source through the existing production source seam, the shared cache registry,
+  in-process production daemon/HTTP report path, and actual CLI executable. Its
+  fixed OpenAI/Anthropic/combined history covers matched/unknown/ambiguous models,
+  Surface-independent original-provider identity, greatest-context and one
+  aggregate cache-write rates, exact current-price and identity repricing without
+  new database writes, report-time no-network behavior, and a coherent old
+  snapshot while replacement refresh is deliberately blocked. The ordinary
+  actual-`serve` acceptance separately pins refresh to `0` and uses the embedded
+  floor; neither path contacts models.dev.
   No OS can carry embedded NUL in argv; its identity contract remains tested at
   Go command and HTTP/report seams, not falsely claimed as a native argv case.
 - Windows process cleanup uses `Kill`, not an unsupported `os.Interrupt`; this
@@ -64,8 +81,9 @@ native jobs while retaining the existing Linux full race suite and reusable
 `core.autocrlf=false`
 **before** checkout on the disposable runner. The verifier records the effective
 setting and `checkout-bytes.json`: actual byte counts, LF/CRLF counts, SHA-256,
-and no-filter Git blob identity for the pinned catalog and both exercised SSE
-fixtures. A clean Git status alone can conceal newline conversion. It fails if
+and no-filter Git blob identity for the pinned Codex catalog, vendored models.dev
+pricing artifact, and both exercised SSE fixtures. A clean Git status alone can
+conceal newline conversion. It fails if
 these working-tree bytes differ from their committed blobs; it never normalizes
 runtime payloads or changes pinned hashes.
 
@@ -110,7 +128,11 @@ client teardown regression, and real CLI/native runtime tests. It also requires
 explicit passes for withheld Content-Length/chunked request bodies; final flush
 and recovery across success, HEAD and early errors; same-connection delayed
 inference/SSE after reports; actual closed stdout pipes in compact/details/JSON;
-recovered writer-log severity; and the real WebSocket slow-reader timeout.
+recovered writer-log severity; and the real WebSocket slow-reader timeout. The
+inventory also names cost-source floor/fetch/fallback isolation, one-snapshot
+reporting, public CLI rounding/exact-total/coverage/compatibility behavior, and
+the actual cost executable test so those capabilities cannot disappear behind a
+package-level pass.
 Bodyless work-deadline precedence is also required. Unix SIGPIPE (including
 malformed flags and help-validation errors with closed stderr) and INT/TERM
 executable checks are mandatory on Linux/macOS and explicit `not_applicable`
@@ -198,7 +220,7 @@ freshness, billing, or complete durability.
 Run focused acceptance/typechecking while developing, then all final gates:
 
 ```sh
-nix develop -c go test ./cmd/copilotd -run 'TestUsageExecutableAcceptance|TestUsageNativeRuntime' -count=1
+nix develop -c go test ./cmd/copilotd -run 'TestUsageExecutableAcceptance|TestUsageCostExecutableAcceptance|TestUsageNativeRuntime' -count=1
 nix develop -c go vet ./...
 nix develop -c go test -race ./... -count=1
 nix fmt

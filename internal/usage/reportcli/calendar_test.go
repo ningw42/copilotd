@@ -13,11 +13,35 @@ import (
 
 	"github.com/ningw42/copilotd/internal/logging"
 	"github.com/ningw42/copilotd/internal/usage"
+	"github.com/ningw42/copilotd/internal/usage/pricing"
 	"github.com/ningw42/copilotd/internal/usage/report"
 	"github.com/ningw42/copilotd/internal/usage/reportcli"
 	"github.com/ningw42/copilotd/internal/usage/reporthttp"
 	"github.com/ningw42/copilotd/internal/usage/sqlitestore"
 )
+
+type calendarPricingSource struct {
+	snapshot *pricing.Snapshot
+}
+
+func (s calendarPricingSource) Current(ctx context.Context, limit pricing.ProjectionLimit) (*pricing.Snapshot, pricing.SnapshotStatus, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, pricing.SnapshotStatus{}, err
+	}
+	if s.snapshot.IdentityBytes() > limit.MaxIdentityBytes {
+		return nil, pricing.SnapshotStatus{}, pricing.ErrProjectionLimit
+	}
+	return s.snapshot, pricing.SnapshotStatus{Source: "fallback", Version: "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"}, nil
+}
+
+func calendarPricing(t *testing.T) pricing.Source {
+	t.Helper()
+	snapshot, err := pricing.ParseSnapshot(context.Background(), []byte(`{"openai":{"id":"openai","models":{}},"anthropic":{"id":"anthropic","models":{}},"google":{"id":"google","models":{}},"xai":{"id":"xai","models":{}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return calendarPricingSource{snapshot: snapshot}
+}
 
 func TestCommandAllPeriodsFromSQLiteThroughHTTPInExplicitNamedZone(t *testing.T) {
 	previous := time.Local
@@ -40,7 +64,7 @@ func TestCommandAllPeriodsFromSQLiteThroughHTTPInExplicitNamedZone(t *testing.T)
 	if result := store.Close(context.Background()); !result.DriverCleanupCompleted || result.FinalFlushLosses != 0 {
 		t.Fatalf("fixture: %+v", result)
 	}
-	server := httptest.NewServer(reporthttp.Handler(report.New(path).Query))
+	server := httptest.NewServer(reporthttp.Handler(report.New(path, calendarPricing(t)).Query))
 	defer server.Close()
 	client, err := reporthttp.NewClient(server.URL)
 	if err != nil {
