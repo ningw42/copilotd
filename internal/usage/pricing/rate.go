@@ -5,6 +5,8 @@ import (
 	"math/big"
 )
 
+const maxRateExpandedDigits = 18
+
 // Rate is an immutable exact USD-per-million-token decimal.
 type Rate struct {
 	coefficient *big.Int
@@ -16,7 +18,6 @@ type Rate struct {
 func ParseRate(raw string) (Rate, error) {
 	const (
 		maxSourceBytes = 128
-		maxDigits      = 18
 		maxExponent    = 36
 	)
 	if raw == "" || len(raw) > maxSourceBytes {
@@ -102,7 +103,7 @@ func ParseRate(raw string) (Rate, error) {
 	if integerDigits < 1 {
 		integerDigits = 1
 	}
-	if integerDigits > maxDigits || scale > maxDigits {
+	if integerDigits > maxRateExpandedDigits || scale > maxRateExpandedDigits {
 		return Rate{}, errors.New("rate exceeds expanded decimal bounds")
 	}
 	return Rate{coefficient: coefficient, scale: scale}, nil

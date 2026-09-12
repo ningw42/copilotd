@@ -54,10 +54,11 @@ Turns and schema do not acquire this metadata.
 This value is response evidence, not request intent or a token metric. The same
 qualifying completed Response supplies it on buffered, SSE, and WebSocket paths;
 no Requested-model, `-fast`, Catalog, alias, or configuration fallback is
-permitted. Current reports integrity-probe the column but leave native metrics,
-wire schema, and Estimated cost unchanged. Persisting it creates no conclusion
-about provider billing or Standard rates during the staged interval before a
-separate valuation design lands.
+permitted. The later approved
+[service-tier pricing design](../design/2026-09-12-openai-service-tier-pricing-design.md)
+projects a bounded lookup candidate into per-Turn Estimated cost while leaving
+native metrics and wire schema unchanged. The raw tier is not grouped or exposed,
+and persisting or valuing it creates no conclusion about provider billing.
 
 ## Native nesting examples
 
@@ -91,7 +92,11 @@ OpenAI uses complete `input_tokens`, while Anthropic uses a checked sum of
 uncached input, aggregate cache creation, and cache read. OpenAI cache counts
 remain subsets of complete input, Anthropic cache counts remain additive,
 reasoning/thinking/TTL subsets are not charged again, and one aggregate
-cache-creation count uses the selected single cache-write rate. Missing or
+cache-creation count uses the selected single cache-write rate. OpenAI then uses
+only bounded completed-response `fast`/`priority` evidence to select an accepted
+Fast declaration; normal rates remain the fallback for unavailable or
+unrecognized evidence. Fast context rates preserve each same-model category's
+explicit Fast premium through exact projection-time composition. Missing or
 inconsistent context evidence, missing required pricing or native-formula
 evidence, or an invalid chargeable relationship excludes the whole Turn from
 the monetary subtotal. Optional cache rates are unnecessary for known-zero

@@ -403,7 +403,7 @@ func mandatoryTests(goos string) []string {
 			"TestQueryBothNativeSectionsShareOneCommittedSnapshot", "TestQueryReadsCommittedHistoryWithoutFlushingOrRetainingWriter", "TestQueryRejectsReportWhenNativeCleanupFails",
 			"TestQueryRepricesAndRematchesEachCapturedSourceRevision", "TestQueryUsesOneCapturedPricingRevisionAcrossBothSurfaces",
 			"TestQueryExactFilterExcludesOversizedUnrelatedIdentity", "TestQueryEnforcesWholeReportResourceLimits", "TestQueryIndexedStreamingNativeEvidence",
-			"TestQueryFailsWholeReportOnUnavailableOrExcessiveData", "TestQueryIgnoresStoredOpenAIServiceTierEvidence",
+			"TestQueryFailsWholeReportOnUnavailableOrExcessiveData", "TestQueryValuesStoredOpenAIServiceTierEvidence",
 			"TestRealSQLiteFailuresUseGenericHTTPResponsesAndReleaseAdmission", "TestInterruptedRealSQLiteScanUsesHTTPDeadlinePrecedenceAndReleasesAdmission",
 		},
 		"internal/server": {

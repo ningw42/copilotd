@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -13,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -28,6 +30,7 @@ import (
 	"github.com/ningw42/copilotd/internal/sse"
 	"github.com/ningw42/copilotd/internal/usage"
 	"github.com/ningw42/copilotd/internal/usage/pricing"
+	"github.com/ningw42/copilotd/internal/usage/report"
 	"github.com/ningw42/copilotd/internal/usage/sqlitestore"
 )
 
@@ -215,6 +218,37 @@ func dialUsageMeterWebSocket(t *testing.T, baseURL, requestID string) *websocket
 	return conn
 }
 
+func assertOpenAICostEventually(t *testing.T, endpoint string, wantTurns int64, wantAmount string) {
+	t.Helper()
+	now := time.Now().UTC()
+	query := report.Query{
+		Timezone: "UTC",
+		Since:    now.AddDate(0, 0, -1).Format(time.DateOnly),
+		Until:    now.AddDate(0, 0, 2).Format(time.DateOnly),
+		Surface:  "openai",
+	}
+	got := waitForUsageReport(t, endpoint, query, func(got report.Report) bool {
+		return got.OpenAI != nil && got.OpenAI.Total.Turns == wantTurns
+	})
+	cost := got.OpenAI.Total.Cost
+	if cost.Amount == nil || cost.Amount.String() != wantAmount || cost.PricedTurns != wantTurns || cost.Unpriced != (report.UnpricedCoverage{}) {
+		t.Fatalf("OpenAI service-tier cost = %+v, want %d priced Turns and amount %s", cost, wantTurns, wantAmount)
+	}
+
+	binary := usageAcceptanceBinary(t)
+	output := usageExec(t, binary, nil, 0,
+		"usage", "--endpoint", endpoint, "--timezone", "UTC", "--since", query.Since,
+		"--until", query.Until, "--surface", "openai", "--json",
+	)
+	var wire usageCostExecutableWire
+	if err := json.Unmarshal([]byte(output), &wire); err != nil {
+		t.Fatal(err)
+	}
+	if wire.OpenAI.Total.Turns != strconv.FormatInt(wantTurns, 10) || wire.OpenAI.Total.Cost.Amount == nil || *wire.OpenAI.Total.Cost.Amount != wantAmount || wire.OpenAI.Total.Cost.PricedTurns != strconv.FormatInt(wantTurns, 10) {
+		t.Fatalf("actual CLI service-tier total = %+v, want %d priced Turns and amount %s", wire.OpenAI.Total, wantTurns, wantAmount)
+	}
+}
+
 func TestRunServeUsageStoreFailurePrecedesBindAndDisabledServeCreatesNothing(t *testing.T) {
 	held, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -329,7 +363,7 @@ func TestRunBoundServeMetersBufferedOpenAIResponseWithoutChangingPayload(t *test
 	t.Cleanup(upstream.Close)
 	harness := startUsageMeterServeHarness(t, upstream.URL, discardLogger(t), nil, nil)
 
-	req, err := http.NewRequest(http.MethodPost, harness.baseURL+"/openai/v1/responses", strings.NewReader(`{"model":"requested-model"}`))
+	req, err := http.NewRequest(http.MethodPost, harness.baseURL+"/openai/v1/responses", strings.NewReader(`{"model":"requested-model","service_tier":"priority"}`))
 	if err != nil {
 		t.Fatalf("build request: %v", err)
 	}
@@ -347,6 +381,7 @@ func TestRunBoundServeMetersBufferedOpenAIResponseWithoutChangingPayload(t *test
 	if string(body) != string(fixture) {
 		t.Fatalf("forwarded body changed:\n got: %q\nwant: %q", body, fixture)
 	}
+	assertOpenAICostEventually(t, harness.baseURL, 1, "0.000168")
 
 	db, report := externalUsageDB(t, harness)
 	assertCleanUsageReport(t, report)
@@ -410,6 +445,7 @@ func TestRunBoundServeMetersOpenAISSECompletionWithoutChangingFrames(t *testing.
 	if !bytes.Equal(body, fixture) {
 		t.Fatalf("forwarded SSE frames changed:\n got: %q\nwant: %q", body, fixture)
 	}
+	assertOpenAICostEventually(t, harness.baseURL, 1, "0.000896")
 
 	db, report := externalUsageDB(t, harness)
 	assertCleanUsageReport(t, report)
@@ -449,14 +485,17 @@ func TestRunBoundServeMetersOpenAIWebSocketCompletionsWithoutChangingMessages(t 
 	}{
 		{kind: websocket.MessageText, data: []byte(`{"type":"response.failed","response":{"id":"failed","model":"not-recorded","status":"failed","usage":{"input_tokens":99,"output_tokens":99}}}`)},
 		{kind: websocket.MessageBinary, data: []byte(`{"type":"response.completed","response":{"id":"incomplete","model":"not-recorded","status":"incomplete","usage":{"input_tokens":98,"output_tokens":98}}}`)},
-		{kind: websocket.MessageText, data: []byte(`{"type":"response.completed","response":{"id":"resp-ws-a","model":"reported-model-a","status":"completed","service_tier":"priority","usage":{"input_tokens":3,"output_tokens":5}}}`)},
+		{kind: websocket.MessageText, data: []byte(`{"type":"response.completed","response":{"id":"resp-ws-a","model":"gpt-5.6-sol","status":"completed","service_tier":"priority","usage":{"input_tokens":3,"input_tokens_details":{"cached_tokens":0,"cache_write_tokens":0},"output_tokens":5,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":8}}}`)},
 		{kind: websocket.MessageBinary, data: []byte(`{"type":"response.completed","response":`)},
 		{kind: websocket.MessageText, data: []byte(`{"type":"error","error":{"message":"session continues"}}`)},
 		{kind: websocket.MessageText, data: bytes.TrimSuffix(recorded, []byte("\n"))},
 		{kind: websocket.MessageBinary, data: []byte(`{"type":"response.incomplete","response":{"id":"incomplete-terminal","model":"not-recorded","status":"incomplete","usage":{"input_tokens":97,"output_tokens":97}}}`)},
-		{kind: websocket.MessageBinary, data: []byte(`{"type":"response.completed","response":{"id":"resp-ws-b","model":"reported-model-b","status":"completed","service_tier":"fast","usage":{"input_tokens":7,"output_tokens":11}}}`)},
+		{kind: websocket.MessageBinary, data: []byte(`{"type":"response.completed","response":{"id":"resp-ws-b","model":"gpt-5.6-sol","status":"completed","service_tier":"fast","usage":{"input_tokens":7,"input_tokens_details":{"cached_tokens":0,"cache_write_tokens":0},"output_tokens":11,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":18}}}`)},
+		{kind: websocket.MessageText, data: []byte(`{"type":"response.completed","response":{"id":"resp-ws-null","model":"gpt-5.6-sol","status":"completed","service_tier":null,"usage":{"input_tokens":1,"input_tokens_details":{"cached_tokens":0,"cache_write_tokens":0},"output_tokens":1,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":2}}}`)},
+		{kind: websocket.MessageText, data: []byte(`{"type":"response.completed","response":{"id":"resp-ws-empty","model":"gpt-5.6-sol","status":"completed","service_tier":"","usage":{"input_tokens":1,"input_tokens_details":{"cached_tokens":0,"cache_write_tokens":0},"output_tokens":2,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":3}}}`)},
+		{kind: websocket.MessageText, data: []byte(`{"type":"response.completed","response":{"id":"resp-ws-unknown","model":"gpt-5.6-sol","status":"completed","service_tier":"future","usage":{"input_tokens":2,"input_tokens_details":{"cached_tokens":0,"cache_write_tokens":0},"output_tokens":1,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":3}}}`)},
 	}
-	bufferedPayload := []byte(`{"id":"resp-shared-http","model":"reported-http-model","status":"completed","service_tier":"default","usage":{"input_tokens":2,"output_tokens":3}}`)
+	bufferedPayload := []byte(`{"id":"resp-shared-http","model":"gpt-5.6-sol","status":"completed","service_tier":"default","usage":{"input_tokens":2,"input_tokens_details":{"cached_tokens":0,"cache_write_tokens":0},"output_tokens":3,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":5}}`)
 	clientMessage := []byte(`{"type":"response.create","model":"requested-model"}`)
 	upstreamReceived := make(chan struct {
 		kind websocket.MessageType
@@ -552,6 +591,7 @@ func TestRunBoundServeMetersOpenAIWebSocketCompletionsWithoutChangingMessages(t 
 		t.Errorf("WebSocket close = %v, want normal completion", readErr)
 	}
 	_ = conn.CloseNow()
+	assertOpenAICostEventually(t, harness.baseURL, 7, "0.001332")
 
 	db, report := externalUsageDB(t, harness)
 	assertCleanUsageReport(t, report)
@@ -567,7 +607,7 @@ func TestRunBoundServeMetersOpenAIWebSocketCompletionsWithoutChangingMessages(t 
 		t.Fatalf("query shared-sink HTTP usage: %v", err)
 	}
 	if httpRequestID != "meter-shared-http-request" || httpResponseID != "resp-shared-http" || httpTurnIndex != 0 ||
-		httpModel != "reported-http-model" || httpServiceTier != "default" || httpTransport != "buffered" {
+		httpModel != "gpt-5.6-sol" || httpServiceTier != "default" || httpTransport != "buffered" {
 		t.Errorf("shared-sink HTTP row = request:%q response:%q turn:%d model:%q transport:%q",
 			httpRequestID, httpResponseID, httpTurnIndex, httpModel, httpTransport)
 	}
@@ -588,12 +628,15 @@ func TestRunBoundServeMetersOpenAIWebSocketCompletionsWithoutChangingMessages(t 
 		optionalsValid bool
 		serviceTier    sql.NullString
 	}{
-		{responseID: "resp-ws-a", model: "reported-model-a", input: 3, output: 5, serviceTier: sql.NullString{String: "priority", Valid: true}},
+		{responseID: "resp-ws-a", model: "gpt-5.6-sol", input: 3, output: 5, optionals: [4]int64{0, 0, 0, 8}, optionalsValid: true, serviceTier: sql.NullString{String: "priority", Valid: true}},
 		{
 			responseID: "resp_redacted_recorded_websocket", model: "gpt-5.6-sol", input: 12, output: 20,
 			optionals: [4]int64{0, 0, 12, 32}, optionalsValid: true,
 		},
-		{responseID: "resp-ws-b", model: "reported-model-b", input: 7, output: 11, serviceTier: sql.NullString{String: "fast", Valid: true}},
+		{responseID: "resp-ws-b", model: "gpt-5.6-sol", input: 7, output: 11, optionals: [4]int64{0, 0, 0, 18}, optionalsValid: true, serviceTier: sql.NullString{String: "fast", Valid: true}},
+		{responseID: "resp-ws-null", model: "gpt-5.6-sol", input: 1, output: 1, optionals: [4]int64{0, 0, 0, 2}, optionalsValid: true},
+		{responseID: "resp-ws-empty", model: "gpt-5.6-sol", input: 1, output: 2, optionals: [4]int64{0, 0, 0, 3}, optionalsValid: true, serviceTier: sql.NullString{String: "", Valid: true}},
+		{responseID: "resp-ws-unknown", model: "gpt-5.6-sol", input: 2, output: 1, optionals: [4]int64{0, 0, 0, 3}, optionalsValid: true, serviceTier: sql.NullString{String: "future", Valid: true}},
 	}
 	for i, want := range wantRows {
 		if !rows.Next() {

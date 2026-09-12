@@ -3,6 +3,7 @@ package pricing_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"strconv"
 	"strings"
@@ -10,9 +11,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ningw42/copilotd/internal/usage"
 	"github.com/ningw42/copilotd/internal/usage/pricing"
 )
 
+// Snapshots and mode declarations in this file are synthetic admission,
+// valuation, and resource fixtures, not recorded models.dev artifacts.
 func TestSnapshotProjectsAllowedProviderIdentitiesAndPreservesUnpricedModels(t *testing.T) {
 	t.Parallel()
 
@@ -49,6 +53,110 @@ func TestSnapshotProjectsAllowedProviderIdentitiesAndPreservesUnpricedModels(t *
 	}
 	if _, ok := snapshot.Tariff(pricing.Identity{Provider: "openai", Model: "gpt-unpriced"}); ok {
 		t.Fatal("unpriced identity reported a tariff")
+	}
+}
+
+func TestSnapshotProjectsOpenAIFastDeclarationsWithoutInventingAliases(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		model      string
+		wantTariff bool
+	}{
+		{
+			name:       "named Fast without provider metadata or normal cost",
+			model:      `{"id":"model","experimental":{"modes":{"FAST":{"cost":{"input":2,"output":4}}}}}`,
+			wantTariff: true,
+		},
+		{
+			name:       "named priority",
+			model:      `{"id":"model","experimental":{"modes":{"PrIoRiTy":{}}}}`,
+			wantTariff: true,
+		},
+		{
+			name:       "differently named wire candidate",
+			model:      `{"id":"model","experimental":{"modes":{"accelerated":{"provider":{"body":{"service_tier":"PRIORITY"}},"cost":{"input":2,"output":4}}}}}`,
+			wantTariff: true,
+		},
+		{
+			name:  "non-Fast mode remains outside projection",
+			model: `{"id":"model","experimental":{"modes":{"batch":{"cost":{"input":2,"output":4,"tiers":{"ignored":true}}}}}}`,
+		},
+		{
+			name:  "empty modes",
+			model: `{"id":"model","experimental":{"modes":{}}}`,
+		},
+		{name: "absent experimental", model: `{"id":"model"}`},
+		{name: "empty experimental", model: `{"id":"model","experimental":{}}`},
+		{name: "unknown fields and valid non-Fast mode", model: `{"id":"model","experimental":{"modes":{"batch":{"provider":{"body":{"service_tier":"batch"},"future":true},"cost":{"input":1,"tiers":{"ignored":true}},"future":true}},"future":true}}`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			snapshot, err := pricing.ParseSnapshot(t.Context(), snapshotModelFixture(tc.model))
+			if err != nil {
+				t.Fatalf("ParseSnapshot() error = %v", err)
+			}
+			if snapshot.IdentityBytes() != len("openai")+len("model") {
+				t.Fatalf("IdentityBytes() = %d, want provider/model bytes only", snapshot.IdentityBytes())
+			}
+			_, gotTariff := snapshot.Tariff(pricing.Identity{Provider: "openai", Model: "model"})
+			if gotTariff != tc.wantTariff {
+				t.Fatalf("Tariff() present = %t, want %t", gotTariff, tc.wantTariff)
+			}
+		})
+	}
+}
+
+func TestSnapshotRejectsMalformedOrContradictoryOpenAIModes(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range malformedOpenAIModeCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := pricing.ParseSnapshot(t.Context(), snapshotModelFixture(tc.model)); err == nil {
+				t.Fatal("ParseSnapshot() error = nil, want rejection")
+			}
+		})
+	}
+}
+
+// Shared synthetic malformed data: each case must fail both direct projection
+// and fetched-snapshot admission. Valid acceptance cases stay separate above.
+func malformedOpenAIModeCases() []struct{ name, model string } {
+	oversized := strings.Repeat("x", 1025)
+	return []struct{ name, model string }{
+		{name: "experimental null", model: `{"id":"model","experimental":null}`},
+		{name: "experimental wrong type", model: `{"id":"model","experimental":[]}`},
+		{name: "modes null", model: `{"id":"model","experimental":{"modes":null}}`},
+		{name: "modes wrong type", model: `{"id":"model","experimental":{"modes":[]}}`},
+		{name: "empty mode name", model: `{"id":"model","experimental":{"modes":{"":{}}}}`},
+		{name: "oversized mode name", model: `{"id":"model","experimental":{"modes":{` + strconv.Quote(oversized) + `:{}}}}`},
+		{name: "mode null", model: `{"id":"model","experimental":{"modes":{"fast":null}}}`},
+		{name: "mode wrong type", model: `{"id":"model","experimental":{"modes":{"fast":[]}}}`},
+		{name: "provider null", model: `{"id":"model","experimental":{"modes":{"fast":{"provider":null}}}}`},
+		{name: "provider wrong type", model: `{"id":"model","experimental":{"modes":{"fast":{"provider":[]}}}}`},
+		{name: "body null", model: `{"id":"model","experimental":{"modes":{"fast":{"provider":{"body":null}}}}}`},
+		{name: "body wrong type", model: `{"id":"model","experimental":{"modes":{"fast":{"provider":{"body":[]}}}}}`},
+		{name: "wire null", model: `{"id":"model","experimental":{"modes":{"accelerated":{"provider":{"body":{"service_tier":null}}}}}}`},
+		{name: "wire empty", model: `{"id":"model","experimental":{"modes":{"accelerated":{"provider":{"body":{"service_tier":""}}}}}}`},
+		{name: "wire wrong type", model: `{"id":"model","experimental":{"modes":{"accelerated":{"provider":{"body":{"service_tier":1}}}}}}`},
+		{name: "wire oversized", model: `{"id":"model","experimental":{"modes":{"accelerated":{"provider":{"body":{"service_tier":` + strconv.Quote(oversized) + `}}}}}}`},
+		{name: "named Fast contradicts wire", model: `{"id":"model","experimental":{"modes":{"fast":{"provider":{"body":{"service_tier":"default"}}}}}}`},
+		{name: "reserved default claims Fast wire", model: `{"id":"model","experimental":{"modes":{"DEFAULT":{"provider":{"body":{"service_tier":"priority"}}}}}}`},
+		{name: "reserved auto claims Fast wire", model: `{"id":"model","experimental":{"modes":{"auto":{"provider":{"body":{"service_tier":"fast"}}}}}}`},
+		{name: "reserved flex claims Fast wire", model: `{"id":"model","experimental":{"modes":{"flex":{"provider":{"body":{"service_tier":"fast"}}}}}}`},
+		{name: "reserved scale claims Fast wire", model: `{"id":"model","experimental":{"modes":{"scale":{"provider":{"body":{"service_tier":"fast"}}}}}}`},
+		{name: "reserved ultrafast claims Fast wire", model: `{"id":"model","experimental":{"modes":{"ultrafast":{"provider":{"body":{"service_tier":"fast"}}}}}}`},
+		{name: "identical duplicate candidates", model: `{"id":"model","experimental":{"modes":{"fast":{"cost":{"input":2}},"priority":{"cost":{"input":2}}}}}`},
+		{name: "conflicting duplicate candidates", model: `{"id":"model","experimental":{"modes":{"fast":{"cost":{"input":2}},"priority":{"cost":{"input":3}}}}}`},
+		{name: "case-colliding duplicate candidates", model: `{"id":"model","experimental":{"modes":{"fast":{},"FAST":{}}}}`},
+		{name: "wire and named duplicate candidates", model: `{"id":"model","experimental":{"modes":{"accelerated":{"provider":{"body":{"service_tier":"priority"}}},"fast":{}}}}`},
+		{name: "Fast cost null", model: `{"id":"model","experimental":{"modes":{"fast":{"cost":null}}}}`},
+		{name: "Fast cost wrong type", model: `{"id":"model","experimental":{"modes":{"fast":{"cost":[]}}}}`},
+		{name: "malformed Fast rate", model: `{"id":"model","experimental":{"modes":{"fast":{"cost":{"reasoning":null}}}}}`},
+		{name: "malformed ignored mode rate", model: `{"id":"model","experimental":{"modes":{"batch":{"cost":{"output_audio":false}}}}}`},
+		{name: "unsupported Fast tiers", model: `{"id":"model","experimental":{"modes":{"fast":{"cost":{"tiers":[]}}}}}`},
+		{name: "unsupported Fast legacy context", model: `{"id":"model","experimental":{"modes":{"fast":{"cost":{"context_over_200k":{}}}}}}`},
 	}
 }
 
@@ -118,6 +226,55 @@ func TestSnapshotTariffsAreDetachedForConcurrentCallers(t *testing.T) {
 	finalTariff, ok := snapshot.Tariff(identity)
 	if !ok || optionalRateString(finalTariff.Rates(101).Input) != "4" {
 		t.Fatalf("Tariff() after concurrent returned-vector mutation = %#v, %t; want original tier", finalTariff, ok)
+	}
+}
+
+func TestSnapshotFastTariffsRemainImmutableForConcurrentCallers(t *testing.T) {
+	t.Parallel()
+
+	snapshot, err := pricing.ParseSnapshot(t.Context(), snapshotModelFixture(`{"id":"model","cost":{
+		"input":1,"output":2,"tiers":[{"input":2,"output":3,"tier":{"type":"context","size":100}}]
+	},"experimental":{"modes":{"fast":{"cost":{"input":2,"output":4}}}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tariff, ok := snapshot.Tariff(pricing.Identity{Provider: "openai", Model: "model"})
+	if !ok {
+		t.Fatal("Fast fixture has no tariff")
+	}
+	normal := tariff.Rates(101)
+	replacement, err := pricing.ParseRate("99")
+	if err != nil {
+		t.Fatal(err)
+	}
+	*normal.Input = replacement
+	*normal.Output = replacement
+
+	zero := int64(0)
+	priority := "priority"
+	native := usage.OpenAIUsage{InputTokens: 150, OutputTokens: 10, CachedTokens: &zero, CacheWriteTokens: &zero}
+	const callers = 32
+	var wait sync.WaitGroup
+	failures := make(chan string, callers)
+	for range callers {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			gotTariff, ok := snapshot.Tariff(pricing.Identity{Provider: "openai", Model: "model"})
+			if !ok {
+				failures <- "missing tariff"
+				return
+			}
+			contribution, err := gotTariff.CalculateOpenAI(native, &priority)
+			if err != nil || contribution.Reason != "" || contribution.Amount.String() != "0.00066" {
+				failures <- fmt.Sprintf("amount=%s reason=%q error=%v", contribution.Amount.String(), contribution.Reason, err)
+			}
+		}()
+	}
+	wait.Wait()
+	close(failures)
+	for failure := range failures {
+		t.Errorf("concurrent Fast calculation: %s", failure)
 	}
 }
 
@@ -285,7 +442,7 @@ func TestSnapshotValidatesEveryRecognizedStandardCostFieldAndTier(t *testing.T) 
 }
 
 func TestSnapshotCancellationInterruptsLargeTierProjection(t *testing.T) {
-	raw := highCardinalitySnapshot(100_000)
+	raw := highCardinalitySnapshot(100_000, false)
 	if len(raw) > 8<<20 {
 		t.Fatalf("cancellation fixture is %d bytes, exceeds remote decoded-body contract", len(raw))
 	}
@@ -310,6 +467,47 @@ func TestSnapshotCancellationInterruptsLargeTierProjection(t *testing.T) {
 	if !errors.Is(err, context.Canceled) || snapshot != nil {
 		t.Fatalf("ParseSnapshot() after mid-projection cancellation = %#v, %v; want nil, context canceled", snapshot, err)
 	}
+}
+
+func TestSnapshotCancellationInterruptsDerivedFastTierConstruction(t *testing.T) {
+	const tiers = 5_000
+	assertOpenAIProjectionCancellation(t, highCardinalitySnapshot(tiers, true), tiers/2)
+}
+
+func TestSnapshotCancellationInterruptsOpenAIModeTraversal(t *testing.T) {
+	const modes = 5_000
+	var model strings.Builder
+	model.WriteString(`{"id":"model","experimental":{"modes":{`)
+	for index := range modes {
+		if index != 0 {
+			model.WriteByte(',')
+		}
+		fmt.Fprintf(&model, `"synthetic-mode-%d":{}`, index)
+	}
+	model.WriteString(`}}}`)
+	assertOpenAIProjectionCancellation(t, snapshotModelFixture(model.String()), modes/2)
+}
+
+func assertOpenAIProjectionCancellation(t *testing.T, raw []byte, extraBudget int) {
+	t.Helper()
+	// The control has the SAME JSON tokens and normal context rows, but lives
+	// under xai, where OpenAI mode traversal/derivation must not execute. Its
+	// completed work budget therefore cannot shrink when the OpenAI loop guard
+	// is removed. Unlike calibrating against the active projection, this cannot
+	// silently move cancellation back into the shared JSON or cost parser.
+	inactive := []byte(strings.NewReplacer(`"openai"`, `"xai"`, `"xai"`, `"openai"`).Replace(string(raw)))
+	baseline := &countingContext{Context: t.Context()}
+	if _, err := pricing.ParseSnapshot(baseline, inactive); err != nil {
+		t.Fatalf("inactive-provider control: %v", err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	cancelled := &countingContext{Context: ctx, cancelAt: baseline.checks + extraBudget, cancel: cancel}
+	snapshot, err := pricing.ParseSnapshot(cancelled, raw)
+	if !errors.Is(err, context.Canceled) || snapshot != nil || ctx.Err() == nil {
+		t.Fatalf("OpenAI projection beyond inactive budget %d + %d: checks=%d, snapshot present=%t, error=%v; want cancellation and no partial snapshot", baseline.checks, extraBudget, cancelled.checks, snapshot != nil, err)
+	}
+	t.Logf("inactive-provider checks=%d, active cancellation at=%d", baseline.checks, cancelled.checks)
 }
 
 func TestSnapshotAcceptsFullUint64ContextThresholds(t *testing.T) {
@@ -362,13 +560,17 @@ func TestSnapshotComparesBoundedExactExponentThresholds(t *testing.T) {
 }
 
 func snapshotFixture(cost string) []byte {
-	return []byte(`{"openai":{"id":"openai","models":{"model":{"id":"model","cost":` + cost + `}}},"anthropic":{"id":"anthropic","models":{}},"google":{"id":"google","models":{}},"xai":{"id":"xai","models":{}}}`)
+	return snapshotModelFixture(`{"id":"model","cost":` + cost + `}`)
 }
 
-func highCardinalitySnapshot(tiers int) []byte {
+func snapshotModelFixture(model string) []byte {
+	return []byte(`{"openai":{"id":"openai","models":{"model":` + model + `}},"anthropic":{"id":"anthropic","models":{}},"google":{"id":"google","models":{}},"xai":{"id":"xai","models":{}}}`)
+}
+
+func highCardinalitySnapshot(tiers int, withFast bool) []byte {
 	var raw strings.Builder
 	raw.Grow(tiers * 64)
-	raw.WriteString(`{"openai":{"id":"openai","models":{}},"anthropic":{"id":"anthropic","models":{}},"google":{"id":"google","models":{}},"xai":{"id":"xai","models":{"large":{"id":"large","cost":{"input":1,"output":2,"tiers":[`)
+	raw.WriteString(`{"openai":{"id":"openai","models":{"large":{"id":"large","cost":{"input":1,"output":2,"tiers":[`)
 	for index := range tiers {
 		if index != 0 {
 			raw.WriteByte(',')
@@ -377,8 +579,26 @@ func highCardinalitySnapshot(tiers int) []byte {
 		raw.WriteString(strconv.Itoa(index))
 		raw.WriteString(`}}`)
 	}
-	raw.WriteString(`]}}}}}`)
+	raw.WriteString(`]}`)
+	if withFast {
+		raw.WriteString(`,"experimental":{"modes":{"fast":{"cost":{"input":2,"output":4}}}}`)
+	}
+	raw.WriteString(`}}},"anthropic":{"id":"anthropic","models":{}},"google":{"id":"google","models":{}},"xai":{"id":"xai","models":{}}}`)
 	return []byte(raw.String())
+}
+
+type countingContext struct {
+	context.Context
+	checks, cancelAt int
+	cancel           context.CancelFunc
+}
+
+func (c *countingContext) Err() error {
+	c.checks++
+	if c.cancelAt > 0 && c.checks >= c.cancelAt {
+		c.cancel()
+	}
+	return c.Context.Err()
 }
 
 func optionalRateString(rate *pricing.Rate) string {

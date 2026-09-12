@@ -8,6 +8,9 @@ import (
 	"github.com/ningw42/copilotd/internal/usage/pricing"
 )
 
+// Pricing fixtures in this file are synthetic policy examples, except for the
+// explicitly identified dated audited rate matrix below. They are not captures
+// or assertions about live provider pricing.
 func TestTariffCalculatesOpenAIWithCompleteInputContext(t *testing.T) {
 	t.Parallel()
 
@@ -32,13 +35,500 @@ func TestTariffCalculatesOpenAIWithCompleteInputContext(t *testing.T) {
 				CacheWriteTokens: &zero,
 				ReasoningTokens:  &ignored,
 				TotalTokens:      &ignored,
-			})
+			}, nil)
 			if err != nil {
 				t.Fatalf("Tariff.CalculateOpenAI() error = %v", err)
 			}
 			if contribution.Reason != "" || contribution.Amount.String() != tc.wantAmount {
 				t.Fatalf("contribution = {amount:%s reason:%q}, want amount %s and no exclusion", contribution.Amount.String(), contribution.Reason, tc.wantAmount)
 			}
+		})
+	}
+}
+
+func TestTariffCalculatesOpenAIFromReportedFastTier(t *testing.T) {
+	t.Parallel()
+
+	raw := []byte(`{
+		"openai":{"id":"openai","models":{"model":{"id":"model",
+			"cost":{"input":1,"output":2,"tiers":[{"input":2,"output":3,"tier":{"type":"context","size":100}}]},
+			"experimental":{"modes":{"fast":{"cost":{"input":2,"output":4},"provider":{"body":{"service_tier":"priority"}}}}}
+		}}},
+		"anthropic":{"id":"anthropic","models":{}},
+		"google":{"id":"google","models":{}},
+		"xai":{"id":"xai","models":{}}
+	}`)
+	snapshot, err := pricing.ParseSnapshot(t.Context(), raw)
+	if err != nil {
+		t.Fatalf("ParseSnapshot() error = %v", err)
+	}
+	tariff, ok := snapshot.Tariff(pricing.Identity{Provider: "openai", Model: "model"})
+	if !ok {
+		t.Fatal("fixture model has no tariff")
+	}
+	zero := int64(0)
+	tests := []struct {
+		name       string
+		tier       *string
+		input      int64
+		wantAmount string
+	}{
+		{name: "unavailable uses normal base", input: 50, wantAmount: "0.00007"},
+		{name: "default uses normal base", tier: stringPointer("default"), input: 50, wantAmount: "0.00007"},
+		{name: "unknown uses normal context", tier: stringPointer("flex"), input: 150, wantAmount: "0.00033"},
+		{name: "priority uses explicit Fast base", tier: stringPointer("priority"), input: 50, wantAmount: "0.00014"},
+		{name: "Fast ASCII case uses derived context", tier: stringPointer("FAST"), input: 150, wantAmount: "0.00066"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			contribution, err := tariff.CalculateOpenAI(usage.OpenAIUsage{
+				InputTokens:      tc.input,
+				OutputTokens:     10,
+				CachedTokens:     &zero,
+				CacheWriteTokens: &zero,
+			}, tc.tier)
+			if err != nil {
+				t.Fatalf("Tariff.CalculateOpenAI() error = %v", err)
+			}
+			if contribution.Reason != "" || contribution.Amount.String() != tc.wantAmount {
+				t.Fatalf("contribution = {amount:%s reason:%q}, want amount %s and no exclusion", contribution.Amount.String(), contribution.Reason, tc.wantAmount)
+			}
+		})
+	}
+}
+
+func TestTariffDistinguishesAbsentAndUnpricedFastDeclarations(t *testing.T) {
+	t.Parallel()
+
+	zero := int64(0)
+	native := usage.OpenAIUsage{InputTokens: 1, OutputTokens: 1, CachedTokens: &zero, CacheWriteTokens: &zero}
+	priority := "priority"
+	tests := []struct {
+		name       string
+		model      string
+		tier       *string
+		wantAmount string
+		wantReason pricing.ExclusionReason
+	}{
+		{
+			name:       "Fast cost works without normal cost",
+			model:      `{"id":"model","experimental":{"modes":{"fast":{"cost":{"input":2,"output":4}}}}}`,
+			tier:       &priority,
+			wantAmount: "0.000006",
+		},
+		{
+			name:       "normal fallback is unavailable without normal cost",
+			model:      `{"id":"model","experimental":{"modes":{"fast":{"cost":{"input":2,"output":4}}}}}`,
+			wantReason: pricing.ExclusionMissingRate,
+		},
+		{
+			name:       "Fast alias falls back when declaration is absent",
+			model:      `{"id":"model","cost":{"input":1,"output":2}}`,
+			tier:       &priority,
+			wantAmount: "0.000003",
+		},
+		{
+			name:       "declared but unpriced Fast does not borrow normal rates",
+			model:      `{"id":"model","cost":{"input":1,"output":2},"experimental":{"modes":{"fast":{}}}}`,
+			tier:       &priority,
+			wantReason: pricing.ExclusionMissingRate,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tariff := tariffFromModel(t, tc.model)
+			contribution, err := tariff.CalculateOpenAI(native, tc.tier)
+			if err != nil {
+				t.Fatalf("Tariff.CalculateOpenAI() error = %v", err)
+			}
+			assertContribution(t, contribution, tc.wantAmount, tc.wantReason)
+		})
+	}
+}
+
+func TestTariffRecognizesOnlyFixedASCIIServiceTierAliases(t *testing.T) {
+	t.Parallel()
+
+	if pricing.MaxServiceTierLookupBytes != len("priority") {
+		t.Fatalf("MaxServiceTierLookupBytes = %d, want fixed longest alias length %d", pricing.MaxServiceTierLookupBytes, len("priority"))
+	}
+	zero := int64(0)
+	native := usage.OpenAIUsage{InputTokens: 1, OutputTokens: 1, CachedTokens: &zero, CacheWriteTokens: &zero}
+	tests := []struct {
+		name       string
+		tier       *string
+		wantAmount string
+	}{
+		{name: "null", wantAmount: "0.000003"},
+		{name: "empty", tier: stringPointer(""), wantAmount: "0.000003"},
+		{name: "default", tier: stringPointer("DeFaUlT"), wantAmount: "0.000003"},
+		{name: "fast", tier: stringPointer("fast"), wantAmount: "0.000006"},
+		{name: "priority ASCII case", tier: stringPointer("PrIoRiTy"), wantAmount: "0.000006"},
+		{name: "source mode name is not an alias", tier: stringPointer("accelerated"), wantAmount: "0.000003"},
+		{name: "flex", tier: stringPointer("flex"), wantAmount: "0.000003"},
+		{name: "scale", tier: stringPointer("scale"), wantAmount: "0.000003"},
+		{name: "leading space", tier: stringPointer(" fast"), wantAmount: "0.000003"},
+		{name: "trailing space", tier: stringPointer("priority "), wantAmount: "0.000003"},
+		{name: "embedded NUL", tier: stringPointer("fast\x00"), wantAmount: "0.000003"},
+		{name: "Unicode lookalike", tier: stringPointer("faſt"), wantAmount: "0.000003"},
+		{name: "overlong", tier: stringPointer("priority-future"), wantAmount: "0.000003"},
+	}
+	for _, wireTier := range []string{"priority", "fast"} {
+		t.Run("wire-"+wireTier, func(t *testing.T) {
+			tariff := tariffFromModel(t, `{"id":"model","cost":{"input":1,"output":2},"experimental":{"modes":{"accelerated":{"provider":{"body":{"service_tier":"`+wireTier+`"}},"cost":{"input":2,"output":4}}}}}`)
+			for _, tc := range tests {
+				t.Run(tc.name, func(t *testing.T) {
+					contribution, err := tariff.CalculateOpenAI(native, tc.tier)
+					if err != nil {
+						t.Fatalf("Tariff.CalculateOpenAI() error = %v", err)
+					}
+					assertContribution(t, contribution, tc.wantAmount, "")
+				})
+			}
+		})
+	}
+}
+
+func TestTariffDerivesExactFastContextRatesPerCategory(t *testing.T) {
+	t.Parallel()
+
+	priority := "priority"
+	tests := []struct {
+		name       string
+		model      string
+		input      int64
+		output     int64
+		cached     int64
+		cacheWrite int64
+		wantAmount string
+		wantReason pricing.ExclusionReason
+	}{
+		{
+			name:       "repeating intermediate has terminating final rate",
+			model:      `{"id":"model","cost":{"input":3,"output":1,"tiers":[{"input":6,"output":1,"tier":{"type":"context","size":100}}]},"experimental":{"modes":{"fast":{"cost":{"input":1,"output":0}}}}}`,
+			input:      1_000_000,
+			wantAmount: "2",
+		},
+		{
+			name:       "final repeating decimal is unavailable",
+			model:      `{"id":"model","cost":{"input":3,"output":1,"tiers":[{"input":1,"output":1,"tier":{"type":"context","size":100}}]},"experimental":{"modes":{"fast":{"cost":{"input":1,"output":0}}}}}`,
+			input:      101,
+			wantReason: pricing.ExclusionMissingRate,
+		},
+		{
+			name:       "unequal category factors remain independent",
+			model:      `{"id":"model","cost":{"input":2,"output":4,"tiers":[{"input":4,"output":12,"tier":{"type":"context","size":100}}]},"experimental":{"modes":{"fast":{"cost":{"input":6,"output":8}}}}}`,
+			input:      1_000_000,
+			output:     1_000_000,
+			wantAmount: "36",
+		},
+		{
+			name:       "zero Fast numerator yields explicit zero",
+			model:      `{"id":"model","cost":{"input":2,"output":2,"tiers":[{"input":4,"output":4,"tier":{"type":"context","size":100}}]},"experimental":{"modes":{"fast":{"cost":{"input":0,"output":0}}}}}`,
+			input:      101,
+			wantAmount: "0",
+		},
+		{
+			name:       "zero context rate yields explicit zero",
+			model:      `{"id":"model","cost":{"input":2,"output":2,"tiers":[{"input":0,"output":0,"tier":{"type":"context","size":100}}]},"experimental":{"modes":{"fast":{"cost":{"input":4,"output":4}}}}}`,
+			input:      101,
+			wantAmount: "0",
+		},
+		{
+			name:       "zero base denominator is unavailable even with zero numerator",
+			model:      `{"id":"model","cost":{"input":0,"output":2,"tiers":[{"input":0,"output":4,"tier":{"type":"context","size":100}}]},"experimental":{"modes":{"fast":{"cost":{"input":0,"output":4}}}}}`,
+			input:      101,
+			wantReason: pricing.ExclusionMissingRate,
+		},
+		{
+			name:       "missing operand is unavailable without cross-category borrowing",
+			model:      `{"id":"model","cost":{"input":2,"output":2,"tiers":[{"input":4,"output":4,"tier":{"type":"context","size":100}}]},"experimental":{"modes":{"fast":{"cost":{"output":4}}}}}`,
+			input:      101,
+			wantReason: pricing.ExclusionMissingRate,
+		},
+		{
+			name:       "missing normal base operand is unavailable",
+			model:      `{"id":"model","cost":{"output":1,"tiers":[{"input":6,"output":1,"tier":{"type":"context","size":100}}]},"experimental":{"modes":{"fast":{"cost":{"input":1,"output":0}}}}}`,
+			input:      101,
+			wantReason: pricing.ExclusionMissingRate,
+		},
+		{
+			name:       "missing normal base operand stays absent with zero Fast numerator",
+			model:      `{"id":"model","cost":{"output":1,"tiers":[{"input":6,"output":1,"tier":{"type":"context","size":100}}]},"experimental":{"modes":{"fast":{"cost":{"input":0,"output":0}}}}}`,
+			input:      101,
+			wantReason: pricing.ExclusionMissingRate,
+		},
+		{
+			name:       "missing normal base operand stays absent with zero context numerator",
+			model:      `{"id":"model","cost":{"output":1,"tiers":[{"input":0,"output":1,"tier":{"type":"context","size":100}}]},"experimental":{"modes":{"fast":{"cost":{"input":1,"output":0}}}}}`,
+			input:      101,
+			wantReason: pricing.ExclusionMissingRate,
+		},
+		{
+			name:       "missing selected context operand is unavailable",
+			model:      `{"id":"model","cost":{"input":3,"output":1,"tiers":[{"output":1,"tier":{"type":"context","size":100}}]},"experimental":{"modes":{"fast":{"cost":{"input":1,"output":0}}}}}`,
+			input:      101,
+			wantReason: pricing.ExclusionMissingRate,
+		},
+		{
+			name:       "missing selected context operand stays absent with zero Fast numerator",
+			model:      `{"id":"model","cost":{"input":3,"output":1,"tiers":[{"output":1,"tier":{"type":"context","size":100}}]},"experimental":{"modes":{"fast":{"cost":{"input":0,"output":0}}}}}`,
+			input:      101,
+			wantReason: pricing.ExclusionMissingRate,
+		},
+		{
+			name:       "terminating final example still uses explicit Fast base at equality",
+			model:      `{"id":"model","cost":{"input":3,"output":1,"tiers":[{"input":6,"output":1,"tier":{"type":"context","size":100}}]},"experimental":{"modes":{"fast":{"cost":{"input":1,"output":0}}}}}`,
+			input:      100,
+			wantAmount: "0.0001",
+		},
+		{
+			name:       "derived rate accepts eighteen fractional digits",
+			model:      `{"id":"model","cost":{"input":1,"output":1,"tiers":[{"input":0.000000001,"output":1,"tier":{"type":"context","size":100}}]},"experimental":{"modes":{"fast":{"cost":{"input":0.000000001,"output":0}}}}}`,
+			input:      1_000_000,
+			wantAmount: "0.000000000000000001",
+		},
+		{
+			// The intermediate Fast/base factor is 1e35, outside source Rate
+			// bounds; the reduced final rate is the representable 18-digit 9e17.
+			name:       "final eighteen integer digits after oversized intermediate factor",
+			model:      `{"id":"model","cost":{"input":0.000000000000000001,"output":1,"tiers":[{"input":0.000000000000000009,"output":1,"tier":{"type":"context","size":100}}]},"experimental":{"modes":{"fast":{"cost":{"input":100000000000000000,"output":0}}}}}`,
+			input:      1_000_000,
+			wantAmount: "900000000000000000",
+		},
+		{
+			name:       "expanded fractional bound is enforced on final rate",
+			model:      `{"id":"model","cost":{"input":1,"output":1,"tiers":[{"input":0.0000000001,"output":1,"tier":{"type":"context","size":100}}]},"experimental":{"modes":{"fast":{"cost":{"input":0.000000001,"output":0}}}}}`,
+			input:      101,
+			wantReason: pricing.ExclusionMissingRate,
+		},
+		{
+			name:       "expanded integer bound is enforced on final rate",
+			model:      `{"id":"model","cost":{"input":1,"output":1,"tiers":[{"input":2,"output":1,"tier":{"type":"context","size":100}}]},"experimental":{"modes":{"fast":{"cost":{"input":999999999999999999,"output":0}}}}}`,
+			input:      101,
+			wantReason: pricing.ExclusionMissingRate,
+		},
+		{
+			name:       "missing derived cache rate is optional for zero cache",
+			model:      `{"id":"model","cost":{"input":1,"output":1,"cache_read":1,"tiers":[{"input":2,"output":2,"cache_read":2,"tier":{"type":"context","size":100}}]},"experimental":{"modes":{"fast":{"cost":{"input":2,"output":2}}}}}`,
+			input:      101,
+			wantAmount: "0.000404",
+		},
+		{
+			name:       "missing derived cache rate excludes positive cache",
+			model:      `{"id":"model","cost":{"input":1,"output":1,"cache_read":1,"tiers":[{"input":2,"output":2,"cache_read":2,"tier":{"type":"context","size":100}}]},"experimental":{"modes":{"fast":{"cost":{"input":2,"output":2}}}}}`,
+			input:      101,
+			cached:     1,
+			wantReason: pricing.ExclusionMissingRate,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tariff := tariffFromModel(t, tc.model)
+			cached, cacheWrite := tc.cached, tc.cacheWrite
+			contribution, err := tariff.CalculateOpenAI(usage.OpenAIUsage{
+				InputTokens:      tc.input,
+				OutputTokens:     tc.output,
+				CachedTokens:     &cached,
+				CacheWriteTokens: &cacheWrite,
+			}, &priority)
+			if err != nil {
+				t.Fatalf("Tariff.CalculateOpenAI() error = %v", err)
+			}
+			assertContribution(t, contribution, tc.wantAmount, tc.wantReason)
+		})
+	}
+}
+
+func TestTariffSelectsDerivedFastRatesAtStrictGreatestContextThreshold(t *testing.T) {
+	t.Parallel()
+
+	priority := "priority"
+	zero := int64(0)
+	for _, tc := range []struct {
+		name       string
+		model      string
+		input      int64
+		wantAmount string
+	}{
+		{
+			name: "equal greatest threshold retains lower tier",
+			model: `{"id":"model","cost":{"input":1,"output":1,"tiers":[
+				{"input":3,"output":1,"tier":{"type":"context","size":200}},
+				{"input":2,"output":1,"tier":{"type":"context","size":100}}
+			]},"experimental":{"modes":{"fast":{"cost":{"input":2,"output":0}}}}}`,
+			input: 200, wantAmount: "0.0008",
+		},
+		{
+			name: "above greatest threshold selects greatest tier",
+			model: `{"id":"model","cost":{"input":1,"output":1,"tiers":[
+				{"input":3,"output":1,"tier":{"type":"context","size":200}},
+				{"input":2,"output":1,"tier":{"type":"context","size":100}}
+			]},"experimental":{"modes":{"fast":{"cost":{"input":2,"output":0}}}}}`,
+			input: 201, wantAmount: "0.001206",
+		},
+		{
+			name:  "legacy context tier composes only without structured tiers",
+			model: `{"id":"model","cost":{"input":1,"output":1,"context_over_200k":{"input":3,"output":1}},"experimental":{"modes":{"fast":{"cost":{"input":2,"output":0}}}}}`,
+			input: 200001, wantAmount: "1.200006",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tariff := tariffFromModel(t, tc.model)
+			contribution, err := tariff.CalculateOpenAI(usage.OpenAIUsage{InputTokens: tc.input, CachedTokens: &zero, CacheWriteTokens: &zero}, &priority)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertContribution(t, contribution, tc.wantAmount, "")
+		})
+	}
+}
+
+func TestTariffMatchesAuditedFastContextMatrices(t *testing.T) {
+	t.Parallel()
+
+	// Dated rate operands from the approved 2026-09-12 design matrices, not a
+	// runtime price table or live fetch. Completions are synthetic. Base-band
+	// category probes charge 100,000 tokens (below 272,000); their literal USD
+	// oracles are one tenth of each independently documented per-million cell.
+	type baseAmounts struct{ input, read, write, output string }
+	priority := "priority"
+	zero, baseTokens, million := int64(0), int64(100_000), int64(1_000_000)
+	for _, tc := range []struct {
+		model, base, fast, context        string
+		normalBase, fastBase              baseAmounts
+		input, read, write, readAndOutput string
+	}{
+		{model: "gpt-5.4", base: `"input":2.5,"cache_read":0.25,"output":15`, fast: `"input":5,"cache_read":0.5,"output":30`, context: `"input":5,"cache_read":0.5,"output":22.5`, normalBase: baseAmounts{"0.25", "0.025", "", "1.5"}, fastBase: baseAmounts{"0.5", "0.05", "", "3"}, input: "10", read: "1", readAndOutput: "46"},
+		{model: "gpt-5.4-mini", base: `"input":0.75,"cache_read":0.075,"output":4.5`, fast: `"input":1.5,"cache_read":0.15,"output":9`, normalBase: baseAmounts{"0.075", "0.0075", "", "0.45"}, fastBase: baseAmounts{"0.15", "0.015", "", "0.9"}},
+		{model: "gpt-5.5", base: `"input":5,"cache_read":0.5,"output":30`, fast: `"input":12.5,"cache_read":1.25,"output":75`, context: `"input":10,"cache_read":1,"output":45`, normalBase: baseAmounts{"0.5", "0.05", "", "3"}, fastBase: baseAmounts{"1.25", "0.125", "", "7.5"}, input: "25", read: "2.5", readAndOutput: "115"},
+		{model: "gpt-5.6", base: `"input":4,"cache_read":0.4,"cache_write":5,"output":20`, fast: `"input":8,"cache_read":0.8,"cache_write":10,"output":40`, context: `"input":8,"cache_read":0.8,"cache_write":10,"output":30`, normalBase: baseAmounts{"0.4", "0.04", "0.5", "2"}, fastBase: baseAmounts{"0.8", "0.08", "1", "4"}, input: "16", read: "1.6", write: "20", readAndOutput: "61.6"},
+		{model: "gpt-5.6-luna", base: `"input":0.2,"cache_read":0.02,"cache_write":0.25,"output":1.2`, fast: `"input":0.4,"cache_read":0.04,"cache_write":0.5,"output":2.4`, context: `"input":0.4,"cache_read":0.04,"cache_write":0.5,"output":1.8`, normalBase: baseAmounts{"0.02", "0.002", "0.025", "0.12"}, fastBase: baseAmounts{"0.04", "0.004", "0.05", "0.24"}, input: "0.8", read: "0.08", write: "1", readAndOutput: "3.68"},
+		{model: "gpt-5.6-sol", base: `"input":4,"cache_read":0.4,"cache_write":5,"output":20`, fast: `"input":8,"cache_read":0.8,"cache_write":10,"output":40`, context: `"input":8,"cache_read":0.8,"cache_write":10,"output":30`, normalBase: baseAmounts{"0.4", "0.04", "0.5", "2"}, fastBase: baseAmounts{"0.8", "0.08", "1", "4"}, input: "16", read: "1.6", write: "20", readAndOutput: "61.6"},
+		{model: "gpt-5.6-terra", base: `"input":2,"cache_read":0.2,"cache_write":2.5,"output":12`, fast: `"input":4,"cache_read":0.4,"cache_write":5,"output":24`, context: `"input":4,"cache_read":0.4,"cache_write":5,"output":18`, normalBase: baseAmounts{"0.2", "0.02", "0.25", "1.2"}, fastBase: baseAmounts{"0.4", "0.04", "0.5", "2.4"}, input: "8", read: "0.8", write: "10", readAndOutput: "36.8"},
+		{model: "gpt-6-astra", base: `"input":10,"cache_read":1,"cache_write":12.5,"output":50`, fast: `"input":20,"cache_read":2,"cache_write":25,"output":100`, context: `"input":20,"cache_read":2,"cache_write":25,"output":75`, normalBase: baseAmounts{"1", "0.1", "1.25", "5"}, fastBase: baseAmounts{"2", "0.2", "2.5", "10"}, input: "40", read: "4", write: "50", readAndOutput: "154"},
+	} {
+		t.Run(tc.model, func(t *testing.T) {
+			cost := tc.base
+			if tc.context != "" {
+				cost += `,"tiers":[{` + tc.context + `,"tier":{"type":"context","size":272000}}]`
+			}
+			tariff := tariffFromModel(t, `{"id":"model","cost":{`+cost+`},"experimental":{"modes":{"fast":{"cost":{`+tc.fast+`}}}}}`)
+			calculate := func(native usage.OpenAIUsage, tier *string) pricing.Contribution {
+				t.Helper()
+				contribution, err := tariff.CalculateOpenAI(native, tier)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return contribution
+			}
+			for _, mode := range []struct {
+				name string
+				tier *string
+				want baseAmounts
+			}{{"normal-base", nil, tc.normalBase}, {"Fast-base", &priority, tc.fastBase}} {
+				t.Run(mode.name, func(t *testing.T) {
+					for _, category := range []struct {
+						name   string
+						native usage.OpenAIUsage
+						want   string
+					}{
+						{"input", usage.OpenAIUsage{InputTokens: baseTokens, CachedTokens: &zero, CacheWriteTokens: &zero}, mode.want.input},
+						{"read", usage.OpenAIUsage{InputTokens: baseTokens, CachedTokens: &baseTokens, CacheWriteTokens: &zero}, mode.want.read},
+						{"write", usage.OpenAIUsage{InputTokens: baseTokens, CachedTokens: &zero, CacheWriteTokens: &baseTokens}, mode.want.write},
+						{"output", usage.OpenAIUsage{OutputTokens: baseTokens, CachedTokens: &zero, CacheWriteTokens: &zero}, mode.want.output},
+					} {
+						t.Run(category.name, func(t *testing.T) {
+							reason := pricing.ExclusionReason("")
+							if category.want == "" {
+								reason = pricing.ExclusionMissingRate
+							}
+							assertContribution(t, calculate(category.native, mode.tier), category.want, reason)
+						})
+					}
+					// An absent cache-write rate is unnecessary for known-zero writes.
+					assertContribution(t, calculate(usage.OpenAIUsage{CachedTokens: &zero, CacheWriteTokens: &zero}, mode.tier), "0", "")
+				})
+			}
+			if tc.context == "" {
+				// Mini has no context row: crossing the other models' threshold must
+				// keep its explicit normal/Fast vector, not invent a surcharge.
+				for _, boundary := range []struct {
+					input        int64
+					normal, fast string
+				}{{271999, "0.20399925", "0.4079985"}, {272000, "0.204", "0.408"}, {272001, "0.20400075", "0.4080015"}} {
+					native := usage.OpenAIUsage{InputTokens: boundary.input, CachedTokens: &zero, CacheWriteTokens: &zero}
+					assertContribution(t, calculate(native, nil), boundary.normal, "")
+					assertContribution(t, calculate(native, &priority), boundary.fast, "")
+				}
+				return
+			}
+			t.Run("Fast-context", func(t *testing.T) {
+				assertContribution(t, calculate(usage.OpenAIUsage{InputTokens: million, CachedTokens: &zero, CacheWriteTokens: &zero}, &priority), tc.input, "")
+				assertContribution(t, calculate(usage.OpenAIUsage{InputTokens: million, CachedTokens: &million, CacheWriteTokens: &zero}, &priority), tc.read, "")
+				assertContribution(t, calculate(usage.OpenAIUsage{InputTokens: million, OutputTokens: million, CachedTokens: &million, CacheWriteTokens: &zero}, &priority), tc.readAndOutput, "")
+				writeReason := pricing.ExclusionReason("")
+				if tc.write == "" {
+					writeReason = pricing.ExclusionMissingRate
+				}
+				assertContribution(t, calculate(usage.OpenAIUsage{InputTokens: million, CachedTokens: &zero, CacheWriteTokens: &million}, &priority), tc.write, writeReason)
+			})
+		})
+	}
+}
+
+func TestTariffUsesFastBaseWhenContextDerivationIsUnavailable(t *testing.T) {
+	t.Parallel()
+
+	tariff := tariffFromModel(t, `{"id":"model","cost":{"input":3,"output":1,"tiers":[{"input":1,"output":1,"tier":{"type":"context","size":100}}]},"experimental":{"modes":{"fast":{"cost":{"input":1,"output":0}}}}}`)
+	priority := "priority"
+	zero := int64(0)
+	for _, tc := range []struct {
+		name       string
+		input      int64
+		wantAmount string
+		wantReason pricing.ExclusionReason
+	}{
+		{name: "equal threshold uses explicit Fast base", input: 100, wantAmount: "0.0001"},
+		{name: "above threshold uses unavailable derivation", input: 101, wantReason: pricing.ExclusionMissingRate},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			contribution, err := tariff.CalculateOpenAI(usage.OpenAIUsage{InputTokens: tc.input, CachedTokens: &zero, CacheWriteTokens: &zero}, &priority)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertContribution(t, contribution, tc.wantAmount, tc.wantReason)
+		})
+	}
+}
+
+func TestTariffAppliesContextSelectionPrecedenceToFastRates(t *testing.T) {
+	t.Parallel()
+
+	priority := "priority"
+	for _, tc := range []struct {
+		name       string
+		model      string
+		wantReason pricing.ExclusionReason
+	}{
+		{
+			name:       "retained context rejects negative complete input before missing rate",
+			model:      `{"id":"model","cost":{"tiers":[{"tier":{"type":"context","size":100}}]},"experimental":{"modes":{"fast":{}}}}`,
+			wantReason: pricing.ExclusionInconsistentUsage,
+		},
+		{
+			name:       "no context preserves explicit-vector missing-rate precedence",
+			model:      `{"id":"model","cost":{},"experimental":{"modes":{"fast":{}}}}`,
+			wantReason: pricing.ExclusionMissingRate,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tariff := tariffFromModel(t, tc.model)
+			contribution, err := tariff.CalculateOpenAI(usage.OpenAIUsage{InputTokens: -1}, &priority)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertContribution(t, contribution, "", tc.wantReason)
 		})
 	}
 }
@@ -378,7 +868,12 @@ func TestCalculateOpenAIUsesExactSupportedDecimalBounds(t *testing.T) {
 
 func tariffFromCost(t *testing.T, cost string) pricing.Tariff {
 	t.Helper()
-	snapshot, err := pricing.ParseSnapshot(t.Context(), snapshotFixture(cost))
+	return tariffFromModel(t, `{"id":"model","cost":`+cost+`}`)
+}
+
+func tariffFromModel(t *testing.T, model string) pricing.Tariff {
+	t.Helper()
+	snapshot, err := pricing.ParseSnapshot(t.Context(), snapshotModelFixture(model))
 	if err != nil {
 		t.Fatalf("ParseSnapshot() error = %v", err)
 	}
@@ -387,6 +882,18 @@ func tariffFromCost(t *testing.T, cost string) pricing.Tariff {
 		t.Fatal("fixture model has no tariff")
 	}
 	return tariff
+}
+
+func stringPointer(value string) *string { return &value }
+
+func assertContribution(t *testing.T, contribution pricing.Contribution, wantAmount string, wantReason pricing.ExclusionReason) {
+	t.Helper()
+	if wantReason != "" {
+		wantAmount = "0"
+	}
+	if contribution.Reason != wantReason || contribution.Amount.String() != wantAmount {
+		t.Fatalf("contribution = {amount:%q reason:%q}, want {%q %q}", contribution.Amount.String(), contribution.Reason, wantAmount, wantReason)
+	}
 }
 
 func mustRate(t *testing.T, raw string) *pricing.Rate {

@@ -27,8 +27,8 @@ type Identity struct {
 	Model    string
 }
 
-// Rates is one standard USD-per-million-token rate vector. Each nil rate is
-// absent; a non-nil zero remains an explicitly reported zero.
+// Rates is one USD-per-million-token rate vector. Each nil rate is absent; a
+// non-nil zero remains an explicitly reported zero.
 type Rates struct {
 	Input      *Rate
 	Output     *Rate
@@ -41,11 +41,17 @@ type contextTier struct {
 	rates     Rates
 }
 
-// Tariff retains one model's base rate vector and its context tiers. Its
-// immutable contents are exposed only through per-input rate selection.
-type Tariff struct {
+type rateSchedule struct {
 	base  Rates
 	tiers []contextTier
+}
+
+// Tariff retains one model's normal rate schedule and optional OpenAI Fast
+// schedule. Its immutable normal contents are exposed through per-input rate
+// selection; service-mode selection remains inside this package.
+type Tariff struct {
+	normal rateSchedule
+	fast   *rateSchedule
 }
 
 // Rates selects the greatest context threshold strictly below completeInput,
@@ -55,13 +61,17 @@ func (t Tariff) Rates(completeInput uint64) Rates {
 }
 
 func (t Tariff) rates(completeInput uint64) Rates {
-	firstNotBelow := sort.Search(len(t.tiers), func(index int) bool {
-		return completeInput <= t.tiers[index].threshold
+	return t.normal.rates(completeInput)
+}
+
+func (s rateSchedule) rates(completeInput uint64) Rates {
+	firstNotBelow := sort.Search(len(s.tiers), func(index int) bool {
+		return completeInput <= s.tiers[index].threshold
 	})
 	if firstNotBelow == 0 {
-		return t.base
+		return s.base
 	}
-	return t.tiers[firstNotBelow-1].rates
+	return s.tiers[firstNotBelow-1].rates
 }
 
 // Snapshot is an immutable projection of one complete accepted artifact.
@@ -140,15 +150,40 @@ func parseSnapshot(ctx context.Context, raw []byte, maxIdentityBytes int) (*Snap
 			identity := Identity{Provider: providerID, Model: modelID}
 			snapshot.identities = append(snapshot.identities, identity)
 			snapshot.identityBytes += identityBytes
-			rawCost, priced := model["cost"]
-			if !priced {
-				continue
+
+			var tariff Tariff
+			retained := false
+			if rawCost, present := model["cost"]; present {
+				parsed, err := parseCost(ctx, rawCost)
+				if err != nil {
+					return nil, fmt.Errorf("model %q/%q cost: %w", providerID, modelID, err)
+				}
+				tariff = parsed
+				retained = true
 			}
-			tariff, err := parseCost(ctx, rawCost)
-			if err != nil {
-				return nil, fmt.Errorf("model %q/%q cost: %w", providerID, modelID, err)
+			if providerID == "openai" {
+				fast, err := parseOpenAIFast(ctx, model)
+				if err != nil {
+					return nil, fmt.Errorf("model %q/%q modes: %w", providerID, modelID, err)
+				}
+				if fast != nil {
+					fast.tiers = make([]contextTier, 0, len(tariff.normal.tiers))
+					for _, tier := range tariff.normal.tiers {
+						if err := ctx.Err(); err != nil {
+							return nil, err
+						}
+						fast.tiers = append(fast.tiers, contextTier{
+							threshold: tier.threshold,
+							rates:     deriveFastContextRates(tariff.normal.base, fast.base, tier.rates),
+						})
+					}
+					tariff.fast = fast
+					retained = true
+				}
 			}
-			snapshot.tariffs[identity] = tariff
+			if retained {
+				snapshot.tariffs[identity] = tariff
+			}
 		}
 	}
 	if err := ctx.Err(); err != nil {
@@ -345,7 +380,7 @@ func parseCost(ctx context.Context, raw json.RawMessage) (Tariff, error) {
 	if err := ctx.Err(); err != nil {
 		return Tariff{}, err
 	}
-	return Tariff{base: baseRates, tiers: contextTiers}, nil
+	return Tariff{normal: rateSchedule{base: baseRates, tiers: contextTiers}}, nil
 }
 
 func contextThreshold(row map[string]json.RawMessage) (uint64, error) {
@@ -445,7 +480,7 @@ func (s *Snapshot) Identities() []Identity {
 }
 
 // Tariff returns an immutable tariff for an identity. False means the identity
-// has no cost object or is absent from this snapshot.
+// has neither a cost object nor an accepted Fast declaration, or is absent.
 func (s *Snapshot) Tariff(identity Identity) (Tariff, bool) {
 	if s == nil {
 		return Tariff{}, false

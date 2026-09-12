@@ -41,7 +41,21 @@ tiers are authoritative for every provider. The generated legacy row is retained
 only as a strict 200,000-token compatibility tier when structured tiers are
 absent, because its name can discard a higher exact threshold. Each chargeable
 rate keeps its source presence; an absent selected-row rate is not filled from
-another row. Experimental mode prices are not part of the standard projection.
+another row.
+
+For OpenAI models, the projection also validates optional `experimental.modes`
+and retains at most one Fast declaration identified by an ASCII-case `fast` or
+`priority` mode name or `provider.body.service_tier` mapping. Every recognized
+mode cost field is validated, including modes that are not selected. The Fast
+base vector is retained exactly as authored. For each retained normal context
+tier, the projection derives each available Fast category exactly as `Fast base
+× normal context / normal base`, with no intermediate rounding or borrowed
+factor. Missing/zero-denominator/non-terminating/out-of-bounds categories remain
+absent. Explicit Fast `tiers` or `context_over_200k` shapes are rejected rather
+than silently ignored because supporting them would require a new selection
+policy. Other modes remain outside the retained pricing projection. The accepted
+artifact bytes, content hash, source audit identity, and provider/model identity
+accounting are unchanged by these derived values.
 
 ## Bumping the floor
 
