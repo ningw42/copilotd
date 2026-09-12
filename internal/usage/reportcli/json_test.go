@@ -164,30 +164,8 @@ func TestCommandJSONPreservesOriginalBytesAndPresentationOnlySelection(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	var wire map[string]any
-	if err := json.Unmarshal(body, &wire); err != nil {
-		t.Fatal(err)
-	}
-	wire["pricing"] = map[string]any{
-		"dataset": "models.dev/api.json", "currency": "USD", "basis": "original_provider", "context_policy": "highest_tier", "cache_write_policy": "single_rate",
-		"version": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "source": "fallback", "last_success": nil,
-	}
-	cost := func() map[string]any {
-		return map[string]any{"amount": "0.125", "priced_turns": "1", "unpriced": map[string]any{"unknown_model": "0", "ambiguous_model": "0", "missing_rate": "0", "missing_usage": "1", "inconsistent_usage": "0"}}
-	}
-	section := wire["openai"].(map[string]any)
-	for _, level := range []string{"rows", "models"} {
-		entry := section[level].([]any)[0].(map[string]any)
-		entry["cost"] = cost()
-		entry["pricing_match"] = map[string]any{"status": "matched", "provider": "openai", "model": "priced-模型", "method": "exact", "future_match": true}
-	}
-	section["total"].(map[string]any)["cost"] = cost()
-	body, err = json.MarshalIndent(wire, "", "  ")
-	if err != nil {
-		t.Fatal(err)
-	}
 	// Unknown case variants are additive, not substitutes. Preserve whitespace,
-	// native Unicode, exact decimal strings, extension fields, and a valid escaped surrogate pair.
+	// native Unicode, exact decimal strings, and a valid escaped surrogate pair.
 	raw := " \n\t" + strings.Replace(string(body), "{", "{\n  \"SCHEMA_VERSION\": 999, \"additive\": {\"number\":9007199254740993123456789,\"pair\":\"\\ud83d\\ude00\"},", 1) + " \n\t"
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {

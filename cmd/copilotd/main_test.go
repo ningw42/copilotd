@@ -18,7 +18,6 @@ import (
 	"github.com/ningw42/copilotd/internal/config"
 	"github.com/ningw42/copilotd/internal/logging"
 	"github.com/ningw42/copilotd/internal/usage"
-	"github.com/ningw42/copilotd/internal/usage/pricing"
 )
 
 func noEnv() func(string) (string, bool) {
@@ -133,44 +132,6 @@ func TestLogCodexCatalogStaging(t *testing.T) {
 	}
 }
 
-func TestConfiguredUsagePricingRegistersOnlyForEnabledMeter(t *testing.T) {
-	for _, tc := range []struct {
-		name    string
-		enabled bool
-		want    int
-	}{
-		{name: "disabled"},
-		{name: "enabled", enabled: true, want: 1},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			registry := cache.NewRegistry()
-			var edgeCalls atomic.Int32
-			source := configuredUsagePricing(config.ServeConfig{
-				ShimUsageMeterEnabled:       tc.enabled,
-				UsagePricingRefreshInterval: 0,
-			}, pricing.NewRemote("https://models.invalid/api.json", mainRoundTripFunc(func(*http.Request) (*http.Response, error) {
-				edgeCalls.Add(1)
-				return nil, nil
-			})), registry, slog.New(slog.NewTextHandler(io.Discard, nil)))
-			registry.Prime(context.Background())
-
-			if (source != nil) != tc.enabled {
-				t.Fatalf("configured pricing source present = %t, want %t", source != nil, tc.enabled)
-			}
-			statuses := registry.Observe()
-			if len(statuses) != tc.want {
-				t.Fatalf("registered cache statuses = %#v, want %d", statuses, tc.want)
-			}
-			if tc.enabled && statuses[0].Name != "usage_prices" {
-				t.Errorf("registered status = %#v, want usage_prices", statuses[0])
-			}
-			if edgeCalls.Load() != 0 {
-				t.Errorf("pinned/disabled pricing made %d requests, want 0", edgeCalls.Load())
-			}
-		})
-	}
-}
-
 func TestConfiguredCodexModelsRegistersOnlyForEnabledCatalog(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -213,29 +174,6 @@ func TestConfiguredCodexModelsRegistersOnlyForEnabledCatalog(t *testing.T) {
 }
 
 type mainRoundTripFunc func(*http.Request) (*http.Response, error)
-
-type mainFixedPricingSource struct {
-	snapshot *pricing.Snapshot
-}
-
-func (s mainFixedPricingSource) Current(ctx context.Context, limit pricing.ProjectionLimit) (*pricing.Snapshot, pricing.SnapshotStatus, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, pricing.SnapshotStatus{}, err
-	}
-	if s.snapshot.IdentityBytes() > limit.MaxIdentityBytes {
-		return nil, pricing.SnapshotStatus{}, pricing.ErrProjectionLimit
-	}
-	return s.snapshot, pricing.SnapshotStatus{Source: "fallback", Version: "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"}, nil
-}
-
-func mainTestPricingSource(t testing.TB) pricing.Source {
-	t.Helper()
-	snapshot, err := pricing.ParseSnapshot(context.Background(), []byte(`{"openai":{"id":"openai","models":{}},"anthropic":{"id":"anthropic","models":{}},"google":{"id":"google","models":{}},"xai":{"id":"xai","models":{}}}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	return mainFixedPricingSource{snapshot: snapshot}
-}
 
 func (fn mainRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return fn(req) }
 
@@ -329,11 +267,8 @@ func TestRunRejectsRemovedUpstreamBaseFlag(t *testing.T) {
 	}
 }
 
-func TestRunServeHelpCoversPricingRefreshAndOmitsRemovedUpstreamBase(t *testing.T) {
+func TestRunServeHelpOmitsRemovedUpstreamBaseFlag(t *testing.T) {
 	help := runSuccessfully(t, "help", "serve")
-	if !strings.Contains(help, "--usage-pricing-refresh-interval DURATION") || !strings.Contains(help, "models.dev pricing refresh cadence (0 pins the embedded floor) (default: 24h)") {
-		t.Errorf("serve help does not describe pricing refresh and its default:\n%s", help)
-	}
 	if strings.Contains(help, "upstream-base") {
 		t.Errorf("serve help unexpectedly lists the removed --upstream-base flag:\n%s", help)
 	}

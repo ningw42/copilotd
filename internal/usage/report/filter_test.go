@@ -19,7 +19,7 @@ func TestQueryRejectsOversizedModelFilterBeforeSQL(t *testing.T) {
 	model := strings.Repeat("x", report.MaxModelBytes+1)
 	q := selection()
 	q.Model = &model
-	r, err := newReporter(t, filepath.Join(t.TempDir(), "absent.db")).Query(context.Background(), q)
+	r, err := report.New(filepath.Join(t.TempDir(), "absent.db")).Query(context.Background(), q)
 	var failure *report.Error
 	if !errors.As(err, &failure) || failure.Code != report.TooLarge || r.OpenAI != nil {
 		t.Fatalf("oversized filter before missing DB: %+v %v", r, err)
@@ -41,7 +41,7 @@ func TestQueryExactFilterExcludesOversizedUnrelatedIdentity(t *testing.T) {
 	q := selection()
 	model := "模型"
 	q.Model = &model
-	r, err := newReporter(t, path).Query(context.Background(), q)
+	r, err := report.New(path).Query(context.Background(), q)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,7 +49,7 @@ func TestQueryExactFilterExcludesOversizedUnrelatedIdentity(t *testing.T) {
 		t.Fatalf("filtered: %+v", r)
 	}
 	q.Model = nil
-	r, err = newReporter(t, path).Query(context.Background(), q)
+	r, err = report.New(path).Query(context.Background(), q)
 	var failure *report.Error
 	if !errors.As(err, &failure) || failure.Code != report.TooLarge || r.OpenAI != nil {
 		t.Fatalf("unfiltered: %+v %v", r, err)
@@ -72,7 +72,7 @@ func TestQueryFiltersExactReportedModelAcrossNativeSurfaces(t *testing.T) {
 			t.Run(surface+"/"+model, func(t *testing.T) {
 				q := selection()
 				q.Surface, q.Model = surface, &model
-				r, err := newReporter(t, path).Query(context.Background(), q)
+				r, err := report.New(path).Query(context.Background(), q)
 				if err != nil {
 					t.Fatal(err)
 				}

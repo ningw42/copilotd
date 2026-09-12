@@ -61,7 +61,6 @@ func defaultConfig() ServeConfig {
 		WebSocketHandshakeTimeout:    10 * time.Second,
 		ShimHookOverrunThreshold:     time.Second,
 		UsageDBPath:                  expectedDefaultUsageDBPath(),
-		UsagePricingRefreshInterval:  24 * time.Hour,
 		MaxRequestBytes:              33554432,
 		MaxBufferedResponseBytes:     33554432,
 		CodexCatalogRefreshInterval:  24 * time.Hour,
@@ -654,41 +653,6 @@ func TestCodexConfigIsInertWhenDisabled(t *testing.T) {
 	}
 }
 
-func TestUsagePricingRefreshIntervalPrecedenceAndValidation(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "copilotd.toml")
-	if err := os.WriteFile(path, []byte("usage-pricing-refresh-interval = \"12h\"\n"), 0o600); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
-
-	for _, tc := range []struct {
-		name string
-		args []string
-		env  map[string]string
-		want time.Duration
-	}{
-		{name: "default", want: 24 * time.Hour},
-		{name: "TOML", args: []string{"--config", path}, want: 12 * time.Hour},
-		{name: "environment", args: []string{"--config", path}, env: map[string]string{"COPILOTD_USAGE_PRICING_REFRESH_INTERVAL": "6h"}, want: 6 * time.Hour},
-		{name: "flag", args: []string{"--config", path, "--usage-pricing-refresh-interval", "3h"}, env: map[string]string{"COPILOTD_USAGE_PRICING_REFRESH_INTERVAL": "6h"}, want: 3 * time.Hour},
-		{name: "zero pins", args: []string{"--usage-pricing-refresh-interval", "0"}, want: 0},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			args := append([]string{"--apikey", testAPIKey}, tc.args...)
-			cfg, err := loadServe(args, envFunc(tc.env))
-			if err != nil {
-				t.Fatalf("loadServe() error = %v", err)
-			}
-			if cfg.UsagePricingRefreshInterval != tc.want {
-				t.Errorf("UsagePricingRefreshInterval = %v, want %v", cfg.UsagePricingRefreshInterval, tc.want)
-			}
-		})
-	}
-
-	if _, err := loadServe([]string{"--apikey", testAPIKey, "--usage-pricing-refresh-interval", "-1ns"}, noEnv()); err == nil || !strings.Contains(err.Error(), "usage-pricing-refresh-interval") {
-		t.Fatalf("negative interval error = %v, want setting-specific validation", err)
-	}
-}
-
 func TestCodexCatalogRefreshIntervalPrecedence(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "copilotd.toml")
 	if err := os.WriteFile(path, []byte("codex-catalog-refresh-interval = \"12h\"\n"), 0o600); err != nil {
@@ -1252,7 +1216,6 @@ func TestDurationDefaultsRenderInDeclaredUnit(t *testing.T) {
 		"response-header-timeout":        "600s",
 		"ws-handshake-timeout":           "10s",
 		"shim-hook-overrun-threshold":    "1s",
-		"usage-pricing-refresh-interval": "24h",
 		"codex-catalog-refresh-interval": "24h",
 		"impersonation-refresh-interval": "24h",
 	}
@@ -1606,7 +1569,6 @@ func TestConfigLogValueEmitsOnlyNonSecretFields(t *testing.T) {
 		ShimResponsesItemIDStabilizerEnabled: true,
 		ShimUsageMeterEnabled:                true,
 		UsageDBPath:                          "/home/op/.config/copilotd/usage.db",
-		UsagePricingRefreshInterval:          12 * time.Hour,
 		ShimHookOverrunThreshold:             750 * time.Millisecond,
 		GithubOAuthToken:                     "gho-super-secret-oauth-value",
 		CodexCatalogEnabled:                  true,
@@ -1653,7 +1615,6 @@ func TestConfigLogValueEmitsOnlyNonSecretFields(t *testing.T) {
 		"config.shim-responses-item-id-stabilizer-enabled=true",
 		"config.shim-usage-meter-enabled=true",
 		"config.usage-db-path=/home/op/.config/copilotd/usage.db",
-		"config.usage-pricing-refresh-interval=12h0m0s",
 		"config.shim-hook-overrun-threshold=750ms",
 		"config.startup-mint-retries=3",
 		"config.vscode-version=1.2.3",
@@ -1714,7 +1675,6 @@ func TestConfigLogValueEmitsOnlyNonSecretFields(t *testing.T) {
 		"shim-responses-item-id-stabilizer-enabled",
 		"shim-usage-meter-enabled",
 		"usage-db-path",
-		"usage-pricing-refresh-interval",
 		"shim-hook-overrun-threshold",
 		"codex-catalog-enabled",
 		"codex-catalog-model-aliases",
@@ -1876,19 +1836,18 @@ func loadLogin(args []string, lookupEnv func(string) (string, bool)) (LoginConfi
 }
 
 func TestLoginDoesNotExposeUsageMeterSettings(t *testing.T) {
-	for _, args := range [][]string{{"--shim-usage-meter-enabled=true"}, {"--usage-db-path", "usage.db"}, {"--usage-pricing-refresh-interval", "1h"}} {
+	for _, args := range [][]string{{"--shim-usage-meter-enabled=true"}, {"--usage-db-path", "usage.db"}} {
 		if _, err := loadLogin(args, noEnv()); err == nil {
 			t.Errorf("login accepted serve-only usage setting %q", args)
 		}
 	}
 	path := filepath.Join(t.TempDir(), "copilotd.toml")
-	if err := os.WriteFile(path, []byte("shim-usage-meter-enabled = true\nusage-db-path = \"ignored/usage.db\"\nusage-pricing-refresh-interval = \"1h\"\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte("shim-usage-meter-enabled = true\nusage-db-path = \"ignored/usage.db\"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	got, err := loadLogin([]string{"--config", path}, envFunc(map[string]string{
-		"COPILOTD_SHIM_USAGE_METER_ENABLED":       "true",
-		"COPILOTD_USAGE_DB_PATH":                  "ignored/env.db",
-		"COPILOTD_USAGE_PRICING_REFRESH_INTERVAL": "2h",
+		"COPILOTD_SHIM_USAGE_METER_ENABLED": "true",
+		"COPILOTD_USAGE_DB_PATH":            "ignored/env.db",
 	}))
 	if err != nil {
 		t.Fatal(err)

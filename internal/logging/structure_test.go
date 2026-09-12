@@ -102,30 +102,28 @@ var expectedLogKeys = map[string]string{
 }
 
 var expectedComponentSinks = map[componentSink]struct{}{
-	{function: "runServe", consumer: "local", component: "cmd/copilotd"}:                                   {},
-	{function: "runServe", consumer: "sqlitestore.Open", component: "internal/usage/sqlitestore"}:          {},
-	{function: "runBoundServe", consumer: "local", component: "cmd/copilotd"}:                              {},
-	{function: "runBoundServe", consumer: "runServeStartup", component: "cmd/copilotd"}:                    {},
-	{function: "runBoundServe", consumer: "upstream.New", component: "internal/upstream"}:                  {},
-	{function: "runBoundServe", consumer: "forward.New arg 7", component: "internal/sse"}:                  {},
-	{function: "runBoundServe", consumer: "forward.New arg 8", component: "internal/shim"}:                 {},
-	{function: "runBoundServe", consumer: "wsforward.New arg 6", component: "internal/wsforward"}:          {},
-	{function: "runBoundServe", consumer: "wsforward.New arg 7", component: "internal/shim"}:               {},
-	{function: "runBoundServe", consumer: "server.New arg 1", component: "internal/server"}:                {},
-	{function: "runBoundServe", consumer: "server.New arg 2", component: "internal/catalog"}:               {},
-	{function: "buildServeProvider", consumer: "identity.NewManager", component: "internal/identity"}:      {},
-	{function: "buildServeProvider", consumer: "impersonation.New", component: "internal/cache"}:           {},
-	{function: "configuredCodexModels", consumer: "catalog.NewModelsCache", component: "internal/cache"}:   {},
-	{function: "configuredUsagePricing", consumer: "pricing.NewCachedSource", component: "internal/cache"}: {},
-	{function: "runLogin", consumer: "local", component: "cmd/copilotd"}:                                   {},
-	{function: "runLogin", consumer: "identity.Login", component: "internal/identity"}:                     {},
+	{function: "runServe", consumer: "local", component: "cmd/copilotd"}:                                 {},
+	{function: "runServe", consumer: "sqlitestore.Open", component: "internal/usage/sqlitestore"}:        {},
+	{function: "runBoundServe", consumer: "local", component: "cmd/copilotd"}:                            {},
+	{function: "runBoundServe", consumer: "runServeStartup", component: "cmd/copilotd"}:                  {},
+	{function: "runBoundServe", consumer: "upstream.New", component: "internal/upstream"}:                {},
+	{function: "runBoundServe", consumer: "forward.New arg 7", component: "internal/sse"}:                {},
+	{function: "runBoundServe", consumer: "forward.New arg 8", component: "internal/shim"}:               {},
+	{function: "runBoundServe", consumer: "wsforward.New arg 6", component: "internal/wsforward"}:        {},
+	{function: "runBoundServe", consumer: "wsforward.New arg 7", component: "internal/shim"}:             {},
+	{function: "runBoundServe", consumer: "server.New arg 1", component: "internal/server"}:              {},
+	{function: "runBoundServe", consumer: "server.New arg 2", component: "internal/catalog"}:             {},
+	{function: "buildServeProvider", consumer: "identity.NewManager", component: "internal/identity"}:    {},
+	{function: "buildServeProvider", consumer: "impersonation.New", component: "internal/cache"}:         {},
+	{function: "configuredCodexModels", consumer: "catalog.NewModelsCache", component: "internal/cache"}: {},
+	{function: "runLogin", consumer: "local", component: "cmd/copilotd"}:                                 {},
+	{function: "runLogin", consumer: "identity.Login", component: "internal/identity"}:                   {},
 }
 
 var expectedBaseParameters = map[string]baseParameter{
-	"runBoundServe":          {name: "base", index: 2},
-	"buildServeProvider":     {name: "base", index: 1},
-	"configuredCodexModels":  {name: "base", index: 3},
-	"configuredUsagePricing": {name: "base", index: 3},
+	"runBoundServe":         {name: "base", index: 2},
+	"buildServeProvider":    {name: "base", index: 1},
+	"configuredCodexModels": {name: "base", index: 3},
 }
 
 var attributeConstructors = map[string]struct{}{

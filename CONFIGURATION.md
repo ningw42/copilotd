@@ -176,15 +176,10 @@ validated period/model rows without changing JSON or reconstructing calendar
 rules. Their Turns, sum, and coverage arithmetic is checked int64; overflow of
 inconsistent rows fails the complete text rendering before stdout, while JSON
 continues to emit the independently validated original bytes. Text uses
-comma-separated exact counts and ASCII-escaped model identities. Every primary
-Surface table places `Est. USD` after `Model(s)` and before `Turns`; supplied exact
-amounts round half up to three fractional digits, and terminal period totals add
-exact amounts before rounding. A partial monetary subtotal has `*`; an entirely
-unpriced nonempty group has `—`; period/model notes list priced/total stored Turns
-and each nonzero exclusion reason. Native `—` still means unreported, and native
-`*` still denotes partial optional-count coverage. Anthropic renders first with
-Turns, Uncached input, Output, Cache create, and Cache read; OpenAI follows with
-Turns, Input, Output, Cache write, and Cache read.
+comma-separated exact counts, ASCII-escaped model identities,
+`—` for unreported metrics, and `*` plus coverage for partial optional metrics.
+Anthropic renders first with Turns, Uncached input, Output, Cache create, and
+Cache read; OpenAI follows with Turns, Input, Output, Cache write, and Cache read.
 Each text section groups Reported-model rows by period and labels the first
 column as `Day`, `Week`, `Month`, or `Year`. A period starts with `Total`, followed
 by a horizontal rule and its model breakdown; another rule separates the next
@@ -193,10 +188,7 @@ rendered as duplicate text rows. A reported zero stays zero; an empty
 selection is explicitly labeled, not represented as proof of no consumption.
 
 `--details` adds secondary native tables for the same period totals and
-Reported-model breakdowns, plus one de-duplicated terminal-safe list of distinct
-Reported-model → Pricing-model resolutions, matched methods, and explicit
-unknown/ambiguous outcomes. A match alone does not promise usable rates or native
-usage. OpenAI secondary columns are **Reasoning** (`reasoning_tokens`) and
+Reported-model breakdowns: OpenAI **Reasoning** (`reasoning_tokens`) and
 **Reported total** (`total_tokens`, never inferred); Anthropic **Thinking**
 (`thinking_tokens`),
 **Cache create 5m** (`ephemeral_5m_input_tokens`), and **Cache create 1h**
@@ -217,22 +209,9 @@ replace required member names, duplicate names after unescaping are rejected at
 every level, and invalid UTF-8/unpaired surrogates are errors rather than repaired
 identities. Schema, effective selections, native metric presence, arrays, int64
 counts, and sum/coverage relationships (including empty sections) must validate
-before any stdout output. Pricing provenance, cost coverage at every aggregate,
-and row/model matches form one atomic additive extension. A wholly absent
-extension identifies an older daemon; partial or dangling recognized pricing
-fields are protocol errors. Amounts are canonical exact nonnegative decimal
-strings (or the governed `null` for nonempty groups with zero priceable Turns),
-and the six canonical int64 coverage strings must partition stored Turns exactly.
-Unknown additive fields remain compatible. Errors use stderr and exit 1,
-including partial/short writes or failure to write the final newline; success,
-including empty, exits 0. Text identifies original-provider/highest-context/
-single-write pricing, fetched versus fallback source, and successful content-fetch
-time when present. It states that valuation uses current accepted rates for
-persisted best-effort observations, may exclude unpriceable Turns, and is not a
-Copilot bill. A wholly absent pricing extension produces the exact older-daemon
-unavailable explanation and `—` cost cells without fabricated exclusions or local
-pricing. Raw-Turn export, HTML, charts, and cross-Surface grand totals are not
-provided.
+before any stdout output. Errors use stderr and exit 1, including partial/short
+writes or failure to write the final newline; success, including empty, exits 0.
+No pricing, raw-Turn export, HTML, or charts are provided.
 
 The same listener serves exactly `GET`/`HEAD /usage/v1/report` without inference
 authentication or readiness/upstream work. A disabled meter returns
@@ -269,7 +248,6 @@ file/schema replacement remains unsupported.
 | [`--shim-responses-item-id-stabilizer-enabled=<BOOL>`](#--shim-responses-item-id-stabilizer-enabled) | `COPILOTD_SHIM_RESPONSES_ITEM_ID_STABILIZER_ENABLED` | `shim-responses-item-id-stabilizer-enabled` | `false` |
 | [`--shim-usage-meter-enabled=<BOOL>`](#--shim-usage-meter-enabled) | `COPILOTD_SHIM_USAGE_METER_ENABLED` | `shim-usage-meter-enabled` | `false` |
 | [`--usage-db-path <PATH>`](#--usage-db-path) | `COPILOTD_USAGE_DB_PATH` | `usage-db-path` | Unix: `<user config dir>/copilotd/usage.db`; Windows: `%LOCALAPPDATA%\\copilotd\\usage.db` |
-| [`--usage-pricing-refresh-interval <DURATION>`](#--usage-pricing-refresh-interval) | `COPILOTD_USAGE_PRICING_REFRESH_INTERVAL` | `usage-pricing-refresh-interval` | `24h` |
 | [`--shim-nop-enabled=<BOOL>`](#--shim-nop-enabled) | `COPILOTD_SHIM_NOP_ENABLED` | `shim-nop-enabled` | `false` |
 | [`--shim-hook-overrun-threshold <DURATION>`](#--shim-hook-overrun-threshold) | `COPILOTD_SHIM_HOOK_OVERRUN_THRESHOLD` | `shim-hook-overrun-threshold` | `1s` |
 | [`--anthropic-catalog-model-id-normalization-enabled=<BOOL>`](#--anthropic-catalog-model-id-normalization-enabled) | `COPILOTD_ANTHROPIC_CATALOG_MODEL_ID_NORMALIZATION_ENABLED` | `anthropic-catalog-model-id-normalization-enabled` | `false` |
@@ -414,28 +392,13 @@ byte-for-byte verbatim.
 
 Enables best-effort recording of native token counts to the SQLite file selected
 by [`--usage-db-path`](#--usage-db-path). It is off by default: disabled `serve`
-and `login` do not open a database, create usage files, start a usage writer,
-install a metering hook, register pricing, or make a models.dev request.
-
-When enabled, `serve` registers the memory-only `usage_prices` cached value before
-cache priming. It starts from the identified vendored `models.dev/api.json` floor,
-refreshes best effort, and retains last-good on fetch or validation failure. The
-selected original-provider namespaces are OpenAI, Anthropic, Google, and xAI;
-standard prices choose the greatest structured context threshold, then the
-legacy long-context row, then base without filling omitted optional rates.
-Prices are current benchmark inputs, never persisted tariff history or Copilot
-billing. Refresh failure is visible in `/readyz` but does not change readiness,
-inference, or native Usage report availability. The existing version-1 report
-protocol exposes the captured dataset/content identity/source/success time,
-exact USD priced-Turn subtotals and exclusion coverage at all aggregate levels,
-and row/model pricing matches. Report requests use the already captured local
-value and never fetch pricing.
+and `login` do not open a database, create usage files, start a usage writer, or
+install a metering hook.
 
 **Enabling this flag also exposes unauthenticated aggregate Usage reports on
 `serve --addr`, including non-loopback/public bindings.** Anyone with network
-reachability can read models, activity history, estimated current valuation, and
-pricing coverage at `/usage/v1/report`. Inference API keys do not protect this
-local path, and neither missing CORS nor
+reachability can read models and activity history at `/usage/v1/report`.
+Inference API keys do not protect this local path, and neither missing CORS nor
 private SQLite files are HTTP access controls. Other local users, DNS rebinding,
 and reachable browser/local-network actors remain part of this deliberate
 exposure. Protect the listener/path with binding, firewall, or reverse-proxy
@@ -542,9 +505,8 @@ GitHub OAuth tokens, or Copilot tokens.
 
 The GitHub Copilot Surface, raw `/models`, provider/Codex Catalogs, and
 `/v1/messages/count_tokens` are not metered. Built-in calendar native-Surface aggregation
-is available through [`usage`](#usage); Copilot billing reconciliation,
-historical tariffs, automatic pruning, per-key attribution, and non-token usage
-projection remain out of scope.
+is available through [`usage`](#usage); pricing/billing reconciliation, automatic
+pruning, per-key attribution, and non-token usage projection remain out of scope.
 External SQLite tooling still supports either native table, for example:
 
 ```sh
@@ -644,21 +606,6 @@ or an earlier runtime log are included, while later calls are outside that
 snapshot. The SQLite/native wait is bounded, but synchronous `slog.Handler` I/O
 is not deadline-aware. There are no public queue-depth or flush-interval tuning
 settings.
-
-### `--usage-pricing-refresh-interval`
-
-Sets the best-effort cadence for refreshing the public
-`https://models.dev/api.json` pricing cached value while the Usage meter is
-enabled. The default is `24h`; `0` pins the identified embedded floor and makes
-no pricing request. Negative values are rejected before binding. When
-`--shim-usage-meter-enabled=false`, no pricing value is registered and no
-pricing request or report extension is produced.
-
-Each attempt uses a dedicated credential-free, redirect-refusing HTTP client, a
-five-second request context, and an 8 MiB decoded-body limit. Accepted bytes must
-contain all four selected original-provider sections and satisfy the bounded
-identity, decimal, and tier projection. Failure holds last-good (or the floor
-when cold), remains non-readiness-gating, and does not persist runtime bytes.
 
 ### `--shim-hook-overrun-threshold`
 

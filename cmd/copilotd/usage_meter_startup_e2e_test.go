@@ -64,7 +64,7 @@ func TestRunServeUsageSchemaFailurePrecedesBind(t *testing.T) {
 				"serve", "--apikey", testAPIKey, "--github-oauth-token", "gho-local",
 				"--addr", held.Addr().String(), "--shim-usage-meter-enabled=true",
 				"--usage-db-path", path, "--log-file", logPath,
-				"--impersonation-refresh-interval", "0", "--usage-pricing-refresh-interval", "0",
+				"--impersonation-refresh-interval", "0",
 			}, noEnv(), io.Discard, io.Discard)
 			if code != 1 {
 				t.Fatalf("exit code = %d, want schema startup failure", code)

@@ -7,12 +7,9 @@ import (
 	"encoding/json/jsontext"
 	"errors"
 	"io"
-	"math"
 	"strconv"
 	"time"
-	"unicode/utf8"
 
-	"github.com/ningw42/copilotd/internal/usage/pricing"
 	"github.com/ningw42/copilotd/internal/usage/report"
 )
 
@@ -28,10 +25,6 @@ func decodeReport(ctx context.Context, body []byte, q report.Query) (report.Repo
 	d := wireDecoder{ctx: ctx}
 	root := d.object(body)
 	r := report.Report{SchemaVersion: d.integer(root, "schema_version"), GeneratedAt: d.instant(root, "generated_at"), Timezone: d.text(root, "timezone"), Period: d.text(root, "period"), Since: d.date(root, "since"), Until: d.date(root, "until"), WindowStart: d.instant(root, "window_start"), WindowEnd: d.instant(root, "window_end"), Scope: d.text(root, "scope"), Collection: d.text(root, "collection"), Surface: d.text(root, "surface"), Buckets: []report.Bucket{}}
-	_, pricingPresent := root["pricing"]
-	if pricingPresent {
-		r.Pricing = d.pricing(d.object(root["pricing"]))
-	}
 	model := d.member(root, "model")
 	if !bytes.Equal(model, []byte("null")) {
 		value := d.text(root, "model")
@@ -92,11 +85,10 @@ func decodeReport(ctx context.Context, body []byte, q report.Query) (report.Repo
 			continue
 		}
 		section := d.object(d.member(root, native.name))
-		s := report.Section{Rows: []report.Row{}, Models: []report.ModelTotal{}, Total: d.total(d.object(d.member(section, "total")), true, native.metrics, pricingPresent)}
+		s := report.Section{Rows: []report.Row{}, Models: []report.ModelTotal{}, Total: d.total(d.object(d.member(section, "total")), true, native.metrics)}
 		for _, raw := range d.array(section, "rows") {
 			o := d.object(raw)
-			row := report.Row{BucketStart: d.date(o, "bucket_start"), ModelTotal: report.ModelTotal{Model: d.text(o, "model"), Total: d.total(o, false, native.metrics, pricingPresent)}}
-			row.PricingMatch = d.pricingMatch(o, pricingPresent)
+			row := report.Row{BucketStart: d.date(o, "bucket_start"), ModelTotal: report.ModelTotal{Model: d.text(o, "model"), Total: d.total(o, false, native.metrics)}}
 			if !bucketNames[row.BucketStart] || r.Model != nil && row.Model != *r.Model {
 				d.err = errProtocol
 			}
@@ -110,8 +102,7 @@ func decodeReport(ctx context.Context, body []byte, q report.Query) (report.Repo
 		}
 		for _, raw := range d.array(section, "models") {
 			o := d.object(raw)
-			model := report.ModelTotal{Model: d.text(o, "model"), Total: d.total(o, false, native.metrics, pricingPresent)}
-			model.PricingMatch = d.pricingMatch(o, pricingPresent)
+			model := report.ModelTotal{Model: d.text(o, "model"), Total: d.total(o, false, native.metrics)}
 			if r.Model != nil && model.Model != *r.Model {
 				d.err = errProtocol
 			}
@@ -223,13 +214,9 @@ func (d *wireDecoder) array(o object, key string) []json.RawMessage {
 	}
 	return values
 }
-func (d *wireDecoder) total(o object, section bool, names []string, pricingPresent bool) report.Total {
+func (d *wireDecoder) total(o object, section bool, names []string) report.Total {
 	total := report.Total{Turns: d.count(o, "turns"), Usage: map[string]report.Metric{}}
-	if section {
-		if _, present := o["pricing_match"]; present {
-			d.err = errProtocol
-		}
-	} else if total.Turns == 0 {
+	if !section && total.Turns == 0 {
 		d.err = errProtocol
 	}
 	metrics := d.object(d.member(o, "usage"))
@@ -254,111 +241,7 @@ func (d *wireDecoder) total(o object, section bool, names []string, pricingPrese
 		}
 		total.Usage[name] = metric
 	}
-	if pricingPresent {
-		total.Cost = d.cost(d.object(d.member(o, "cost")), total.Turns)
-	} else if _, present := o["cost"]; present {
-		d.err = errProtocol
-	}
 	return total
-}
-
-func (d *wireDecoder) pricing(o object) *report.PricingProvenance {
-	value := &report.PricingProvenance{
-		Dataset: d.text(o, "dataset"), Currency: d.text(o, "currency"), Basis: d.text(o, "basis"),
-		ContextPolicy: d.text(o, "context_policy"), CacheWritePolicy: d.text(o, "cache_write_policy"),
-		Version: d.text(o, "version"), Source: d.text(o, "source"),
-	}
-	lastSuccess := d.member(o, "last_success")
-	if !bytes.Equal(lastSuccess, []byte("null")) {
-		instant := d.instant(o, "last_success")
-		value.LastSuccess = &instant
-	}
-	if value.Dataset != "models.dev/api.json" || value.Currency != "USD" || value.Basis != "original_provider" || value.ContextPolicy != "highest_tier" || value.CacheWritePolicy != "single_rate" || !validContentVersion(value.Version) || value.Source != "fallback" && value.Source != "fetched" {
-		d.err = errProtocol
-	}
-	return value
-}
-
-func validContentVersion(value string) bool {
-	if len(value) != len("sha256:")+64 || value[:len("sha256:")] != "sha256:" {
-		return false
-	}
-	for _, digit := range value[len("sha256:"):] {
-		if !('0' <= digit && digit <= '9') && !('a' <= digit && digit <= 'f') {
-			return false
-		}
-	}
-	return true
-}
-
-func (d *wireDecoder) cost(o object, turns int64) report.Cost {
-	cost := report.Cost{PricedTurns: d.count(o, "priced_turns")}
-	rawAmount := d.member(o, "amount")
-	if !bytes.Equal(rawAmount, []byte("null")) {
-		amountText := d.text(o, "amount")
-		amount, err := pricing.ParseAmount(amountText)
-		if err != nil {
-			d.err = errProtocol
-		} else {
-			cost.Amount = &amount
-		}
-	}
-	unpriced := d.object(d.member(o, "unpriced"))
-	cost.Unpriced = report.UnpricedCoverage{
-		UnknownModel: d.count(unpriced, "unknown_model"), AmbiguousModel: d.count(unpriced, "ambiguous_model"),
-		MissingRate: d.count(unpriced, "missing_rate"), MissingUsage: d.count(unpriced, "missing_usage"),
-		InconsistentUsage: d.count(unpriced, "inconsistent_usage"),
-	}
-	total := cost.PricedTurns
-	for _, count := range []int64{cost.Unpriced.UnknownModel, cost.Unpriced.AmbiguousModel, cost.Unpriced.MissingRate, cost.Unpriced.MissingUsage, cost.Unpriced.InconsistentUsage} {
-		if count > math.MaxInt64-total {
-			d.err = errProtocol
-			break
-		}
-		total += count
-	}
-	if total != turns || turns == 0 && (cost.Amount == nil || cost.Amount.String() != "0") || turns > 0 && cost.PricedTurns == 0 && cost.Amount != nil || cost.PricedTurns > 0 && cost.Amount == nil {
-		d.err = errProtocol
-	}
-	return cost
-}
-
-func (d *wireDecoder) pricingMatch(o object, pricingPresent bool) report.PricingMatch {
-	if !pricingPresent {
-		if _, present := o["pricing_match"]; present {
-			d.err = errProtocol
-		}
-		return report.PricingMatch{}
-	}
-	matchObject := d.object(d.member(o, "pricing_match"))
-	match := report.PricingMatch{Status: report.PricingMatchStatus(d.text(matchObject, "status"))}
-	switch match.Status {
-	case report.PricingMatchMatched:
-		match.Provider = d.text(matchObject, "provider")
-		match.Model = d.text(matchObject, "model")
-		match.Method = report.PricingMatchMethod(d.text(matchObject, "method"))
-		if !validPricingIdentity(match.Provider) || !validPricingIdentity(match.Model) {
-			d.err = errProtocol
-		}
-		switch match.Method {
-		case report.PricingMatchByExact, report.PricingMatchByNormalized, report.PricingMatchByAlias, report.PricingMatchBySuffix, report.PricingMatchByDated:
-		default:
-			d.err = errProtocol
-		}
-	case report.PricingMatchUnknown, report.PricingMatchAmbiguous:
-		for _, key := range []string{"provider", "model", "method"} {
-			if _, present := matchObject[key]; present {
-				d.err = errProtocol
-			}
-		}
-	default:
-		d.err = errProtocol
-	}
-	return match
-}
-
-func validPricingIdentity(value string) bool {
-	return value != "" && len(value) <= 1024 && utf8.ValidString(value)
 }
 
 // jsontext validates strict Unicode and unique decoded member names by default.

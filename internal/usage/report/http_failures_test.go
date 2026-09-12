@@ -20,11 +20,11 @@ func TestRealSQLiteFailuresUseGenericHTTPResponsesAndReleaseAdmission(t *testing
 	for _, name := range []string{"missing", "schema", "contention", "cleanup"} {
 		t.Run(name, func(t *testing.T) {
 			path := stored(t)
-			query := newReporter(t, path).Query
+			query := report.New(path).Query
 			switch name {
 			case "missing":
 				path = filepath.Join(t.TempDir(), "missing-parent", "private.db")
-				query = newReporter(t, path).Query
+				query = report.New(path).Query
 			case "cleanup":
 				query = report.NewCleanupFailureForTest(path).Query
 			default:
@@ -81,7 +81,7 @@ func TestInterruptedRealSQLiteScanUsesHTTPDeadlinePrecedenceAndReleasesAdmission
 		SELECT 1788220800000,'','',0,'native-scan','buffered',1,2 FROM n`); err != nil {
 		t.Fatal(err)
 	}
-	reader := newReporter(t, path)
+	reader := report.New(path)
 	// A shorter parent HTTP context drives the adapter's deadline precedence.
 	// Actual scanning, cancellation classification, and cleanup remain real
 	// SQLite; this characterizes precedence, not a changed production 5s budget.

@@ -62,25 +62,10 @@ Copilot is reachable.
 
 **Enabling `serve --shim-usage-meter-enabled` also exposes aggregate history
 without authentication on the existing `--addr` listener.** Anyone who can reach
-`GET /usage/v1/report` can read model identities, activity patterns, estimated
-current valuation, and pricing coverage. Inference
+`GET /usage/v1/report` can read model identities and activity patterns. Inference
 API keys, missing CORS headers, and private database permissions do not protect
 this HTTP path; use bind/firewall/reverse-proxy policy. HTTP is plain TCP unless
 an operator supplies a TLS reverse proxy or tunnel.
-
-An enabled Usage meter also registers a memory-only `models.dev/api.json`
-pricing cached value. Its identified vendored floor is immediately available;
-best-effort refresh uses a credential-free, redirect-refusing public request and
-holds last-good on failure. Original-provider rates are limited to OpenAI,
-Anthropic, Google, and xAI and select the highest structured context tier, then
-the legacy long-context row, then base. Prices are neither persisted nor a
-Copilot bill, and source failure does not gate readiness or native reports. Set
-`--usage-pricing-refresh-interval=0` to pin the embedded floor. Each report uses
-one captured local snapshot; report requests perform no pricing network work.
-The version-1 HTTP response identifies that snapshot under `pricing`, adds exact
-USD `cost` and priced/unpriced Turn coverage to every row/model/section total,
-and adds `pricing_match` to rows and range-model entries. Unpriceable Turns remain
-successful native report data.
 
 Reports support Anthropic and OpenAI, separately or together (the default), with
 daily, Monday-weekly, monthly, or yearly groups in a named timezone:
@@ -99,14 +84,10 @@ copilotd usage --timezone UTC --period month --since 2026-01-01 --json
 appending `/usage/v1/report`. The command is an HTTP client, never an offline
 SQLite reader. It shows exact native counts and stored-Turn coverage in
 Reported-model rows grouped by period, with a `Day`, `Week`, `Month`, or `Year`
-first-column heading. Each primary Surface table places **Est. USD** immediately
-after `Model(s)` and before `Turns`; secondary native tables do not repeat money.
-Amounts use exact daemon-supplied USD values rounded half up to three fractional
-digits. Each period starts with a terminal-only `Total` derived from its validated
-model rows and separated from the model breakdown. Text sums exact amounts before
-rounding, uses checked int64 coverage/native subtotal arithmetic, and fails before
-stdout if inconsistent rows or monetary addition would overflow; `--json` still
-emits the independently validated original bytes.
+first-column heading. Each period starts with a terminal-only `Total` derived
+from its validated model rows and separated from the model breakdown. Text uses
+checked int64 subtotal arithmetic and fails before stdout if inconsistent rows
+would overflow; `--json` still emits the independently validated original bytes.
 Whole-range per-model and section totals remain in JSON but are not repeated in
 the text tables. Anthropic appears first with **Uncached input**,
 Output, Cache create, and Cache read; OpenAI retains complete Input, Output, Cache write,
@@ -149,32 +130,16 @@ cross-builds alone.
 `--model` selects an exact non-empty valid UTF-8 **Reported model**, preserving
 case, whitespace, and Unicode without Catalog alias expansion or Requested-model
 substitution. Unknown identities succeed empty. `--details` adds native reasoning
-and reported-total counts for OpenAI, thinking/cache-TTL counts for Anthropic,
-and a distinct Reported-model → Pricing-model resolution list with method or
-explicit unknown/ambiguous status. A match does not by itself establish that a
-Turn is priceable. Text safely ASCII-escapes
+and reported-total counts for OpenAI, and thinking/cache-TTL counts for Anthropic,
+for the same period totals and Reported-model breakdowns. Text safely ASCII-escapes
 model identities without surrounding quotes, including boundary spaces. `—` means unreported, `0` means reported
 zero, and `*` shows partial stored-Turn coverage. Static tables use rounded Lip Gloss borders without color
 or interactive terminal control; `range_partial` and `in_progress` remain
 available in JSON.
 `--json` emits the complete validated original response plus a newline, preserving
-exact decimal count and amount strings, Unicode, pricing fields, and unknown
-additive fields. Pricing provenance and every nested cost/match object are an
-atomic additive extension: the client accepts a wholly absent extension as an
-older daemon, but rejects partial or dangling recognized fields. Cost amounts are
-exact nonnegative decimal strings; `null` means a nonempty aggregate has no
-priceable Turns, while empty and priceable-free aggregates carry `"0"`. Coverage
-partitions stored Turns into priced Turns and five explicit exclusion reasons.
-In text, a partial priced subtotal has `*`, a wholly unpriced nonempty group has
-`—`, and compact period/model notes list priced/total stored Turns plus every
-nonzero exclusion reason. The header identifies fetched/fallback provenance and
-successful fetch time when present, followed by the current-rate approximation
-and non-billing caveat. A new CLI talking to an older daemon keeps native counts
-usable and says `Estimated cost unavailable (daemon does not provide prices)`;
-it never prices locally. `--details` does not change JSON or make another request.
-There is no raw-Turn export, HTML, chart output, or cross-Surface monetary/token
-grand total.
-[Contention and lifecycle integration evidence](docs/research/2026-09-08-usage-reporting-concurrency.md)
+exact decimal count strings, Unicode, and additive fields. `--details` does not
+change JSON or make another request. There is no pricing, raw-Turn export, HTML,
+or chart output. [Contention and lifecycle integration evidence](docs/research/2026-09-08-usage-reporting-concurrency.md)
 includes real blocked TCP output and native SQLite cleanup; the
 [release verification guide](docs/verification/usage-reporting.md) separates
 implemented behavior from the required native release gate.
@@ -225,8 +190,8 @@ WebSocket requested-model attribution remains absent. With the flag off,
 
 The owner-only GitHub OAuth token file remains the only other persisted
 application state; an injected GitHub OAuth token needs no file. Copilot tokens
-and best-effort cached values, including the models.dev pricing snapshot, stay
-in memory with embedded fallbacks and no disk persistence
+and best-effort cached values stay in memory, with embedded fallbacks and no
+disk persistence
 ([ADR-0009](docs/adr/0009-refresh-codex-models-from-latest-release-in-memory.md)).
 Optional configuration files and log destinations are operator inputs/outputs,
 not additional application state stores.
@@ -250,7 +215,6 @@ handlers instead fetch support data and render their own representations.
 | Inference shims | `internal/shim` | Ordered hook contract for opt-in parity transforms and read-only observers, including the Responses item-id stabilizer and Usage meter completion observation on all five supported Surface/transport paths |
 | Usage persistence | `internal/usage`, `internal/usage/sqlitestore` | Standard-library usage contract plus private local SQLite writer, migrations, bounded loss reporting, and finalization |
 | Usage reporting | `internal/usage/report`, `internal/usage/reporthttp`, `internal/usage/reportcli` | Bounded snapshot aggregation, local HTTP contract and strict client validation, safe terminal presentation |
-| Usage pricing | `internal/usage/pricing` | Validated original-provider pricing snapshots, exact rate/amount arithmetic, and the memory-only models.dev source |
 | Catalogs | `internal/catalog` | Provider-shaped and Codex model catalogs |
 | Observability | `internal/logging`, `internal/requestsummary`, component-owned counters | Structured logs, request correlation, terminal summaries, metric scaffolding |
 | Build and distribution | `flake.nix`, `.github/workflows/` | Reproducible builds, verification, release archives and checksums |

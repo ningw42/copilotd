@@ -43,7 +43,7 @@ func TestQueryCombinedHistoryPreservesAttributionAndCoverage(t *testing.T) {
 	for _, surface := range []string{"", "all"} {
 		q := selection()
 		q.Surface = surface
-		got, err := newReporter(t, path).Query(context.Background(), q)
+		got, err := report.New(path).Query(context.Background(), q)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -51,7 +51,7 @@ func TestQueryCombinedHistoryPreservesAttributionAndCoverage(t *testing.T) {
 			t.Fatalf("combined selection: %+v", got)
 		}
 		a, o := got.Anthropic, got.OpenAI
-		want := report.Total{Turns: 3, Cost: report.Cost{Unpriced: report.UnpricedCoverage{UnknownModel: 3}}, Usage: map[string]report.Metric{
+		want := report.Total{Turns: 3, Usage: map[string]report.Metric{
 			"input_tokens": {Sum: ptr(22), ReportedTurns: 3}, "output_tokens": {Sum: ptr(12), ReportedTurns: 3},
 			"cache_creation_input_tokens": {Sum: ptr(2000), ReportedTurns: 2}, "cache_read_input_tokens": {Sum: ptr(6000), ReportedTurns: 2},
 			"ephemeral_5m_input_tokens": {Sum: ptr(750), ReportedTurns: 1}, "ephemeral_1h_input_tokens": {Sum: ptr(1250), ReportedTurns: 1}, "thinking_tokens": {Sum: ptr(4), ReportedTurns: 1},
@@ -76,7 +76,7 @@ func TestQueryDistinguishesSelectedEmptyAndUnselectedNativeSections(t *testing.T
 	for _, surface := range []string{"anthropic", "openai", "all", ""} {
 		q := selection()
 		q.Surface = surface
-		got, err := newReporter(t, path).Query(context.Background(), q)
+		got, err := report.New(path).Query(context.Background(), q)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -147,7 +147,7 @@ func TestQueryFailsAtomicallyForEitherSelectedNativeSection(t *testing.T) {
 			}
 			q := selection()
 			q.Surface = "all"
-			got, err := newReporter(t, path).Query(context.Background(), q)
+			got, err := report.New(path).Query(context.Background(), q)
 			var failure *report.Error
 			if !errors.As(err, &failure) || failure.Code != tc.code || !reflect.DeepEqual(got, report.Report{}) {
 				t.Fatalf("whole report must fail: %+v %v", got, err)
@@ -159,7 +159,7 @@ func TestQueryFailsAtomicallyForEitherSelectedNativeSection(t *testing.T) {
 			if tc.table == "anthropic_turn" {
 				q.Surface = "openai"
 			}
-			if _, err := newReporter(t, path).Query(context.Background(), q); err != nil {
+			if _, err := report.New(path).Query(context.Background(), q); err != nil {
 				t.Fatalf("unselected bad rows must not be examined: %v", err)
 			}
 		})
@@ -174,7 +174,7 @@ func TestQuerySharesRetainedModelIdentityAcrossNativeSections(t *testing.T) {
 		turn("2026-09-01T00:00:00Z", model, usage.OpenAIUsage{InputTokens: 8012}))
 	q := selection()
 	q.Surface = "all"
-	got, err := newReporter(t, path).Query(context.Background(), q)
+	got, err := report.New(path).Query(context.Background(), q)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -190,11 +190,11 @@ func TestQueryDailyAnthropicNativeCounts(t *testing.T) {
 	}))
 	q := selection()
 	q.Surface = "anthropic"
-	got, err := newReporter(t, path).Query(context.Background(), q)
+	got, err := report.New(path).Query(context.Background(), q)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := report.Total{Turns: 1, Cost: report.Cost{Unpriced: report.UnpricedCoverage{UnknownModel: 1}}, Usage: map[string]report.Metric{
+	want := report.Total{Turns: 1, Usage: map[string]report.Metric{
 		"input_tokens": {Sum: ptr(12), ReportedTurns: 1}, "output_tokens": {Sum: ptr(9), ReportedTurns: 1},
 		"cache_creation_input_tokens": {Sum: ptr(2000), ReportedTurns: 1}, "cache_read_input_tokens": {Sum: ptr(6000), ReportedTurns: 1},
 		"ephemeral_5m_input_tokens": {Sum: ptr(750), ReportedTurns: 1}, "ephemeral_1h_input_tokens": {Sum: ptr(1250), ReportedTurns: 1},

@@ -92,7 +92,7 @@ func TestCommandDetailsGroupsOpenAIReportedSecondaryValuesByPeriod(t *testing.T)
 			t.Errorf("missing secondary row %q: %s", want, text)
 		}
 	}
-	assertTextExcludes(t, text, "\x1b", "\u202e", `"evil\x1b[31m\n\u202e"`, `├─ "`, `└─ "`, "│ All ", "[clipped]", "[in progress]", "Model totals", "Section total", "│ Range", "reported total: 1/2 stored Turns", "9,223,372,036,854,775,807")
+	assertTextExcludes(t, text, "\x1b", "\u202e", `"evil\x1b[31m\n\u202e"`, `├─ "`, `└─ "`, "│ All ", "[clipped]", "[in progress]", "Model totals", "Section total", "│ Range", "reported total: 1/2 stored Turns", "9,223,372,036,854,775,807", "Persisted successful Turns observed by the Usage meter", "Optional-count coverage refers only to stored Turns")
 	options.Details = false
 	out.Reset()
 	if err := reportcli.Run(context.Background(), client, options, &out); err != nil {

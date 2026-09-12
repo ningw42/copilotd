@@ -27,7 +27,6 @@ import (
 	"github.com/ningw42/copilotd/internal/shim"
 	"github.com/ningw42/copilotd/internal/sse"
 	"github.com/ningw42/copilotd/internal/usage"
-	"github.com/ningw42/copilotd/internal/usage/pricing"
 	"github.com/ningw42/copilotd/internal/usage/sqlitestore"
 )
 
@@ -58,7 +57,6 @@ type usageMeterServeHarness struct {
 	cfg     config.ServeConfig
 	baseURL string
 	store   *sqlitestore.Store
-	caches  *cache.Registry
 	cancel  context.CancelFunc
 	done    <-chan error
 
@@ -72,24 +70,11 @@ type usageMeterServeHarness struct {
 // without replacing the production HTTP handler, encoder or connection writes.
 func startUsageMeterServeHarness(t *testing.T, upstreamURL string, base *slog.Logger, configure func(*config.ServeConfig), decorate func(shim.Registry) shim.Registry, listeners ...net.Listener) *usageMeterServeHarness {
 	t.Helper()
-	remote := pricing.NewRemote("https://models.invalid/api.json", mainRoundTripFunc(func(*http.Request) (*http.Response, error) {
-		return nil, errors.New("offline pricing fixture was unexpectedly fetched")
-	}))
-	return startUsageMeterServeHarnessWithPricing(t, upstreamURL, base, configure, decorate, remote, listeners...)
-}
-
-// startUsageMeterServeHarnessWithPricing replaces only the existing public
-// pricing source edge for deterministic executable acceptance. Runtime flags and
-// production composition remain unchanged.
-func startUsageMeterServeHarnessWithPricing(t *testing.T, upstreamURL string, base *slog.Logger, configure func(*config.ServeConfig), decorate func(shim.Registry) shim.Registry, remote pricing.Remote, listeners ...net.Listener) *usageMeterServeHarness {
-	t.Helper()
 	cfg := e2eConfig("gho-usage-meter-serve-harness")
 	// Ordinary fixture finalization uses the production shutdown budget. Tests
 	// of bounded forced shutdown override it explicitly below.
 	cfg.ShutdownTimeout = usageMeterFixtureShutdownTimeout
 	cfg.ImpersonationRefreshInterval = 0
-	// Meter-enabled integration fixtures must never acquire a live pricing edge.
-	cfg.UsagePricingRefreshInterval = 0
 	cfg.WebSocketHandshakeTimeout = 5 * time.Second
 	cfg.ShimUsageMeterEnabled = true
 	cfg.UsageDBPath = filepath.Join(t.TempDir(), "usage", "usage.db")
@@ -115,12 +100,10 @@ func startUsageMeterServeHarnessWithPricing(t *testing.T, upstreamURL string, ba
 	var exchangeAuth, exchangeUA string
 	github := newGitHubExchangeStub(t, "copilot-usage-meter-serve-harness", upstreamURL, &exchangeAuth, &exchangeUA)
 	cacheRegistry := cache.NewRegistry()
-	harness.caches = cacheRegistry
 	mgr, imp, err := buildServeProvider(cfg, base, github.URL, github.Client(), productionDiscoveryEdge(), cacheRegistry)
 	if err != nil {
 		t.Fatalf("build serve provider: %v", err)
 	}
-	usagePricing := configuredUsagePricing(cfg, remote, cacheRegistry, base)
 	registry := configuredShimRegistry(cfg, sink)
 	if decorate != nil {
 		registry = decorate(registry)
@@ -146,7 +129,7 @@ func startUsageMeterServeHarnessWithPricing(t *testing.T, upstreamURL string, ba
 	done := make(chan error, 1)
 	harness.done = done
 	go func() {
-		done <- runBoundServe(ctx, cfg, base, mgr, imp, nil, usagePricing, cacheRegistry, registry, ln, store)
+		done <- runBoundServe(ctx, cfg, base, mgr, imp, nil, cacheRegistry, registry, ln, store)
 	}()
 	t.Cleanup(func() { _ = harness.stop() })
 	assertHTTPStatusEventually(t, harness.baseURL+"/healthz", http.StatusOK)
@@ -235,7 +218,7 @@ func TestRunServeUsageStoreFailurePrecedesBindAndDisabledServeCreatesNothing(t *
 			"serve", "--apikey", testAPIKey, "--github-oauth-token", "gho-local",
 			"--addr", held.Addr().String(), "--shim-usage-meter-enabled=true",
 			"--usage-db-path", dbPath, "--log-file", logPath,
-			"--impersonation-refresh-interval", "0", "--usage-pricing-refresh-interval", "0",
+			"--impersonation-refresh-interval", "0",
 		}, noEnv(), io.Discard, io.Discard)
 		if code != 1 {
 			t.Fatalf("exit code = %d, want 1", code)
@@ -295,7 +278,7 @@ func TestRunServeFinalizesOpenedUsageStoreOnBindFailure(t *testing.T) {
 		"serve", "--apikey", testAPIKey, "--github-oauth-token", "gho-local",
 		"--addr", held.Addr().String(), "--shim-usage-meter-enabled=true",
 		"--usage-db-path", dbPath, "--log-file", logPath,
-		"--impersonation-refresh-interval", "0", "--usage-pricing-refresh-interval", "0",
+		"--impersonation-refresh-interval", "0",
 	}, noEnv(), io.Discard, io.Discard)
 	if code != 1 {
 		t.Fatalf("exit code = %d, want bind failure", code)

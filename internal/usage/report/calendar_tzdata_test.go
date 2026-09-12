@@ -26,7 +26,7 @@ func TestQueryOperatorTimezoneData(t *testing.T) {
 			{"Test/Excessive", "2024-01-01", "2024-01-02", TooLarge},
 			{"Test/Unrepresentable", "9998-12-31", "9999-01-01", InvalidQuery},
 		} {
-			got, err := newReporterForTest(path).Query(context.Background(), Query{Timezone: tc.zone, Since: tc.since, Until: tc.until})
+			got, err := New(path).Query(context.Background(), Query{Timezone: tc.zone, Since: tc.since, Until: tc.until})
 			var failure *Error
 			if !errors.As(err, &failure) || failure.Code != tc.code || got.OpenAI != nil {
 				t.Fatalf("%s: %+v %v", tc.zone, got, err)
@@ -36,7 +36,7 @@ func TestQueryOperatorTimezoneData(t *testing.T) {
 			}
 		}
 		ctx := &calendarCancelContext{Context: context.Background(), remaining: 30}
-		_, err := newReporterForTest(path).Query(ctx, Query{Timezone: "Test/Excessive", Since: "2024-01-01", Until: "2024-01-02"})
+		_, err := New(path).Query(ctx, Query{Timezone: "Test/Excessive", Since: "2024-01-01", Until: "2024-01-02"})
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("calendar cancellation: %v", err)
 		}

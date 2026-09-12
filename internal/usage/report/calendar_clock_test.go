@@ -27,7 +27,7 @@ func calendarReader(t *testing.T, now string, turns ...usage.Turn) *Reporter {
 	if result := store.Close(context.Background()); !result.DriverCleanupCompleted || result.FinalFlushLosses != 0 {
 		t.Fatalf("fixture: %+v", result)
 	}
-	r := newReporterForTest(path)
+	r := New(path)
 	at, err := time.Parse(time.RFC3339, now)
 	if err != nil {
 		t.Fatal(err)

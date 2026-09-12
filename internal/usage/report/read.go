@@ -13,8 +13,6 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/ningw42/copilotd/internal/usage"
-	"github.com/ningw42/copilotd/internal/usage/pricing"
 	"github.com/ningw42/copilotd/internal/usage/sqlitestore"
 )
 
@@ -41,7 +39,7 @@ func productionReadLimits() readLimits {
 
 // Each call owns exactly one read-only connection and one snapshot, including
 // compatibility checks. No resource survives materialization, even on failure.
-func (r *Reporter) read(ctx context.Context, buckets []Bucket, surface string, model *string, budget *readBudget, valuation *capturedPricing) (_ map[string]*Section, err error) {
+func (r *Reporter) read(ctx context.Context, buckets []Bucket, surface string, model *string) (_ map[string]*Section, err error) {
 	if !filepath.IsAbs(r.path) {
 		return nil, errors.New("database path is not absolute")
 	}
@@ -115,13 +113,14 @@ func (r *Reporter) read(ctx context.Context, buckets []Bucket, surface string, m
 		}
 	}
 	sections := map[string]*Section{}
+	budget := readBudget{limits: r.limits, afterExaminedTurn: r.afterExaminedTurn, identities: map[string]string{}}
 	for _, native := range []string{"anthropic", "openai"} {
 		if surface != "all" && surface != native {
 			continue
 		}
 		// Close each table's Rows before the next query, retaining the same
 		// transaction and request-wide budgets for both native sections.
-		sections[native], err = readSection(ctx, conn, buckets, native, model, budget, valuation)
+		sections[native], err = readSection(ctx, conn, buckets, native, model, &budget)
 		if err != nil {
 			return nil, err
 		}
@@ -136,19 +135,7 @@ type readBudget struct {
 	retainedBytes, examined, groups int
 }
 
-func (b *readBudget) remainingIdentityBytes() int {
-	return max(0, b.limits.maxDistinctModelBytes-b.retainedBytes)
-}
-
-func (b *readBudget) retainIdentityBytes(size int) error {
-	if size < 0 || size > b.remainingIdentityBytes() {
-		return tooLarge()
-	}
-	b.retainedBytes += size
-	return nil
-}
-
-func readSection(ctx context.Context, conn *sql.Conn, buckets []Bucket, surface string, model *string, budget *readBudget, valuation *capturedPricing) (_ *Section, err error) {
+func readSection(ctx context.Context, conn *sql.Conn, buckets []Bucket, surface string, model *string, budget *readBudget) (_ *Section, err error) {
 	if err = capBusy(ctx, conn); err != nil {
 		return nil, err
 	}
@@ -215,22 +202,12 @@ func readSection(ctx context.Context, conn *sql.Conn, buckets []Bucket, surface 
 		}
 		model, interned := budget.identities[safeModel.String]
 		if !interned {
-			if err := budget.retainIdentityBytes(len(safeModel.String)); err != nil {
-				return nil, err
+			budget.retainedBytes += len(safeModel.String)
+			if budget.retainedBytes > budget.limits.maxDistinctModelBytes {
+				return nil, tooLarge()
 			}
 			model = safeModel.String
 			budget.identities[model] = model
-		}
-		selectedPricing, err := valuation.model(ctx, model)
-		if err != nil {
-			return nil, err
-		}
-		contribution, err := valueTurn(surface, counts, selectedPricing)
-		if err != nil {
-			if errors.Is(err, pricing.ErrOverflow) {
-				return nil, overflow()
-			}
-			return nil, err
 		}
 		// Timestamp-ordered rows belong to the authoritative half-open UTC
 		// intervals, even when a historical clock reversal displays yesterday.
@@ -278,33 +255,16 @@ func readSection(ctx context.Context, conn *sql.Conn, buckets []Bucket, surface 
 					total.Usage[name] = m
 				}
 			}
-			if err := addCost(&total.Cost, contribution); err != nil {
-				return nil, err
-			}
 		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 	for key, total := range groups {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		selected, ok := valuation.memo[key.model]
-		if !ok {
-			return nil, errors.New("missing memoized pricing resolution")
-		}
-		section.Rows = append(section.Rows, Row{BucketStart: key.bucket, ModelTotal: ModelTotal{Model: key.model, Total: *total, PricingMatch: selected.match}})
+		section.Rows = append(section.Rows, Row{BucketStart: key.bucket, ModelTotal: ModelTotal{Model: key.model, Total: *total}})
 	}
 	for model, total := range models {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		selected, ok := valuation.memo[model]
-		if !ok {
-			return nil, errors.New("missing memoized pricing resolution")
-		}
-		section.Models = append(section.Models, ModelTotal{Model: model, Total: *total, PricingMatch: selected.match})
+		section.Models = append(section.Models, ModelTotal{Model: model, Total: *total})
 	}
 	sort.Slice(section.Rows, func(i, j int) bool {
 		a, b := section.Rows[i], section.Rows[j]
@@ -312,103 +272,6 @@ func readSection(ctx context.Context, conn *sql.Conn, buckets []Bucket, surface 
 	})
 	sort.Slice(section.Models, func(i, j int) bool { return section.Models[i].Model < section.Models[j].Model })
 	return &section, ctx.Err()
-}
-
-type turnContribution struct {
-	amount pricing.Amount
-	reason string
-}
-
-func valueTurn(surface string, counts []sql.NullInt64, selected modelPricing) (turnContribution, error) {
-	switch selected.match.Status {
-	case PricingMatchUnknown:
-		return turnContribution{reason: "unknown_model"}, nil
-	case PricingMatchAmbiguous:
-		return turnContribution{reason: "ambiguous_model"}, nil
-	case PricingMatchMatched:
-	default:
-		return turnContribution{}, errors.New("invalid pricing resolution")
-	}
-
-	var contribution pricing.Contribution
-	var err error
-	if surface == "anthropic" {
-		contribution, err = pricing.CalculateAnthropic(usage.AnthropicUsage{
-			InputTokens:              counts[0].Int64,
-			OutputTokens:             counts[1].Int64,
-			CacheCreationInputTokens: nullableCount(counts[2]),
-			CacheReadInputTokens:     nullableCount(counts[3]),
-			Ephemeral5mInputTokens:   nullableCount(counts[4]),
-			Ephemeral1hInputTokens:   nullableCount(counts[5]),
-			ThinkingTokens:           nullableCount(counts[6]),
-		}, selected.rates)
-	} else {
-		contribution, err = pricing.CalculateOpenAI(usage.OpenAIUsage{
-			InputTokens:      counts[0].Int64,
-			OutputTokens:     counts[1].Int64,
-			CachedTokens:     nullableCount(counts[2]),
-			CacheWriteTokens: nullableCount(counts[3]),
-			ReasoningTokens:  nullableCount(counts[4]),
-			TotalTokens:      nullableCount(counts[5]),
-		}, selected.rates)
-	}
-	if err != nil {
-		return turnContribution{}, err
-	}
-	return turnContribution{amount: contribution.Amount, reason: string(contribution.Reason)}, nil
-}
-
-func nullableCount(count sql.NullInt64) *int64 {
-	if !count.Valid {
-		return nil
-	}
-	value := count.Int64
-	return &value
-}
-
-func addCost(cost *Cost, contribution turnContribution) error {
-	if contribution.reason != "" {
-		if cost.PricedTurns == 0 {
-			cost.Amount = nil
-		}
-		var count *int64
-		switch contribution.reason {
-		case "unknown_model":
-			count = &cost.Unpriced.UnknownModel
-		case "ambiguous_model":
-			count = &cost.Unpriced.AmbiguousModel
-		case string(pricing.ExclusionMissingRate):
-			count = &cost.Unpriced.MissingRate
-		case string(pricing.ExclusionMissingUsage):
-			count = &cost.Unpriced.MissingUsage
-		case string(pricing.ExclusionInconsistentUsage):
-			count = &cost.Unpriced.InconsistentUsage
-		default:
-			return errors.New("invalid pricing exclusion")
-		}
-		if *count == math.MaxInt64 {
-			return overflow()
-		}
-		*count = *count + 1
-		return nil
-	}
-	if cost.PricedTurns == math.MaxInt64 {
-		return overflow()
-	}
-	var current pricing.Amount
-	if cost.Amount != nil {
-		current = *cost.Amount
-	}
-	total, err := current.Add(contribution.amount)
-	if err != nil {
-		if errors.Is(err, pricing.ErrOverflow) {
-			return overflow()
-		}
-		return err
-	}
-	cost.PricedTurns++
-	cost.Amount = &total
-	return nil
 }
 
 // Floor, rather than round up: a sub-millisecond remainder means no native
@@ -429,5 +292,5 @@ func capBusy(ctx context.Context, conn *sql.Conn) error {
 }
 
 func overflow() error {
-	return &Error{Code: Overflow, Message: "Exact aggregation exceeds supported numeric bounds; narrow the date range or model/Surface selection."}
+	return &Error{Code: Overflow, Message: "Exact aggregate exceeds int64; narrow the date range or model/Surface selection."}
 }

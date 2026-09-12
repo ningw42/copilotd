@@ -15,7 +15,7 @@ import (
 
 func TestQueryDeniedDatabaseReadIsGenericUnavailable(t *testing.T) {
 	path := stored(t, turn("2026-09-01T00:00:00Z", "permission", usage.OpenAIUsage{InputTokens: 1}))
-	if _, err := newReporter(t, path).Query(context.Background(), selection()); err != nil {
+	if _, err := report.New(path).Query(context.Background(), selection()); err != nil {
 		t.Fatalf("query closed writer fixture: %v", err)
 	}
 	info, err := os.Stat(path)
@@ -43,7 +43,7 @@ func TestQueryDeniedDatabaseReadIsGenericUnavailable(t *testing.T) {
 		t.Fatalf("database read denial preflight: %v; want os.ErrPermission", openErr)
 	}
 
-	got, err := newReporter(t, path).Query(context.Background(), selection())
+	got, err := report.New(path).Query(context.Background(), selection())
 	var failure *report.Error
 	if !errors.As(err, &failure) {
 		t.Fatalf("permission failure type: %v", err)

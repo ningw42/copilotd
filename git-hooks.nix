@@ -9,11 +9,7 @@
   # File hygiene for everything treefmt doesn't format (Markdown, config, ...).
   check-merge-conflicts.enable = true;
   trim-trailing-whitespace.enable = true;
-  end-of-file-fixer = {
-    enable = true;
-    # Preserve the independently identified vendored response bytes exactly.
-    excludes = [ "^internal/usage/pricing/modelsdevdata/api\\.json$" ];
-  };
+  end-of-file-fixer.enable = true;
   mixed-line-endings = {
     enable = true;
     args = [ "--fix=lf" ];

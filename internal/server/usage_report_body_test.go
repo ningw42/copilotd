@@ -18,7 +18,6 @@ import (
 	"github.com/ningw42/copilotd/internal/forward"
 	"github.com/ningw42/copilotd/internal/logging"
 	"github.com/ningw42/copilotd/internal/usage"
-	"github.com/ningw42/copilotd/internal/usage/pricing"
 	"github.com/ningw42/copilotd/internal/usage/report"
 	"github.com/ningw42/copilotd/internal/usage/reporthttp"
 	"github.com/ningw42/copilotd/internal/usage/sqlitestore"
@@ -28,29 +27,6 @@ import (
 // not itself a latency contract. Keep it wider than the route's real five-second
 // deadline so transient hosted-runner I/O does not fail the fixture first.
 const reportBodyFixtureWatchdog = 10 * time.Second
-
-type reportBodyPricingSource struct {
-	snapshot *pricing.Snapshot
-}
-
-func (s reportBodyPricingSource) Current(ctx context.Context, limit pricing.ProjectionLimit) (*pricing.Snapshot, pricing.SnapshotStatus, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, pricing.SnapshotStatus{}, err
-	}
-	if s.snapshot.IdentityBytes() > limit.MaxIdentityBytes {
-		return nil, pricing.SnapshotStatus{}, pricing.ErrProjectionLimit
-	}
-	return s.snapshot, pricing.SnapshotStatus{Source: "fallback", Version: "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"}, nil
-}
-
-func reportBodyPricing(t *testing.T) pricing.Source {
-	t.Helper()
-	snapshot, err := pricing.ParseSnapshot(context.Background(), []byte(`{"openai":{"id":"openai","models":{}},"anthropic":{"id":"anthropic","models":{}},"google":{"id":"google","models":{}},"xai":{"id":"xai","models":{}}}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	return reportBodyPricingSource{snapshot: snapshot}
-}
 
 // orderedReportDeadlineWriter controls notification ordering at the public HTTP
 // boundary, not the handler's five-second deadline values. In the read-first
@@ -215,7 +191,7 @@ func TestUsageIncompleteRequestBodiesReleaseReportSlotsWithinWriteBudget(t *test
 			// net/http's response buffer: Write must flush while holding its slot.
 			store.Record(usage.Turn{At: time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC), Model: strings.Repeat("m", 4096), Transport: usage.TransportBuffered, Usage: usage.OpenAIUsage{InputTokens: 1, OutputTokens: 2}})
 			closeReportBodyFixtureStore(t, store)
-			reader := report.New(path, reportBodyPricing(t))
+			reader := report.New(path)
 			completed := make(chan struct{}, 2)
 			addr := startReportBodyServer(t, func(ctx context.Context, q report.Query) (report.Report, error) {
 				result, err := reader.Query(ctx, q)
@@ -344,7 +320,7 @@ func TestReportIncompleteBodiesBoundFinalFlushAndRecovery(t *testing.T) {
 				t.Fatal(err)
 			}
 			closeReportBodyFixtureStore(t, store)
-			reader := report.New(path, reportBodyPricing(t))
+			reader := report.New(path)
 			completed := make(chan struct{}, 2)
 			var query reporthttp.QueryFunc = func(ctx context.Context, q report.Query) (report.Report, error) {
 				defer func() { completed <- struct{}{} }()

@@ -11,6 +11,7 @@ import (
 
 	"github.com/ningw42/copilotd/internal/logging"
 	"github.com/ningw42/copilotd/internal/usage"
+	"github.com/ningw42/copilotd/internal/usage/report"
 	"github.com/ningw42/copilotd/internal/usage/sqlitestore"
 )
 
@@ -22,7 +23,7 @@ func TestQueryUsesLiteralConfiguredPathPunctuation(t *testing.T) {
 	}
 	writer.Record(turn("2026-09-01T00:00:00Z", "literal", usage.OpenAIUsage{InputTokens: 19}))
 	writer.Close(context.Background())
-	result, err := newReporter(t, path).Query(context.Background(), selection())
+	result, err := report.New(path).Query(context.Background(), selection())
 	if err != nil {
 		t.Fatal(err)
 	}

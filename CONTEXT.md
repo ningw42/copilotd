@@ -173,27 +173,9 @@ _Avoid_: billing meter, usage tracker
 
 **Usage report**:
 A calendar aggregation of persisted Turns by Surface and Reported model, retaining
-the native counts and their reporting coverage and optionally valuing priceable
-Turns as Estimated cost. It describes observed history, not billing, complete
-consumption, or per-process attribution.
+the native counts and their reporting coverage. It describes observed history,
+not billing, complete consumption, or per-process attribution.
 _Avoid_: billing report, request totals (for Turn counts)
-
-**Estimated cost**:
-A USD valuation of fully priceable persisted Turns using the daemon's current
-accepted original-provider rates. It is not a Copilot bill, invoice, or proof of
-complete consumption.
-_Avoid_: billed cost, charge, spend
-
-**Pricing coverage**:
-The partition of stored Turns between fully priceable Turns and explicit reasons
-that valuation excluded the rest. It describes stored evidence, not billing or
-consumption completeness.
-_Avoid_: billing coverage, cost completeness
-
-**Pricing model**:
-The original-provider/model pair selected to value a Reported model. It is
-independent of Surface, Requested model, forwarding targets, and Catalog metadata.
-_Avoid_: billed model, resolved model, provider model
 
 **Requested model**:
 The explicit model string in the upstream-bound HTTP inference request after
