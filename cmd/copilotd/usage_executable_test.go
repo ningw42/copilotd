@@ -121,12 +121,16 @@ func TestUsageExecutableAcceptance(t *testing.T) {
 		assertTextExcludes(t, out, "best-effort and potentially incomplete", "Optional-count coverage refers only to stored Turns")
 	})
 	t.Run("observed_inference_to_executable", func(t *testing.T) {
+		openAIFixture, err := os.ReadFile(filepath.Join("..", "..", "internal", "shim", "testdata", "usage", "openai-responses-buffered.recorded.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
 		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			if strings.Contains(r.URL.Path, "messages") {
 				_, _ = io.WriteString(w, `{"id":"synthetic","type":"message","stop_reason":"end_turn","model":"observed","usage":{"input_tokens":12,"output_tokens":9}}`)
 			} else {
-				_, _ = io.WriteString(w, `{"id":"synthetic","status":"completed","model":"observed","usage":{"input_tokens":8012,"output_tokens":9}}`)
+				_, _ = w.Write(openAIFixture)
 			}
 		}))
 		defer upstream.Close()
@@ -153,8 +157,20 @@ func TestUsageExecutableAcceptance(t *testing.T) {
 			out := usageExec(t, binary, nil, 0, "usage", "--endpoint", h.baseURL, "--timezone", "UTC", "--since", before.Format(time.DateOnly), "--until", time.Now().UTC().AddDate(0, 0, 1).Format(time.DateOnly), "--json")
 			r := usageExecutableReport(t, out)
 			if r.Anthropic.Total.Turns == 1 && r.OpenAI.Total.Turns == 1 {
-				if *r.Anthropic.Total.Usage["input_tokens"].Sum != 12 || *r.OpenAI.Total.Usage["input_tokens"].Sum != 8012 || r.OpenAI.Rows[0].Model != "observed" {
-					t.Fatal("observed counts/identity")
+				openAI := r.OpenAI.Total
+				if *r.Anthropic.Total.Usage["input_tokens"].Sum != 12 || r.OpenAI.Rows[0].Model != "gpt-5.6-sol" ||
+					*openAI.Usage["input_tokens"].Sum != 12 || *openAI.Usage["output_tokens"].Sum != 6 ||
+					*openAI.Usage["cached_tokens"].Sum != 0 || *openAI.Usage["cache_write_tokens"].Sum != 0 ||
+					*openAI.Usage["reasoning_tokens"].Sum != 0 || *openAI.Usage["total_tokens"].Sum != 18 {
+					t.Fatalf("recorded native counts/identity changed: %+v", r.OpenAI)
+				}
+				var priced usageCostExecutableWire
+				if err := json.Unmarshal([]byte(out), &priced); err != nil {
+					t.Fatal(err)
+				}
+				cost := priced.OpenAI.Total.Cost
+				if cost.Amount == nil || *cost.Amount != "0.000168" || cost.PricedTurns != "1" {
+					t.Fatalf("recorded 12-token context did not use gpt-5.6-sol base rates: %+v", cost)
 				}
 				break
 			}
@@ -166,7 +182,7 @@ func TestUsageExecutableAcceptance(t *testing.T) {
 		if err := h.stopAfterClient(client); err != nil {
 			t.Fatal(err)
 		}
-		t.Log("live synthetic inference -> in-process production daemon/meter/writer -> actual usage executable; separate prior-history tests use actual serve executable")
+		t.Log("recorded September OpenAI fixture and synthetic Anthropic inference -> in-process production daemon/meter/writer -> actual usage executable; gpt-5.6-sol short context uses embedded base rates and preserves every native aggregate")
 	})
 	t.Run("details", func(t *testing.T) {
 		out := usageExec(t, binary, nil, 0, append(base, "--model", "Model", "--details")...)
@@ -535,6 +551,9 @@ func TestUsageCostExecutableAcceptance(t *testing.T) {
 	at := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
 	for _, turn := range []usage.Turn{
 		{At: at, Model: "gpt-tiered", Transport: usage.TransportBuffered, Usage: usage.OpenAIUsage{InputTokens: 3 * million, OutputTokens: million, CachedTokens: &million, CacheWriteTokens: &million}},
+		// This short-context Turn resolves to the same Pricing model but must use
+		// its base vector rather than either structured context tier.
+		{At: at, Model: "gpt-tiered-fast", Transport: usage.TransportBuffered, Usage: usage.OpenAIUsage{InputTokens: 100, CachedTokens: &zero, CacheWriteTokens: &zero}},
 		{At: at, Model: "rematch", Transport: usage.TransportBuffered, Usage: usage.OpenAIUsage{InputTokens: million, OutputTokens: million, CachedTokens: &zero, CacheWriteTokens: &zero}},
 		{At: at, Model: "shared", Transport: usage.TransportBuffered, Usage: usage.OpenAIUsage{InputTokens: million, OutputTokens: million, CachedTokens: &zero, CacheWriteTokens: &zero}},
 		{At: at, Model: "unknown", Transport: usage.TransportBuffered, Usage: usage.OpenAIUsage{InputTokens: million, OutputTokens: million, CachedTokens: &zero, CacheWriteTokens: &zero}},
@@ -547,15 +566,15 @@ func TestUsageCostExecutableAcceptance(t *testing.T) {
 	}
 
 	query := report.Query{Timezone: "UTC", Since: "2026-09-01", Until: "2026-09-02", Surface: "all"}
-	waitForUsageTurns(t, h.baseURL, query, 2, 4)
+	waitForUsageTurns(t, h.baseURL, query, 2, 5)
 	argsFor := func(surface string) []string {
 		return []string{"usage", "--endpoint", h.baseURL, "--timezone", "UTC", "--since", "2026-09-01", "--until", "2026-09-02", "--surface", surface, "--json"}
 	}
 	args := argsFor("all")
 	first := decodeUsageCostExecutable(t, usageExec(t, binary, nil, 0, args...))
-	assertUsageCostRevision(t, first, "17", "3", "17", "rematch", "exact", "20", "34")
+	assertUsageCostRevision(t, first, "17", "3", "17", "rematch", "exact", "20.0001", "34")
 	openAIOnly := decodeUsageCostExecutable(t, usageExec(t, binary, nil, 0, argsFor("openai")...))
-	if len(openAIOnly.OpenAI.Rows) != 4 || len(openAIOnly.Anthropic.Rows) != 0 || openAIOnly.OpenAI.Total.Cost.Amount == nil || *openAIOnly.OpenAI.Total.Cost.Amount != "20" {
+	if len(openAIOnly.OpenAI.Rows) != 5 || len(openAIOnly.Anthropic.Rows) != 0 || openAIOnly.OpenAI.Total.Cost.Amount == nil || *openAIOnly.OpenAI.Total.Cost.Amount != "20.0001" {
 		t.Fatalf("OpenAI-only actual executable history = %+v", openAIOnly)
 	}
 	anthropicOnly := decodeUsageCostExecutable(t, usageExec(t, binary, nil, 0, argsFor("anthropic")...))
@@ -564,7 +583,7 @@ func TestUsageCostExecutableAcceptance(t *testing.T) {
 	}
 
 	text := usageExec(t, binary, nil, 0, "usage", "--endpoint", h.baseURL, "--timezone", "UTC", "--since", "2026-09-01", "--until", "2026-09-02", "--details")
-	for _, want := range []string{"Est. USD", "20.000*", "34.000", "Pricing model resolutions (Reported → Pricing)", "gpt-tiered → openai/gpt-tiered (exact)", "shared → ambiguous", "unknown → unknown"} {
+	for _, want := range []string{"Est. USD", "20.000*", "34.000", "Pricing: original-provider / models.dev standard + context rates / single cache-write rate", "Pricing model resolutions (Reported → Pricing)", "gpt-tiered → openai/gpt-tiered (exact)", "gpt-tiered-fast → openai/gpt-tiered (suffix)", "shared → ambiguous", "unknown → unknown"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("actual executable text missing %q: %s", want, text)
 		}
@@ -584,7 +603,7 @@ func TestUsageCostExecutableAcceptance(t *testing.T) {
 	// A report never joins the blocked fetch and stays entirely on the previously
 	// captured revision. The source call count also proves report-time no-network.
 	during := decodeUsageCostExecutable(t, usageExec(t, binary, nil, 0, args...))
-	assertUsageCostRevision(t, during, "17", "3", "17", "rematch", "exact", "20", "34")
+	assertUsageCostRevision(t, during, "17", "3", "17", "rematch", "exact", "20.0001", "34")
 	if priceCalls.Load() != 2 {
 		t.Fatalf("report triggered pricing network calls: %d", priceCalls.Load())
 	}
@@ -599,11 +618,11 @@ func TestUsageCostExecutableAcceptance(t *testing.T) {
 		t.Fatalf("replacement pricing fetch calls = %d, want 2", priceCalls.Load())
 	}
 	second := decodeUsageCostExecutable(t, usageExec(t, binary, nil, 0, args...))
-	assertUsageCostRevision(t, second, "34", "10", "34", "rematch-20260901", "dated", "44", "68")
+	assertUsageCostRevision(t, second, "34", "10", "34", "rematch-20260901", "dated", "44.0001", "68")
 	if first.Pricing.Version == second.Pricing.Version || first.OpenAI.Total.Turns != second.OpenAI.Total.Turns || first.Anthropic.Total.Turns != second.Anthropic.Total.Turns {
 		t.Fatalf("repricing did not change only the captured tariff/match revision: first=%+v second=%+v", first, second)
 	}
-	t.Log("local synthetic models.dev source -> shared cache lifecycle -> production reporter/HTTP -> actual CLI; highest-context, aggregate cache-write, original-provider, unknown/ambiguous, report-time no-network and price/identity repricing verified without new database writes")
+	t.Log("local synthetic models.dev source -> shared cache lifecycle -> production reporter/HTTP -> actual CLI; per-Turn context tiers, aggregate cache-write, original-provider, unknown/ambiguous, report-time no-network and price/identity repricing verified without new database writes")
 }
 
 type usageCostExecutableWire struct {
@@ -652,6 +671,9 @@ func decodeUsageCostExecutable(t *testing.T, output string) usageCostExecutableW
 	if err := json.Unmarshal([]byte(output), &wire); err != nil {
 		t.Fatal(err)
 	}
+	if strings.Contains(output, `"context_policy"`) {
+		t.Fatal("actual executable response retained presentation-only context_policy")
+	}
 	if wire.Pricing.Source != "fetched" || wire.Pricing.Version == "" || wire.Pricing.LastSuccess == nil {
 		t.Fatalf("actual executable pricing provenance = %+v", wire.Pricing)
 	}
@@ -662,11 +684,14 @@ func assertUsageCostRevision(t *testing.T, wire usageCostExecutableWire, tiered,
 	t.Helper()
 	openAI := usageCostRowsByModel(wire.OpenAI.Rows)
 	anthropic := usageCostRowsByModel(wire.Anthropic.Rows)
-	for model, want := range map[string]string{"gpt-tiered": tiered, "rematch": rematch} {
+	for model, want := range map[string]string{"gpt-tiered": tiered, "gpt-tiered-fast": "0.0001", "rematch": rematch} {
 		row, ok := openAI[model]
 		if !ok || row.Cost.Amount == nil || *row.Cost.Amount != want || row.Cost.PricedTurns != "1" || row.PricingMatch.Status != "matched" || row.PricingMatch.Provider != "openai" {
 			t.Fatalf("OpenAI %s revision row = %+v", model, row)
 		}
+	}
+	if row := openAI["gpt-tiered-fast"]; row.PricingMatch.Model != "gpt-tiered" || row.PricingMatch.Method != "suffix" {
+		t.Fatalf("short-context resolution = %+v, want gpt-tiered/suffix", row.PricingMatch)
 	}
 	if row := openAI["rematch"]; row.PricingMatch.Model != rematchModel || row.PricingMatch.Method != rematchMethod {
 		t.Fatalf("rematch resolution = %+v, want %s/%s", row.PricingMatch, rematchModel, rematchMethod)
@@ -683,7 +708,7 @@ func assertUsageCostRevision(t *testing.T, wire usageCostExecutableWire, tiered,
 			t.Fatalf("Anthropic %s original-provider row = %+v", model, row)
 		}
 	}
-	if wire.OpenAI.Total.Cost.Amount == nil || *wire.OpenAI.Total.Cost.Amount != openAITotal || wire.OpenAI.Total.Cost.PricedTurns != "2" || wire.OpenAI.Total.Turns != "4" || wire.Anthropic.Total.Cost.Amount == nil || *wire.Anthropic.Total.Cost.Amount != anthropicTotal || wire.Anthropic.Total.Cost.PricedTurns != "2" || wire.Anthropic.Total.Turns != "2" {
+	if wire.OpenAI.Total.Cost.Amount == nil || *wire.OpenAI.Total.Cost.Amount != openAITotal || wire.OpenAI.Total.Cost.PricedTurns != "3" || wire.OpenAI.Total.Turns != "5" || wire.Anthropic.Total.Cost.Amount == nil || *wire.Anthropic.Total.Cost.Amount != anthropicTotal || wire.Anthropic.Total.Cost.PricedTurns != "2" || wire.Anthropic.Total.Turns != "2" {
 		t.Fatalf("combined section totals = OpenAI %+v Anthropic %+v", wire.OpenAI.Total, wire.Anthropic.Total)
 	}
 }

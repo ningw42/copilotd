@@ -333,7 +333,7 @@ func valueTurn(surface string, counts []sql.NullInt64, selected modelPricing) (t
 	var contribution pricing.Contribution
 	var err error
 	if surface == "anthropic" {
-		contribution, err = pricing.CalculateAnthropic(usage.AnthropicUsage{
+		contribution, err = selected.tariff.CalculateAnthropic(usage.AnthropicUsage{
 			InputTokens:              counts[0].Int64,
 			OutputTokens:             counts[1].Int64,
 			CacheCreationInputTokens: nullableCount(counts[2]),
@@ -341,16 +341,16 @@ func valueTurn(surface string, counts []sql.NullInt64, selected modelPricing) (t
 			Ephemeral5mInputTokens:   nullableCount(counts[4]),
 			Ephemeral1hInputTokens:   nullableCount(counts[5]),
 			ThinkingTokens:           nullableCount(counts[6]),
-		}, selected.rates)
+		})
 	} else {
-		contribution, err = pricing.CalculateOpenAI(usage.OpenAIUsage{
+		contribution, err = selected.tariff.CalculateOpenAI(usage.OpenAIUsage{
 			InputTokens:      counts[0].Int64,
 			OutputTokens:     counts[1].Int64,
 			CachedTokens:     nullableCount(counts[2]),
 			CacheWriteTokens: nullableCount(counts[3]),
 			ReasoningTokens:  nullableCount(counts[4]),
 			TotalTokens:      nullableCount(counts[5]),
-		}, selected.rates)
+		})
 	}
 	if err != nil {
 		return turnContribution{}, err

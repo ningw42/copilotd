@@ -43,9 +43,10 @@ func TestCachedSourceServesValidatedEmbeddedFloorWhenRefreshIsPinned(t *testing.
 	if got := len(snapshot.Identities()); got != 113 {
 		t.Fatalf("embedded projected identities = %d, want literal audited count 113", got)
 	}
-	rates, ok := snapshot.Rates(pricing.Identity{Provider: "openai", Model: "gpt-5.6-sol"})
-	if !ok || rateString(rates.Input) != "8" || rateString(rates.Output) != "30" || rateString(rates.CacheRead) != "0.8" || rateString(rates.CacheWrite) != "10" {
-		t.Fatalf("embedded gpt-5.6-sol selected rates = %#v, %t; want audited highest-tier 8/30/0.8/10", rates, ok)
+	tariff, ok := snapshot.Tariff(pricing.Identity{Provider: "openai", Model: "gpt-5.6-sol"})
+	baseRates, contextRates := tariff.Rates(272000), tariff.Rates(272001)
+	if !ok || rateString(baseRates.Input) != "4" || rateString(baseRates.Output) != "20" || rateString(baseRates.CacheRead) != "0.4" || rateString(baseRates.CacheWrite) != "5" || rateString(contextRates.Input) != "8" || rateString(contextRates.Output) != "30" || rateString(contextRates.CacheRead) != "0.8" || rateString(contextRates.CacheWrite) != "10" {
+		t.Fatalf("embedded gpt-5.6-sol tariff = base %#v context %#v, %t; want audited base 4/20/0.4/5 and above-272k 8/30/0.8/10", baseRates, contextRates, ok)
 	}
 	if status.Source != "fallback" || status.Version != "sha256:db685655368231dce789b060e493a21899cb861c9930cc52521795776ab6e3b5" || status.LastSuccess != nil {
 		t.Fatalf("snapshot status = %#v, want cold identified fallback", status)
@@ -174,9 +175,10 @@ func TestCachedSourceConcurrentMissDoesNotBlockCanceledWaiter(t *testing.T) {
 			if got := next.snapshot.Identities(); !reflect.DeepEqual(got, wantIdentities) {
 				t.Fatalf("follower identities = %#v, want complete projection %#v", got, wantIdentities)
 			}
-			rates, ok := next.snapshot.Rates(wantIdentities[0])
+			tariff, ok := next.snapshot.Tariff(wantIdentities[0])
+			rates := tariff.Rates(0)
 			if !ok || rateString(rates.Input) != "1" || rateString(rates.Output) != "2" {
-				t.Fatalf("follower reused incomplete rates: %#v, %t", rates, ok)
+				t.Fatalf("follower reused incomplete tariff: %#v, %t", rates, ok)
 			}
 			if test.err == nil && (first.snapshot != next.snapshot || !reflect.DeepEqual(first.status, next.status)) {
 				t.Fatal("successful concurrent misses did not reuse the same immutable snapshot/status")
@@ -216,7 +218,7 @@ func TestCachedSourceRefreshReplacesTheWholeSnapshotWithoutCredentials(t *testin
 	if got, want := snapshot.Identities(), []pricing.Identity{{Provider: "openai", Model: "new"}}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("fetched identities = %#v, want full replacement %#v", got, want)
 	}
-	if _, ok := snapshot.Rates(pricing.Identity{Provider: "openai", Model: "gpt-5.6-sol"}); ok {
+	if _, ok := snapshot.Tariff(pricing.Identity{Provider: "openai", Model: "gpt-5.6-sol"}); ok {
 		t.Fatal("deleted floor model survived fetched full-snapshot replacement")
 	}
 	if status.Source != "fetched" || status.Version != "sha256:eb603ea80cffa7d28ced8860aca64564d6caf08362b06e91df159b07a368c53d" || status.LastSuccess == nil {
@@ -330,17 +332,20 @@ func TestCachedSourceRefreshAcceptsReplacementWithDeletedRates(t *testing.T) {
 	if snapshot == firstSnapshot {
 		t.Fatal("distinct pricing content reused the previous parsed snapshot")
 	}
-	deleted, ok := snapshot.Rates(pricing.Identity{Provider: "openai", Model: "deleted"})
+	deletedTariff, ok := snapshot.Tariff(pricing.Identity{Provider: "openai", Model: "deleted"})
+	deleted := deletedTariff.Rates(0)
 	if !ok || rateString(deleted.Input) != "1" || deleted.Output != nil {
 		t.Fatalf("rate-deleted model = %#v, %t; want input 1 and absent output", deleted, ok)
 	}
-	absentBase, ok := snapshot.Rates(pricing.Identity{Provider: "openai", Model: "absent-base"})
+	absentTariff, ok := snapshot.Tariff(pricing.Identity{Provider: "openai", Model: "absent-base"})
+	absentBase := absentTariff.Rates(0)
 	if !ok || absentBase.Input != nil || absentBase.Output != nil || rateString(absentBase.CacheRead) != "0" || absentBase.CacheWrite != nil {
 		t.Fatalf("absent-base model = %#v, %t; want absent input/output/write and explicit-zero read", absentBase, ok)
 	}
-	tiered, ok := snapshot.Rates(pricing.Identity{Provider: "openai", Model: "tiered"})
-	if !ok || tiered.Input != nil || rateString(tiered.Output) != "5" || tiered.CacheRead != nil || tiered.CacheWrite != nil {
-		t.Fatalf("incomplete highest tier = %#v, %t; want authoritative absent input and output 5 without backfill", tiered, ok)
+	tieredTariff, ok := snapshot.Tariff(pricing.Identity{Provider: "openai", Model: "tiered"})
+	tieredBase, tieredFirst, tieredSecond := tieredTariff.Rates(100), tieredTariff.Rates(101), tieredTariff.Rates(201)
+	if !ok || rateString(tieredBase.Input) != "7" || rateString(tieredBase.Output) != "8" || rateString(tieredFirst.Input) != "3" || rateString(tieredFirst.Output) != "4" || tieredSecond.Input != nil || rateString(tieredSecond.Output) != "5" || tieredSecond.CacheRead != nil || tieredSecond.CacheWrite != nil {
+		t.Fatalf("replacement tiered tariff = base %#v first %#v second %#v, %t; want all authoritative vectors without backfill", tieredBase, tieredFirst, tieredSecond, ok)
 	}
 	observed := registry.Observe()
 	if len(observed) != 1 || observed[0].LastAttemptResult == nil || *observed[0].LastAttemptResult != cache.AttemptSuccess {

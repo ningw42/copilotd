@@ -9,7 +9,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"slices"
+	"sort"
 	"unicode/utf8"
 )
 
@@ -25,8 +27,8 @@ type Identity struct {
 	Model    string
 }
 
-// Rates is the selected standard USD-per-million-token rate vector. Each nil
-// rate is absent; a non-nil zero remains an explicitly reported zero.
+// Rates is one standard USD-per-million-token rate vector. Each nil rate is
+// absent; a non-nil zero remains an explicitly reported zero.
 type Rates struct {
 	Input      *Rate
 	Output     *Rate
@@ -34,11 +36,39 @@ type Rates struct {
 	CacheWrite *Rate
 }
 
+type contextTier struct {
+	threshold uint64
+	rates     Rates
+}
+
+// Tariff retains one model's base rate vector and its context tiers. Its
+// immutable contents are exposed only through per-input rate selection.
+type Tariff struct {
+	base  Rates
+	tiers []contextTier
+}
+
+// Rates selects the greatest context threshold strictly below completeInput,
+// or the base vector when no threshold matches. The returned vector is detached.
+func (t Tariff) Rates(completeInput uint64) Rates {
+	return detachedRates(t.rates(completeInput))
+}
+
+func (t Tariff) rates(completeInput uint64) Rates {
+	firstNotBelow := sort.Search(len(t.tiers), func(index int) bool {
+		return completeInput <= t.tiers[index].threshold
+	})
+	if firstNotBelow == 0 {
+		return t.base
+	}
+	return t.tiers[firstNotBelow-1].rates
+}
+
 // Snapshot is an immutable projection of one complete accepted artifact.
 type Snapshot struct {
 	identities    []Identity
 	identityBytes int
-	rates         map[Identity]Rates
+	tariffs       map[Identity]Tariff
 }
 
 // ParseSnapshot validates and projects one complete models.dev artifact without
@@ -63,7 +93,7 @@ func parseSnapshot(ctx context.Context, raw []byte, maxIdentityBytes int) (*Snap
 		return nil, err
 	}
 
-	snapshot := &Snapshot{rates: make(map[Identity]Rates)}
+	snapshot := &Snapshot{tariffs: make(map[Identity]Tariff)}
 	for _, providerID := range selectedProviders {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -114,11 +144,11 @@ func parseSnapshot(ctx context.Context, raw []byte, maxIdentityBytes int) (*Snap
 			if !priced {
 				continue
 			}
-			rates, err := parseCost(ctx, rawCost)
+			tariff, err := parseCost(ctx, rawCost)
 			if err != nil {
 				return nil, fmt.Errorf("model %q/%q cost: %w", providerID, modelID, err)
 			}
-			snapshot.rates[identity] = rates
+			snapshot.tariffs[identity] = tariff
 		}
 	}
 	if err := ctx.Err(); err != nil {
@@ -230,87 +260,92 @@ func selectedModelsProvider(pointer jsontext.Pointer) string {
 	}
 }
 
-func parseCost(ctx context.Context, raw json.RawMessage) (Rates, error) {
+func parseCost(ctx context.Context, raw json.RawMessage) (Tariff, error) {
 	if err := ctx.Err(); err != nil {
-		return Rates{}, err
+		return Tariff{}, err
 	}
 	var base map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &base); err != nil || base == nil {
-		return Rates{}, errors.New("cost is not an object")
+		return Tariff{}, errors.New("cost is not an object")
 	}
 	if err := ctx.Err(); err != nil {
-		return Rates{}, err
+		return Tariff{}, err
 	}
 	baseRates, err := parseCostRow(base)
 	if err != nil {
-		return Rates{}, err
+		return Tariff{}, err
 	}
 
 	var legacyRates *Rates
 	if legacy, present := base["context_over_200k"]; present {
 		var row map[string]json.RawMessage
 		if err := json.Unmarshal(legacy, &row); err != nil || row == nil {
-			return Rates{}, errors.New("context_over_200k is not an object")
+			return Tariff{}, errors.New("context_over_200k is not an object")
 		}
 		if err := ctx.Err(); err != nil {
-			return Rates{}, err
+			return Tariff{}, err
 		}
 		parsed, err := parseCostRow(row)
 		if err != nil {
-			return Rates{}, fmt.Errorf("context_over_200k: %w", err)
+			return Tariff{}, fmt.Errorf("context_over_200k: %w", err)
 		}
 		legacyRates = &parsed
 	}
 
+	var contextTiers []contextTier
 	if rawTiers, present := base["tiers"]; present {
 		var tiers []json.RawMessage
 		if err := json.Unmarshal(rawTiers, &tiers); err != nil || tiers == nil {
-			return Rates{}, errors.New("tiers is not an array")
+			return Tariff{}, errors.New("tiers is not an array")
 		}
 		if err := ctx.Err(); err != nil {
-			return Rates{}, err
+			return Tariff{}, err
 		}
-		var selected *Rates
-		var highest uint64
 		seen := make(map[uint64]struct{}, len(tiers))
 		for index, rawTier := range tiers {
 			if err := ctx.Err(); err != nil {
-				return Rates{}, err
+				return Tariff{}, err
 			}
 			var tier map[string]json.RawMessage
 			if err := json.Unmarshal(rawTier, &tier); err != nil || tier == nil {
-				return Rates{}, fmt.Errorf("tiers[%d] is not an object", index)
+				return Tariff{}, fmt.Errorf("tiers[%d] is not an object", index)
 			}
 			parsed, err := parseCostRow(tier)
 			if err != nil {
-				return Rates{}, fmt.Errorf("tiers[%d]: %w", index, err)
+				return Tariff{}, fmt.Errorf("tiers[%d]: %w", index, err)
 			}
 			threshold, err := contextThreshold(tier)
 			if err != nil {
-				return Rates{}, fmt.Errorf("tiers[%d]: %w", index, err)
+				return Tariff{}, fmt.Errorf("tiers[%d]: %w", index, err)
 			}
 			if _, duplicate := seen[threshold]; duplicate {
-				return Rates{}, fmt.Errorf("tiers[%d] duplicates context threshold %d", index, threshold)
+				return Tariff{}, fmt.Errorf("tiers[%d] duplicates context threshold %d", index, threshold)
 			}
 			seen[threshold] = struct{}{}
-			if selected == nil || threshold > highest {
-				selected, highest = &parsed, threshold
-			}
-		}
-		if selected != nil {
-			if err := ctx.Err(); err != nil {
-				return Rates{}, err
-			}
-			return *selected, nil
+			contextTiers = append(contextTiers, contextTier{threshold: threshold, rates: parsed})
 		}
 	}
 	if err := ctx.Err(); err != nil {
-		return Rates{}, err
+		return Tariff{}, err
 	}
-	if legacyRates != nil {
-		return *legacyRates, nil
+	if len(contextTiers) > 0 {
+		slices.SortFunc(contextTiers, func(a, b contextTier) int {
+			switch {
+			case a.threshold < b.threshold:
+				return -1
+			case a.threshold > b.threshold:
+				return 1
+			default:
+				return 0
+			}
+		})
+	} else if legacyRates != nil {
+		contextTiers = []contextTier{{threshold: 200000, rates: *legacyRates}}
 	}
-	return baseRates, nil
+	if err := ctx.Err(); err != nil {
+		return Tariff{}, err
+	}
+	return Tariff{base: baseRates, tiers: contextTiers}, nil
 }
 
 func contextThreshold(row map[string]json.RawMessage) (uint64, error) {
@@ -330,11 +365,37 @@ func contextThreshold(row map[string]json.RawMessage) (uint64, error) {
 	if !present {
 		return 0, errors.New("tier size is missing")
 	}
-	threshold, err := ParseRate(string(rawSize))
-	if err != nil || threshold.scale != 0 || threshold.coefficient == nil || !threshold.coefficient.IsUint64() {
+	threshold, ok := boundedNonnegativeInteger(rawSize)
+	if !ok {
 		return 0, errors.New("tier size is not a bounded nonnegative integer")
 	}
-	return threshold.coefficient.Uint64(), nil
+	return threshold, nil
+}
+
+func boundedNonnegativeInteger(raw json.RawMessage) (uint64, bool) {
+	if len(raw) == 0 || len(raw) > 128 {
+		return 0, false
+	}
+	for index, digit := range raw {
+		if digit != 'e' && digit != 'E' {
+			continue
+		}
+		exponent := raw[index+1:]
+		if len(exponent) > 0 && (exponent[0] == '+' || exponent[0] == '-') {
+			exponent = exponent[1:]
+		}
+		// Any nonzero integer representable by uint64 needs at most a two-digit
+		// decimal exponent. Bound parsing before math/big expands remote input.
+		if len(exponent) == 0 || len(exponent) > 2 {
+			return 0, false
+		}
+		break
+	}
+	value, ok := new(big.Rat).SetString(string(raw))
+	if !ok || value.Sign() < 0 || !value.IsInt() || !value.Num().IsUint64() {
+		return 0, false
+	}
+	return value.Num().Uint64(), true
 }
 
 func parseCostRow(object map[string]json.RawMessage) (Rates, error) {
@@ -383,22 +444,22 @@ func (s *Snapshot) Identities() []Identity {
 	return append([]Identity(nil), s.identities...)
 }
 
-// Rates returns a detached selected rate vector for an identity. Nil fields
-// preserve absent prices. False means the identity has no cost object or is
-// absent from this snapshot.
-func (s *Snapshot) Rates(identity Identity) (Rates, bool) {
+// Tariff returns an immutable tariff for an identity. False means the identity
+// has no cost object or is absent from this snapshot.
+func (s *Snapshot) Tariff(identity Identity) (Tariff, bool) {
 	if s == nil {
-		return Rates{}, false
+		return Tariff{}, false
 	}
-	rates, ok := s.rates[identity]
-	if !ok {
-		return Rates{}, false
-	}
+	tariff, ok := s.tariffs[identity]
+	return tariff, ok
+}
+
+func detachedRates(rates Rates) Rates {
 	rates.Input = detachedRate(rates.Input)
 	rates.Output = detachedRate(rates.Output)
 	rates.CacheRead = detachedRate(rates.CacheRead)
 	rates.CacheWrite = detachedRate(rates.CacheWrite)
-	return rates, true
+	return rates
 }
 
 func detachedRate(rate *Rate) *Rate {

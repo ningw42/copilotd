@@ -39,22 +39,26 @@ func TestSnapshotProjectsAllowedProviderIdentitiesAndPreservesUnpricedModels(t *
 	if got := snapshot.Identities(); !reflect.DeepEqual(got, wantIdentities) {
 		t.Fatalf("identities = %#v, want %#v", got, wantIdentities)
 	}
-	priced, ok := snapshot.Rates(pricing.Identity{Provider: "openai", Model: "gpt-priced"})
+	tariff, ok := snapshot.Tariff(pricing.Identity{Provider: "openai", Model: "gpt-priced"})
 	if !ok {
-		t.Fatal("priced identity has no selected rates")
+		t.Fatal("priced identity has no tariff")
 	}
+	priced := tariff.Rates(0)
 	if optionalRateString(priced.Input) != "1.25" || optionalRateString(priced.Output) != "10" || optionalRateString(priced.CacheRead) != "0" || priced.CacheWrite != nil {
-		t.Fatalf("selected rates = %#v, want input=1.25 output=10 cache_read=0 and absent cache_write", priced)
+		t.Fatalf("base rates = %#v, want input=1.25 output=10 cache_read=0 and absent cache_write", priced)
 	}
-	if _, ok := snapshot.Rates(pricing.Identity{Provider: "openai", Model: "gpt-unpriced"}); ok {
-		t.Fatal("unpriced identity reported selected rates")
+	if _, ok := snapshot.Tariff(pricing.Identity{Provider: "openai", Model: "gpt-unpriced"}); ok {
+		t.Fatal("unpriced identity reported a tariff")
 	}
 }
 
-func TestSnapshotRatesAreDetachedForConcurrentCallers(t *testing.T) {
+func TestSnapshotTariffsAreDetachedForConcurrentCallers(t *testing.T) {
 	t.Parallel()
 
-	snapshot, err := pricing.ParseSnapshot(context.Background(), snapshotFixture(`{"input":1,"output":2,"cache_read":0.5,"cache_write":3}`))
+	snapshot, err := pricing.ParseSnapshot(context.Background(), snapshotFixture(`{
+		"input":1,"output":2,"cache_read":0.5,"cache_write":3,
+		"tiers":[{"input":4,"output":5,"cache_read":0.25,"cache_write":6,"tier":{"type":"context","size":100}}]
+	}`))
 	if err != nil {
 		t.Fatalf("ParseSnapshot() error = %v", err)
 	}
@@ -64,17 +68,24 @@ func TestSnapshotRatesAreDetachedForConcurrentCallers(t *testing.T) {
 		t.Fatalf("ParseRate() error = %v", err)
 	}
 
-	first, ok := snapshot.Rates(identity)
-	if !ok || first.Input == nil || first.Output == nil || first.CacheRead == nil || first.CacheWrite == nil {
-		t.Fatalf("Rates() = %#v, %t; want complete vector", first, ok)
+	firstTariff, ok := snapshot.Tariff(identity)
+	if !ok {
+		t.Fatal("Tariff() did not return the priced identity")
 	}
-	*first.Input = replacement
-	*first.Output = replacement
-	*first.CacheRead = replacement
-	*first.CacheWrite = replacement
-	later, ok := snapshot.Rates(identity)
-	if !ok || optionalRateString(later.Input) != "1" || optionalRateString(later.Output) != "2" || optionalRateString(later.CacheRead) != "0.5" || optionalRateString(later.CacheWrite) != "3" {
-		t.Fatalf("Rates() after returned-vector mutation = %#v, %t; want original vector", later, ok)
+	firstBase, firstTier := firstTariff.Rates(0), firstTariff.Rates(101)
+	for _, rates := range []*pricing.Rates{&firstBase, &firstTier} {
+		*rates.Input = replacement
+		*rates.Output = replacement
+		*rates.CacheRead = replacement
+		*rates.CacheWrite = replacement
+	}
+	laterTariff, ok := snapshot.Tariff(identity)
+	if !ok {
+		t.Fatal("Tariff() stopped returning the priced identity")
+	}
+	laterBase, laterTier := laterTariff.Rates(0), laterTariff.Rates(101)
+	if optionalRateString(laterBase.Input) != "1" || optionalRateString(laterBase.Output) != "2" || optionalRateString(laterBase.CacheRead) != "0.5" || optionalRateString(laterBase.CacheWrite) != "3" || optionalRateString(laterTier.Input) != "4" || optionalRateString(laterTier.Output) != "5" || optionalRateString(laterTier.CacheRead) != "0.25" || optionalRateString(laterTier.CacheWrite) != "6" {
+		t.Fatalf("Tariff() after returned-vector mutation = base %#v tier %#v; want original vectors", laterBase, laterTier)
 	}
 
 	const callers = 32
@@ -84,8 +95,13 @@ func TestSnapshotRatesAreDetachedForConcurrentCallers(t *testing.T) {
 		wait.Add(1)
 		go func() {
 			defer wait.Done()
-			got, ok := snapshot.Rates(identity)
-			if !ok || optionalRateString(got.Input) != "1" || optionalRateString(got.Output) != "2" || optionalRateString(got.CacheRead) != "0.5" || optionalRateString(got.CacheWrite) != "3" {
+			tariff, ok := snapshot.Tariff(identity)
+			if !ok {
+				failures <- struct{}{}
+				return
+			}
+			got := tariff.Rates(101)
+			if optionalRateString(got.Input) != "4" || optionalRateString(got.Output) != "5" || optionalRateString(got.CacheRead) != "0.25" || optionalRateString(got.CacheWrite) != "6" {
 				failures <- struct{}{}
 				return
 			}
@@ -97,27 +113,72 @@ func TestSnapshotRatesAreDetachedForConcurrentCallers(t *testing.T) {
 	}
 	wait.Wait()
 	if len(failures) != 0 {
-		t.Fatalf("%d concurrent callers observed a mutated vector", len(failures))
+		t.Fatalf("%d concurrent callers observed a mutated tariff", len(failures))
 	}
-	final, ok := snapshot.Rates(identity)
-	if !ok || optionalRateString(final.Input) != "1" || optionalRateString(final.Output) != "2" || optionalRateString(final.CacheRead) != "0.5" || optionalRateString(final.CacheWrite) != "3" {
-		t.Fatalf("Rates() after concurrent returned-vector mutation = %#v, %t; want original vector", final, ok)
+	finalTariff, ok := snapshot.Tariff(identity)
+	if !ok || optionalRateString(finalTariff.Rates(101).Input) != "4" {
+		t.Fatalf("Tariff() after concurrent returned-vector mutation = %#v, %t; want original tier", finalTariff, ok)
 	}
 }
 
-func TestSnapshotSelectsHighestStructuredTierThenLegacyThenBase(t *testing.T) {
+func TestSnapshotTariffSelectsStructuredContextTiersAtStrictBoundaries(t *testing.T) {
+	t.Parallel()
+
+	raw := []byte(`{
+		"openai":{"id":"openai","models":{}},
+		"anthropic":{"id":"anthropic","models":{}},
+		"google":{"id":"google","models":{"tiered":{"id":"tiered","cost":{
+			"input":1,"output":2,"cache_write":10,
+			"context_over_200k":{"input":80,"output":90},
+			"tiers":[
+				{"input":5,"output":6,"cache_read":0.5,"tier":{"type":"context","size":200}},
+				{"input":3,"output":4,"tier":{"type":"context","size":100}}
+			]
+		}}}},
+		"xai":{"id":"xai","models":{}}
+	}`)
+
+	snapshot, err := pricing.ParseSnapshot(context.Background(), raw)
+	if err != nil {
+		t.Fatalf("ParseSnapshot() error = %v", err)
+	}
+	tariff, ok := snapshot.Tariff(pricing.Identity{Provider: "google", Model: "tiered"})
+	if !ok {
+		t.Fatal("tiered identity has no tariff")
+	}
+	read05, write10 := "0.5", "10"
+	tests := []struct {
+		name                  string
+		input                 uint64
+		wantInput, wantOutput string
+		wantRead, wantWrite   *string
+	}{
+		{name: "below first threshold", input: 99, wantInput: "1", wantOutput: "2", wantWrite: &write10},
+		{name: "equal first threshold", input: 100, wantInput: "1", wantOutput: "2", wantWrite: &write10},
+		{name: "above first threshold", input: 101, wantInput: "3", wantOutput: "4"},
+		{name: "equal second threshold uses first tier", input: 200, wantInput: "3", wantOutput: "4"},
+		{name: "above second threshold", input: 201, wantInput: "5", wantOutput: "6", wantRead: &read05},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rates := tariff.Rates(tc.input)
+			if optionalRateString(rates.Input) != tc.wantInput || optionalRateString(rates.Output) != tc.wantOutput || optionalRateString(rates.CacheRead) != optionalString(tc.wantRead) || optionalRateString(rates.CacheWrite) != optionalString(tc.wantWrite) {
+				t.Fatalf("Rates(%d) = input %q output %q read %q write %q; want %q/%q/%q/%q", tc.input, optionalRateString(rates.Input), optionalRateString(rates.Output), optionalRateString(rates.CacheRead), optionalRateString(rates.CacheWrite), tc.wantInput, tc.wantOutput, optionalString(tc.wantRead), optionalString(tc.wantWrite))
+			}
+		})
+	}
+}
+
+func TestSnapshotTariffUsesLegacyContextRatesOnlyWithoutStructuredTiers(t *testing.T) {
 	t.Parallel()
 
 	raw := []byte(`{
 		"openai":{"id":"openai","models":{
 			"structured":{"id":"structured","cost":{
-				"input":1,"output":2,"cache_write":3,
-				"context_over_200k":{"input":8,"output":9,"cache_write":10},
-				"tiers":[
-					{"input":3,"output":4,"cache_write":9,"tier":{"type":"context","size":100000}},
-					{"input":4,"output":5,"cache_read":0.4,"tier":{"type":"context","size":200000}}
-				]
-			},"experimental":{"modes":{"fast":{"cost":{"input":99,"output":99}}}}},
+				"input":1,"output":2,
+				"context_over_200k":{"input":8,"output":9},
+				"tiers":[{"input":3,"output":4,"tier":{"type":"context","size":272000}}]
+			}},
 			"legacy":{"id":"legacy","cost":{"input":1,"output":2,"context_over_200k":{"input":6,"output":7,"cache_write":8}}},
 			"base":{"id":"base","cost":{"input":1.5,"output":2.5,"cache_read":0.15}}
 		}},
@@ -130,20 +191,24 @@ func TestSnapshotSelectsHighestStructuredTierThenLegacyThenBase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseSnapshot() error = %v", err)
 	}
-	assertRates := func(model, input, output string, cacheRead, cacheWrite *string) {
+	assertRates := func(model string, completeInput uint64, input, output string, cacheRead, cacheWrite *string) {
 		t.Helper()
-		got, ok := snapshot.Rates(pricing.Identity{Provider: "openai", Model: model})
+		tariff, ok := snapshot.Tariff(pricing.Identity{Provider: "openai", Model: model})
 		if !ok {
-			t.Fatalf("%s has no selected rates", model)
+			t.Fatalf("%s has no tariff", model)
 		}
+		got := tariff.Rates(completeInput)
 		if optionalRateString(got.Input) != input || optionalRateString(got.Output) != output || optionalRateString(got.CacheRead) != optionalString(cacheRead) || optionalRateString(got.CacheWrite) != optionalString(cacheWrite) {
-			t.Fatalf("%s rates = input %q output %q read %q write %q; want %q/%q/%q/%q", model, optionalRateString(got.Input), optionalRateString(got.Output), optionalRateString(got.CacheRead), optionalRateString(got.CacheWrite), input, output, optionalString(cacheRead), optionalString(cacheWrite))
+			t.Fatalf("%s rates at %d input = input %q output %q read %q write %q; want %q/%q/%q/%q", model, completeInput, optionalRateString(got.Input), optionalRateString(got.Output), optionalRateString(got.CacheRead), optionalRateString(got.CacheWrite), input, output, optionalString(cacheRead), optionalString(cacheWrite))
 		}
 	}
-	read04, write8, read015 := "0.4", "8", "0.15"
-	assertRates("structured", "4", "5", &read04, nil)
-	assertRates("legacy", "6", "7", nil, &write8)
-	assertRates("base", "1.5", "2.5", &read015, nil)
+	write8, read015 := "8", "0.15"
+	assertRates("structured", 200001, "1", "2", nil, nil)
+	assertRates("structured", 272001, "3", "4", nil, nil)
+	assertRates("legacy", 199999, "1", "2", nil, nil)
+	assertRates("legacy", 200000, "1", "2", nil, nil)
+	assertRates("legacy", 200001, "6", "7", nil, &write8)
+	assertRates("base", ^uint64(0), "1.5", "2.5", &read015, nil)
 }
 
 func TestSnapshotRejectsAmbiguousJSONAndInvalidSelectedIdentities(t *testing.T) {
@@ -247,6 +312,31 @@ func TestSnapshotCancellationInterruptsLargeTierProjection(t *testing.T) {
 	}
 }
 
+func TestSnapshotAcceptsFullUint64ContextThresholds(t *testing.T) {
+	t.Parallel()
+
+	snapshot, err := pricing.ParseSnapshot(context.Background(), snapshotFixture(`{
+		"input":1,"output":2,
+		"tiers":[
+			{"input":3,"output":4,"tier":{"type":"context","size":1000000000000000000}},
+			{"input":5,"output":6,"tier":{"type":"context","size":18446744073709551615}}
+		]
+	}`))
+	if err != nil {
+		t.Fatalf("ParseSnapshot() error = %v", err)
+	}
+	tariff, ok := snapshot.Tariff(pricing.Identity{Provider: "openai", Model: "model"})
+	atFirst := tariff.Rates(1_000_000_000_000_000_000)
+	aboveFirst := tariff.Rates(1_000_000_000_000_000_001)
+	atMaximum := tariff.Rates(^uint64(0))
+	if !ok || optionalRateString(atFirst.Input) != "1" || optionalRateString(aboveFirst.Input) != "3" || optionalRateString(atMaximum.Input) != "3" {
+		t.Fatalf("full-width threshold tariff = at first %#v above first %#v at maximum %#v, %t", atFirst, aboveFirst, atMaximum, ok)
+	}
+	if _, err := pricing.ParseSnapshot(context.Background(), snapshotFixture(`{"tiers":[{"tier":{"type":"context","size":18446744073709551616}}]}`)); err == nil {
+		t.Fatal("ParseSnapshot() accepted a context threshold above uint64")
+	}
+}
+
 func TestSnapshotComparesBoundedExactExponentThresholds(t *testing.T) {
 	t.Parallel()
 
@@ -255,9 +345,10 @@ func TestSnapshotComparesBoundedExactExponentThresholds(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseSnapshot() error = %v", err)
 	}
-	rates, ok := snapshot.Rates(pricing.Identity{Provider: "openai", Model: "model"})
+	tariff, ok := snapshot.Tariff(pricing.Identity{Provider: "openai", Model: "model"})
+	rates := tariff.Rates(201)
 	if !ok || optionalRateString(rates.Input) != "5" || optionalRateString(rates.Output) != "6" {
-		t.Fatalf("selected rates = %#v, %t; want threshold 2e2 row", rates, ok)
+		t.Fatalf("rates above threshold 2e2 = %#v, %t; want its exact row", rates, ok)
 	}
 
 	for _, cost := range []string{

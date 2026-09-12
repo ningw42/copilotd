@@ -30,9 +30,11 @@ contention/lifecycle evidence. #213 adds executable acceptance and native CI;
 actual target/revision certification is tracked in its retained results, not
 inferred from the pipeline. The estimated-cost extension keeps prices and money
 out of SQLite: one current accepted in-memory snapshot values committed native
-observations at report time, so later refresh can revalue history without changing
-stored Turns or adding a migration. The CLI's period cost totals are presentation
-only. The persistence, file, and finalization policies below remain unchanged.
+observations at report time, selecting any context tariff per Turn from its
+persisted complete Surface-native input. A later refresh can therefore revalue
+history without changing stored Turns or adding a migration. The CLI's period
+cost totals are presentation only. The persistence, file, and finalization
+policies below remain unchanged.
 
 ## Why SQLite
 

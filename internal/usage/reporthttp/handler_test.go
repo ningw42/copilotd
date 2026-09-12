@@ -141,7 +141,7 @@ func TestHandlerEncodingBudgetIsSharedBetweenNativeSections(t *testing.T) {
 func TestHandlerCancellationBeforePricingExtensionEncodingReturnsSafeFailure(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	result := report.Report{Pricing: &report.PricingProvenance{
-		Dataset: "models.dev/api.json", Currency: "USD", Basis: "original_provider", ContextPolicy: "highest_tier", CacheWritePolicy: "single_rate",
+		Dataset: "models.dev/api.json", Currency: "USD", Basis: "original_provider", CacheWritePolicy: "single_rate",
 		Version: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", Source: "fallback",
 	}}
 	handler := reporthttp.Handler(func(context.Context, report.Query) (report.Report, error) {
@@ -183,7 +183,7 @@ func TestHandlerGuardsPricingProvenanceAndIdentitySizes(t *testing.T) {
 			SchemaVersion: 1, GeneratedAt: start, Timezone: "UTC", Period: "day", Since: "2026-09-01", Until: "2026-09-02",
 			WindowStart: start, WindowEnd: start.AddDate(0, 0, 1), Scope: "configured_database", Collection: "best_effort", Surface: "openai",
 			Buckets: []report.Bucket{{StartDate: "2026-09-01", UntilDate: "2026-09-02", RangeStart: start, RangeEnd: start.AddDate(0, 0, 1)}},
-			Pricing: &report.PricingProvenance{Dataset: "models.dev/api.json", Currency: "USD", Basis: "original_provider", ContextPolicy: "highest_tier", CacheWritePolicy: "single_rate", Version: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", Source: "fetched"},
+			Pricing: &report.PricingProvenance{Dataset: "models.dev/api.json", Currency: "USD", Basis: "original_provider", CacheWritePolicy: "single_rate", Version: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", Source: "fetched"},
 			OpenAI:  &report.Section{Rows: []report.Row{{BucketStart: "2026-09-01", ModelTotal: model}}, Models: []report.ModelTotal{model}, Total: total},
 		}
 	}
@@ -264,6 +264,9 @@ func TestHandlerGuardsPricingProvenanceAndIdentitySizes(t *testing.T) {
 				if len(got.OpenAI.Rows) != 1 || len(got.OpenAI.Models) != 1 || got.OpenAI.Rows[0].PricingMatch != result.OpenAI.Rows[0].PricingMatch || got.OpenAI.Models[0].PricingMatch != result.OpenAI.Models[0].PricingMatch {
 					t.Fatal("bounded pricing identities were not preserved")
 				}
+				if strings.Contains(rr.Body.String(), `"context_policy"`) {
+					t.Fatal("presentation-only context policy was encoded")
+				}
 			})
 		}
 	}
@@ -278,7 +281,7 @@ func TestHandlerCountsEscapedPricingExtensionAgainstResponseLimit(t *testing.T) 
 		Total:        report.Total{Turns: 1, Usage: map[string]report.Metric{}, Cost: report.Cost{Amount: &zero, PricedTurns: 1}},
 	}
 	base := report.Report{
-		Pricing: &report.PricingProvenance{Dataset: "models.dev/api.json", Currency: "USD", Basis: "original_provider", ContextPolicy: "highest_tier", CacheWritePolicy: "single_rate", Version: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", Source: "fallback"},
+		Pricing: &report.PricingProvenance{Dataset: "models.dev/api.json", Currency: "USD", Basis: "original_provider", CacheWritePolicy: "single_rate", Version: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", Source: "fallback"},
 		OpenAI:  &report.Section{Models: []report.ModelTotal{}, Total: report.Total{Usage: map[string]report.Metric{}, Cost: report.Cost{Amount: &zero}}},
 	}
 	for _, tc := range []struct {

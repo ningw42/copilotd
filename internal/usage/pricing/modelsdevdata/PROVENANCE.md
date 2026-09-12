@@ -35,9 +35,13 @@ The selected projection follows the observed schema names: root provider keys,
 provider `id` and `models`, model `id` and optional `cost`, recognized `input`,
 `output`, `reasoning`, `cache_read`, `cache_write`, `input_audio`, and
 `output_audio` rates, structured `tiers[].tier` context `size`, and the generated
-legacy `context_over_200k` row. Each chargeable rate keeps its source presence;
-an absent selected-row rate is not filled from another row. Experimental mode
-prices are not part of the standard selected projection.
+deprecated `context_over_200k` row. The projection retains the base vector and
+every valid structured context tier, ordered by exact `tier.size`; structured
+tiers are authoritative for every provider. The generated legacy row is retained
+only as a strict 200,000-token compatibility tier when structured tiers are
+absent, because its name can discard a higher exact threshold. Each chargeable
+rate keeps its source presence; an absent selected-row rate is not filled from
+another row. Experimental mode prices are not part of the standard projection.
 
 ## Bumping the floor
 

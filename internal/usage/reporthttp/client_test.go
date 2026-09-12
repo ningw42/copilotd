@@ -76,7 +76,7 @@ func TestHandlerClientPublishCompleteEmptyPricingExtension(t *testing.T) {
 	}
 	zero := pricing.Amount{}
 	result.Pricing = &report.PricingProvenance{
-		Dataset: "models.dev/api.json", Currency: "USD", Basis: "original_provider", ContextPolicy: "highest_tier", CacheWritePolicy: "single_rate",
+		Dataset: "models.dev/api.json", Currency: "USD", Basis: "original_provider", CacheWritePolicy: "single_rate",
 		Version: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", Source: "fallback",
 	}
 	result.OpenAI.Total.Cost = report.Cost{Amount: &zero}
@@ -93,7 +93,7 @@ func TestHandlerClientPublishCompleteEmptyPricingExtension(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(got.JSON), `"pricing":{"dataset":"models.dev/api.json","currency":"USD","basis":"original_provider","context_policy":"highest_tier","cache_write_policy":"single_rate","version":"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","source":"fallback","last_success":null}`) ||
+	if !strings.Contains(string(got.JSON), `"pricing":{"dataset":"models.dev/api.json","currency":"USD","basis":"original_provider","cache_write_policy":"single_rate","version":"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","source":"fallback","last_success":null}`) ||
 		!strings.Contains(string(got.JSON), `"cost":{"amount":"0","priced_turns":"0","unpriced":{"unknown_model":"0","ambiguous_model":"0","missing_rate":"0","missing_usage":"0","inconsistent_usage":"0"}}`) {
 		t.Fatalf("complete empty pricing extension missing: %s", got.JSON)
 	}
@@ -158,7 +158,7 @@ func TestHandlerClientPublishCompletePricingAtEveryAggregateLevel(t *testing.T) 
 		Scope: "configured_database", Collection: "best_effort", Surface: "all",
 		Buckets: []report.Bucket{{StartDate: "2026-09-01", UntilDate: "2026-09-02", RangeStart: start, RangeEnd: start.AddDate(0, 0, 1)}},
 		Pricing: &report.PricingProvenance{
-			Dataset: "models.dev/api.json", Currency: "USD", Basis: "original_provider", ContextPolicy: "highest_tier", CacheWritePolicy: "single_rate",
+			Dataset: "models.dev/api.json", Currency: "USD", Basis: "original_provider", CacheWritePolicy: "single_rate",
 			Version: "sha256:abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd", Source: "fallback", LastSuccess: &lastSuccess,
 		},
 		Anthropic: &report.Section{Rows: []report.Row{}, Models: []report.ModelTotal{}},

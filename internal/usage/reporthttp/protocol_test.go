@@ -78,9 +78,9 @@ func completePricingReportJSON(t *testing.T) (string, report.Query) {
 	}
 	root["pricing"] = map[string]any{
 		"dataset": "models.dev/api.json", "currency": "USD", "basis": "original_provider",
-		"context_policy": "highest_tier", "cache_write_policy": "single_rate",
-		"version": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-		"source":  "fallback", "last_success": "2026-08-31T23:00:00Z",
+		"cache_write_policy": "single_rate",
+		"version":            "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		"source":             "fallback", "last_success": "2026-08-31T23:00:00Z",
 	}
 	cost := func() map[string]any {
 		return map[string]any{
@@ -236,8 +236,10 @@ func TestClientValidatesPricingProvenanceAndMatchedIdentity(t *testing.T) {
 		}},
 		{"unknown source", false, func(root map[string]any) { root["pricing"].(map[string]any)["source"] = "embedded" }},
 		{"effective date is not timestamp", false, func(root map[string]any) { root["pricing"].(map[string]any)["last_success"] = "2026-09-01" }},
+		{"absent presentation-only context policy", true, func(root map[string]any) { delete(root["pricing"].(map[string]any), "context_policy") }},
+		{"legacy context policy is additive", true, func(root map[string]any) { root["pricing"].(map[string]any)["context_policy"] = "highest_tier" }},
 	}
-	for _, field := range []string{"dataset", "currency", "basis", "context_policy", "cache_write_policy", "version", "source", "last_success"} {
+	for _, field := range []string{"dataset", "currency", "basis", "cache_write_policy", "version", "source", "last_success"} {
 		field := field
 		cases = append(cases, example{"missing " + field, false, func(root map[string]any) { delete(root["pricing"].(map[string]any), field) }})
 	}

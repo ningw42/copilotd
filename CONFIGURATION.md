@@ -80,9 +80,10 @@ edges advance, omitting coincident daily buckets while retaining larger-period
 nominal labels. Unsupported/non-monotonic transition behavior fails rather than
 fabricating an interval; calendar traversal is context-checked and bounded for
 custom operator data. UTC half-open intervals govern both selection and grouping,
-even if a historical clock reversal later displays yesterday. The terminal uses
-server-computed `[clipped]` and `[in progress]` flags; the latter tests the captured
-instant against the unclipped interval. Empty/future buckets invent no model rows,
+even if a historical clock reversal later displays yesterday. The JSON report
+retains server-computed `range_partial` and `in_progress` flags; static terminal
+labels show only the bucket start date. JSON `in_progress` tests
+the captured instant against the unclipped interval. Empty/future buckets invent no model rows,
 and future-dated stored Turns are not filtered out by generation time.
 
 **Terminal-local timezone:** the configuration visible to the CLI process,
@@ -220,14 +221,18 @@ counts, and sum/coverage relationships (including empty sections) must validate
 before any stdout output. Pricing provenance, cost coverage at every aggregate,
 and row/model matches form one atomic additive extension. A wholly absent
 extension identifies an older daemon; partial or dangling recognized pricing
-fields are protocol errors. Amounts are canonical exact nonnegative decimal
+fields are protocol errors. The current pricing object omits the former
+presentation-only `context_policy`; clients preserve that legacy member as
+unknown additive data. Amounts are canonical exact nonnegative decimal
 strings (or the governed `null` for nonempty groups with zero priceable Turns),
 and the six canonical int64 coverage strings must partition stored Turns exactly.
 Unknown additive fields remain compatible. Errors use stderr and exit 1,
 including partial/short writes or failure to write the final newline; success,
-including empty, exits 0. Text identifies original-provider/highest-context/
-single-write pricing, fetched versus fallback source, and successful content-fetch
-time when present. It states that valuation uses current accepted rates for
+including empty, exits 0. Text identifies original-provider models.dev
+standard/context and single-write rates, fetched versus fallback source, and
+successful content-fetch time when present. This wording remains accurate for a
+legacy daemon whose additive `context_policy` described highest-tier selection.
+It states that valuation uses current accepted rates for
 persisted best-effort observations, may exclude unpriceable Turns, and is not a
 Copilot bill. A wholly absent pricing extension produces the exact older-daemon
 unavailable explanation and `—` cost cells without fabricated exclusions or local
@@ -420,11 +425,16 @@ install a metering hook, register pricing, or make a models.dev request.
 When enabled, `serve` registers the memory-only `usage_prices` cached value before
 cache priming. It starts from the identified vendored `models.dev/api.json` floor,
 refreshes best effort, and retains last-good on fetch or validation failure. The
-selected original-provider namespaces are OpenAI, Anthropic, Google, and xAI;
-standard prices choose the greatest structured context threshold, then the
-legacy long-context row, then base without filling omitted optional rates.
-Prices are current benchmark inputs, never persisted tariff history or Copilot
-billing. Refresh failure is visible in `/readyz` but does not change readiness,
+selected original-provider namespaces are OpenAI, Anthropic, Google, and xAI.
+Rate selection is data-driven rather than provider-specific: every priceable
+Turn starts from its Pricing model's base vector and selects the tier with the
+greatest threshold strictly below complete native input. Structured
+`tiers[].tier.size` is authoritative; deprecated `context_over_200k` is a strict
+200,000-token fallback only when structured tiers are absent. OpenAI uses
+complete `input_tokens`; Anthropic uses checked uncached input plus cache creation
+plus cache read. Selected rows never inherit omitted optional rates from another
+row. Prices are current benchmark inputs, never persisted tariff history or
+Copilot billing. Refresh failure is visible in `/readyz` but does not change readiness,
 inference, or native Usage report availability. The existing version-1 report
 protocol exposes the captured dataset/content identity/source/success time,
 exact USD priced-Turn subtotals and exclusion coverage at all aggregate levels,

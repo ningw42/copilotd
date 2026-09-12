@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"net/http/httptest"
 	"reflect"
 	"slices"
@@ -206,7 +207,7 @@ func TestQueryValuesCompleteOpenAIReportFromOnePricingSnapshot(t *testing.T) {
 			{StartDate: "2026-09-02", UntilDate: "2026-09-03", RangeStart: time.Date(2026, 9, 2, 0, 0, 0, 0, time.UTC), RangeEnd: time.Date(2026, 9, 3, 0, 0, 0, 0, time.UTC), InProgress: true},
 		},
 		Pricing: &report.PricingProvenance{
-			Dataset: "models.dev/api.json", Currency: "USD", Basis: "original_provider", ContextPolicy: "highest_tier", CacheWritePolicy: "single_rate",
+			Dataset: "models.dev/api.json", Currency: "USD", Basis: "original_provider", CacheWritePolicy: "single_rate",
 			Version: "sha256:openai-fixture", Source: "fetched", LastSuccess: &lastSuccess,
 		},
 		OpenAI: &report.Section{
@@ -221,6 +222,242 @@ func TestQueryValuesCompleteOpenAIReportFromOnePricingSnapshot(t *testing.T) {
 	assertReportEqual(t, got, want)
 	if got.OpenAI.Rows[0].Cost.Amount == got.OpenAI.Rows[1].Cost.Amount || got.OpenAI.Rows[0].Cost.Amount == got.OpenAI.Models[0].Cost.Amount || got.OpenAI.Models[0].Cost.Amount == got.OpenAI.Total.Cost.Amount {
 		t.Fatal("aggregate amounts share mutable result pointers")
+	}
+}
+
+func TestQuerySelectsContextTariffsPerTurnAcrossNativeSurfaces(t *testing.T) {
+	source := pricingSourceRaw(t, `{
+		"openai":{"id":"openai","models":{}},
+		"anthropic":{"id":"anthropic","models":{"claude-tiered":{"id":"claude-tiered","cost":{
+			"input":1,"output":1,"cache_read":1,"cache_write":1,
+			"tiers":[
+				{"input":3,"output":3,"cache_read":3,"cache_write":3,"tier":{"type":"context","size":200}},
+				{"input":2,"output":2,"cache_read":2,"cache_write":2,"tier":{"type":"context","size":100}}
+			]
+		}}}},
+		"google":{"id":"google","models":{"gemini-tiered":{"id":"gemini-tiered","cost":{
+			"input":1,"output":1,"cache_read":1,"cache_write":1,
+			"tiers":[
+				{"input":2,"output":2,"cache_read":2,"cache_write":2,"tier":{"type":"context","size":100}},
+				{"input":3,"output":3,"cache_read":3,"cache_write":3,"tier":{"type":"context","size":200}}
+			]
+		}}}},
+		"xai":{"id":"xai","models":{}}
+	}`, pricing.SnapshotStatus{Source: "fetched", Version: "sha256:per-turn-context"})
+
+	path := stored(t,
+		turn("2026-09-01T01:00:00Z", "gemini-tiered", usage.OpenAIUsage{
+			InputTokens: 100, CachedTokens: ptr(90), CacheWriteTokens: ptr(5),
+		}),
+		turn("2026-09-01T02:00:00Z", "gemini-tiered", usage.OpenAIUsage{
+			InputTokens: 201, CachedTokens: ptr(190), CacheWriteTokens: ptr(10),
+		}),
+		anthropicTurn("2026-09-01T03:00:00Z", "claude-tiered", usage.AnthropicUsage{
+			InputTokens: 1, CacheCreationInputTokens: ptr(39), CacheReadInputTokens: ptr(60),
+		}),
+		anthropicTurn("2026-09-01T04:00:00Z", "claude-tiered", usage.AnthropicUsage{
+			InputTokens: 1, CacheCreationInputTokens: ptr(40), CacheReadInputTokens: ptr(160),
+		}),
+	)
+	q := selection()
+	q.Surface = "all"
+	got, err := report.New(path, source).Query(context.Background(), q)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got.OpenAI == nil || len(got.OpenAI.Rows) != 1 || got.OpenAI.Rows[0].Model != "gemini-tiered" || got.OpenAI.Rows[0].PricingMatch.Provider != "google" {
+		t.Fatalf("OpenAI-native tiered result = %+v", got.OpenAI)
+	}
+	wantOpenAICost := report.Cost{Amount: amount(t, "0.000703"), PricedTurns: 2}
+	assertCostEqual(t, got.OpenAI.Rows[0].Cost, wantOpenAICost)
+	assertCostEqual(t, got.OpenAI.Models[0].Cost, wantOpenAICost)
+	assertCostEqual(t, got.OpenAI.Total.Cost, wantOpenAICost)
+	if got.OpenAI.Total.Turns != 2 || *got.OpenAI.Total.Usage["input_tokens"].Sum != 301 || *got.OpenAI.Total.Usage["cached_tokens"].Sum != 280 || *got.OpenAI.Total.Usage["cache_write_tokens"].Sum != 15 {
+		t.Fatalf("OpenAI native aggregates changed during tier selection: %+v", got.OpenAI.Total)
+	}
+
+	if got.Anthropic == nil || len(got.Anthropic.Rows) != 1 || got.Anthropic.Rows[0].Model != "claude-tiered" || got.Anthropic.Rows[0].PricingMatch.Provider != "anthropic" {
+		t.Fatalf("Anthropic-native tiered result = %+v", got.Anthropic)
+	}
+	wantAnthropicCost := report.Cost{Amount: amount(t, "0.000703"), PricedTurns: 2}
+	assertCostEqual(t, got.Anthropic.Rows[0].Cost, wantAnthropicCost)
+	assertCostEqual(t, got.Anthropic.Models[0].Cost, wantAnthropicCost)
+	assertCostEqual(t, got.Anthropic.Total.Cost, wantAnthropicCost)
+	if got.Anthropic.Total.Turns != 2 || *got.Anthropic.Total.Usage["input_tokens"].Sum != 2 || *got.Anthropic.Total.Usage["cache_creation_input_tokens"].Sum != 79 || *got.Anthropic.Total.Usage["cache_read_input_tokens"].Sum != 220 {
+		t.Fatalf("Anthropic native aggregates changed during tier selection: %+v", got.Anthropic.Total)
+	}
+}
+
+func TestQuerySelectsLegacyContextTariffAtStrict200kBoundary(t *testing.T) {
+	source := pricingSource(t, `{"legacy":{"id":"legacy","cost":{
+		"input":1,"output":1,
+		"context_over_200k":{"input":2,"output":2}
+	}}}`, pricing.SnapshotStatus{Source: "fallback", Version: "sha256:legacy-context"})
+	zero := int64(0)
+	path := stored(t,
+		turn("2026-09-01T00:00:00Z", "legacy", usage.OpenAIUsage{InputTokens: 199999, CachedTokens: &zero, CacheWriteTokens: &zero}),
+		turn("2026-09-01T01:00:00Z", "legacy", usage.OpenAIUsage{InputTokens: 200000, CachedTokens: &zero, CacheWriteTokens: &zero}),
+		turn("2026-09-01T02:00:00Z", "legacy", usage.OpenAIUsage{InputTokens: 200001, CachedTokens: &zero, CacheWriteTokens: &zero}),
+	)
+	got, err := report.New(path, source).Query(context.Background(), selection())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := report.Cost{Amount: amount(t, "0.800001"), PricedTurns: 3}
+	assertCostEqual(t, got.OpenAI.Rows[0].Cost, want)
+	assertCostEqual(t, got.OpenAI.Models[0].Cost, want)
+	assertCostEqual(t, got.OpenAI.Total.Cost, want)
+	total := got.OpenAI.Total
+	input, output := total.Usage["input_tokens"], total.Usage["output_tokens"]
+	cached, cacheWrite := total.Usage["cached_tokens"], total.Usage["cache_write_tokens"]
+	if total.Turns != 3 || input.Sum == nil || *input.Sum != 600000 || input.ReportedTurns != 3 || output.Sum == nil || *output.Sum != 0 || output.ReportedTurns != 3 || cached.Sum == nil || *cached.Sum != 0 || cached.ReportedTurns != 3 || cacheWrite.Sum == nil || *cacheWrite.Sum != 0 || cacheWrite.ReportedTurns != 3 {
+		t.Fatalf("legacy boundary native aggregates changed: %+v", total)
+	}
+}
+
+func TestQueryPreservesAnthropicContextEvidenceCoverage(t *testing.T) {
+	source := pricingSourceRaw(t, `{
+		"openai":{"id":"openai","models":{}},
+		"anthropic":{"id":"anthropic","models":{"context":{"id":"context","cost":{
+			"input":1,"output":1,"cache_read":1,"cache_write":1,
+			"tiers":[{"input":2,"output":2,"cache_read":2,"cache_write":2,"tier":{"type":"context","size":100}}]
+		}}}},
+		"google":{"id":"google","models":{}},
+		"xai":{"id":"xai","models":{}}
+	}`, pricing.SnapshotStatus{Source: "fetched", Version: "sha256:anthropic-context-evidence"})
+	zero, maximum := int64(0), int64(math.MaxInt64)
+	tests := []struct {
+		name   string
+		native usage.AnthropicUsage
+		cost   report.Cost
+	}{
+		{
+			name:   "zero complete input remains priceable",
+			native: usage.AnthropicUsage{CacheCreationInputTokens: &zero, CacheReadInputTokens: &zero},
+			cost:   report.Cost{Amount: amount(t, "0"), PricedTurns: 1},
+		},
+		{
+			name:   "missing additive input remains unpriceable",
+			native: usage.AnthropicUsage{InputTokens: 1, CacheCreationInputTokens: &zero},
+			cost:   report.Cost{Unpriced: report.UnpricedCoverage{MissingUsage: 1}},
+		},
+		{
+			name: "overflowing additive input remains unpriceable",
+			native: usage.AnthropicUsage{
+				InputTokens: maximum, CacheCreationInputTokens: &maximum, CacheReadInputTokens: &maximum,
+			},
+			cost: report.Cost{Unpriced: report.UnpricedCoverage{InconsistentUsage: 1}},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			path := stored(t, anthropicTurn("2026-09-01T01:00:00Z", "context", tc.native))
+			q := selection()
+			q.Surface = "anthropic"
+			got, err := report.New(path, source).Query(context.Background(), q)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertCostEqual(t, got.Anthropic.Rows[0].Cost, tc.cost)
+			assertCostEqual(t, got.Anthropic.Models[0].Cost, tc.cost)
+			assertCostEqual(t, got.Anthropic.Total.Cost, tc.cost)
+		})
+	}
+}
+
+func TestQueryPreservesProvableMissingRateBeforeAnthropicContextEvidence(t *testing.T) {
+	source := pricingSourceRaw(t, `{
+		"openai":{"id":"openai","models":{}},
+		"anthropic":{"id":"anthropic","models":{
+			"missing-input":{"id":"missing-input","cost":{
+				"output":1,"cache_read":1,"cache_write":1,
+				"tiers":[{"output":2,"cache_read":2,"cache_write":2,"tier":{"type":"context","size":100}}]
+			}},
+			"one-usable":{"id":"one-usable","cost":{
+				"input":1,"output":1,"cache_read":1,"cache_write":1,
+				"tiers":[{"output":2,"cache_read":2,"cache_write":2,"tier":{"type":"context","size":100}}]
+			}}
+		}},
+		"google":{"id":"google","models":{}},
+		"xai":{"id":"xai","models":{}}
+	}`, pricing.SnapshotStatus{Source: "fetched", Version: "sha256:anthropic-context-overlap"})
+	zero, maximum := int64(0), int64(math.MaxInt64)
+	missingContext := usage.AnthropicUsage{
+		InputTokens: 1, OutputTokens: 1, CacheCreationInputTokens: &zero,
+	}
+	overflowingContext := usage.AnthropicUsage{
+		InputTokens: maximum, CacheCreationInputTokens: &maximum, CacheReadInputTokens: &maximum,
+	}
+	tests := []struct {
+		name, model string
+		native      usage.AnthropicUsage
+		cost        report.Cost
+	}{
+		{name: "missing context keeps provable missing rate", model: "missing-input", native: missingContext, cost: report.Cost{Unpriced: report.UnpricedCoverage{MissingRate: 1}}},
+		{name: "overflowing context keeps provable missing rate", model: "missing-input", native: overflowingContext, cost: report.Cost{Unpriced: report.UnpricedCoverage{MissingRate: 1}}},
+		{name: "missing context is not reordered with a usable vector", model: "one-usable", native: missingContext, cost: report.Cost{Unpriced: report.UnpricedCoverage{MissingUsage: 1}}},
+		{name: "overflowing context is not reordered with a usable vector", model: "one-usable", native: overflowingContext, cost: report.Cost{Unpriced: report.UnpricedCoverage{InconsistentUsage: 1}}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			path := stored(t, anthropicTurn("2026-09-01T01:00:00Z", tc.model, tc.native))
+			q := selection()
+			q.Surface = "anthropic"
+			got, err := report.New(path, source).Query(context.Background(), q)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertCostEqual(t, got.Anthropic.Rows[0].Cost, tc.cost)
+			assertCostEqual(t, got.Anthropic.Models[0].Cost, tc.cost)
+			assertCostEqual(t, got.Anthropic.Total.Cost, tc.cost)
+			total := got.Anthropic.Total
+			input, output := total.Usage["input_tokens"], total.Usage["output_tokens"]
+			creation := total.Usage["cache_creation_input_tokens"]
+			if total.Turns != 1 || input.Sum == nil || *input.Sum != tc.native.InputTokens || input.ReportedTurns != 1 || output.Sum == nil || *output.Sum != tc.native.OutputTokens || output.ReportedTurns != 1 || creation.Sum == nil || *creation.Sum != *tc.native.CacheCreationInputTokens || creation.ReportedTurns != 1 {
+				t.Fatalf("overlap classification changed native aggregates: %+v", total)
+			}
+			read := total.Usage["cache_read_input_tokens"]
+			if tc.native.CacheReadInputTokens == nil && (read.Sum != nil || read.ReportedTurns != 0) || tc.native.CacheReadInputTokens != nil && (read.Sum == nil || *read.Sum != *tc.native.CacheReadInputTokens || read.ReportedTurns != 1) {
+				t.Fatalf("cache-read aggregate = %+v for native %+v", read, tc.native)
+			}
+		})
+	}
+}
+
+func TestQueryRevaluesContextTierAfterSnapshotRefresh(t *testing.T) {
+	firstSource := pricingSource(t, `{"context":{"id":"context","cost":{
+		"input":1,"output":1,
+		"tiers":[{"input":2,"output":2,"tier":{"type":"context","size":100}}]
+	}}}`, pricing.SnapshotStatus{Source: "fetched", Version: "sha256:first-context"})
+	secondSource := pricingSource(t, `{"context":{"id":"context","cost":{
+		"input":3,"output":3,
+		"tiers":[{"input":9,"output":9,"tier":{"type":"context","size":200}}]
+	}}}`, pricing.SnapshotStatus{Source: "fetched", Version: "sha256:second-context"})
+	source := &mutablePricingSource{current: firstSource}
+	zero := int64(0)
+	path := stored(t, turn("2026-09-01T01:00:00Z", "context", usage.OpenAIUsage{
+		InputTokens: 150, CachedTokens: &zero, CacheWriteTokens: &zero,
+	}))
+	reader := report.New(path, source)
+
+	first, err := reader.Query(context.Background(), selection())
+	if err != nil {
+		t.Fatal(err)
+	}
+	source.set(secondSource)
+	second, err := reader.Query(context.Background(), selection())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Pricing.Version != "sha256:first-context" || first.OpenAI.Total.Cost.Amount.String() != "0.0003" {
+		t.Fatalf("first context snapshot result = %+v", first)
+	}
+	if second.Pricing.Version != "sha256:second-context" || second.OpenAI.Total.Cost.Amount.String() != "0.00045" {
+		t.Fatalf("second context snapshot result = %+v", second)
+	}
+	if first.OpenAI.Total.Cost.Amount.String() != "0.0003" || source.callCount() != 2 {
+		t.Fatalf("refresh mutated prior report or Current calls = %d", source.callCount())
 	}
 }
 
@@ -335,7 +572,7 @@ func TestQueryValuesBothNativeSurfacesByReportedModelOnly(t *testing.T) {
 			{StartDate: "2026-09-01", UntilDate: "2026-09-02", RangeStart: time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC), RangeEnd: time.Date(2026, 9, 2, 0, 0, 0, 0, time.UTC)},
 			{StartDate: "2026-09-02", UntilDate: "2026-09-03", RangeStart: time.Date(2026, 9, 2, 0, 0, 0, 0, time.UTC), RangeEnd: time.Date(2026, 9, 3, 0, 0, 0, 0, time.UTC)},
 		},
-		Pricing:   &report.PricingProvenance{Dataset: "models.dev/api.json", Currency: "USD", Basis: "original_provider", ContextPolicy: "highest_tier", CacheWritePolicy: "single_rate", Version: "sha256:combined", Source: "fetched"},
+		Pricing:   &report.PricingProvenance{Dataset: "models.dev/api.json", Currency: "USD", Basis: "original_provider", CacheWritePolicy: "single_rate", Version: "sha256:combined", Source: "fetched"},
 		Anthropic: section(anthropicTotal), OpenAI: section(openAITotal),
 	}
 	assertReportEqual(t, got, want)

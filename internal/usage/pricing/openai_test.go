@@ -8,6 +8,41 @@ import (
 	"github.com/ningw42/copilotd/internal/usage/pricing"
 )
 
+func TestTariffCalculatesOpenAIWithCompleteInputContext(t *testing.T) {
+	t.Parallel()
+
+	tariff := tariffFromCost(t, `{
+		"input":1,"output":2,
+		"tiers":[{"input":3,"output":5,"tier":{"type":"context","size":200}}]
+	}`)
+	zero, ignored := int64(0), int64(1_000_000)
+	tests := []struct {
+		name       string
+		input      int64
+		wantAmount string
+	}{
+		{name: "equal threshold uses base", input: 200, wantAmount: "0.0002"},
+		{name: "above threshold uses tier", input: 201, wantAmount: "0.000603"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			contribution, err := tariff.CalculateOpenAI(usage.OpenAIUsage{
+				InputTokens:      tc.input,
+				CachedTokens:     &zero,
+				CacheWriteTokens: &zero,
+				ReasoningTokens:  &ignored,
+				TotalTokens:      &ignored,
+			})
+			if err != nil {
+				t.Fatalf("Tariff.CalculateOpenAI() error = %v", err)
+			}
+			if contribution.Reason != "" || contribution.Amount.String() != tc.wantAmount {
+				t.Fatalf("contribution = {amount:%s reason:%q}, want amount %s and no exclusion", contribution.Amount.String(), contribution.Reason, tc.wantAmount)
+			}
+		})
+	}
+}
+
 func TestCalculateOpenAIValuesInclusiveInputAndCompleteOutput(t *testing.T) {
 	t.Parallel()
 
@@ -339,6 +374,19 @@ func TestCalculateOpenAIUsesExactSupportedDecimalBounds(t *testing.T) {
 			t.Fatalf("contribution = {amount:%s reason:%q}, want exact maximum %s", contribution.Amount.String(), contribution.Reason, want)
 		}
 	})
+}
+
+func tariffFromCost(t *testing.T, cost string) pricing.Tariff {
+	t.Helper()
+	snapshot, err := pricing.ParseSnapshot(t.Context(), snapshotFixture(cost))
+	if err != nil {
+		t.Fatalf("ParseSnapshot() error = %v", err)
+	}
+	tariff, ok := snapshot.Tariff(pricing.Identity{Provider: "openai", Model: "model"})
+	if !ok {
+		t.Fatal("fixture model has no tariff")
+	}
+	return tariff
 }
 
 func mustRate(t *testing.T, raw string) *pricing.Rate {

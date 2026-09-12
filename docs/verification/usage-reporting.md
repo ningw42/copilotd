@@ -41,11 +41,13 @@ existing Nix development shell (native CI uses setup-go).
   prerequisite API key/GitHub OAuth token values are never live credentials.
   Discovery/refresh is disabled; the initial HTTPS Exchange CONNECT is observed
   and refused by a loopback proxy that never opens a tunnel. Reports still work.
-- `observed_inference_to_executable` separately sends qualifying synthetic
-  Anthropic/OpenAI completions through the **in-process production daemon**,
-  meter and normal asynchronous writer, then invokes the actual CLI executable.
-  This closes the observation-to-output chain without claiming that the prior
-  history setup itself was live inference. Existing buffered/SSE/WebSocket and
+- `observed_inference_to_executable` separately sends a qualifying synthetic
+  Anthropic completion and the recorded September OpenAI buffered fixture through
+  the **in-process production daemon**, meter and normal asynchronous writer,
+  then invokes the actual CLI executable. It verifies every recorded OpenAI native
+  aggregate and the embedded gpt-5.6-sol base-rate valuation for twelve input
+  tokens. This closes the observation-to-output chain without claiming that the
+  prior history setup itself was live inference. Existing buffered/SSE/WebSocket and
   concurrency fixtures remain retained; no public upstream compatibility claim
   follows from synthetic responses.
 - Acceptance includes both Surfaces/all, four periods, independent/default
@@ -59,10 +61,12 @@ existing Nix development shell (native CI uses setup-go).
   source through the existing production source seam, the shared cache registry,
   in-process production daemon/HTTP report path, and actual CLI executable. Its
   fixed OpenAI/Anthropic/combined history covers matched/unknown/ambiguous models,
-  Surface-independent original-provider identity, greatest-context and one
-  aggregate cache-write rates, exact current-price and identity repricing without
-  new database writes, report-time no-network behavior, and a coherent old
-  snapshot while replacement refresh is deliberately blocked. The ordinary
+  Surface-independent original-provider identity, per-Turn context-tier selection
+  and one aggregate cache-write rate, a short OpenAI-native Turn valued at base
+  rates, exact current-price and identity repricing without new database writes,
+  report-time no-network behavior, omission of presentation-only
+  `pricing.context_policy`, and a coherent old snapshot while replacement refresh
+  is deliberately blocked. The ordinary
   actual-`serve` acceptance separately pins refresh to `0` and uses the embedded
   floor; neither path contacts models.dev.
   No OS can carry embedded NUL in argv; its identity contract remains tested at

@@ -1,8 +1,9 @@
 # Estimated cost in Usage reports
 
-**Status:** implemented through #238: pricing/source, matching, native calculators,
-daemon-owned aggregation, additive HTTP transport, CLI presentation, and local
-synthetic executable acceptance. Final full-suite/race/flake and same-revision
+**Status:** implemented through #238 and amended by #241: pricing/source,
+matching, native calculators, per-Turn context-tier selection, daemon-owned
+aggregation, additive HTTP transport, CLI presentation, and local synthetic
+executable acceptance. Final full-suite/race/flake and same-revision
 native-platform certification remain release gates, not inferred from this status.
 **Date:** 2026-09-11
 **Extends:** [Usage reporting](2026-09-07-usage-reporting-design.md)
@@ -30,10 +31,11 @@ The maintainer chose:
    files.
 3. **One cache-write price:** multiply the aggregate cache-write count by the
    corresponding models.dev rate. Do not distinguish cache-write TTLs.
-4. **Long-context pricing rather than precise tier reconstruction:** always use
-   the highest-context tier when one exists, otherwise the base rates. This is the
-   interpretation presented before the maintainer's agreement. Overestimation
-   from that choice is accepted; no per-Turn threshold selection is needed.
+4. **Per-Turn context pricing:** retain base and structured context tariffs and
+   select one rate vector from each Turn's complete Surface-native input. Use the
+   base vector when no strict-above threshold matches and otherwise the greatest
+   matching threshold. Selection is data-driven from models.dev, not special-cased
+   by provider.
 5. **Report-time valuation:** never persist prices or calculated costs. Historical
    Turns are always valued using the latest accepted pricing snapshot available
    to this daemon, not a historical tariff.
@@ -53,9 +55,9 @@ those details are already implemented or separately approved.
 
 **Estimated cost** is a USD valuation of priceable persisted Turns using the
 selected original-provider rates. It is not money paid to GitHub, an invoice,
-subscription savings, or proof of complete consumption. Highest-context pricing
-and a single cache-write rate are intentional approximations, not guarantees
-that the result is an upper bound on actual charges.
+subscription savings, or proof of complete consumption. Current accepted rates,
+per-Turn context selection, and a single cache-write rate do not guarantee that
+the result is an upper bound on actual charges.
 
 A **Pricing model** is the original-provider/model pair selected for that
 valuation. It is separate from the Reported model and Requested model, and is
@@ -348,23 +350,41 @@ Matching names does not establish the execution tier or recover an actual bill.
 
 ## 6. Rate selection and native valuation
 
-### One flat rate vector per Pricing model
+### One tariff and one selected vector per Turn
 
-Use standard `cost` values from the chosen provider/model. If `cost.tiers` has
-entries, select the row with the greatest numeric context threshold, regardless
-of a Turn's actual size. That row is authoritative: an omitted optional rate
-stays absent; do not silently fill it from another tier. If structured tiers are
-absent but legacy `context_over_200k` rates exist, use that long-context row
-without interpreting its name as a threshold. Otherwise use base rates.
+Use standard `cost` values from the chosen provider/model. Retain its base rate
+vector and every valid structured `cost.tiers` context row, ordered by exact
+numeric `tier.size`. For each Turn, use the base vector when complete native
+input is below or equal to every threshold. Otherwise select the matching tier
+with the greatest threshold for which `complete input > tier.size`. At equality,
+that tier does not apply, though a lower threshold may still match.
+
+Structured tiers are authoritative and selection is provider-independent. Current
+models.dev data exercises this under selected OpenAI, Google, and xAI Pricing
+identities; the direct Anthropic catalog's current absence of tiers is not a
+permanent exemption. If no structured tier exists but deprecated
+`context_over_200k` rates do, treat that row as a strict `complete input > 200000`
+compatibility tier. Never prefer the generated legacy name over a structured
+threshold: current OpenAI rows demonstrate that it can discard an exact 272,000
+boundary. A selected row is authoritative, so an omitted rate stays absent; do
+not fill it from the base or another tier.
 
 Reject malformed or duplicate structured thresholds rather than depending on
-input order. Experimental mode rates are not selected. The optional `reasoning`
-rate does not create an extra charge: this feature values the complete native
-output count once at the output rate.
+input order, and validate recognized base, structured, and legacy rows even when
+one is not selected. Experimental mode rates are not selected. The optional
+`reasoning` rate does not create an extra charge: this feature values the complete
+native output count once at the output rate.
 
-All source rates are USD per million tokens. The interpretation does not depend
-on the Reported model's apparent context limit, a live Catalog, or metadata used
-for Codex aliases. Highest-context selection is intentional even for tiny Turns.
+Derive complete input from the persisted native Surface, independently of the
+Pricing model's provider. OpenAI uses complete `input_tokens`. Anthropic uses a
+checked sum of uncached `input_tokens`, `cache_creation_input_tokens`, and
+`cache_read_input_tokens`; missing, negative, or overflowing context evidence
+cannot select a tier and excludes the Turn. Output, reasoning/thinking, TTL
+subdivisions, and reported total tokens never select context rates.
+
+All source rates are USD per million tokens. Selection does not depend on the
+Reported model's apparent context limit, a live Catalog, Requested-model suffix,
+or metadata used for Codex aliases.
 
 ### Formulas
 
@@ -392,8 +412,8 @@ inconsistent with one another; the aggregate creation count is the chosen input.
 Do not add reasoning/thinking to output or use reported `total_tokens` as another
 chargeable count. All native fields remain visible exactly as before.
 
-Although the selected rates are flat, value individual Turns during the existing
-scan. This preserves missing-count correlation and pricing coverage; aggregated
+Select and value individual Turns during the existing scan. This preserves
+mixed tiers, missing-count correlation, and pricing coverage; aggregated
 optional-field coverage cannot establish which Turns were fully priceable.
 Calculate one contribution per Turn and reuse it at period/model, whole-range
 model, and whole-section aggregation levels.
@@ -417,13 +437,21 @@ A Turn is priceable when:
 Unpriceable Turns still contribute to all existing native metrics and Turn
 counts. Distinguish `unknown_model`, `ambiguous_model`, `missing_rate`,
 `missing_usage`, and `inconsistent_usage` in monetary coverage. Assign one reason
-per Turn, in that precedence order, to keep reasons additive. Within
-`missing_rate`, check optional rates only for known positive counts; an absent
-cache count is `missing_usage`, not evidence of a missing rate requirement.
+per Turn to keep reasons additive. Model resolution remains first, and a matched
+model with no tariff is `missing_rate`. When missing or inconsistent complete-input
+evidence prevents context-tier selection, preserve `missing_rate` if every retained
+base/tier vector independently lacks a rate required by known chargeable evidence;
+do not merge rate presence across vectors or guess a tier. Required input/output
+rates remain required even for known-zero counts, while optional cache rates are
+required only for known-positive counts. If at least one retained vector has every
+rate required by the known evidence, return the context-derived `missing_usage` or
+`inconsistent_usage` reason. After selection, preserve the existing `missing_rate`,
+`missing_usage`, then `inconsistent_usage` formula precedence. An absent cache
+count alone is `missing_usage`, not evidence of a missing optional rate.
 
 This is stricter about **missing evidence** than about the agreed **tariff
-approximations**. One cache-write rate and highest-context rates do not themselves
-make a Turn unpriceable.
+approximations**. One cache-write rate and data-driven context-tier selection do
+not themselves make a Turn unpriceable.
 
 ## 7. Amounts and report interface
 
@@ -457,7 +485,6 @@ adds a top-level `pricing` object identifying the benchmark and captured snapsho
     "dataset": "models.dev/api.json",
     "currency": "USD",
     "basis": "original_provider",
-    "context_policy": "highest_tier",
     "cache_write_policy": "single_rate",
     "version": "sha256:<full content digest>",
     "source": "fallback",
@@ -465,6 +492,11 @@ adds a top-level `pricing` object identifying the benchmark and captured snapsho
   }
 }
 ```
+
+#241 removes the presentation-only `pricing.context_policy` member without a
+replacement. It never configured or drove valuation; report documentation and
+terminal caveats describe the calculation. A new client treats that member from
+an older daemon as unknown additive data and preserves it in original-byte JSON.
 
 `last_success` is the cached value's successful content-fetch time, not a tariff
 effective date, report watermark, or proof every entry is up to date. Full
@@ -531,7 +563,7 @@ model resolution.
   Do not reinterpret absence as zero or silently calculate locally.
 - When top-level `pricing` is present, require and validate the full extension on
   all selected aggregate levels. Partial extension presence is a protocol error.
-- Validate decimal bounds/canonical form, known policies/statuses, identity shape,
+- Validate decimal bounds/canonical form, the known cache-write policy/statuses, identity shape,
   amount/coverage relationships, and checked reason-count sums. Reuse existing
   duplicate-member/Unicode checks and bounded fragment encoding. Do not reconstruct
   pricing, matching, or cross-level server aggregates in the client.
@@ -568,16 +600,20 @@ rounded cells.
 - A compact note identifies the period/model or `Total`, priced/total stored
   Turns, and nonzero exclusion reasons. Entirely unpriced groups also receive a
   note; unlike optional native metrics, zero monetary coverage needs explanation.
-- A short header identifies original-provider/highest-context pricing and whether
-  the effective snapshot is fetched or fallback. Include the successful fetch
+- A short header identifies original-provider models.dev standard/context rates
+  and whether the effective snapshot is fetched or fallback. This remains true
+  when the new client accepts an older daemon's additive highest-tier policy
+  member without interpreting it. Include the successful fetch
   time when available; do not call it the price's effective date.
 - `--details` also lists distinct Reported-model → Pricing-model resolutions and
   methods; unknown/ambiguous matches are explicit. Escape these identities using
   the existing terminal-safe policy.
 
 Always state that this is estimated original-provider cost for persisted,
-best-effort observations; uses current accepted highest-context/single-write
-rates; is not a Copilot bill; and may exclude unpriceable Turns. This should be
+best-effort observations; uses the daemon's current accepted models.dev
+standard/context and single cache-write rates; is not a Copilot bill; and may
+exclude unpriceable Turns. This wording must remain accurate when reading a
+legacy highest-tier daemon. This should be
 short explanatory text, not a new interactive presentation.
 
 ## 9. Failure and resource behavior
@@ -613,8 +649,8 @@ calls are required in normal tests.
    provider matching, normalization collisions, invalid dates, meaningful variant
    preservation, multiple suffix ordering, concurrent reads, and unpriced exact
    candidates. Document evidence for every explicit alias.
-2. **Pricing data/module:** verify embedded identity/license, standard/highest-
-   context/legacy selection, exact decimals, known-zero versus absent values,
+2. **Pricing data/module:** verify embedded identity/license, base/structured-
+   context/legacy selection, strict thresholds, exact decimals, known-zero versus absent values,
    native formulas, TTL-independence, output-subset non-duplication, invalid native
    relationships, and numeric bounds. Exercise fetch size/deadline/redirect limits,
    malformed/duplicate data, last-good, floor, refresh disabling, and no credentials
@@ -637,8 +673,8 @@ calls are required in normal tests.
    enabling metering in a test must not accidentally contact the internet.
 5. **Documentation and verification:** update README, CONFIGURATION, help/config
    assertions, domain definitions, and affected ADR/design scope notes together.
-   Record the deliberate current-price/highest-context approximation so it is not
-   later "fixed" into historical or precise billing. Run focused tests and the
+   Record the deliberate current-price/per-Turn-context approximation so it is
+   not later "fixed" into historical billing. Run focused tests and the
    existing full verification through Nix (`nix develop -c go test ...`, race tests,
    `nix fmt`, `nix flake check`) only once implementation is authorized.
 
@@ -646,7 +682,7 @@ No implementation task starts merely because this sequence exists.
 
 ## 11. Review points before implementation
 
-The original-provider benchmark, no persisted pricing, highest-context rates,
+The original-provider benchmark, no persisted pricing, per-Turn context rates,
 aggregate cache-write calculation, server/CLI split, dedicated constrained
 matcher, cost-column position, and three-decimal USD display are settled
 direction. Please review these **proposed defaults**, which make that direction
