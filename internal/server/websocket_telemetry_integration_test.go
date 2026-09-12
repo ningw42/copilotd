@@ -135,6 +135,11 @@ func TestWebSocketTelemetryEmitsEstablishmentAndTerminalAccessRecords(t *testing
 		t.Fatalf("close downstream client: %v", err)
 	}
 	waitForWsCount(t, func() uint64 { return terminals.Count(wsforward.SessionClientClosed) }, 1)
+	waitForWsLog(t, logs,
+		"msg=access",
+		"request_id=ws-telemetry-request",
+		"terminal_reason=client_closed",
+	)
 
 	if got := accepts.Count(wsforward.AcceptEstablished); got != 1 {
 		t.Errorf("established count = %d, want 1", got)
@@ -409,9 +414,23 @@ func waitForWsCount(t *testing.T, count func() uint64, want uint64) {
 	waitForWsCondition(t, func() bool { return count() == want })
 }
 
-func waitForWsLog(t *testing.T, logs *synchronizedLogBuffer, want string) {
+func waitForWsLog(t *testing.T, logs *synchronizedLogBuffer, wants ...string) {
 	t.Helper()
-	waitForWsCondition(t, func() bool { return strings.Contains(logs.String(), want) })
+	waitForWsCondition(t, func() bool {
+		for _, line := range strings.Split(logs.String(), "\n") {
+			matched := true
+			for _, want := range wants {
+				if !strings.Contains(line, want) {
+					matched = false
+					break
+				}
+			}
+			if matched {
+				return true
+			}
+		}
+		return false
+	})
 }
 
 func waitForWsCondition(t *testing.T, condition func() bool) {
