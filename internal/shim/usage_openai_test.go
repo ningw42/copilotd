@@ -802,32 +802,23 @@ func observeSyntheticOpenAICompletions(t *testing.T, transport syntheticOpenAITr
 	t.Helper()
 	sink := &memoryUsageSink{}
 	ctx := context.Background()
-	var chain *Chain
-	var stream sse.FrameTransformer
-	var server MessageTransform
+	var observe func([]byte)
 	switch transport.transport {
 	case usage.TransportBuffered:
 		registry := CanonicalRegistry(sink)
 		registry[len(registry)-1].Enabled = true
-		chain = registry.NewChain(ctx, endpoint.OpenAI, endpoint.RouteOpenAIResponses)
-	case usage.TransportSSE:
-		stream = enabledOpenAIUsageStream(ctx, sink)
-	case usage.TransportWebSocket:
-		server = enabledOpenAIUsageWSServer(ctx, sink)
-	default:
-		t.Fatalf("unsupported synthetic transport %q", transport.transport)
-	}
-
-	for _, response := range responses {
-		switch transport.transport {
-		case usage.TransportBuffered:
+		chain := registry.NewChain(ctx, endpoint.OpenAI, endpoint.RouteOpenAIResponses)
+		observe = func(response []byte) {
 			input, want := bytes.Clone(response), bytes.Clone(response)
 			got, err := chain.RunBuffered(ctx, input)
 			if err != nil || !bytes.Equal(got, want) || &got[0] != &input[0] {
 				t.Fatalf("buffered completion changed: got=%q want=%q err=%v", got, want, err)
 			}
 			clear(input)
-		case usage.TransportSSE:
+		}
+	case usage.TransportSSE:
+		stream := enabledOpenAIUsageStream(ctx, sink)
+		observe = func(response []byte) {
 			payload := syntheticOpenAICompletedEvent(response)
 			frame := sse.Frame{Type: "response.completed", Raw: append(append([]byte("event: response.completed\ndata: "), payload...), '\n', '\n')}
 			want := sse.Frame{Type: frame.Type, Raw: bytes.Clone(frame.Raw)}
@@ -835,7 +826,10 @@ func observeSyntheticOpenAICompletions(t *testing.T, transport syntheticOpenAITr
 				t.Fatalf("SSE completion changed: got=%#v want=%#v", got, want)
 			}
 			clear(frame.Raw)
-		case usage.TransportWebSocket:
+		}
+	case usage.TransportWebSocket:
+		server := enabledOpenAIUsageWSServer(ctx, sink)
+		observe = func(response []byte) {
 			input := bytes.Clone(syntheticOpenAICompletedEvent(response))
 			message := &Message{Kind: transport.kind, Data: input}
 			want := bytes.Clone(input)
@@ -844,6 +838,13 @@ func observeSyntheticOpenAICompletions(t *testing.T, transport syntheticOpenAITr
 			}
 			clear(input)
 		}
+	default:
+		t.Fatalf("unsupported synthetic transport %q", transport.transport)
+		return nil
+	}
+
+	for _, response := range responses {
+		observe(response)
 	}
 
 	turns := sink.snapshot()
