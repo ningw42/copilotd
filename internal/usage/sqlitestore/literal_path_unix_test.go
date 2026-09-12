@@ -65,8 +65,8 @@ func TestStoreOpensPunctuationFilenameAsLiteralDestination(t *testing.T) {
 			if !report.DriverCleanupCompleted || report.FinalFlushLosses != 0 {
 				t.Fatalf("Close literal %q: %+v", path, report)
 			}
-			if version, count := queryLiteralVersionAndCount(t, path); version != 2 || count != 1 {
-				t.Errorf("literal %q version/count = %d/%d, want 2/1", path, version, count)
+			if version, count := queryLiteralVersionAndCount(t, path); version != 3 || count != 1 {
+				t.Errorf("literal %q version/count = %d/%d, want 3/1", path, version, count)
 			}
 		})
 	}
@@ -111,8 +111,8 @@ func TestStoreLiteralQueryFilenameCannotRedirectToNeighborSymlink(t *testing.T) 
 	if !report.DriverCleanupCompleted || report.FinalFlushLosses != 0 {
 		t.Fatalf("Close literal query filename: %+v", report)
 	}
-	if version, count := queryLiteralVersionAndCount(t, literal); version != 2 || count != 1 {
-		t.Errorf("literal destination version/count = %d/%d, want 2/1", version, count)
+	if version, count := queryLiteralVersionAndCount(t, literal); version != 3 || count != 1 {
+		t.Errorf("literal destination version/count = %d/%d, want 3/1", version, count)
 	}
 
 	targetDB, err = sql.Open("sqlite", externalLiteralSQLiteURI(t, target))

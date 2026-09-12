@@ -167,8 +167,8 @@ the per-request or per-session object it constructs is a shim instance.
 _Avoid_: using shim instance for the registry entry
 
 **Usage meter**:
-The opt-in read-only Shim that records Surface-native token counts from observed
-successful inference completions.
+The opt-in read-only Shim that records Surface-native token counts and narrowly
+approved completion evidence from observed successful inference completions.
 _Avoid_: billing meter, usage tracker
 
 **Usage report**:
@@ -208,8 +208,9 @@ the Requested model; neither identity is a Catalog display name or metadata sour
 _Avoid_: actual model, normalized model
 
 **Turn**:
-One qualifying successful inference completion observed by the Usage meter; one
-WebSocket session can contain multiple Turns.
+One qualifying successful inference completion observed by the Usage meter,
+including its Surface-native usage and any explicitly scoped optional completion
+evidence; one WebSocket session can contain multiple Turns.
 _Avoid_: request, session
 
 **Decline by passthrough**:

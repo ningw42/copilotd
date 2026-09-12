@@ -207,7 +207,7 @@ func TestQueryRejectsUTF16SchemaWithoutMigration(t *testing.T) {
 	if _, err = db.Exec("PRAGMA encoding='UTF-16le'"); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"001_initial.sql", "002_requested_model.sql"} {
+	for _, name := range []string{"001_initial.sql", "002_requested_model.sql", "003_openai_service_tier.sql"} {
 		script, err := os.ReadFile(filepath.Join("..", "sqlitestore", "migrations", name))
 		if err != nil {
 			t.Fatal(err)
@@ -216,7 +216,7 @@ func TestQueryRejectsUTF16SchemaWithoutMigration(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err = db.Exec("PRAGMA user_version=2"); err != nil {
+	if _, err = db.Exec("PRAGMA user_version=3"); err != nil {
 		t.Fatal(err)
 	}
 	if err = db.Close(); err != nil {

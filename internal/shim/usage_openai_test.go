@@ -77,6 +77,9 @@ func TestOpenAIUsageMeterRecordsRecordedSSECompletionWithoutChangingFrames(t *te
 		t.Fatalf("recorded Turns = %d, want 1", len(turns))
 	}
 	turn := turns[0]
+	if turn.OpenAIServiceTier != nil {
+		t.Errorf("recorded fixture OpenAIServiceTier = %q, want unavailable", *turn.OpenAIServiceTier)
+	}
 	after := time.Now()
 	if turn.At.Before(before) || turn.At.After(after) || turn.RequestID != "sse-inbound-correlation" ||
 		turn.ResponseID != "resp_redacted_recorded_sse" || turn.Model != "gpt-5.6-sol" ||
@@ -165,14 +168,16 @@ func TestOpenAIUsageMeterKeepsSSECompletionsSelfContainedAcrossInterleavingAndDu
 	sink := &memoryUsageSink{}
 	constructionCtx := logging.WithRequestID(context.Background(), "captured-once")
 	adapter := enabledOpenAIUsageStream(constructionCtx, sink)
+	// Synthetic interleaved completions exercise per-completion tier ownership;
+	// no recorded fixture is modified.
 	frames := []sse.Frame{
 		{Type: "response.failed", Raw: []byte("event: response.failed\ndata: {\"type\":\"response.failed\"}\n\n")},
 		{Type: "response.completed", Raw: []byte("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-a\",\"model\":\"model-a\",\"status\":\"completed\",\"usage\":{\"input_tokens\":41}}}\n\n")},
 		{Type: "response.incomplete", Raw: []byte("event: response.incomplete\ndata: {\"type\":\"response.incomplete\"}\n\n")},
-		{Type: "response.completed", Raw: []byte("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-b\",\"model\":\"model-b\",\"status\":\"completed\",\"usage\":{\"input_tokens\":7,\"output_tokens\":8}}}\n\n")},
+		{Type: "response.completed", Raw: []byte("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-b\",\"model\":\"model-b\",\"status\":\"completed\",\"service_tier\":\"priority\",\"usage\":{\"input_tokens\":7,\"output_tokens\":8}}}\n\n")},
 		{Type: "error", Raw: []byte("event: error\ndata: {\"type\":\"error\"}\n\n")},
 		{Type: "response.completed", Raw: []byte("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-a\",\"model\":\"model-a\",\"status\":\"completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":2}}}\n\n")},
-		{Type: "response.completed", Raw: []byte("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-b\",\"model\":\"model-b-duplicate\",\"status\":\"completed\",\"usage\":{\"input_tokens\":70,\"output_tokens\":80}}}\n\n")},
+		{Type: "response.completed", Raw: []byte("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-b\",\"model\":\"model-b-duplicate\",\"status\":\"completed\",\"service_tier\":\"flex\",\"usage\":{\"input_tokens\":70,\"output_tokens\":80}}}\n\n")},
 	}
 	for _, frame := range frames {
 		hookCtx := logging.WithRequestID(context.Background(), "must-not-replace-construction-correlation")
@@ -188,10 +193,12 @@ func TestOpenAIUsageMeterKeepsSSECompletionsSelfContainedAcrossInterleavingAndDu
 	wantIDs := []string{"resp-b", "resp-a", "resp-b"}
 	wantModels := []string{"model-b", "model-a", "model-b-duplicate"}
 	wantCounts := [][2]int64{{7, 8}, {1, 2}, {70, 80}}
+	wantTiers := []*string{stringPointer("priority"), nil, stringPointer("flex")}
 	for i, turn := range turns {
 		native := turn.Usage.(usage.OpenAIUsage)
 		if turn.RequestID != "captured-once" || turn.ResponseID != wantIDs[i] || turn.Model != wantModels[i] ||
 			turn.Transport != usage.TransportSSE || turn.TurnIndex != i ||
+			!reflect.DeepEqual(turn.OpenAIServiceTier, wantTiers[i]) ||
 			native.InputTokens != wantCounts[i][0] || native.OutputTokens != wantCounts[i][1] {
 			t.Errorf("Turn %d = %+v usage=%+v", i, turn, native)
 		}
@@ -285,6 +292,9 @@ func TestOpenAIUsageMeterRecordsRecordedWebSocketCompletionWithoutChangingMessag
 	}
 	after := time.Now()
 	for index, turn := range turns {
+		if turn.OpenAIServiceTier != nil {
+			t.Errorf("Turn %d recorded fixture OpenAIServiceTier = %q, want unavailable", index, *turn.OpenAIServiceTier)
+		}
 		if turn.At.Before(before) || turn.At.After(after) || turn.RequestID != "websocket-handshake-correlation" ||
 			turn.ResponseID != "resp_redacted_recorded_websocket" || turn.Model != "gpt-5.6-sol" ||
 			turn.Transport != usage.TransportWebSocket || turn.TurnIndex != index {
@@ -305,6 +315,8 @@ func TestOpenAIUsageMeterRecordsRecordedWebSocketCompletionWithoutChangingMessag
 func TestOpenAIUsageMeterKeepsWebSocketCompletionsSelfContainedAcrossInvalidAndTerminalMessages(t *testing.T) {
 	sink := &memoryUsageSink{}
 	adapter := enabledOpenAIUsageWSServer(context.Background(), sink)
+	// Synthetic WebSocket literals cover independent present/missing tier
+	// evidence alongside malformed and terminal Messages.
 	payloads := [][]byte{
 		[]byte(`{"type":"response.created","response":{"id":"created","model":"created-model","status":"in_progress","usage":{"input_tokens":99,"output_tokens":99}}}`),
 		[]byte(`{"type":"vendor.completed","response":{"id":"wrong-event-type","model":"bad","status":"completed","usage":{"input_tokens":99,"output_tokens":99}}}`),
@@ -314,10 +326,10 @@ func TestOpenAIUsageMeterKeepsWebSocketCompletionsSelfContainedAcrossInvalidAndT
 		[]byte(`{"type":"response.incomplete","response":{"id":"incomplete","model":"bad","status":"incomplete","usage":{"input_tokens":3,"output_tokens":4}}}`),
 		[]byte(`{"type":"error","error":{"message":"session event"}}`),
 		[]byte(`{"type":"response.completed","response":{"id":"invalid-optional","model":"bad","status":"completed","usage":{"input_tokens":5,"output_tokens":6,"total_tokens":"11"}}}`),
-		[]byte(`{"type":"response.completed","response":{"id":"resp-a","model":"reported-a","status":"completed","usage":{"input_tokens":0,"output_tokens":0,"input_tokens_details":{"cached_tokens":null},"output_tokens_details":null,"total_tokens":null}}}`),
+		[]byte(`{"type":"response.completed","response":{"id":"resp-a","model":"reported-a","status":"completed","service_tier":"priority","usage":{"input_tokens":0,"output_tokens":0,"input_tokens_details":{"cached_tokens":null},"output_tokens_details":null,"total_tokens":null}}}`),
 		[]byte(`{"type":"response.completed","response":{"id":"negative-core","model":"bad","status":"completed","usage":{"input_tokens":-1,"output_tokens":2}}}`),
 		[]byte(`{"type":"response.completed","response":{"id":"resp-b","model":"reported-b","status":"completed","usage":{"input_tokens":7,"output_tokens":8,"input_tokens_details":{"cached_tokens":0,"cache_write_tokens":0},"output_tokens_details":{"reasoning_tokens":0},"total_tokens":0}}}`),
-		[]byte(`{"type":"response.completed","response":{"id":"resp-b","model":"reported-b-duplicate","status":"completed","usage":{"input_tokens":70,"output_tokens":80}}}`),
+		[]byte(`{"type":"response.completed","response":{"id":"resp-b","model":"reported-b-duplicate","status":"completed","service_tier":"fast","usage":{"input_tokens":70,"output_tokens":80}}}`),
 	}
 	for index, payload := range payloads {
 		kind := MessageText
@@ -341,10 +353,12 @@ func TestOpenAIUsageMeterKeepsWebSocketCompletionsSelfContainedAcrossInvalidAndT
 	wantIDs := []string{"resp-a", "resp-b", "resp-b"}
 	wantModels := []string{"reported-a", "reported-b", "reported-b-duplicate"}
 	wantCounts := [][2]int64{{0, 0}, {7, 8}, {70, 80}}
+	wantTiers := []*string{stringPointer("priority"), nil, stringPointer("fast")}
 	for index, turn := range turns {
 		native := turn.Usage.(usage.OpenAIUsage)
 		if turn.RequestID != "" || turn.ResponseID != wantIDs[index] || turn.Model != wantModels[index] ||
 			turn.Transport != usage.TransportWebSocket || turn.TurnIndex != index ||
+			!reflect.DeepEqual(turn.OpenAIServiceTier, wantTiers[index]) ||
 			native.InputTokens != wantCounts[index][0] || native.OutputTokens != wantCounts[index][1] {
 			t.Errorf("Turn %d = %+v usage=%+v", index, turn, native)
 		}
@@ -472,6 +486,9 @@ func TestOpenAIUsageMeterRecordsRecordedBufferedCompletionWithoutChangingBody(t 
 		t.Fatalf("recorded Turns = %d, want 1", len(turns))
 	}
 	turn := turns[0]
+	if turn.OpenAIServiceTier != nil {
+		t.Errorf("recorded fixture OpenAIServiceTier = %q, want unavailable", *turn.OpenAIServiceTier)
+	}
 	after := time.Now()
 	if turn.At.Before(before) || turn.At.After(after) || turn.RequestID != "inbound-correlation" || turn.ResponseID != "resp_redacted_recorded_buffered" ||
 		turn.Model != "gpt-5.6-sol" || turn.Transport != usage.TransportBuffered || turn.TurnIndex != 0 {
@@ -633,6 +650,213 @@ func TestCanonicalRegistryKeepsUsageMeterExactLastWithOpenAIStreamingHooksActive
 			}
 		})
 	}
+}
+
+type syntheticOpenAITransportCase struct {
+	name      string
+	transport usage.Transport
+	kind      MessageKind
+}
+
+func syntheticOpenAITransportCases() []syntheticOpenAITransportCase {
+	return []syntheticOpenAITransportCase{
+		{name: "buffered", transport: usage.TransportBuffered},
+		{name: "SSE", transport: usage.TransportSSE},
+		{name: "WebSocket text", transport: usage.TransportWebSocket, kind: MessageText},
+		{name: "WebSocket binary", transport: usage.TransportWebSocket, kind: MessageBinary},
+	}
+}
+
+func TestOpenAIUsageMeterServiceTierEvidenceMatrixAcrossTransports(t *testing.T) {
+	// These synthetic member literals exercise the provider contract; recorded
+	// Copilot fixtures remain unchanged and continue to represent absent evidence.
+	tests := []struct {
+		name    string
+		members []byte
+		want    *string
+	}{
+		{name: "absent"},
+		{name: "null", members: []byte(`"service_tier":null,`)},
+		{name: "empty", members: []byte(`"service_tier":"",`), want: stringPointer("")},
+		{name: "known default", members: []byte(`"service_tier":"default",`), want: stringPointer("default")},
+		{name: "known priority", members: []byte(`"service_tier":"priority",`), want: stringPointer("priority")},
+		{name: "future", members: []byte(`"service_tier":"turbo-next",`), want: stringPointer("turbo-next")},
+		{name: "whitespace control NUL and Unicode", members: []byte(`"service_tier":"  \t\u0000雪\n  ",`), want: stringPointer("  \t\x00雪\n  ")},
+		{name: "escaped string", members: []byte(`"service_tier":"\u0070riority\/x",`), want: stringPointer("priority/x")},
+		{name: "escaped exact key", members: []byte(`"\u0073ervice_tier":"fast",`), want: stringPointer("fast")},
+		{name: "nested and differently cased only", members: []byte(`"metadata":{"service_tier":"nested"},"Service_Tier":"cased",`)},
+		{name: "number", members: []byte(`"service_tier":42,`)},
+		{name: "boolean", members: []byte(`"service_tier":true,`)},
+		{name: "array", members: []byte(`"service_tier":["priority"],`)},
+		{name: "object", members: []byte(`"service_tier":{"value":"priority"},`)},
+		{name: "identical duplicate", members: []byte(`"service_tier":"priority","service_tier":"priority",`)},
+		{name: "conflicting duplicate", members: []byte(`"service_tier":"priority","service_tier":"default",`)},
+		{name: "escaped equivalent duplicate", members: []byte(`"service_tier":"priority","\u0073ervice_tier":"priority",`)},
+		{name: "invalid UTF-8", members: []byte("\"service_tier\":\"bad-\xff\",")},
+		{name: "lone high surrogate", members: []byte(`"service_tier":"\uD800",`)},
+		{name: "lone low surrogate", members: []byte(`"service_tier":"\uDC00",`)},
+		{name: "valid surrogate pair", members: []byte(`"service_tier":"\uD83D\uDE80",`), want: stringPointer("🚀")},
+		{name: "genuine literal replacement character", members: []byte(`"service_tier":"�",`), want: stringPointer("�")},
+		{name: "genuine escaped replacement character", members: []byte(`"service_tier":"\uFFFD",`), want: stringPointer("�")},
+		{name: "literal backslash-u text", members: []byte(`"service_tier":"\\uD800",`), want: stringPointer(`\uD800`)},
+		{name: "unrelated lone surrogate", members: []byte(`"service_tier":"priority","unrelated":"\uD800",`), want: stringPointer("priority")},
+		{name: "unrelated invalid UTF-8", members: []byte("\"service_tier\":\"priority\",\"unrelated\":\"\xff\","), want: stringPointer("priority")},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			response := syntheticOpenAIResponse(tc.members)
+			for _, transport := range syntheticOpenAITransportCases() {
+				t.Run(transport.name, func(t *testing.T) {
+					turn := observeSyntheticOpenAICompletions(t, transport, response)[0]
+					if !reflect.DeepEqual(turn.OpenAIServiceTier, tc.want) {
+						t.Errorf("OpenAIServiceTier = %v, want %v", turn.OpenAIServiceTier, tc.want)
+					}
+					native := turn.Usage.(usage.OpenAIUsage)
+					if native.InputTokens != 1 || native.OutputTokens != 2 {
+						t.Errorf("malformed optional evidence changed native usage: %+v", native)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestOpenAIUsageMeterIgnoresEarlierEventTierEvidence(t *testing.T) {
+	// Synthetic earlier-event literals prove that only the completed Response is
+	// evidence; no recorded fixture is augmented with a tier.
+	t.Run("SSE", func(t *testing.T) {
+		sink := &memoryUsageSink{}
+		adapter := enabledOpenAIUsageStream(context.Background(), sink)
+		frames := []sse.Frame{
+			{
+				Type: "response.created",
+				Raw:  []byte("event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"service_tier\":\"priority\"}}\n\n"),
+			},
+			{
+				Type: "response.completed",
+				Raw:  []byte("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-tier\",\"model\":\"reported\",\"status\":\"completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":2}}}\n\n"),
+			},
+		}
+		for _, frame := range frames {
+			want := sse.Frame{Type: frame.Type, Raw: bytes.Clone(frame.Raw)}
+			if got := adapter.Transform(context.Background(), frame); !reflect.DeepEqual(got, []sse.Frame{want}) {
+				t.Fatalf("frame changed: got=%#v want=%#v", got, want)
+			}
+			clear(frame.Raw)
+		}
+		turns := sink.snapshot()
+		if len(turns) != 1 || turns[0].OpenAIServiceTier != nil {
+			t.Fatalf("Turns = %+v, want completion-local unavailable tier", turns)
+		}
+	})
+
+	t.Run("WebSocket", func(t *testing.T) {
+		sink := &memoryUsageSink{}
+		adapter := enabledOpenAIUsageWSServer(context.Background(), sink)
+		messages := []Message{
+			{Kind: MessageText, Data: []byte(`{"type":"response.created","response":{"service_tier":"priority"}}`)},
+			{Kind: MessageBinary, Data: syntheticOpenAICompletedEvent(syntheticOpenAIResponse(nil))},
+		}
+		for index := range messages {
+			message := &messages[index]
+			wantKind, wantData := message.Kind, bytes.Clone(message.Data)
+			if emit := adapter(context.Background(), message); !emit || message.Kind != wantKind || !bytes.Equal(message.Data, wantData) {
+				t.Fatalf("Message %d changed: emit=%t got=%+v want kind=%v data=%q", index, emit, message, wantKind, wantData)
+			}
+			clear(message.Data)
+		}
+		turns := sink.snapshot()
+		if len(turns) != 1 || turns[0].OpenAIServiceTier != nil {
+			t.Fatalf("Turns = %+v, want completion-local unavailable tier", turns)
+		}
+	})
+}
+
+func TestOpenAIUsageMeterOwnsTierEvidenceAcrossInputReuseAndLaterCompletions(t *testing.T) {
+	// Synthetic completions deliberately transition from present to absent tier
+	// evidence while each submitted transport buffer is cleared after observation.
+	first := syntheticOpenAIResponse([]byte(`"service_tier":"priority",`))
+	second := syntheticOpenAIResponse(nil)
+	for _, transport := range syntheticOpenAITransportCases() {
+		t.Run(transport.name, func(t *testing.T) {
+			turns := observeSyntheticOpenAICompletions(t, transport, first, second)
+			if len(turns) != 2 || turns[0].OpenAIServiceTier == nil || *turns[0].OpenAIServiceTier != "priority" ||
+				turns[1].OpenAIServiceTier != nil || turns[0].TurnIndex != 0 || turns[1].TurnIndex != 1 {
+				t.Fatalf("immutable completion evidence = %+v", turns)
+			}
+		})
+	}
+}
+
+func syntheticOpenAIResponse(members []byte) []byte {
+	response := append([]byte(`{"id":"resp-tier","model":"reported","status":"completed",`), members...)
+	return append(response, []byte(`"usage":{"input_tokens":1,"output_tokens":2}}`)...)
+}
+
+func syntheticOpenAICompletedEvent(response []byte) []byte {
+	payload := append([]byte(`{"type":"response.completed","response":`), response...)
+	return append(payload, '}')
+}
+
+func observeSyntheticOpenAICompletions(t *testing.T, transport syntheticOpenAITransportCase, responses ...[]byte) []usage.Turn {
+	t.Helper()
+	sink := &memoryUsageSink{}
+	ctx := context.Background()
+	var observe func([]byte)
+	switch transport.transport {
+	case usage.TransportBuffered:
+		registry := CanonicalRegistry(sink)
+		registry[len(registry)-1].Enabled = true
+		chain := registry.NewChain(ctx, endpoint.OpenAI, endpoint.RouteOpenAIResponses)
+		observe = func(response []byte) {
+			input, want := bytes.Clone(response), bytes.Clone(response)
+			got, err := chain.RunBuffered(ctx, input)
+			if err != nil || !bytes.Equal(got, want) || &got[0] != &input[0] {
+				t.Fatalf("buffered completion changed: got=%q want=%q err=%v", got, want, err)
+			}
+			clear(input)
+		}
+	case usage.TransportSSE:
+		stream := enabledOpenAIUsageStream(ctx, sink)
+		observe = func(response []byte) {
+			payload := syntheticOpenAICompletedEvent(response)
+			frame := sse.Frame{Type: "response.completed", Raw: append(append([]byte("event: response.completed\ndata: "), payload...), '\n', '\n')}
+			want := sse.Frame{Type: frame.Type, Raw: bytes.Clone(frame.Raw)}
+			if got := stream.Transform(ctx, frame); !reflect.DeepEqual(got, []sse.Frame{want}) {
+				t.Fatalf("SSE completion changed: got=%#v want=%#v", got, want)
+			}
+			clear(frame.Raw)
+		}
+	case usage.TransportWebSocket:
+		server := enabledOpenAIUsageWSServer(ctx, sink)
+		observe = func(response []byte) {
+			input := bytes.Clone(syntheticOpenAICompletedEvent(response))
+			message := &Message{Kind: transport.kind, Data: input}
+			want := bytes.Clone(input)
+			if emit := server(ctx, message); !emit || message.Kind != transport.kind || !bytes.Equal(message.Data, want) || &message.Data[0] != &input[0] {
+				t.Fatalf("WebSocket completion changed: emit=%t message=%+v want kind=%v data=%q", emit, message, transport.kind, want)
+			}
+			clear(input)
+		}
+	default:
+		t.Fatalf("unsupported synthetic transport %q", transport.transport)
+		return nil
+	}
+
+	for _, response := range responses {
+		observe(response)
+	}
+
+	turns := sink.snapshot()
+	if len(turns) != len(responses) {
+		t.Fatalf("Turns = %+v, want %d", turns, len(responses))
+	}
+	for index, turn := range turns {
+		if turn.Transport != transport.transport || turn.TurnIndex != index {
+			t.Fatalf("Turn %d = %+v, want transport %s and ordinal %d", index, turn, transport.transport, index)
+		}
+	}
+	return turns
 }
 
 func pointerValue(value *int64) int64 {

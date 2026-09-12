@@ -100,7 +100,7 @@ func (r *Reporter) read(ctx context.Context, buckets []Bucket, surface string, m
 	}
 	// Version alone is insufficient for a damaged or partially replaced schema.
 	for _, statement := range []string{
-		`SELECT at_ms,model,requested_model,input_tokens,output_tokens,cached_tokens,cache_write_tokens,reasoning_tokens,total_tokens FROM openai_turn LIMIT 0`,
+		`SELECT at_ms,model,requested_model,service_tier,input_tokens,output_tokens,cached_tokens,cache_write_tokens,reasoning_tokens,total_tokens FROM openai_turn LIMIT 0`,
 		`SELECT at_ms,model,requested_model,input_tokens,output_tokens,cache_creation_input_tokens,cache_read_input_tokens,ephemeral_5m_input_tokens,ephemeral_1h_input_tokens,thinking_tokens FROM anthropic_turn LIMIT 0`,
 	} {
 		if err = capBusy(ctx, conn); err != nil {

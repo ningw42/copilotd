@@ -151,6 +151,51 @@ func assertReportEqual(t *testing.T, got, want report.Report) {
 	}
 }
 
+func TestQueryIgnoresStoredOpenAIServiceTierEvidence(t *testing.T) {
+	source := pricingSource(t, `{"gpt-5.6-sol":{"id":"gpt-5.6-sol","cost":{
+		"input":2,"output":8,"cache_read":0.5,"cache_write":3,
+		"tiers":[{"input":4,"output":16,"cache_read":1,"cache_write":6,"tier":{"type":"context","size":100}}]
+	}}}`, pricing.SnapshotStatus{Source: "fetched", Version: "sha256:service-tier-invariance"})
+	now := time.Date(2026, 9, 2, 18, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name       string
+		input      int64
+		wantAmount string
+	}{
+		{name: "positive base amount", input: 100, wantAmount: "0.000325"},
+		{name: "positive context amount", input: 101, wantAmount: "0.000654"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := turn("2026-09-01T12:00:00Z", "gpt-5.6-sol", usage.OpenAIUsage{
+				InputTokens: tc.input, OutputTokens: 20, CachedTokens: ptr(30), CacheWriteTokens: ptr(10),
+			})
+			defaultTier, priorityTier := "default", "priority"
+			withDefault, withPriority := base, base
+			withDefault.OpenAIServiceTier = &defaultTier
+			withPriority.OpenAIServiceTier = &priorityTier
+			read := func(turn usage.Turn) report.Report {
+				t.Helper()
+				reporter := report.New(stored(t, turn), source)
+				report.SetNowForTest(reporter, now)
+				got, err := reporter.Query(context.Background(), selection())
+				if err != nil {
+					t.Fatal(err)
+				}
+				return got
+			}
+			defaultReport, priorityReport := read(withDefault), read(withPriority)
+			wantCost := report.Cost{Amount: amount(t, tc.wantAmount), PricedTurns: 1}
+			for _, got := range []report.Report{defaultReport, priorityReport} {
+				if got.OpenAI == nil || got.OpenAI.Total.Cost.Amount == nil || got.OpenAI.Total.Cost.Amount.String() == "0" {
+					t.Fatalf("service-tier invariance fixture was not positively valued: %+v", got.OpenAI)
+				}
+				assertCostEqual(t, got.OpenAI.Total.Cost, wantCost)
+			}
+			assertReportEqual(t, defaultReport, priorityReport)
+		})
+	}
+}
+
 func TestQueryValuesCompleteOpenAIReportFromOnePricingSnapshot(t *testing.T) {
 	lastSuccess := time.Date(2026, 8, 31, 23, 0, 0, 0, time.UTC)
 	source := pricingSource(t, `{"gpt-5.6-sol":{"id":"gpt-5.6-sol","cost":{"input":2,"output":8,"cache_read":0.5,"cache_write":3}}}`, pricing.SnapshotStatus{

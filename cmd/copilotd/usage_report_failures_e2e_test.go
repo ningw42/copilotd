@@ -120,7 +120,7 @@ func prepareUsageReportHistory(t *testing.T, path, encoding, alter string) {
 	if _, err := db.Exec("PRAGMA encoding='" + encoding + "'"); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"001_initial.sql", "002_requested_model.sql"} {
+	for _, name := range []string{"001_initial.sql", "002_requested_model.sql", "003_openai_service_tier.sql"} {
 		body, err := os.ReadFile(filepath.Join("..", "..", "internal", "usage", "sqlitestore", "migrations", name))
 		if err != nil {
 			t.Fatal(err)
@@ -129,7 +129,7 @@ func prepareUsageReportHistory(t *testing.T, path, encoding, alter string) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := db.Exec("PRAGMA user_version=2"); err != nil {
+	if _, err := db.Exec("PRAGMA user_version=3"); err != nil {
 		t.Fatal(err)
 	}
 	if alter != "" {

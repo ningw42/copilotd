@@ -34,7 +34,7 @@ const (
 var (
 	//go:embed migrations/*.sql
 	migrationFiles embed.FS
-	migrationNames = []string{"migrations/001_initial.sql", "migrations/002_requested_model.sql"}
+	migrationNames = []string{"migrations/001_initial.sql", "migrations/002_requested_model.sql", "migrations/003_openai_service_tier.sql"}
 )
 
 // Report is the bounded loss and cleanup result observed through Close's final
@@ -323,11 +323,11 @@ func insertTurn(ctx context.Context, conn *sql.Conn, turn usage.Turn) error {
 		_, err := conn.ExecContext(ctx, `INSERT INTO openai_turn (
 			at_ms, request_id, response_id, turn_index, model, requested_model, transport,
 			input_tokens, cached_tokens, cache_write_tokens, output_tokens,
-			reasoning_tokens, total_tokens
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			reasoning_tokens, total_tokens, service_tier
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			atMS, turn.RequestID, turn.ResponseID, turn.TurnIndex, turn.Model, turn.RequestedModel, string(turn.Transport),
 			native.InputTokens, nullable(native.CachedTokens), nullable(native.CacheWriteTokens),
-			native.OutputTokens, nullable(native.ReasoningTokens), nullable(native.TotalTokens),
+			native.OutputTokens, nullable(native.ReasoningTokens), nullable(native.TotalTokens), turn.OpenAIServiceTier,
 		)
 		if err != nil {
 			return fmt.Errorf("insert OpenAI Turn: %w", err)

@@ -319,6 +319,9 @@ func TestRunBoundServeMetersBufferedOpenAIResponseWithoutChangingPayload(t *test
 	if err != nil {
 		t.Fatalf("read recorded response fixture: %v", err)
 	}
+	// Keep the recorded capture untouched; this listener fixture deliberately
+	// adds synthetic response evidence to the copied completion.
+	fixture = bytes.Replace(fixture, []byte("  \"status\": \"completed\",\n"), []byte("  \"status\": \"completed\",\n  \"service_tier\": \"default\",\n"), 1)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write(fixture)
@@ -348,22 +351,22 @@ func TestRunBoundServeMetersBufferedOpenAIResponseWithoutChangingPayload(t *test
 	db, report := externalUsageDB(t, harness)
 	assertCleanUsageReport(t, report)
 	var (
-		atMS, inputTokens, cachedTokens, cacheWriteTokens int64
-		outputTokens, reasoningTokens, totalTokens        int64
-		requestID, responseID, model, transport           string
-		turnIndex                                         int
+		atMS, inputTokens, cachedTokens, cacheWriteTokens    int64
+		outputTokens, reasoningTokens, totalTokens           int64
+		requestID, responseID, model, serviceTier, transport string
+		turnIndex                                            int
 	)
-	err = db.QueryRow(`SELECT at_ms, request_id, response_id, turn_index, model, transport,
+	err = db.QueryRow(`SELECT at_ms, request_id, response_id, turn_index, model, service_tier, transport,
 		input_tokens, cached_tokens, cache_write_tokens, output_tokens, reasoning_tokens, total_tokens
 		FROM openai_turn`).Scan(
-		&atMS, &requestID, &responseID, &turnIndex, &model, &transport,
+		&atMS, &requestID, &responseID, &turnIndex, &model, &serviceTier, &transport,
 		&inputTokens, &cachedTokens, &cacheWriteTokens, &outputTokens, &reasoningTokens, &totalTokens,
 	)
 	if err != nil {
 		t.Fatalf("query buffered OpenAI usage: %v", err)
 	}
 	if atMS <= 0 || requestID != "meter-tracer-request" || responseID != "resp_redacted_recorded_buffered" ||
-		turnIndex != 0 || model != "gpt-5.6-sol" || transport != "buffered" || inputTokens != 12 ||
+		turnIndex != 0 || model != "gpt-5.6-sol" || serviceTier != "default" || transport != "buffered" || inputTokens != 12 ||
 		cachedTokens != 0 || cacheWriteTokens != 0 || outputTokens != 6 || reasoningTokens != 0 || totalTokens != 18 {
 		t.Errorf("persisted row = at_ms:%d request:%q response:%q turn:%d model:%q transport:%q usage:[%d %d %d %d %d %d]",
 			atMS, requestID, responseID, turnIndex, model, transport, inputTokens, cachedTokens, cacheWriteTokens, outputTokens, reasoningTokens, totalTokens)
@@ -375,6 +378,8 @@ func TestRunBoundServeMetersOpenAISSECompletionWithoutChangingFrames(t *testing.
 	if err != nil {
 		t.Fatalf("read recorded SSE fixture: %v", err)
 	}
+	// Add synthetic evidence only to this copied frame, not the recorded file.
+	fixture = bytes.Replace(fixture, []byte(`"status":"completed",`), []byte(`"status":"completed","service_tier":"priority",`), 1)
 	frameEnd := bytes.Index(fixture, []byte("\n\n"))
 	if frameEnd < 0 {
 		t.Fatal("recorded SSE fixture has no frame separator")
@@ -409,22 +414,22 @@ func TestRunBoundServeMetersOpenAISSECompletionWithoutChangingFrames(t *testing.
 	db, report := externalUsageDB(t, harness)
 	assertCleanUsageReport(t, report)
 	var (
-		atMS, inputTokens, cachedTokens, cacheWriteTokens int64
-		outputTokens, reasoningTokens, totalTokens        int64
-		requestID, responseID, model, transport           string
-		turnIndex                                         int
+		atMS, inputTokens, cachedTokens, cacheWriteTokens    int64
+		outputTokens, reasoningTokens, totalTokens           int64
+		requestID, responseID, model, serviceTier, transport string
+		turnIndex                                            int
 	)
-	err = db.QueryRow(`SELECT at_ms, request_id, response_id, turn_index, model, transport,
+	err = db.QueryRow(`SELECT at_ms, request_id, response_id, turn_index, model, service_tier, transport,
 		input_tokens, cached_tokens, cache_write_tokens, output_tokens, reasoning_tokens, total_tokens
 		FROM openai_turn`).Scan(
-		&atMS, &requestID, &responseID, &turnIndex, &model, &transport,
+		&atMS, &requestID, &responseID, &turnIndex, &model, &serviceTier, &transport,
 		&inputTokens, &cachedTokens, &cacheWriteTokens, &outputTokens, &reasoningTokens, &totalTokens,
 	)
 	if err != nil {
 		t.Fatalf("query OpenAI SSE usage: %v", err)
 	}
 	if atMS <= 0 || requestID != "meter-sse-tracer-request" || responseID != "resp_redacted_recorded_sse" ||
-		turnIndex != 0 || model != "gpt-5.6-sol" || transport != "sse" || inputTokens != 12 ||
+		turnIndex != 0 || model != "gpt-5.6-sol" || serviceTier != "priority" || transport != "sse" || inputTokens != 12 ||
 		cachedTokens != 0 || cacheWriteTokens != 0 || outputTokens != 20 || reasoningTokens != 12 || totalTokens != 32 {
 		t.Errorf("persisted row = at_ms:%d request:%q response:%q turn:%d model:%q transport:%q usage:[%d %d %d %d %d %d]",
 			atMS, requestID, responseID, turnIndex, model, transport, inputTokens, cachedTokens, cacheWriteTokens, outputTokens, reasoningTokens, totalTokens)
@@ -436,20 +441,22 @@ func TestRunBoundServeMetersOpenAIWebSocketCompletionsWithoutChangingMessages(t 
 	if err != nil {
 		t.Fatalf("read recorded WebSocket fixture: %v", err)
 	}
+	// The recorded WebSocket capture remains byte-unchanged; every other Message
+	// and the buffered payload in this mixed sequence is explicitly synthetic.
 	messages := []struct {
 		kind websocket.MessageType
 		data []byte
 	}{
 		{kind: websocket.MessageText, data: []byte(`{"type":"response.failed","response":{"id":"failed","model":"not-recorded","status":"failed","usage":{"input_tokens":99,"output_tokens":99}}}`)},
 		{kind: websocket.MessageBinary, data: []byte(`{"type":"response.completed","response":{"id":"incomplete","model":"not-recorded","status":"incomplete","usage":{"input_tokens":98,"output_tokens":98}}}`)},
-		{kind: websocket.MessageText, data: []byte(`{"type":"response.completed","response":{"id":"resp-ws-a","model":"reported-model-a","status":"completed","usage":{"input_tokens":3,"output_tokens":5}}}`)},
+		{kind: websocket.MessageText, data: []byte(`{"type":"response.completed","response":{"id":"resp-ws-a","model":"reported-model-a","status":"completed","service_tier":"priority","usage":{"input_tokens":3,"output_tokens":5}}}`)},
 		{kind: websocket.MessageBinary, data: []byte(`{"type":"response.completed","response":`)},
 		{kind: websocket.MessageText, data: []byte(`{"type":"error","error":{"message":"session continues"}}`)},
 		{kind: websocket.MessageText, data: bytes.TrimSuffix(recorded, []byte("\n"))},
 		{kind: websocket.MessageBinary, data: []byte(`{"type":"response.incomplete","response":{"id":"incomplete-terminal","model":"not-recorded","status":"incomplete","usage":{"input_tokens":97,"output_tokens":97}}}`)},
-		{kind: websocket.MessageBinary, data: []byte(`{"type":"response.completed","response":{"id":"resp-ws-b","model":"reported-model-b","status":"completed","usage":{"input_tokens":7,"output_tokens":11}}}`)},
+		{kind: websocket.MessageBinary, data: []byte(`{"type":"response.completed","response":{"id":"resp-ws-b","model":"reported-model-b","status":"completed","service_tier":"fast","usage":{"input_tokens":7,"output_tokens":11}}}`)},
 	}
-	bufferedPayload := []byte(`{"id":"resp-shared-http","model":"reported-http-model","status":"completed","usage":{"input_tokens":2,"output_tokens":3}}`)
+	bufferedPayload := []byte(`{"id":"resp-shared-http","model":"reported-http-model","status":"completed","service_tier":"default","usage":{"input_tokens":2,"output_tokens":3}}`)
 	clientMessage := []byte(`{"type":"response.create","model":"requested-model"}`)
 	upstreamReceived := make(chan struct {
 		kind websocket.MessageType
@@ -552,20 +559,20 @@ func TestRunBoundServeMetersOpenAIWebSocketCompletionsWithoutChangingMessages(t 
 	if err := db.QueryRow(`SELECT count(*) FROM openai_turn WHERE transport='websocket' AND requested_model IS NOT NULL`).Scan(&attributedWebSocketRows); err != nil || attributedWebSocketRows != 0 {
 		t.Errorf("WebSocket requested-model rows = %d, %v; want zero", attributedWebSocketRows, err)
 	}
-	var httpRequestID, httpResponseID, httpModel, httpTransport string
+	var httpRequestID, httpResponseID, httpModel, httpServiceTier, httpTransport string
 	var httpTurnIndex int
-	if err := db.QueryRow(`SELECT request_id, response_id, turn_index, model, transport FROM openai_turn WHERE transport = 'buffered'`).Scan(
-		&httpRequestID, &httpResponseID, &httpTurnIndex, &httpModel, &httpTransport,
+	if err := db.QueryRow(`SELECT request_id, response_id, turn_index, model, service_tier, transport FROM openai_turn WHERE transport = 'buffered'`).Scan(
+		&httpRequestID, &httpResponseID, &httpTurnIndex, &httpModel, &httpServiceTier, &httpTransport,
 	); err != nil {
 		t.Fatalf("query shared-sink HTTP usage: %v", err)
 	}
 	if httpRequestID != "meter-shared-http-request" || httpResponseID != "resp-shared-http" || httpTurnIndex != 0 ||
-		httpModel != "reported-http-model" || httpTransport != "buffered" {
+		httpModel != "reported-http-model" || httpServiceTier != "default" || httpTransport != "buffered" {
 		t.Errorf("shared-sink HTTP row = request:%q response:%q turn:%d model:%q transport:%q",
 			httpRequestID, httpResponseID, httpTurnIndex, httpModel, httpTransport)
 	}
 
-	rows, err := db.Query(`SELECT at_ms, request_id, response_id, turn_index, model, transport,
+	rows, err := db.Query(`SELECT at_ms, request_id, response_id, turn_index, model, service_tier, transport,
 		input_tokens, cached_tokens, cache_write_tokens, output_tokens, reasoning_tokens, total_tokens
 		FROM openai_turn WHERE transport = 'websocket' ORDER BY id`)
 	if err != nil {
@@ -579,13 +586,14 @@ func TestRunBoundServeMetersOpenAIWebSocketCompletionsWithoutChangingMessages(t 
 		output         int64
 		optionals      [4]int64
 		optionalsValid bool
+		serviceTier    sql.NullString
 	}{
-		{responseID: "resp-ws-a", model: "reported-model-a", input: 3, output: 5},
+		{responseID: "resp-ws-a", model: "reported-model-a", input: 3, output: 5, serviceTier: sql.NullString{String: "priority", Valid: true}},
 		{
 			responseID: "resp_redacted_recorded_websocket", model: "gpt-5.6-sol", input: 12, output: 20,
 			optionals: [4]int64{0, 0, 12, 32}, optionalsValid: true,
 		},
-		{responseID: "resp-ws-b", model: "reported-model-b", input: 7, output: 11},
+		{responseID: "resp-ws-b", model: "reported-model-b", input: 7, output: 11, serviceTier: sql.NullString{String: "fast", Valid: true}},
 	}
 	for i, want := range wantRows {
 		if !rows.Next() {
@@ -593,14 +601,15 @@ func TestRunBoundServeMetersOpenAIWebSocketCompletionsWithoutChangingMessages(t 
 		}
 		var atMS, input, output int64
 		var requestID, responseID, model, transport string
+		var serviceTier sql.NullString
 		var turnIndex int
 		var optionals [4]sql.NullInt64
-		if err := rows.Scan(&atMS, &requestID, &responseID, &turnIndex, &model, &transport,
+		if err := rows.Scan(&atMS, &requestID, &responseID, &turnIndex, &model, &serviceTier, &transport,
 			&input, &optionals[0], &optionals[1], &output, &optionals[2], &optionals[3]); err != nil {
 			t.Fatalf("scan OpenAI WebSocket row %d: %v", i, err)
 		}
 		if atMS <= 0 || requestID != "meter-websocket-tracer-request" || responseID != want.responseID ||
-			turnIndex != i || model != want.model || transport != "websocket" || input != want.input || output != want.output {
+			turnIndex != i || model != want.model || serviceTier != want.serviceTier || transport != "websocket" || input != want.input || output != want.output {
 			t.Errorf("persisted WebSocket row %d = at_ms:%d request:%q response:%q turn:%d model:%q transport:%q usage:[%d %d]",
 				i, atMS, requestID, responseID, turnIndex, model, transport, input, output)
 		}

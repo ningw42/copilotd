@@ -1,6 +1,6 @@
 # OpenAI reported service-tier capture — Design
 
-**Status:** approved design; implementation pending.
+**Status:** approved design; implemented by #247.
 **Approval:** 2026-09-12 — Ning Wang, following author/reviewer consensus.
 **Issue:** [#247](https://github.com/ningw42/copilotd/issues/247), part of
 [#242](https://github.com/ningw42/copilotd/issues/242).

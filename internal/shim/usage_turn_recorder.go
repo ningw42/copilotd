@@ -72,24 +72,18 @@ func requestedModelFrom(body []byte) *string {
 	return model
 }
 
-func (r *turnRecorder) record(responseID, model string, transport usage.Transport, native usage.Usage) {
+func (r *turnRecorder) record(turn usage.Turn) {
 	requestedModel := r.requestedModel
 	// WebSocket forwarding does not invoke the HTTP request hook. Keep this
 	// boundary defensive: even if an internal caller populated request metadata,
 	// self-contained WebSocket Turns remain unattributed.
-	if transport == usage.TransportWebSocket {
+	if turn.Transport == usage.TransportWebSocket {
 		requestedModel = nil
 	}
-	turnIndex := r.turnIndex
+	turn.At = time.Now()
+	turn.RequestID = r.requestID
+	turn.RequestedModel = requestedModel
+	turn.TurnIndex = r.turnIndex
 	r.turnIndex++
-	r.sink.Record(usage.Turn{
-		At:             time.Now(),
-		RequestID:      r.requestID,
-		ResponseID:     responseID,
-		Model:          model,
-		RequestedModel: requestedModel,
-		Transport:      transport,
-		TurnIndex:      turnIndex,
-		Usage:          native,
-	})
+	r.sink.Record(turn)
 }

@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"github.com/ningw42/copilotd/internal/endpoint"
+	"github.com/ningw42/copilotd/internal/sse"
+	"github.com/ningw42/copilotd/internal/usage"
 )
 
 func TestUsageMeterObservesRequestedModelWithoutChangingRequestOrReportedModel(t *testing.T) {
@@ -16,7 +18,9 @@ func TestUsageMeterObservesRequestedModelWithoutChangingRequestOrReportedModel(t
 	registry := CanonicalRegistry(sink)
 	registry[len(registry)-1].Enabled = true
 	chain := registry.NewChain(ctx, endpoint.OpenAI, endpoint.RouteOpenAIResponses)
-	request := []byte(`{"model":"gpt-5.6-sol-fast","input":"private prompt"}`)
+	// Synthetic request and response literals isolate Requested-model intent
+	// from the response-authoritative tier without altering recorded fixtures.
+	request := []byte(`{"model":"gpt-5.6-sol-fast","service_tier":"priority","input":"private prompt"}`)
 	original := bytes.Clone(request)
 	header := http.Header{"X-Test": {"unchanged"}}
 	gotHeader, gotRequest, err := chain.RunRequest(ctx, "keep=query", header, request)
@@ -25,14 +29,76 @@ func TestUsageMeterObservesRequestedModelWithoutChangingRequestOrReportedModel(t
 	}
 	// The submitted metadata must not retain the mutable request bytes.
 	clear(request)
-	response := []byte(`{"id":"response","model":"gpt-5.6-sol","status":"completed","usage":{"input_tokens":12,"output_tokens":6}}`)
+	response := []byte(`{"id":"response","model":"gpt-5.6-sol","status":"completed","service_tier":"default","usage":{"input_tokens":12,"output_tokens":6}}`)
 	gotResponse, err := chain.RunBuffered(ctx, response)
 	if err != nil || !bytes.Equal(gotResponse, response) || &gotResponse[0] != &response[0] {
 		t.Fatalf("response changed: %q, %v", gotResponse, err)
 	}
 	turns := sink.snapshot()
-	if len(turns) != 1 || turns[0].RequestedModel == nil || *turns[0].RequestedModel != "gpt-5.6-sol-fast" || turns[0].Model != "gpt-5.6-sol" {
-		t.Fatalf("Turns = %+v, want distinct requested and reported model", turns)
+	if len(turns) != 1 || turns[0].RequestedModel == nil || *turns[0].RequestedModel != "gpt-5.6-sol-fast" ||
+		turns[0].Model != "gpt-5.6-sol" || turns[0].OpenAIServiceTier == nil || *turns[0].OpenAIServiceTier != "default" {
+		t.Fatalf("Turns = %+v, want distinct request intent and authoritative response evidence", turns)
+	}
+}
+
+func TestUsageMeterNeverInfersOpenAIServiceTierFromRequestIntent(t *testing.T) {
+	ctx := context.Background()
+	sink := &memoryUsageSink{}
+	chain, response := enabledBufferedUsageFixture(ctx, endpoint.OpenAI, sink)
+	// This synthetic request asks for priority/Fast while the synthetic
+	// completion deliberately omits service_tier.
+	request := []byte(`{"model":"gpt-5.6-sol-fast","service_tier":"priority"}`)
+	if _, got, err := chain.RunRequest(ctx, "", nil, request); err != nil || !bytes.Equal(got, request) {
+		t.Fatalf("request changed or failed: got=%q err=%v", got, err)
+	}
+	if got, err := chain.RunBuffered(ctx, response); err != nil || !bytes.Equal(got, response) {
+		t.Fatalf("response changed or failed: got=%q err=%v", got, err)
+	}
+	turns := sink.snapshot()
+	if len(turns) != 1 || turns[0].RequestedModel == nil || *turns[0].RequestedModel != "gpt-5.6-sol-fast" ||
+		turns[0].OpenAIServiceTier != nil {
+		t.Fatalf("Turns = %+v, want Requested model but unavailable service-tier evidence", turns)
+	}
+}
+
+func TestUsageMeterOpenAISSEUsesResponseTierWithoutRequestFallback(t *testing.T) {
+	ctx := context.Background()
+	sink := &memoryUsageSink{}
+	registry := CanonicalRegistry(sink)
+	registry[len(registry)-1].Enabled = true
+	chain := registry.NewChain(ctx, endpoint.OpenAI, endpoint.RouteOpenAIResponses)
+	// Synthetic SSE literals exercise a priority/Fast request followed by one
+	// downgraded default response and one response with no tier evidence.
+	request := []byte(`{"model":"gpt-5.6-sol-fast","service_tier":"priority"}`)
+	requestWant := bytes.Clone(request)
+	if _, got, err := chain.RunRequest(ctx, "", nil, request); err != nil || !bytes.Equal(got, requestWant) || &got[0] != &request[0] {
+		t.Fatalf("request changed or failed: got=%q err=%v", got, err)
+	}
+	clear(request)
+	adapter := chain.StreamAdapter(ctx, nil)
+	responses := [][]byte{
+		syntheticOpenAIResponse([]byte(`"service_tier":"default",`)),
+		syntheticOpenAIResponse(nil),
+	}
+	for _, response := range responses {
+		payload := syntheticOpenAICompletedEvent(response)
+		frame := sse.Frame{Type: "response.completed", Raw: append(append([]byte("event: response.completed\ndata: "), payload...), '\n', '\n')}
+		want := sse.Frame{Type: frame.Type, Raw: bytes.Clone(frame.Raw)}
+		if got := adapter.Transform(ctx, frame); !reflect.DeepEqual(got, []sse.Frame{want}) {
+			t.Fatalf("SSE frame changed: got=%#v want=%#v", got, want)
+		}
+		clear(frame.Raw)
+	}
+	turns := sink.snapshot()
+	wantTiers := []*string{stringPointer("default"), nil}
+	if len(turns) != len(wantTiers) {
+		t.Fatalf("Turns = %+v, want two", turns)
+	}
+	for index, turn := range turns {
+		if turn.RequestedModel == nil || *turn.RequestedModel != "gpt-5.6-sol-fast" || turn.Model != "reported" ||
+			turn.Transport != usage.TransportSSE || turn.TurnIndex != index || !reflect.DeepEqual(turn.OpenAIServiceTier, wantTiers[index]) {
+			t.Errorf("Turn %d = %+v, want response-authoritative SSE evidence", index, turn)
+		}
 	}
 }
 

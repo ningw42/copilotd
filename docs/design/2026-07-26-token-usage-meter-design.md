@@ -55,11 +55,14 @@ configured local usage database (OS-specific default in §10). Both final Routes
 support buffered JSON and SSE; only OpenAI Responses supports WebSocket. The
 GitHub Copilot Surface and the Catalogs are not metered.
 
-_Current implementation (#203):_ qualifying buffered and SSE Anthropic Messages,
-buffered OpenAI Responses objects, self-contained OpenAI `response.completed`
-SSE events, and qualifying OpenAI WebSocket server Messages submit rows. Migration
-1's native counts remain unchanged; migration 2 adds nullable Requested-model
-metadata to both tables. Attribution covers the four HTTP paths only (§6.4).
+_Current implementation (through #247):_ qualifying buffered and SSE Anthropic
+Messages, buffered OpenAI Responses objects, self-contained OpenAI
+`response.completed` SSE events, and qualifying OpenAI WebSocket server Messages
+submit rows. #203 added nullable Requested-model metadata through migration 2;
+#247 adds nullable top-level OpenAI `service_tier` response evidence through
+migration 3. Migration 1's native counts remain unchanged. Attribution covers
+the four HTTP paths only (§6.4); service-tier observation uses the same completed
+Response on all three OpenAI transports (§6.3).
 
 An eligible completion contains the required usage fields, identity, and model
 reported upstream (§6). This is best-effort observation, not an exactly-once
@@ -80,7 +83,7 @@ Requested information:
 | (e) cache create | `cache_creation_input_tokens` (+ TTL split) / `cache_write_tokens`, with native nesting (§5) |
 | (f) cache read | `cache_read_input_tokens` / `cached_tokens` |
 | (g) inference Surface | the **table name** — one table per metered Surface |
-| (h) anything else | `request_id`, upstream `message_id` / `response_id`, `transport`, `turn_index`, `reasoning_tokens`, `thinking_tokens`, cache TTL split |
+| (h) anything else | `request_id`, upstream `message_id` / `response_id`, `transport`, `turn_index`, `reasoning_tokens`, `thinking_tokens`, cache TTL split, and nullable OpenAI response `service_tier` evidence |
 
 ---
 
@@ -145,9 +148,12 @@ the SSE pump.
 - **Multi-user / per-key attribution.** Explicitly out of scope.
 - **Metering `count_tokens`.** `(Anthropic, /v1/messages/count_tokens)` reports an
   estimate, not consumption. Out of scope.
-- **Non-token usage fields.** Labels such as `service_tier` and request counts
-  such as `server_tool_use.web_search_requests` are not token counts. Persisting
-  them would be a scope change, not merely a parser update.
+- **Other non-token usage fields.** Migration 3 intentionally admits the narrow
+  top-level OpenAI `service_tier` exception approved in the
+  [service-tier capture design](2026-09-12-openai-service-tier-capture-design.md).
+  Request counts such as `server_tool_use.web_search_requests` and other labels
+  remain out of scope; adding them is still a scope change, not merely a parser
+  update.
 - **Model-name mapping.** Store the model reported by the inference response,
   not a Catalog's display ID or metadata source. Catalog normalization and Codex
   catalog aliases do not rewrite inference responses.
@@ -266,13 +272,15 @@ const (
 )
 
 // Turn is the Surface-independent envelope. Usage carries the verbatim,
-// Surface-native token fields and selects the destination table.
+// Surface-native token fields and selects the destination table; optional
+// fields carry explicitly scoped completion evidence.
 type Turn struct {
 	At         time.Time
 	RequestID  string    // inbound HTTP correlation; empty if unavailable
 	ResponseID string    // upstream message.id / response.id, not an HTTP request ID
 	Model      string    // as reported upstream, never the client's requested name
 	RequestedModel *string // explicit upstream-bound HTTP model; nil unknown, "" explicit empty
+	OpenAIServiceTier *string // exact response service_tier; nil unavailable, "" explicit empty
 	Transport  Transport
 	TurnIndex  int       // submission ordinal within the shim instance
 	Usage      Usage
@@ -441,8 +449,14 @@ For both SSE and WebSocket, parse each `response.completed.response` independent
 and require that same response to contain its ID, model, completed status, and
 valid required usage. SSE uses `Frame.Data()` after routing on `Frame.Type`, and
 validates the decoded event type too; WebSocket decodes Message data directly.
-A buffered Responses body uses the same response-object validator. Do not fill
-missing values from an earlier event or the client request.
+A buffered Responses body uses the same response-object validator. That one
+Response-level decode also captures a unique exact top-level `service_tier`
+string. Missing, null, wrong-typed, duplicate, invalid-UTF-8, or malformed
+surrogate evidence becomes unavailable without rejecting otherwise valid usage;
+empty, unfamiliar, escaped, and Unicode strings are preserved exactly. Do not
+fill missing values from an earlier event, Requested model, request tier, Catalog,
+or configuration. The reported response field is authoritative even when a Fast
+or priority request completes with `service_tier: "default"`.
 
 Keep only immutable instance metadata and the submission ordinal. There is no
 OpenAI per-turn accumulator, overlap warning, `response.id` map, or client-message
@@ -610,10 +624,26 @@ ALTER TABLE openai_turn ADD COLUMN requested_model TEXT;
 Both tables remain STRICT with all previous columns, constraints, and indexes.
 Historical rows retain every value and acquire SQL `NULL` for unknown Requested
 model; there is no backfill from `model`. New HTTP rows use §6.4's optional string,
-while WebSocket rows always use `NULL`. Fresh and upgraded databases reach the
-same schema and `user_version=2`; reopening is a no-op. Both ALTERs and the version
-bump use the existing all-pending-migrations transaction (§8.1). Stop existing
-writers before upgrading (§8.3).
+while WebSocket rows always use `NULL`. Fresh databases and databases upgraded only through migration 2 reach
+`user_version=2`; reopening is a no-op at that version. Both ALTERs and the
+version bump use the existing all-pending-migrations transaction (§8.1). Stop
+existing writers before upgrading (§8.3).
+
+### 7.5 OpenAI service-tier evidence (migration 3)
+
+Migration 3 appends one nullable metadata column without changing the frozen
+native token projection:
+
+```sql
+ALTER TABLE openai_turn ADD COLUMN service_tier TEXT;
+```
+
+Historical OpenAI rows acquire `NULL`; Anthropic schema and history are
+unchanged. New rows preserve the exact decoded top-level response string,
+including `""`, with no enum, default, backfill, index, or pricing
+interpretation. Fresh, v1-upgraded, and v2-upgraded databases converge on
+`user_version=3`; reopening v3 is a no-op. Current reports integrity-probe the
+column but do not scan, aggregate, expose, or value it.
 
 ---
 
@@ -627,7 +657,7 @@ the DDL, so a half-applied migration is impossible.
 
 ```go
 // Ordered, append-only, embedded in the binary. Index+1 == user_version.
-var migrations = []string{ /* 1: initial schema, 2: requested_model */ }
+var migrations = []string{ /* 1: initial schema, 2: requested_model, 3: OpenAI service_tier */ }
 ```
 
 Open sequence on the configured connection (§9): acquire `BEGIN IMMEDIATE`, then
@@ -959,8 +989,9 @@ no provider billing behavior is inferred from these native counts.
 
 ### `internal/usage/sqlitestore`
 
-- Migration ladder: empty → v2 and historical v1 → v2 preserve the same schema;
-  old rows acquire only a NULL Requested model; reopen is a no-op;
+- Migration ladder: empty, historical v1, and genuine v2 histories converge on
+  v3; old rows acquire NULL optional metadata while Anthropic gains no migration-3
+  column; reopen is a no-op;
   `user_version > len(migrations)` refuses to open and names both numbers.
   Concurrent same-version fresh openers handle WAL-activation contention as well
   as serializing the version check and migrations. Exercise native immediate
@@ -968,7 +999,9 @@ no provider billing behavior is inferred from these native counts.
   budget exhaustion, and non-contention errors.
   A failed migration rolls back all pending changes and the version bump.
 - Round-trip per table asserting **`NULL` survives as `NULL` and does not collapse
-  to `0`**; inbound correlation and upstream message/response IDs stay distinct;
+  to `0`**; OpenAI service-tier text additionally covers empty, unfamiliar,
+  whitespace/control (including NUL), and Unicode values; inbound correlation
+  and upstream message/response IDs stay distinct;
   reused request IDs and duplicate upstream IDs do not prevent another row.
 - `STRICT` rejects non-convertible text in an integer column; parser tests enforce
   the stronger native-number contract. `at_utc` renders a known `at_ms` correctly.
@@ -1005,9 +1038,12 @@ Use dedicated usage fixtures (§11.3) and an in-memory sink:
 - SSE data extraction covers multiline data, CRLF, absent/empty fields, and
   advisory event names. Every emitted `Raw` is byte-identical to its input.
 - OpenAI completions are self-contained: interleaved event sequences cannot mix
-  counters; failed/incomplete/malformed responses do not affect a later valid
-  completion. Repeated qualifying completions have the documented non-deduplicated
-  behavior and successive submission ordinals.
+  counters or service tiers; failed/incomplete/malformed responses do not affect
+  a later valid completion. A shared buffered/SSE/WebSocket matrix covers absent,
+  null, empty, unfamiliar, wrong-typed, duplicate, escaped, Unicode, invalid
+  UTF-8, and surrogate evidence while preserving payload bytes. Repeated
+  qualifying completions have the documented non-deduplicated behavior and
+  successive submission ordinals.
 - WebSocket sessions use captured handshake correlation and bounded state; a
   missing construction request ID produces an empty correlation field, not a
   fabricated one. Assert Message kind/data identity as well as `emit=true`.
@@ -1060,11 +1096,12 @@ all four cgo-free release targets with the chosen SQLite driver (§13).
 ### Reconciled implementation docs
 
 `CONTEXT.md` defines Shim, Usage meter, and Turn without embedding this
-implementation plan. As of #203, README and `CONFIGURATION.md` describe the
+implementation plan. Through #247, README and `CONFIGURATION.md` describe the
 available opt-in database and settings, all five implemented recording paths,
-four-path HTTP Requested-model attribution, the version-2 migration,
-and the durability, filesystem, buffering, retention, backup, external-query,
-and shutdown consequences. The existing
+#203's four-path HTTP Requested-model attribution and migration 2, #247's
+three-path OpenAI service-tier observation and migration 3, unchanged report
+valuation/projection, and the durability, filesystem, buffering, retention,
+backup, external-query, and shutdown consequences. The existing
 `docs/divergence-ledger.md` copilotd-originated error row already covers the
 meter-activated bounded-read `BadGateway`/`GatewayTimeout` Fabrications;
 observation itself adds no usage-rewriting Alteration (§4.2).

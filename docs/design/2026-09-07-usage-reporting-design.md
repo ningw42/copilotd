@@ -70,9 +70,11 @@ best-effort durability, or bounded writer finalization.
 
 [ADR-0018](../adr/0018-store-per-surface-native-usage.md) remains authoritative:
 store and aggregate each Surface's counts with their native meanings. Do not
-create normalized input columns or infer a provider total. The current two
-Turn tables, `at_ms` indexes, and schema version 2 are sufficient; **no migration
-is required** for v1 reporting.
+create normalized input columns or infer a provider total. The original v1
+report projection required no migration beyond the then-current schema v2.
+The writer now owns schema v3, whose nullable OpenAI `service_tier` metadata is
+integrity-probed but is not scanned, aggregated, exposed, or valued by report
+wire-schema version 1.
 
 The served HTTP path is a local handler, **not an Endpoint, Route, or Surface**
 in the project's domain vocabulary: it has no upstream dependency. Do not add a
@@ -698,12 +700,14 @@ For each admitted query:
    activity: normal read-only WAL access may still use sidecars.
 3. Begin one read transaction, check the supported schema and text encoding,
    and read both selected native tables under that same snapshot. v1 requires
-   the current schema version 2 and UTF-8 encoding, as created by the existing
-   writer; incompatible encoding/schema returns `usage_unavailable`. No lazy
+   the current writer schema version 3 and UTF-8 encoding, including the explicit
+   `openai_turn.service_tier` presence probe even for Anthropic-only selections;
+   incompatible encoding/schema returns `usage_unavailable`. No lazy
    migration or partial-schema interpretation. Keep compatibility and literal
    path policy aligned with store-owned facts, not an independent schema.
 4. Select only `at_ms`, a **size-guarded** Reported model plus its byte-length
-   metadata, and the frozen native counts, with bound half-open timestamp and
+   metadata, and the frozen native counts—never Requested model or service-tier
+   evidence—with bound half-open timestamp and
    optional exact-model predicates. Guard the model in SQLite before its full
    identity is transferred, as specified below; do not first scan an unbounded
    string and then check its Go length. Use the existing timestamp indexes and

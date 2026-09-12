@@ -455,7 +455,8 @@ protect reports. See [`usage`](#usage) for supported selections and presentation
 **Implemented coverage is all five supported paths: buffered and SSE Anthropic
 Messages plus buffered, SSE, and WebSocket OpenAI Responses.** Requested-model
 attribution covers only the four HTTP buffered/SSE paths; WebSocket rows always
-have `requested_model IS NULL`.
+have `requested_model IS NULL`. Each of the three OpenAI paths also observes the
+same completed Response's optional top-level `service_tier`.
 
 Both native tables keep `model` as the unchanged **Reported model** from the
 upstream completion. The nullable `requested_model` is the **Requested model**:
@@ -475,6 +476,18 @@ backfill a required response field, or prevent an otherwise-eligible row. The
 meter observes once and retains only the optional model string, never the prompt
 or full request body. Every qualifying observation for that HTTP request shares
 that metadata, without inheriting from another request.
+
+`openai_turn.service_tier` is separate nullable completion evidence. A unique
+exact top-level Response string is decoded and stored verbatim: `""` remains an
+empty SQL string, and unknown future values, whitespace, controls, and Unicode
+are not normalized. Missing or JSON `null` is SQL `NULL`; wrong types, duplicate
+exact decoded keys, invalid UTF-8, and malformed surrogate escapes also make only
+this optional evidence unavailable. Nested and differently cased members do not
+count. The response is authoritative: `service_tier = 'default'` is retained even
+when the request selected priority/Fast or the Requested model ends in `-fast`.
+There is no fallback from request intent, Requested/Reported model, Catalogs,
+aliases, or configuration, and no earlier-event or WebSocket client-message
+state.
 
 A buffered Anthropic row requires one self-contained object whose `type` is
 `"message"`, with its own non-empty `id` and reported `model`, a non-empty string
@@ -524,6 +537,7 @@ and installs no client-message hook. Neither streaming observer fills fields
 from an earlier event or the client request.
 The meter also preserves these OpenAI-native fields when reported:
 
+- top-level `service_tier` as separately scoped nullable response metadata;
 - `input_tokens_details.cached_tokens` and
   `input_tokens_details.cache_write_tokens`, both subsets already inside complete
   `input_tokens`;
@@ -553,18 +567,22 @@ GitHub OAuth tokens, or Copilot tokens.
 The GitHub Copilot Surface, raw `/models`, provider/Codex Catalogs, and
 `/v1/messages/count_tokens` are not metered. Built-in calendar native-Surface aggregation
 is available through [`usage`](#usage); Copilot billing reconciliation,
-historical tariffs, automatic pruning, per-key attribution, and non-token usage
-projection remain out of scope.
+historical tariffs, automatic pruning, per-key attribution, and other non-token
+usage projection remain out of scope. Current reports and Estimated cost ignore
+stored `service_tier`; the field is immediately visible only to external SQLite
+inspection, and this staging interval does not classify non-default evidence as
+Standard billing.
 External SQLite tooling still supports either native table, for example:
 
 ```sh
 sqlite3 "$USAGE_DB" \
   'SELECT at_utc, quote(requested_model) AS requested_model, model, input_tokens, output_tokens FROM anthropic_turn ORDER BY at_ms DESC;
-   SELECT at_utc, quote(requested_model) AS requested_model, model, input_tokens, output_tokens FROM openai_turn ORDER BY at_ms DESC;'
+   SELECT at_utc, quote(requested_model) AS requested_model, model, quote(service_tier) AS service_tier, input_tokens, output_tokens FROM openai_turn ORDER BY at_ms DESC;'
 ```
 
-`quote(requested_model)` makes SQL `NULL` visibly different from the empty string
-`''` in SQLite's text output.
+`quote(...)` makes SQL `NULL` visibly different from the empty string `''` in
+ordinary SQLite text output. Use a SQLite API and scan `service_tier` as TEXT when
+inspecting embedded NUL exactly; `quote()` display is not faithful for that case.
 
 Enabling this setting changes non-SSE forwarding even when a body is an error or
 is not JSON: every non-SSE response with no `Content-Encoding`, or exactly one
@@ -612,10 +630,11 @@ such as `?`, `%`, or `file:` cannot introduce SQLite query parameters.
 
 When metering is enabled, startup validates the destination and migrates before
 binding. Failure is fatal rather than silently disabling requested recording.
-Schema version 2 appends nullable `requested_model TEXT` to both existing STRICT
-native tables without changing their earlier columns or indexes. Historical rows
-keep all values and acquire `NULL`; fresh databases reach the same schema as
-upgraded ones, and reopening is a no-op. All pending DDL and the version bump
+Schema version 3 retains migration 2's nullable `requested_model TEXT` on both
+STRICT native tables and appends nullable `service_tier TEXT` only to
+`openai_turn`. Historical rows keep all values and acquire `NULL`; Anthropic
+schema is unchanged by migration 3. Fresh, v1-upgraded, and v2-upgraded databases
+reach the same schema, and reopening is a no-op. All pending DDL and the version bump
 commit atomically or roll back together. **Stop all existing writers before
 starting a binary that upgrades the schema**; mixed-version online upgrades are
 not supported. An older binary refuses a newer schema rather than writing to it.
