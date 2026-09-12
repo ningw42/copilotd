@@ -427,7 +427,7 @@ func mandatoryTests(goos string) []string {
 		"internal/usage/sqlitestore": {
 			"TestStoreRecoveredWriteFailureDoesNotPoisonLaterOrFinalLevels", "TestStoreRoundTripsNullableOpenAIServiceTierExactly",
 			"TestStoreV1UpgradePreservesHistoryAndMatchesFreshV3Schema", "TestStoreV2UpgradeAddsOnlyNullableOpenAIServiceTier",
-			"TestStoreServiceTierMigrationFailureRollsBackEarlierPendingMigration",
+			"TestStorePendingMigrationFailureRollsBackAllChanges",
 		},
 		"internal/wsforward": {"TestProxyWriteTimeoutTearsDownSlowReaderSession"},
 		"cmd/copilotd": {

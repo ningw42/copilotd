@@ -197,61 +197,50 @@ func TestStoreV2UpgradeAddsOnlyNullableOpenAIServiceTier(t *testing.T) {
 	}
 }
 
-func TestStoreServiceTierMigrationFailureRollsBackEarlierPendingMigration(t *testing.T) {
-	path, db := createUsageV1(t)
-	// This external conflict allows migration 2 to run before migration 3 fails.
-	// The all-pending transaction must roll migration 2 back as well.
-	if _, err := db.Exec(`ALTER TABLE openai_turn ADD COLUMN service_tier TEXT; UPDATE openai_turn SET service_tier='sentinel'`); err != nil {
-		t.Fatal(err)
+func TestStorePendingMigrationFailureRollsBackAllChanges(t *testing.T) {
+	tests := []struct {
+		name, conflictingDDL, wantMigration string
+	}{
+		{
+			name: "migration 2 conflict rolls back its first ALTER",
+			conflictingDDL: `ALTER TABLE openai_turn ADD COLUMN requested_model TEXT;
+				UPDATE openai_turn SET requested_model='sentinel'`,
+			wantMigration: "migration 2",
+		},
+		{
+			name: "migration 3 conflict rolls back earlier pending migration 2",
+			conflictingDDL: `ALTER TABLE openai_turn ADD COLUMN service_tier TEXT;
+				UPDATE openai_turn SET service_tier='sentinel'`,
+			wantMigration: "migration 3",
+		},
 	}
-	queries := []string{usageSchemaQuery, "PRAGMA user_version", "SELECT * FROM anthropic_turn", "SELECT * FROM openai_turn"}
-	before := make([][][]any, len(queries))
-	for i, query := range queries {
-		before[i] = externalRows(t, db, query)
-	}
-	_ = db.Close()
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			path, db := createUsageV1(t)
+			if _, err := db.Exec(tc.conflictingDDL); err != nil {
+				t.Fatal(err)
+			}
+			queries := []string{usageSchemaQuery, "PRAGMA user_version", "SELECT * FROM anthropic_turn", "SELECT * FROM openai_turn"}
+			before := make([][][]any, len(queries))
+			for i, query := range queries {
+				before[i] = externalRows(t, db, query)
+			}
+			_ = db.Close()
 
-	store, err := sqlitestore.Open(path, testStoreLogger(io.Discard))
-	if err == nil {
-		closeStore(t, store)
-		t.Fatal("Open accepted conflicting service-tier migration")
-	}
-	if !strings.Contains(err.Error(), "migration 3") {
-		t.Fatalf("Open = %v, want migration 3 failure", err)
-	}
-	db = openExternal(t, path)
-	for i, query := range queries {
-		if got := externalRows(t, db, query); !reflect.DeepEqual(got, before[i]) {
-			t.Errorf("failed later migration changed %s: %#v, want %#v", query, got, before[i])
-		}
-	}
-}
-
-func TestStoreRequestedModelMigrationRollsBackFirstAlterWhenSecondFails(t *testing.T) {
-	path, db := createUsageV1(t)
-	// An external schema conflict makes the second statement fail after the
-	// first ALTER. Startup must leave every preexisting value and schema intact.
-	if _, err := db.Exec(`ALTER TABLE openai_turn ADD COLUMN requested_model TEXT; UPDATE openai_turn SET requested_model='sentinel'`); err != nil {
-		t.Fatal(err)
-	}
-	queries := []string{usageSchemaQuery, "PRAGMA user_version", "SELECT * FROM anthropic_turn", "SELECT * FROM openai_turn"}
-	before := make([][][]any, len(queries))
-	for i, query := range queries {
-		before[i] = externalRows(t, db, query)
-	}
-	_ = db.Close()
-	store, err := sqlitestore.Open(path, testStoreLogger(io.Discard))
-	if err == nil {
-		closeStore(t, store)
-		t.Fatal("Open accepted conflicting pending migration")
-	}
-	if !strings.Contains(err.Error(), "migration 2") {
-		t.Fatalf("Open = %v, want migration 2 failure", err)
-	}
-	db = openExternal(t, path)
-	for i, query := range queries {
-		if got := externalRows(t, db, query); !reflect.DeepEqual(got, before[i]) {
-			t.Errorf("failed migration changed %s: %#v, want %#v", query, got, before[i])
-		}
+			store, err := sqlitestore.Open(path, testStoreLogger(io.Discard))
+			if err == nil {
+				closeStore(t, store)
+				t.Fatal("Open accepted conflicting pending migration")
+			}
+			if !strings.Contains(err.Error(), tc.wantMigration) {
+				t.Fatalf("Open = %v, want %s failure", err, tc.wantMigration)
+			}
+			db = openExternal(t, path)
+			for i, query := range queries {
+				if got := externalRows(t, db, query); !reflect.DeepEqual(got, before[i]) {
+					t.Errorf("failed migration changed %s: %#v, want %#v", query, got, before[i])
+				}
+			}
+		})
 	}
 }

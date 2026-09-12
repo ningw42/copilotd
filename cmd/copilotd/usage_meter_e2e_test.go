@@ -441,6 +441,8 @@ func TestRunBoundServeMetersOpenAIWebSocketCompletionsWithoutChangingMessages(t 
 	if err != nil {
 		t.Fatalf("read recorded WebSocket fixture: %v", err)
 	}
+	// The recorded WebSocket capture remains byte-unchanged; every other Message
+	// and the buffered payload in this mixed sequence is explicitly synthetic.
 	messages := []struct {
 		kind websocket.MessageType
 		data []byte

@@ -55,14 +55,14 @@ configured local usage database (OS-specific default in §10). Both final Routes
 support buffered JSON and SSE; only OpenAI Responses supports WebSocket. The
 GitHub Copilot Surface and the Catalogs are not metered.
 
-_Current implementation (#203):_ qualifying buffered and SSE Anthropic Messages,
-buffered OpenAI Responses objects, self-contained OpenAI `response.completed`
-SSE events, and qualifying OpenAI WebSocket server Messages submit rows. Migration
-1's native counts remain unchanged; migration 2 adds nullable Requested-model
-metadata to both tables, and migration 3 adds nullable top-level OpenAI
-`service_tier` response evidence. Attribution covers the four HTTP paths only
-(§6.4); service-tier observation uses the same completed Response on all three
-OpenAI transports (§6.3).
+_Current implementation (through #247):_ qualifying buffered and SSE Anthropic
+Messages, buffered OpenAI Responses objects, self-contained OpenAI
+`response.completed` SSE events, and qualifying OpenAI WebSocket server Messages
+submit rows. #203 added nullable Requested-model metadata through migration 2;
+#247 adds nullable top-level OpenAI `service_tier` response evidence through
+migration 3. Migration 1's native counts remain unchanged. Attribution covers
+the four HTTP paths only (§6.4); service-tier observation uses the same completed
+Response on all three OpenAI transports (§6.3).
 
 An eligible completion contains the required usage fields, identity, and model
 reported upstream (§6). This is best-effort observation, not an exactly-once
@@ -1096,12 +1096,12 @@ all four cgo-free release targets with the chosen SQLite driver (§13).
 ### Reconciled implementation docs
 
 `CONTEXT.md` defines Shim, Usage meter, and Turn without embedding this
-implementation plan. As of #203, README and `CONFIGURATION.md` describe the
+implementation plan. Through #247, README and `CONFIGURATION.md` describe the
 available opt-in database and settings, all five implemented recording paths,
-four-path HTTP Requested-model attribution, three-path OpenAI service-tier
-observation, the version-3 migration, unchanged report valuation/projection,
-and the durability, filesystem, buffering, retention, backup, external-query,
-and shutdown consequences. The existing
+#203's four-path HTTP Requested-model attribution and migration 2, #247's
+three-path OpenAI service-tier observation and migration 3, unchanged report
+valuation/projection, and the durability, filesystem, buffering, retention,
+backup, external-query, and shutdown consequences. The existing
 `docs/divergence-ledger.md` copilotd-originated error row already covers the
 meter-activated bounded-read `BadGateway`/`GatewayTimeout` Fabrications;
 observation itself adds no usage-rewriting Alteration (§4.2).
