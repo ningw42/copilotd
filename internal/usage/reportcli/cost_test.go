@@ -115,8 +115,8 @@ func pricedOpenAICommandReport(t *testing.T, amounts []string, sectionAmount str
 	end := start.AddDate(0, 0, 1)
 	provenance := &report.PricingProvenance{
 		Dataset: "models.dev/api.json", Currency: "USD", Basis: "original_provider",
-		ContextPolicy: "highest_tier", CacheWritePolicy: "single_rate",
-		Version: "sha256:abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd", Source: "fallback",
+		CacheWritePolicy: "single_rate",
+		Version:          "sha256:abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd", Source: "fallback",
 	}
 	section := &report.Section{}
 	for index, raw := range amounts {

@@ -116,7 +116,6 @@ type PricingProvenance struct {
 	Dataset          string
 	Currency         string
 	Basis            string
-	ContextPolicy    string
 	CacheWritePolicy string
 	Version          string
 	Source           string
@@ -308,7 +307,6 @@ func pricingProvenance(status pricing.SnapshotStatus) *PricingProvenance {
 		Dataset:          "models.dev/api.json",
 		Currency:         "USD",
 		Basis:            "original_provider",
-		ContextPolicy:    "highest_tier",
 		CacheWritePolicy: "single_rate",
 		Version:          status.Version,
 		Source:           status.Source,

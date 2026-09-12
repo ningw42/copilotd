@@ -84,7 +84,6 @@ type wirePricing struct {
 	Dataset          string     `json:"dataset"`
 	Currency         string     `json:"currency"`
 	Basis            string     `json:"basis"`
-	ContextPolicy    string     `json:"context_policy"`
 	CacheWritePolicy string     `json:"cache_write_policy"`
 	Version          string     `json:"version"`
 	Source           string     `json:"source"`
@@ -137,7 +136,7 @@ func validatePricingProvenance(provenance *report.PricingProvenance) error {
 	if provenance == nil {
 		return nil
 	}
-	if provenance.Dataset != "models.dev/api.json" || provenance.Currency != "USD" || provenance.Basis != "original_provider" || provenance.ContextPolicy != "highest_tier" || provenance.CacheWritePolicy != "single_rate" || !validContentVersion(provenance.Version) || provenance.Source != "fallback" && provenance.Source != "fetched" {
+	if provenance.Dataset != "models.dev/api.json" || provenance.Currency != "USD" || provenance.Basis != "original_provider" || provenance.CacheWritePolicy != "single_rate" || !validContentVersion(provenance.Version) || provenance.Source != "fallback" && provenance.Source != "fetched" {
 		return errInvalidPricingProvenance
 	}
 	if provenance.LastSuccess != nil {
@@ -155,8 +154,8 @@ func pricingForWire(value *report.PricingProvenance) *wirePricing {
 	}
 	return &wirePricing{
 		Dataset: value.Dataset, Currency: value.Currency, Basis: value.Basis,
-		ContextPolicy: value.ContextPolicy, CacheWritePolicy: value.CacheWritePolicy,
-		Version: value.Version, Source: value.Source, LastSuccess: value.LastSuccess,
+		CacheWritePolicy: value.CacheWritePolicy, Version: value.Version,
+		Source: value.Source, LastSuccess: value.LastSuccess,
 	}
 }
 

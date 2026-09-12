@@ -265,15 +265,14 @@ func (d *wireDecoder) total(o object, section bool, names []string, pricingPrese
 func (d *wireDecoder) pricing(o object) *report.PricingProvenance {
 	value := &report.PricingProvenance{
 		Dataset: d.text(o, "dataset"), Currency: d.text(o, "currency"), Basis: d.text(o, "basis"),
-		ContextPolicy: d.text(o, "context_policy"), CacheWritePolicy: d.text(o, "cache_write_policy"),
-		Version: d.text(o, "version"), Source: d.text(o, "source"),
+		CacheWritePolicy: d.text(o, "cache_write_policy"), Version: d.text(o, "version"), Source: d.text(o, "source"),
 	}
 	lastSuccess := d.member(o, "last_success")
 	if !bytes.Equal(lastSuccess, []byte("null")) {
 		instant := d.instant(o, "last_success")
 		value.LastSuccess = &instant
 	}
-	if value.Dataset != "models.dev/api.json" || value.Currency != "USD" || value.Basis != "original_provider" || value.ContextPolicy != "highest_tier" || value.CacheWritePolicy != "single_rate" || !validContentVersion(value.Version) || value.Source != "fallback" && value.Source != "fetched" {
+	if value.Dataset != "models.dev/api.json" || value.Currency != "USD" || value.Basis != "original_provider" || value.CacheWritePolicy != "single_rate" || !validContentVersion(value.Version) || value.Source != "fallback" && value.Source != "fetched" {
 		d.err = errProtocol
 	}
 	return value

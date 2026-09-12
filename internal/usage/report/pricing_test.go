@@ -207,7 +207,7 @@ func TestQueryValuesCompleteOpenAIReportFromOnePricingSnapshot(t *testing.T) {
 			{StartDate: "2026-09-02", UntilDate: "2026-09-03", RangeStart: time.Date(2026, 9, 2, 0, 0, 0, 0, time.UTC), RangeEnd: time.Date(2026, 9, 3, 0, 0, 0, 0, time.UTC), InProgress: true},
 		},
 		Pricing: &report.PricingProvenance{
-			Dataset: "models.dev/api.json", Currency: "USD", Basis: "original_provider", ContextPolicy: "highest_tier", CacheWritePolicy: "single_rate",
+			Dataset: "models.dev/api.json", Currency: "USD", Basis: "original_provider", CacheWritePolicy: "single_rate",
 			Version: "sha256:openai-fixture", Source: "fetched", LastSuccess: &lastSuccess,
 		},
 		OpenAI: &report.Section{
@@ -506,7 +506,7 @@ func TestQueryValuesBothNativeSurfacesByReportedModelOnly(t *testing.T) {
 			{StartDate: "2026-09-01", UntilDate: "2026-09-02", RangeStart: time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC), RangeEnd: time.Date(2026, 9, 2, 0, 0, 0, 0, time.UTC)},
 			{StartDate: "2026-09-02", UntilDate: "2026-09-03", RangeStart: time.Date(2026, 9, 2, 0, 0, 0, 0, time.UTC), RangeEnd: time.Date(2026, 9, 3, 0, 0, 0, 0, time.UTC)},
 		},
-		Pricing:   &report.PricingProvenance{Dataset: "models.dev/api.json", Currency: "USD", Basis: "original_provider", ContextPolicy: "highest_tier", CacheWritePolicy: "single_rate", Version: "sha256:combined", Source: "fetched"},
+		Pricing:   &report.PricingProvenance{Dataset: "models.dev/api.json", Currency: "USD", Basis: "original_provider", CacheWritePolicy: "single_rate", Version: "sha256:combined", Source: "fetched"},
 		Anthropic: section(anthropicTotal), OpenAI: section(openAITotal),
 	}
 	assertReportEqual(t, got, want)
