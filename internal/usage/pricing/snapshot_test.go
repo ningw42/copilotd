@@ -15,6 +15,8 @@ import (
 	"github.com/ningw42/copilotd/internal/usage/pricing"
 )
 
+// Snapshots and mode declarations in this file are synthetic admission,
+// valuation, and resource fixtures, not recorded models.dev artifacts.
 func TestSnapshotProjectsAllowedProviderIdentitiesAndPreservesUnpricedModels(t *testing.T) {
 	t.Parallel()
 
@@ -85,6 +87,9 @@ func TestSnapshotProjectsOpenAIFastDeclarationsWithoutInventingAliases(t *testin
 			name:  "empty modes",
 			model: `{"id":"model","experimental":{"modes":{}}}`,
 		},
+		{name: "absent experimental", model: `{"id":"model"}`},
+		{name: "empty experimental", model: `{"id":"model","experimental":{}}`},
+		{name: "unknown fields and valid non-Fast mode", model: `{"id":"model","experimental":{"modes":{"batch":{"provider":{"body":{"service_tier":"batch"},"future":true},"cost":{"input":1,"tiers":{"ignored":true}},"future":true}},"future":true}}`},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -106,14 +111,20 @@ func TestSnapshotProjectsOpenAIFastDeclarationsWithoutInventingAliases(t *testin
 func TestSnapshotRejectsMalformedOrContradictoryOpenAIModes(t *testing.T) {
 	t.Parallel()
 
+	for _, tc := range malformedOpenAIModeCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := pricing.ParseSnapshot(t.Context(), snapshotModelFixture(tc.model)); err == nil {
+				t.Fatal("ParseSnapshot() error = nil, want rejection")
+			}
+		})
+	}
+}
+
+// Shared synthetic malformed data: each case must fail both direct projection
+// and fetched-snapshot admission. Valid acceptance cases stay separate above.
+func malformedOpenAIModeCases() []struct{ name, model string } {
 	oversized := strings.Repeat("x", 1025)
-	tests := []struct {
-		name  string
-		model string
-		ok    bool
-	}{
-		{name: "absent experimental", model: `{"id":"model"}`, ok: true},
-		{name: "empty experimental", model: `{"id":"model","experimental":{}}`, ok: true},
+	return []struct{ name, model string }{
 		{name: "experimental null", model: `{"id":"model","experimental":null}`},
 		{name: "experimental wrong type", model: `{"id":"model","experimental":[]}`},
 		{name: "modes null", model: `{"id":"model","experimental":{"modes":null}}`},
@@ -146,18 +157,6 @@ func TestSnapshotRejectsMalformedOrContradictoryOpenAIModes(t *testing.T) {
 		{name: "malformed ignored mode rate", model: `{"id":"model","experimental":{"modes":{"batch":{"cost":{"output_audio":false}}}}}`},
 		{name: "unsupported Fast tiers", model: `{"id":"model","experimental":{"modes":{"fast":{"cost":{"tiers":[]}}}}}`},
 		{name: "unsupported Fast legacy context", model: `{"id":"model","experimental":{"modes":{"fast":{"cost":{"context_over_200k":{}}}}}}`},
-		{name: "unknown fields and valid non-Fast mode", model: `{"id":"model","experimental":{"modes":{"batch":{"provider":{"body":{"service_tier":"batch"},"future":true},"cost":{"input":1,"tiers":{"ignored":true}},"future":true}},"future":true}}`, ok: true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			_, err := pricing.ParseSnapshot(t.Context(), snapshotModelFixture(tc.model))
-			if tc.ok && err != nil {
-				t.Fatalf("ParseSnapshot() error = %v, want accepted", err)
-			}
-			if !tc.ok && err == nil {
-				t.Fatal("ParseSnapshot() error = nil, want rejection")
-			}
-		})
 	}
 }
 
@@ -472,21 +471,43 @@ func TestSnapshotCancellationInterruptsLargeTierProjection(t *testing.T) {
 
 func TestSnapshotCancellationInterruptsDerivedFastTierConstruction(t *testing.T) {
 	const tiers = 5_000
-	raw := highCardinalitySnapshot(tiers, true)
-	baseline := &countingContext{Context: context.Background()}
-	if _, err := pricing.ParseSnapshot(baseline, raw); err != nil {
-		t.Fatalf("baseline ParseSnapshot() error = %v", err)
-	}
-	if baseline.checks <= tiers {
-		t.Fatalf("baseline context checks = %d, want more than %d derived-tier checks", baseline.checks, tiers)
-	}
+	assertOpenAIProjectionCancellation(t, highCardinalitySnapshot(tiers, true), tiers/2)
+}
 
-	cancelAt := baseline.checks - tiers/2
-	cancelled := &countingContext{Context: context.Background(), cancelAt: cancelAt}
-	snapshot, err := pricing.ParseSnapshot(cancelled, raw)
-	if !errors.Is(err, context.Canceled) || snapshot != nil {
-		t.Fatalf("ParseSnapshot() at context check %d = %#v, %v; want nil, context canceled", cancelAt, snapshot, err)
+func TestSnapshotCancellationInterruptsOpenAIModeTraversal(t *testing.T) {
+	const modes = 5_000
+	var model strings.Builder
+	model.WriteString(`{"id":"model","experimental":{"modes":{`)
+	for index := range modes {
+		if index != 0 {
+			model.WriteByte(',')
+		}
+		fmt.Fprintf(&model, `"synthetic-mode-%d":{}`, index)
 	}
+	model.WriteString(`}}}`)
+	assertOpenAIProjectionCancellation(t, snapshotModelFixture(model.String()), modes/2)
+}
+
+func assertOpenAIProjectionCancellation(t *testing.T, raw []byte, extraBudget int) {
+	t.Helper()
+	// The control has the SAME JSON tokens and normal context rows, but lives
+	// under xai, where OpenAI mode traversal/derivation must not execute. Its
+	// completed work budget therefore cannot shrink when the OpenAI loop guard
+	// is removed. Unlike calibrating against the active projection, this cannot
+	// silently move cancellation back into the shared JSON or cost parser.
+	inactive := []byte(strings.NewReplacer(`"openai"`, `"xai"`, `"xai"`, `"openai"`).Replace(string(raw)))
+	baseline := &countingContext{Context: t.Context()}
+	if _, err := pricing.ParseSnapshot(baseline, inactive); err != nil {
+		t.Fatalf("inactive-provider control: %v", err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	cancelled := &countingContext{Context: ctx, cancelAt: baseline.checks + extraBudget, cancel: cancel}
+	snapshot, err := pricing.ParseSnapshot(cancelled, raw)
+	if !errors.Is(err, context.Canceled) || snapshot != nil || ctx.Err() == nil {
+		t.Fatalf("OpenAI projection beyond inactive budget %d + %d: checks=%d, snapshot present=%t, error=%v; want cancellation and no partial snapshot", baseline.checks, extraBudget, cancelled.checks, snapshot != nil, err)
+	}
+	t.Logf("inactive-provider checks=%d, active cancellation at=%d", baseline.checks, cancelled.checks)
 }
 
 func TestSnapshotAcceptsFullUint64ContextThresholds(t *testing.T) {
@@ -569,14 +590,15 @@ func highCardinalitySnapshot(tiers int, withFast bool) []byte {
 type countingContext struct {
 	context.Context
 	checks, cancelAt int
+	cancel           context.CancelFunc
 }
 
 func (c *countingContext) Err() error {
 	c.checks++
 	if c.cancelAt > 0 && c.checks >= c.cancelAt {
-		return context.Canceled
+		c.cancel()
 	}
-	return nil
+	return c.Context.Err()
 }
 
 func optionalRateString(rate *pricing.Rate) string {

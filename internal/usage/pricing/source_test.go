@@ -24,6 +24,8 @@ import (
 	"github.com/ningw42/copilotd/internal/usage/pricing"
 )
 
+// Local HTTP artifacts in this file are synthetic refresh/admission fixtures.
+// The pinned embedded-floor test below alone uses the identified vendored bytes.
 func TestCachedSourceServesValidatedEmbeddedFloorWhenRefreshIsPinned(t *testing.T) {
 	t.Parallel()
 
@@ -462,48 +464,16 @@ func TestCachedSourceHoldsLastGoodAfterMalformedOpenAIModeRefresh(t *testing.T) 
 	t.Parallel()
 
 	const good = `{"openai":{"id":"openai","models":{"kept":{"id":"kept","cost":{"input":1,"output":2},"experimental":{"modes":{"fast":{"cost":{"input":2,"output":4}}}}}}},"anthropic":{"id":"anthropic","models":{}},"google":{"id":"google","models":{}},"xai":{"id":"xai","models":{}}}`
-	oversized := strings.Repeat("x", 1025)
-	for _, tc := range []struct {
-		name  string
-		model string
-	}{
-		{name: "experimental null", model: `{"id":"kept","experimental":null}`},
-		{name: "experimental wrong type", model: `{"id":"kept","experimental":[]}`},
-		{name: "modes null", model: `{"id":"kept","experimental":{"modes":null}}`},
-		{name: "modes wrong type", model: `{"id":"kept","experimental":{"modes":[]}}`},
-		{name: "empty mode name", model: `{"id":"kept","experimental":{"modes":{"":{}}}}`},
-		{name: "oversized mode name", model: `{"id":"kept","experimental":{"modes":{` + strconv.Quote(oversized) + `:{}}}}`},
-		{name: "mode entry null", model: `{"id":"kept","experimental":{"modes":{"fast":null}}}`},
-		{name: "mode entry wrong type", model: `{"id":"kept","experimental":{"modes":{"fast":[]}}}`},
-		{name: "provider null", model: `{"id":"kept","experimental":{"modes":{"fast":{"provider":null}}}}`},
-		{name: "provider wrong type", model: `{"id":"kept","experimental":{"modes":{"fast":{"provider":[]}}}}`},
-		{name: "provider body null", model: `{"id":"kept","experimental":{"modes":{"fast":{"provider":{"body":null}}}}}`},
-		{name: "provider body wrong type", model: `{"id":"kept","experimental":{"modes":{"fast":{"provider":{"body":[]}}}}}`},
-		{name: "wire tier null", model: `{"id":"kept","experimental":{"modes":{"accelerated":{"provider":{"body":{"service_tier":null}}}}}}`},
-		{name: "wire tier empty", model: `{"id":"kept","experimental":{"modes":{"accelerated":{"provider":{"body":{"service_tier":""}}}}}}`},
-		{name: "wire tier wrong type", model: `{"id":"kept","experimental":{"modes":{"accelerated":{"provider":{"body":{"service_tier":1}}}}}}`},
-		{name: "wire tier oversized", model: `{"id":"kept","experimental":{"modes":{"accelerated":{"provider":{"body":{"service_tier":` + strconv.Quote(oversized) + `}}}}}}`},
-		{name: "named candidate contradicts mapping", model: `{"id":"kept","experimental":{"modes":{"fast":{"provider":{"body":{"service_tier":"default"}}}}}}`},
-		{name: "reserved name contradicts mapping", model: `{"id":"kept","experimental":{"modes":{"flex":{"provider":{"body":{"service_tier":"priority"}}}}}}`},
-		{name: "identical duplicate candidates", model: `{"id":"kept","experimental":{"modes":{"fast":{"cost":{"input":2}},"priority":{"cost":{"input":2}}}}}`},
-		{name: "conflicting duplicate candidates", model: `{"id":"kept","experimental":{"modes":{"fast":{"cost":{"input":2}},"priority":{"cost":{"input":3}}}}}`},
-		{name: "case-colliding candidates", model: `{"id":"kept","experimental":{"modes":{"fast":{},"FAST":{}}}}`},
-		{name: "Fast cost null", model: `{"id":"kept","experimental":{"modes":{"fast":{"cost":null}}}}`},
-		{name: "Fast cost wrong type", model: `{"id":"kept","experimental":{"modes":{"fast":{"cost":[]}}}}`},
-		{name: "invalid Fast rate", model: `{"id":"kept","experimental":{"modes":{"fast":{"cost":{"reasoning":null}}}}}`},
-		{name: "invalid ignored mode rate", model: `{"id":"kept","experimental":{"modes":{"batch":{"cost":{"input":null}}}}}`},
-		{name: "unsupported Fast tiers", model: `{"id":"kept","experimental":{"modes":{"fast":{"cost":{"tiers":[]}}}}}`},
-		{name: "unsupported Fast legacy context", model: `{"id":"kept","experimental":{"modes":{"fast":{"cost":{"context_over_200k":{}}}}}}`},
-	} {
+	for _, tc := range malformedOpenAIModeCases() {
 		t.Run(tc.name, func(t *testing.T) {
-			malformed := `{"openai":{"id":"openai","models":{"kept":` + tc.model + `}},"anthropic":{"id":"anthropic","models":{}},"google":{"id":"google","models":{}},"xai":{"id":"xai","models":{}}}`
+			malformed := snapshotModelFixture(tc.model)
 			var request atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				if request.Add(1) == 1 {
 					_, _ = io.WriteString(w, good)
 					return
 				}
-				_, _ = io.WriteString(w, malformed)
+				_, _ = w.Write(malformed)
 			}))
 			t.Cleanup(server.Close)
 			registry := cache.NewRegistry()

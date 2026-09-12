@@ -2,11 +2,13 @@ package report_test
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"math"
 	"net/http/httptest"
 	"reflect"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -17,8 +19,12 @@ import (
 	"github.com/ningw42/copilotd/internal/usage/pricing"
 	"github.com/ningw42/copilotd/internal/usage/report"
 	"github.com/ningw42/copilotd/internal/usage/reporthttp"
+	"github.com/ningw42/copilotd/internal/usage/sqlitestore"
 )
 
+// Pricing sources and Turn histories in this file are synthetic policy
+// fixtures, including real-looking model names with manufactured prices and
+// thresholds. They are not live/recorded models.dev or completion evidence.
 type fixedPricingSource struct {
 	snapshot *pricing.Snapshot
 	status   pricing.SnapshotStatus
@@ -256,19 +262,94 @@ func TestQueryBoundsUnrecognizedOpenAIServiceTierBeforeLookup(t *testing.T) {
 	source := pricingSource(t, `{"gpt-long":{"id":"gpt-long","cost":{
 		"input":1,"output":2,"tiers":[{"input":2,"output":3,"tier":{"type":"context","size":100}}]
 	},"experimental":{"modes":{"fast":{"cost":{"input":2,"output":4}}}}}}`, pricing.SnapshotStatus{Source: "fetched", Version: "sha256:bounded-tier"})
-	longTier := strings.Repeat("x", 1<<20)
 	storedTurn := turn("2026-09-01T12:00:00Z", "gpt-long", usage.OpenAIUsage{
 		InputTokens: 150, OutputTokens: 10, CachedTokens: ptr(0), CacheWriteTokens: ptr(0),
 	})
-	storedTurn.OpenAIServiceTier = &longTier
-	reader := report.New(stored(t, storedTurn), source)
+	path := stored(t, storedTurn)
+	writer, err := sql.Open("sqlite", sqlitestore.LiteralFileURL(path).String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	reader := report.New(path, source)
 	report.SetNowForTest(reader, time.Date(2026, 9, 2, 18, 0, 0, 0, time.UTC))
+	wantCost := report.Cost{Amount: amount(t, "0.00033"), PricedTurns: 1}
+	query := func(t *testing.T) {
+		t.Helper()
+		got, err := reader.Query(context.Background(), selection())
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertCostEqual(t, got.OpenAI.Total.Cost, wantCost)
+	}
+	allocationBytes := func(t *testing.T, tier string) uint64 {
+		t.Helper()
+		if _, err := writer.Exec("UPDATE openai_turn SET service_tier=?", tier); err != nil {
+			t.Fatal(err)
+		}
+		query(t) // Warm driver/source work before measuring the real report path.
+		least := ^uint64(0)
+		for range 3 {
+			runtime.GC()
+			var before, after runtime.MemStats
+			runtime.ReadMemStats(&before)
+			query(t)
+			runtime.ReadMemStats(&after)
+			least = min(least, after.TotalAlloc-before.TotalAlloc)
+		}
+		var storedTier string
+		if err := writer.QueryRow("SELECT service_tier FROM openai_turn").Scan(&storedTier); err != nil || storedTier != tier {
+			t.Fatalf("report changed exact stored tier: bytes=%d, want=%d, error=%v", len(storedTier), len(tier), err)
+		}
+		return least
+	}
+	baseline := allocationBytes(t, "unknown")
+	for _, tc := range []struct{ name, tier string }{
+		{"overlong text", strings.Repeat("x", 1<<20)},
+		{"embedded NUL before overlong tail", "fast\x00" + strings.Repeat("x", 1<<20)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			allocated := allocationBytes(t, tc.tier)
+			t.Logf("actual Query allocated bytes: short=%d, %s=%d", baseline, tc.name, allocated)
+			// This is Go allocation-volume evidence, not a peak-native-memory
+			// bound. The pinned driver's raw TEXT transfer alone allocates at
+			// least the 1 MiB string. A generous 256 KiB noise allowance still
+			// detects moving the guard to Go or using NUL-sensitive length().
+			if allocated > baseline+(256<<10) {
+				t.Fatalf("actual Query materialized oversized tier: short=%d bytes, overlong=%d bytes", baseline, allocated)
+			}
+		})
+	}
+}
 
+func TestQueryIgnoresNonTextOpenAIServiceTierCandidate(t *testing.T) {
+	source := pricingSource(t, `{"gpt-typed":{"id":"gpt-typed","cost":{"input":1,"output":2},"experimental":{"modes":{"fast":{"cost":{"input":2,"output":4}}}}}}`, pricing.SnapshotStatus{Source: "fetched", Version: "sha256:synthetic-nontext-tier"})
+	tier := "priority"
+	storedTurn := turn("2026-09-01T12:00:00Z", "gpt-typed", usage.OpenAIUsage{InputTokens: 50, OutputTokens: 10, CachedTokens: ptr(0), CacheWriteTokens: ptr(0)})
+	storedTurn.OpenAIServiceTier = &tier
+	path := stored(t, storedTurn)
+	db, err := sql.Open("sqlite", sqlitestore.LiteralFileURL(path).String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	// Synthetic unexpected metadata: the writer's STRICT table cannot store a
+	// BLOB tier. A view over that real v3 history presents one without changing
+	// native values or inventing a reader hook. sql.NullString would accept its
+	// bytes as "priority", so losing the production typeof guard misprices it.
+	if _, err := db.Exec(`ALTER TABLE openai_turn RENAME TO stored_openai_turn;
+		CREATE VIEW openai_turn AS SELECT at_ms,model,requested_model,
+		input_tokens,output_tokens,cached_tokens,cache_write_tokens,reasoning_tokens,total_tokens,
+		CAST(service_tier AS BLOB) AS service_tier FROM stored_openai_turn`); err != nil {
+		t.Fatal(err)
+	}
+	reader := report.New(path, source)
+	report.SetNowForTest(reader, time.Date(2026, 9, 2, 18, 0, 0, 0, time.UTC))
 	got, err := reader.Query(context.Background(), selection())
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertCostEqual(t, got.OpenAI.Total.Cost, report.Cost{Amount: amount(t, "0.00033"), PricedTurns: 1})
+	assertCostEqual(t, got.OpenAI.Total.Cost, report.Cost{Amount: amount(t, "0.00007"), PricedTurns: 1})
 }
 
 func TestQueryValuesCompleteOpenAIReportFromOnePricingSnapshot(t *testing.T) {

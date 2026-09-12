@@ -46,15 +46,7 @@ func deriveFastContextRate(base, fast, selectedContext *Rate) *Rate {
 	if fives < scale {
 		numerator.Mul(numerator, new(big.Int).Exp(big.NewInt(5), big.NewInt(int64(scale-fives)), nil))
 	}
-	for scale > 0 {
-		quotient, remainder := new(big.Int), new(big.Int)
-		quotient.QuoRem(numerator, big.NewInt(10), remainder)
-		if remainder.Sign() != 0 {
-			break
-		}
-		numerator = quotient
-		scale--
-	}
+	// GCD reduction and balancing factors 2/5 already give the minimal scale.
 
 	integerDigits := len(numerator.String()) - scale
 	if integerDigits < 1 {
