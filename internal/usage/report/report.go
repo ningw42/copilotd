@@ -232,8 +232,8 @@ type capturedPricing struct {
 }
 
 type modelPricing struct {
-	match PricingMatch
-	rates pricing.Rates
+	match  PricingMatch
+	tariff pricing.Tariff
 }
 
 func (r *Reporter) capturePricing(ctx context.Context, budget *readBudget) (*capturedPricing, pricing.SnapshotStatus, error) {
@@ -281,7 +281,7 @@ func (c *capturedPricing) model(ctx context.Context, reported string) (modelPric
 	resolution := c.matcher.Resolve(reported)
 	selected := modelPricing{match: reportPricingMatch(resolution)}
 	if resolution.Status == modelmatch.StatusMatched {
-		selected.rates, _ = c.snapshot.Rates(pricing.Identity{
+		selected.tariff, _ = c.snapshot.Tariff(pricing.Identity{
 			Provider: resolution.Identity.Provider,
 			Model:    resolution.Identity.Model,
 		})

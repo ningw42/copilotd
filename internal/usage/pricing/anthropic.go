@@ -7,6 +7,9 @@ import "github.com/ningw42/copilotd/internal/usage"
 // checked sum of uncached input, aggregate cache creation, and cache read;
 // output, thinking, and cache TTL subdivisions never influence tier selection.
 func (t Tariff) CalculateAnthropic(native usage.AnthropicUsage) (Contribution, error) {
+	if len(t.tiers) == 0 {
+		return CalculateAnthropic(native, t.Rates(0))
+	}
 	completeInput, reason := anthropicCompleteInput(native)
 	if reason != "" {
 		return Contribution{Reason: reason}, nil

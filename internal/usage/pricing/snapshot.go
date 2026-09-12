@@ -423,20 +423,6 @@ func (s *Snapshot) Tariff(identity Identity) (Tariff, bool) {
 	return tariff, ok
 }
 
-// Rates temporarily preserves the previous highest-tier accessor for callers
-// that have not yet moved to per-Turn tariff selection.
-func (s *Snapshot) Rates(identity Identity) (Rates, bool) {
-	tariff, ok := s.Tariff(identity)
-	if !ok {
-		return Rates{}, false
-	}
-	selected := tariff.base
-	if len(tariff.tiers) > 0 {
-		selected = tariff.tiers[len(tariff.tiers)-1].rates
-	}
-	return detachedRates(selected), true
-}
-
 func detachedRates(rates Rates) Rates {
 	rates.Input = detachedRate(rates.Input)
 	rates.Output = detachedRate(rates.Output)
