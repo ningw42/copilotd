@@ -180,9 +180,10 @@ _Avoid_: billing report, request totals (for Turn counts)
 
 **Estimated cost**:
 A USD valuation of fully priceable persisted Turns using the daemon's current
-accepted original-provider rates. Each Turn selects any context tier from its
-Pricing model using complete Surface-native input; absence of a tier uses the
-base rates. It is not a Copilot bill, invoice, or proof of complete consumption.
+accepted original-provider rates and declared valuation policies, including
+context selection from complete Surface-native input and any response-tier
+fallback or derivation. It is not a Copilot bill, invoice, or proof of complete
+consumption.
 _Avoid_: billed cost, charge, spend
 
 **Pricing coverage**:
@@ -195,6 +196,18 @@ _Avoid_: billing coverage, cost completeness
 The original-provider/model pair selected to value a Reported model. It is
 independent of Surface, Requested model, forwarding targets, and Catalog metadata.
 _Avoid_: billed model, resolved model, provider model
+
+**Derived Fast rates**:
+Estimated Fast rates for a context band, calculated by scaling each category's
+base context rate by the same Pricing model's corresponding Fast-to-base rate
+ratio. They need not be explicitly published rates for that combination.
+_Avoid_: official Fast-long prices, universal Fast multiplier
+
+**Reported service tier**:
+The nullable processing-tier label reported by a completed OpenAI response,
+preserved as Turn evidence independently of native token counts. It is not
+reconstructed from request intent, model names, or configuration.
+_Avoid_: requested tier, inferred tier
 
 **Requested model**:
 The explicit model string in the upstream-bound HTTP inference request after
