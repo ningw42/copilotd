@@ -76,7 +76,8 @@ func TestAnthropicUsageMeterAccumulatesGeneratedSSEUsageWithoutChangingFrames(t 
 			}
 			turn := turns[0]
 			if turn.RequestID != "anthropic-sse-correlation" || turn.ResponseID != test.messageID ||
-				turn.Model != "claude-synthetic" || turn.Transport != usage.TransportSSE || turn.TurnIndex != 0 {
+				turn.Model != "claude-synthetic" || turn.Transport != usage.TransportSSE || turn.TurnIndex != 0 ||
+				turn.OpenAIServiceTier != nil {
 				t.Errorf("Turn envelope = %+v", turn)
 			}
 			native := turn.Usage.(usage.AnthropicUsage)
@@ -355,7 +356,7 @@ func TestAnthropicUsageMeterRecordsGeneratedBufferedMessageWithoutChangingBody(t
 	after := time.Now()
 	if turn.At.Before(before) || turn.At.After(after) || turn.RequestID != "anthropic-inbound-correlation" ||
 		turn.ResponseID != "msg_redacted_synthetic_buffered" || turn.Model != "claude-synthetic" ||
-		turn.Transport != usage.TransportBuffered || turn.TurnIndex != 0 {
+		turn.Transport != usage.TransportBuffered || turn.TurnIndex != 0 || turn.OpenAIServiceTier != nil {
 		t.Errorf("Turn envelope = %+v", turn)
 	}
 	native, ok := turn.Usage.(usage.AnthropicUsage)

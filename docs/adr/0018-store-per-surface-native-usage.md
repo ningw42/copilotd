@@ -42,6 +42,23 @@ Compaction iteration counts are not included in top-level usage, and supporting
 iteration variants later requires a separate schema/cardinality review rather
 than flattening them into migration 1.
 
+## Nullable response metadata extension
+
+The frozen six-plus-seven token-count projection remains unchanged. Migration 3
+admits one separate, explicitly scoped field: the exact decoded top-level OpenAI
+Response `service_tier`, stored as nullable `openai_turn.service_tier TEXT`.
+Missing, null, wrong-typed, duplicate, or lossily decodable evidence remains
+`NULL`; an explicit empty or unfamiliar string is preserved exactly. Anthropic
+Turns and schema do not acquire this metadata.
+
+This value is response evidence, not request intent or a token metric. The same
+qualifying completed Response supplies it on buffered, SSE, and WebSocket paths;
+no Requested-model, `-fast`, Catalog, alias, or configuration fallback is
+permitted. Current reports integrity-probe the column but leave native metrics,
+wire schema, and Estimated cost unchanged. Persisting it creates no conclusion
+about provider billing or Standard rates during the staged interval before a
+separate valuation design lands.
+
 ## Native nesting examples
 
 For an Anthropic report with `input_tokens=12`,
@@ -62,8 +79,9 @@ stored as reported rather than recalculated.
 
 Every newly supported token-count field requires both a forward schema migration
 and updated semantic documentation immediately beside the corresponding Go
-field. Historical rows that did not report the new field remain `NULL`; a
-migration must never fabricate zero. Values retain their Surface-native meaning
+field. Historical rows that did not report a nullable field remain `NULL`; a
+migration must never fabricate zero or response metadata. Values retain their
+Surface-native meaning
 even when providers choose asymmetric nesting, and interpretation stays adjacent
 to the Go types rather than being hidden in query-time normalization.
 

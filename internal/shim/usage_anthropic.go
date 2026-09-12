@@ -59,7 +59,12 @@ func (m *anthropicUsageMeter) TransformRequest(_ context.Context, request *Reque
 func (m *anthropicUsageMeter) TransformBuffered(_ context.Context, body *Body) error {
 	messageID, model, native, ok := parseAnthropicMessage(body.Bytes)
 	if ok {
-		m.recorder.record(messageID, model, usage.TransportBuffered, native)
+		m.recorder.record(usage.Turn{
+			ResponseID: messageID,
+			Model:      model,
+			Transport:  usage.TransportBuffered,
+			Usage:      native,
+		})
 	}
 	return nil
 }
@@ -151,7 +156,12 @@ func (m *anthropicUsageMeter) observeDelta(event map[string]json.RawMessage) {
 
 func (m *anthropicUsageMeter) observeStop() {
 	if m.accumulator.active && m.accumulator.usage.inputTokens.reported && m.accumulator.usage.outputTokens.reported {
-		m.recorder.record(m.accumulator.messageID, m.accumulator.model, usage.TransportSSE, m.accumulator.usage.native())
+		m.recorder.record(usage.Turn{
+			ResponseID: m.accumulator.messageID,
+			Model:      m.accumulator.model,
+			Transport:  usage.TransportSSE,
+			Usage:      m.accumulator.usage.native(),
+		})
 	}
 	m.accumulator.clearCandidate()
 }

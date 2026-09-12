@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"encoding/json/jsontext"
+	"io"
 	"strconv"
 
 	"github.com/ningw42/copilotd/internal/sse"
@@ -77,79 +79,131 @@ func (m *openAIUsageMeter) observeResponseCompletedEvent(raw []byte, transport u
 }
 
 func (m *openAIUsageMeter) observeResponse(raw []byte, transport usage.Transport) {
-	responseID, model, native, ok := parseOpenAIResponse(raw)
+	turn, ok := parseOpenAIResponse(raw)
 	if !ok {
 		return
 	}
-	m.recorder.record(responseID, model, transport, native)
+	turn.Transport = transport
+	m.recorder.record(turn)
 }
 
-func parseOpenAIResponse(raw []byte) (string, string, usage.OpenAIUsage, bool) {
-	object, ok := decodeJSONObject(raw)
+func parseOpenAIResponse(raw []byte) (usage.Turn, bool) {
+	object, serviceTier, ok := decodeOpenAIResponseObject(raw)
 	if !ok {
-		return "", "", usage.OpenAIUsage{}, false
+		return usage.Turn{}, false
 	}
 	responseID, ok := requiredNonemptyString(object, "id")
 	if !ok {
-		return "", "", usage.OpenAIUsage{}, false
+		return usage.Turn{}, false
 	}
 	model, ok := requiredNonemptyString(object, "model")
 	if !ok {
-		return "", "", usage.OpenAIUsage{}, false
+		return usage.Turn{}, false
 	}
 	status, ok := requiredNonemptyString(object, "status")
 	if !ok || status != "completed" {
-		return "", "", usage.OpenAIUsage{}, false
+		return usage.Turn{}, false
 	}
 	usageObject, ok := requiredJSONObject(object, "usage")
 	if !ok {
-		return "", "", usage.OpenAIUsage{}, false
+		return usage.Turn{}, false
 	}
 	inputTokens, ok := requiredNonnegativeInt64(usageObject, "input_tokens")
 	if !ok {
-		return "", "", usage.OpenAIUsage{}, false
+		return usage.Turn{}, false
 	}
 	outputTokens, ok := requiredNonnegativeInt64(usageObject, "output_tokens")
 	if !ok {
-		return "", "", usage.OpenAIUsage{}, false
+		return usage.Turn{}, false
 	}
 	totalTokens, ok := optionalNonnegativeInt64(usageObject, "total_tokens")
 	if !ok {
-		return "", "", usage.OpenAIUsage{}, false
+		return usage.Turn{}, false
 	}
 
 	var cachedTokens, cacheWriteTokens *int64
 	if details, present, valid := optionalJSONObject(usageObject, "input_tokens_details"); !valid {
-		return "", "", usage.OpenAIUsage{}, false
+		return usage.Turn{}, false
 	} else if present {
 		cachedTokens, ok = optionalNonnegativeInt64(details, "cached_tokens")
 		if !ok {
-			return "", "", usage.OpenAIUsage{}, false
+			return usage.Turn{}, false
 		}
 		cacheWriteTokens, ok = optionalNonnegativeInt64(details, "cache_write_tokens")
 		if !ok {
-			return "", "", usage.OpenAIUsage{}, false
+			return usage.Turn{}, false
 		}
 	}
 
 	var reasoningTokens *int64
 	if details, present, valid := optionalJSONObject(usageObject, "output_tokens_details"); !valid {
-		return "", "", usage.OpenAIUsage{}, false
+		return usage.Turn{}, false
 	} else if present {
 		reasoningTokens, ok = optionalNonnegativeInt64(details, "reasoning_tokens")
 		if !ok {
-			return "", "", usage.OpenAIUsage{}, false
+			return usage.Turn{}, false
 		}
 	}
 
-	return responseID, model, usage.OpenAIUsage{
-		InputTokens:      inputTokens,
-		OutputTokens:     outputTokens,
-		CachedTokens:     cachedTokens,
-		CacheWriteTokens: cacheWriteTokens,
-		ReasoningTokens:  reasoningTokens,
-		TotalTokens:      totalTokens,
+	return usage.Turn{
+		ResponseID:        responseID,
+		Model:             model,
+		OpenAIServiceTier: serviceTier,
+		Usage: usage.OpenAIUsage{
+			InputTokens:      inputTokens,
+			OutputTokens:     outputTokens,
+			CachedTokens:     cachedTokens,
+			CacheWriteTokens: cacheWriteTokens,
+			ReasoningTokens:  reasoningTokens,
+			TotalTokens:      totalTokens,
+		},
 	}, true
+}
+
+// decodeOpenAIResponseObject performs the one Response-level traversal. It
+// preserves encoding/json's existing last-wins behavior for unrelated members
+// while retaining enough information to reject ambiguous optional tier evidence.
+func decodeOpenAIResponseObject(raw []byte) (map[string]json.RawMessage, *string, bool) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	if token, err := decoder.Token(); err != nil || token != json.Delim('{') {
+		return nil, nil, false
+	}
+	object := make(map[string]json.RawMessage)
+	var tierRaw json.RawMessage
+	tierOccurrences := 0
+	for decoder.More() {
+		token, err := decoder.Token()
+		key, keyOK := token.(string)
+		if err != nil || !keyOK {
+			return nil, nil, false
+		}
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return nil, nil, false
+		}
+		object[key] = value
+		if key == "service_tier" {
+			tierOccurrences++
+			if tierOccurrences == 1 {
+				tierRaw = value
+			}
+		}
+	}
+	if token, err := decoder.Token(); err != nil || token != json.Delim('}') {
+		return nil, nil, false
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		return nil, nil, false
+	}
+	if tierOccurrences != 1 {
+		return object, nil, true
+	}
+	decoded, err := jsontext.AppendUnquote(nil, bytes.TrimSpace(tierRaw))
+	if err != nil {
+		return object, nil, true
+	}
+	serviceTier := string(decoded)
+	return object, &serviceTier, true
 }
 
 func decodeJSONObject(raw []byte) (map[string]json.RawMessage, bool) {

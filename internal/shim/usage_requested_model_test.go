@@ -16,7 +16,7 @@ func TestUsageMeterObservesRequestedModelWithoutChangingRequestOrReportedModel(t
 	registry := CanonicalRegistry(sink)
 	registry[len(registry)-1].Enabled = true
 	chain := registry.NewChain(ctx, endpoint.OpenAI, endpoint.RouteOpenAIResponses)
-	request := []byte(`{"model":"gpt-5.6-sol-fast","input":"private prompt"}`)
+	request := []byte(`{"model":"gpt-5.6-sol-fast","service_tier":"priority","input":"private prompt"}`)
 	original := bytes.Clone(request)
 	header := http.Header{"X-Test": {"unchanged"}}
 	gotHeader, gotRequest, err := chain.RunRequest(ctx, "keep=query", header, request)
@@ -25,14 +25,33 @@ func TestUsageMeterObservesRequestedModelWithoutChangingRequestOrReportedModel(t
 	}
 	// The submitted metadata must not retain the mutable request bytes.
 	clear(request)
-	response := []byte(`{"id":"response","model":"gpt-5.6-sol","status":"completed","usage":{"input_tokens":12,"output_tokens":6}}`)
+	response := []byte(`{"id":"response","model":"gpt-5.6-sol","status":"completed","service_tier":"default","usage":{"input_tokens":12,"output_tokens":6}}`)
 	gotResponse, err := chain.RunBuffered(ctx, response)
 	if err != nil || !bytes.Equal(gotResponse, response) || &gotResponse[0] != &response[0] {
 		t.Fatalf("response changed: %q, %v", gotResponse, err)
 	}
 	turns := sink.snapshot()
-	if len(turns) != 1 || turns[0].RequestedModel == nil || *turns[0].RequestedModel != "gpt-5.6-sol-fast" || turns[0].Model != "gpt-5.6-sol" {
-		t.Fatalf("Turns = %+v, want distinct requested and reported model", turns)
+	if len(turns) != 1 || turns[0].RequestedModel == nil || *turns[0].RequestedModel != "gpt-5.6-sol-fast" ||
+		turns[0].Model != "gpt-5.6-sol" || turns[0].OpenAIServiceTier == nil || *turns[0].OpenAIServiceTier != "default" {
+		t.Fatalf("Turns = %+v, want distinct request intent and authoritative response evidence", turns)
+	}
+}
+
+func TestUsageMeterNeverInfersOpenAIServiceTierFromRequestIntent(t *testing.T) {
+	ctx := context.Background()
+	sink := &memoryUsageSink{}
+	chain, response := enabledBufferedUsageFixture(ctx, endpoint.OpenAI, sink)
+	request := []byte(`{"model":"gpt-5.6-sol-fast","service_tier":"priority"}`)
+	if _, got, err := chain.RunRequest(ctx, "", nil, request); err != nil || !bytes.Equal(got, request) {
+		t.Fatalf("request changed or failed: got=%q err=%v", got, err)
+	}
+	if got, err := chain.RunBuffered(ctx, response); err != nil || !bytes.Equal(got, response) {
+		t.Fatalf("response changed or failed: got=%q err=%v", got, err)
+	}
+	turns := sink.snapshot()
+	if len(turns) != 1 || turns[0].RequestedModel == nil || *turns[0].RequestedModel != "gpt-5.6-sol-fast" ||
+		turns[0].OpenAIServiceTier != nil {
+		t.Fatalf("Turns = %+v, want Requested model but unavailable service-tier evidence", turns)
 	}
 }
 

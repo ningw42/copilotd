@@ -24,7 +24,7 @@ const (
 
 // Turn is the Surface-independent completion-observation envelope. Usage
 // carries the verbatim Surface-native token fields and selects the destination
-// table.
+// table; optional fields carry explicitly scoped completion evidence.
 type Turn struct {
 	At         time.Time
 	RequestID  string // inbound HTTP correlation; empty if unavailable
@@ -34,9 +34,14 @@ type Turn struct {
 	// request after earlier Shims. Nil means unknown (always for WebSocket);
 	// a pointer to "" means explicitly empty. It never supplies Model.
 	RequestedModel *string
-	Transport      Transport
-	TurnIndex      int // submission-attempt ordinal within the Shim instance
-	Usage          Usage
+	// OpenAIServiceTier is the exact decoded top-level service_tier in the
+	// qualifying completed OpenAI Response. Nil means unavailable evidence;
+	// a pointer to "" means explicitly empty. It is not request intent or a
+	// pricing classification. It is unset for Anthropic Turns.
+	OpenAIServiceTier *string
+	Transport         Transport
+	TurnIndex         int // submission-attempt ordinal within the Shim instance
+	Usage             Usage
 }
 
 // Usage is a closed sum: only the two Surface-native records satisfy it.

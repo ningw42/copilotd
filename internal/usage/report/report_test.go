@@ -200,14 +200,16 @@ func TestQueryEnforcesWholeReportResourceLimits(t *testing.T) {
 func TestQueryFailsWholeReportOnUnavailableOrExcessiveData(t *testing.T) {
 	cases := []struct {
 		name, sql string
+		surface   string
 		code      report.Code
 	}{
-		{"schema", "PRAGMA user_version=99", report.Unavailable},
-		{"missing unselected table", "DROP TABLE anthropic_turn", report.Unavailable},
-		{"negative", "UPDATE openai_turn SET input_tokens=-1", report.Unavailable},
-		{"invalid UTF8", "UPDATE openai_turn SET model=CAST(x'ff' AS TEXT)", report.Unavailable},
-		{"huge model", "UPDATE openai_turn SET model=printf('%.*c',1048577,'x')", report.TooLarge},
-		{"overflow", "UPDATE openai_turn SET input_tokens=9223372036854775807", report.Overflow},
+		{name: "schema", sql: "PRAGMA user_version=99", code: report.Unavailable},
+		{name: "missing unselected table", sql: "DROP TABLE anthropic_turn", code: report.Unavailable},
+		{name: "missing service tier for Anthropic-only query", sql: "ALTER TABLE openai_turn DROP COLUMN service_tier", surface: "anthropic", code: report.Unavailable},
+		{name: "negative", sql: "UPDATE openai_turn SET input_tokens=-1", code: report.Unavailable},
+		{name: "invalid UTF8", sql: "UPDATE openai_turn SET model=CAST(x'ff' AS TEXT)", code: report.Unavailable},
+		{name: "huge model", sql: "UPDATE openai_turn SET model=printf('%.*c',1048577,'x')", code: report.TooLarge},
+		{name: "overflow", sql: "UPDATE openai_turn SET input_tokens=9223372036854775807", code: report.Overflow},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -226,9 +228,12 @@ func TestQueryFailsWholeReportOnUnavailableOrExcessiveData(t *testing.T) {
 				for _, zone := range []string{"UTC", "Europe/Berlin"} {
 					q := selection()
 					q.Period, q.Timezone = period, zone
+					if tc.surface != "" {
+						q.Surface = tc.surface
+					}
 					got, err := newReporter(t, path).Query(context.Background(), q)
 					var failure *report.Error
-					if !errors.As(err, &failure) || failure.Code != tc.code || got.OpenAI != nil {
+					if !errors.As(err, &failure) || failure.Code != tc.code || got.OpenAI != nil || got.Anthropic != nil {
 						t.Fatalf("%s/%s: report=%+v err=%v; want %s, no partial report", period, zone, got, err, tc.code)
 					}
 					if strings.Contains(err.Error(), path) || strings.Contains(err.Error(), "SELECT") {

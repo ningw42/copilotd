@@ -151,6 +151,28 @@ func assertReportEqual(t *testing.T, got, want report.Report) {
 	}
 }
 
+func TestQueryIgnoresStoredOpenAIServiceTierEvidence(t *testing.T) {
+	base := turn("2026-09-01T12:00:00Z", "gpt-5.6-sol", usage.OpenAIUsage{
+		InputTokens: 100, OutputTokens: 20, CachedTokens: ptr(30), CacheWriteTokens: ptr(10),
+	})
+	defaultTier, priorityTier := "default", "priority"
+	withDefault, withPriority := base, base
+	withDefault.OpenAIServiceTier = &defaultTier
+	withPriority.OpenAIServiceTier = &priorityTier
+	now := time.Date(2026, 9, 2, 18, 0, 0, 0, time.UTC)
+	read := func(turn usage.Turn) report.Report {
+		t.Helper()
+		reporter := newReporter(t, stored(t, turn))
+		report.SetNowForTest(reporter, now)
+		got, err := reporter.Query(context.Background(), selection())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	assertReportEqual(t, read(withDefault), read(withPriority))
+}
+
 func TestQueryValuesCompleteOpenAIReportFromOnePricingSnapshot(t *testing.T) {
 	lastSuccess := time.Date(2026, 8, 31, 23, 0, 0, 0, time.UTC)
 	source := pricingSource(t, `{"gpt-5.6-sol":{"id":"gpt-5.6-sol","cost":{"input":2,"output":8,"cache_read":0.5,"cache_write":3}}}`, pricing.SnapshotStatus{

@@ -395,11 +395,15 @@ func mandatoryTests(goos string) []string {
 			"TestCachedSourceServesValidatedEmbeddedFloorWhenRefreshIsPinned", "TestCachedSourceRefreshReplacesTheWholeSnapshotWithoutCredentials",
 			"TestCachedSourceRejectsMalformedRefreshAndHoldsLastGood", "TestRemoteRefreshRefusesRedirectsAndBoundsDecodedBodies",
 		},
+		"internal/shim": {
+			"TestOpenAIUsageMeterServiceTierEvidenceMatrixAcrossTransports", "TestOpenAIUsageMeterOwnsTierEvidenceAcrossInputReuseAndLaterCompletions",
+		},
 		"internal/usage/report": {
 			"TestPinnedDriverFirstReadOnlyWALConnections", "TestPinnedDriverReadOnlyGuardAndInterruptCleanup", "TestQueryCapsNativeLockWaitingByRemainingBudget",
 			"TestQueryBothNativeSectionsShareOneCommittedSnapshot", "TestQueryReadsCommittedHistoryWithoutFlushingOrRetainingWriter", "TestQueryRejectsReportWhenNativeCleanupFails",
 			"TestQueryRepricesAndRematchesEachCapturedSourceRevision", "TestQueryUsesOneCapturedPricingRevisionAcrossBothSurfaces",
 			"TestQueryExactFilterExcludesOversizedUnrelatedIdentity", "TestQueryEnforcesWholeReportResourceLimits", "TestQueryIndexedStreamingNativeEvidence",
+			"TestQueryFailsWholeReportOnUnavailableOrExcessiveData", "TestQueryIgnoresStoredOpenAIServiceTierEvidence",
 			"TestRealSQLiteFailuresUseGenericHTTPResponsesAndReleaseAdmission", "TestInterruptedRealSQLiteScanUsesHTTPDeadlinePrecedenceAndReleasesAdmission",
 		},
 		"internal/server": {
@@ -420,8 +424,12 @@ func mandatoryTests(goos string) []string {
 			"TestCommandPricingJSONPreservesLiteralWireBytesIndependentOfDetails",
 			"TestCommandCostSubtotalOverflowEmitsNothingWhileJSONStaysOriginal",
 		},
-		"internal/usage/sqlitestore": {"TestStoreRecoveredWriteFailureDoesNotPoisonLaterOrFinalLevels"},
-		"internal/wsforward":         {"TestProxyWriteTimeoutTearsDownSlowReaderSession"},
+		"internal/usage/sqlitestore": {
+			"TestStoreRecoveredWriteFailureDoesNotPoisonLaterOrFinalLevels", "TestStoreRoundTripsNullableOpenAIServiceTierExactly",
+			"TestStoreV1UpgradePreservesHistoryAndMatchesFreshV3Schema", "TestStoreV2UpgradeAddsOnlyNullableOpenAIServiceTier",
+			"TestStoreServiceTierMigrationFailureRollsBackEarlierPendingMigration",
+		},
+		"internal/wsforward": {"TestProxyWriteTimeoutTearsDownSlowReaderSession"},
 		"cmd/copilotd": {
 			"TestConfiguredUsagePricingRegistersOnlyForEnabledMeter", "TestDisabledReportDoesNotOpenHistoryOrValidateTimezone", "TestUsageCostExecutableAcceptance",
 			"TestUsageReportDeadlinesDoNotLeakIntoReusedInferenceConnections", "TestUsageExecutableReadsGenericRecovery",
@@ -429,6 +437,7 @@ func mandatoryTests(goos string) []string {
 			"TestUsageNativeRuntime", "TestUsageExecutableAcceptance", "TestUsageExecutableAcceptance/process_timezone", "TestUsageExecutableAcceptance/system_timezone", "TestUsageExecutableAcceptance/observed_inference_to_executable",
 			"TestUsageReportsOverlapNativeInferenceAndAnotherCommittedWriter", "TestUsageSlowTCPReportsHoldSlotsReleaseSQLiteAndDoNotDeadlineSSE", "TestUsageForcedDrainCancelsRealSQLiteReadAndInference",
 			"TestUsageGracefulDrainFinishesReportAndInferenceBeforeWriterCutoff", "TestUsageStorageFailuresDoNotChangeInferenceReadinessOrWriterAdmission", "TestUsageEncodedLimitRejectsWholeRealReportAndReleasesSlots",
+			"TestRunBoundServeMetersBufferedOpenAIResponseWithoutChangingPayload", "TestRunBoundServeMetersOpenAISSECompletionWithoutChangingFrames", "TestRunBoundServeMetersOpenAIWebSocketCompletionsWithoutChangingMessages",
 			"TestUsageReportClientTeardownClosesAnUnusedDialBeforeGracefulStop", "TestDailyOpenAIUsageCommandThroughProductionListener",
 			"TestRunBoundServeForcedWebSocketDrainAndFreshUsageFinalizationAreBounded", "TestRunBoundServeStopsUsageAdmissionBeforeReportingForcedDrainError",
 		},

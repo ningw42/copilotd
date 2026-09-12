@@ -77,6 +77,9 @@ func TestOpenAIUsageMeterRecordsRecordedSSECompletionWithoutChangingFrames(t *te
 		t.Fatalf("recorded Turns = %d, want 1", len(turns))
 	}
 	turn := turns[0]
+	if turn.OpenAIServiceTier != nil {
+		t.Errorf("recorded fixture OpenAIServiceTier = %q, want unavailable", *turn.OpenAIServiceTier)
+	}
 	after := time.Now()
 	if turn.At.Before(before) || turn.At.After(after) || turn.RequestID != "sse-inbound-correlation" ||
 		turn.ResponseID != "resp_redacted_recorded_sse" || turn.Model != "gpt-5.6-sol" ||
@@ -169,10 +172,10 @@ func TestOpenAIUsageMeterKeepsSSECompletionsSelfContainedAcrossInterleavingAndDu
 		{Type: "response.failed", Raw: []byte("event: response.failed\ndata: {\"type\":\"response.failed\"}\n\n")},
 		{Type: "response.completed", Raw: []byte("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-a\",\"model\":\"model-a\",\"status\":\"completed\",\"usage\":{\"input_tokens\":41}}}\n\n")},
 		{Type: "response.incomplete", Raw: []byte("event: response.incomplete\ndata: {\"type\":\"response.incomplete\"}\n\n")},
-		{Type: "response.completed", Raw: []byte("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-b\",\"model\":\"model-b\",\"status\":\"completed\",\"usage\":{\"input_tokens\":7,\"output_tokens\":8}}}\n\n")},
+		{Type: "response.completed", Raw: []byte("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-b\",\"model\":\"model-b\",\"status\":\"completed\",\"service_tier\":\"priority\",\"usage\":{\"input_tokens\":7,\"output_tokens\":8}}}\n\n")},
 		{Type: "error", Raw: []byte("event: error\ndata: {\"type\":\"error\"}\n\n")},
 		{Type: "response.completed", Raw: []byte("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-a\",\"model\":\"model-a\",\"status\":\"completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":2}}}\n\n")},
-		{Type: "response.completed", Raw: []byte("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-b\",\"model\":\"model-b-duplicate\",\"status\":\"completed\",\"usage\":{\"input_tokens\":70,\"output_tokens\":80}}}\n\n")},
+		{Type: "response.completed", Raw: []byte("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-b\",\"model\":\"model-b-duplicate\",\"status\":\"completed\",\"service_tier\":\"flex\",\"usage\":{\"input_tokens\":70,\"output_tokens\":80}}}\n\n")},
 	}
 	for _, frame := range frames {
 		hookCtx := logging.WithRequestID(context.Background(), "must-not-replace-construction-correlation")
@@ -188,10 +191,12 @@ func TestOpenAIUsageMeterKeepsSSECompletionsSelfContainedAcrossInterleavingAndDu
 	wantIDs := []string{"resp-b", "resp-a", "resp-b"}
 	wantModels := []string{"model-b", "model-a", "model-b-duplicate"}
 	wantCounts := [][2]int64{{7, 8}, {1, 2}, {70, 80}}
+	wantTiers := []*string{stringPointer("priority"), nil, stringPointer("flex")}
 	for i, turn := range turns {
 		native := turn.Usage.(usage.OpenAIUsage)
 		if turn.RequestID != "captured-once" || turn.ResponseID != wantIDs[i] || turn.Model != wantModels[i] ||
 			turn.Transport != usage.TransportSSE || turn.TurnIndex != i ||
+			!reflect.DeepEqual(turn.OpenAIServiceTier, wantTiers[i]) ||
 			native.InputTokens != wantCounts[i][0] || native.OutputTokens != wantCounts[i][1] {
 			t.Errorf("Turn %d = %+v usage=%+v", i, turn, native)
 		}
@@ -285,6 +290,9 @@ func TestOpenAIUsageMeterRecordsRecordedWebSocketCompletionWithoutChangingMessag
 	}
 	after := time.Now()
 	for index, turn := range turns {
+		if turn.OpenAIServiceTier != nil {
+			t.Errorf("Turn %d recorded fixture OpenAIServiceTier = %q, want unavailable", index, *turn.OpenAIServiceTier)
+		}
 		if turn.At.Before(before) || turn.At.After(after) || turn.RequestID != "websocket-handshake-correlation" ||
 			turn.ResponseID != "resp_redacted_recorded_websocket" || turn.Model != "gpt-5.6-sol" ||
 			turn.Transport != usage.TransportWebSocket || turn.TurnIndex != index {
@@ -314,10 +322,10 @@ func TestOpenAIUsageMeterKeepsWebSocketCompletionsSelfContainedAcrossInvalidAndT
 		[]byte(`{"type":"response.incomplete","response":{"id":"incomplete","model":"bad","status":"incomplete","usage":{"input_tokens":3,"output_tokens":4}}}`),
 		[]byte(`{"type":"error","error":{"message":"session event"}}`),
 		[]byte(`{"type":"response.completed","response":{"id":"invalid-optional","model":"bad","status":"completed","usage":{"input_tokens":5,"output_tokens":6,"total_tokens":"11"}}}`),
-		[]byte(`{"type":"response.completed","response":{"id":"resp-a","model":"reported-a","status":"completed","usage":{"input_tokens":0,"output_tokens":0,"input_tokens_details":{"cached_tokens":null},"output_tokens_details":null,"total_tokens":null}}}`),
+		[]byte(`{"type":"response.completed","response":{"id":"resp-a","model":"reported-a","status":"completed","service_tier":"priority","usage":{"input_tokens":0,"output_tokens":0,"input_tokens_details":{"cached_tokens":null},"output_tokens_details":null,"total_tokens":null}}}`),
 		[]byte(`{"type":"response.completed","response":{"id":"negative-core","model":"bad","status":"completed","usage":{"input_tokens":-1,"output_tokens":2}}}`),
 		[]byte(`{"type":"response.completed","response":{"id":"resp-b","model":"reported-b","status":"completed","usage":{"input_tokens":7,"output_tokens":8,"input_tokens_details":{"cached_tokens":0,"cache_write_tokens":0},"output_tokens_details":{"reasoning_tokens":0},"total_tokens":0}}}`),
-		[]byte(`{"type":"response.completed","response":{"id":"resp-b","model":"reported-b-duplicate","status":"completed","usage":{"input_tokens":70,"output_tokens":80}}}`),
+		[]byte(`{"type":"response.completed","response":{"id":"resp-b","model":"reported-b-duplicate","status":"completed","service_tier":"fast","usage":{"input_tokens":70,"output_tokens":80}}}`),
 	}
 	for index, payload := range payloads {
 		kind := MessageText
@@ -341,10 +349,12 @@ func TestOpenAIUsageMeterKeepsWebSocketCompletionsSelfContainedAcrossInvalidAndT
 	wantIDs := []string{"resp-a", "resp-b", "resp-b"}
 	wantModels := []string{"reported-a", "reported-b", "reported-b-duplicate"}
 	wantCounts := [][2]int64{{0, 0}, {7, 8}, {70, 80}}
+	wantTiers := []*string{stringPointer("priority"), nil, stringPointer("fast")}
 	for index, turn := range turns {
 		native := turn.Usage.(usage.OpenAIUsage)
 		if turn.RequestID != "" || turn.ResponseID != wantIDs[index] || turn.Model != wantModels[index] ||
 			turn.Transport != usage.TransportWebSocket || turn.TurnIndex != index ||
+			!reflect.DeepEqual(turn.OpenAIServiceTier, wantTiers[index]) ||
 			native.InputTokens != wantCounts[index][0] || native.OutputTokens != wantCounts[index][1] {
 			t.Errorf("Turn %d = %+v usage=%+v", index, turn, native)
 		}
@@ -472,6 +482,9 @@ func TestOpenAIUsageMeterRecordsRecordedBufferedCompletionWithoutChangingBody(t 
 		t.Fatalf("recorded Turns = %d, want 1", len(turns))
 	}
 	turn := turns[0]
+	if turn.OpenAIServiceTier != nil {
+		t.Errorf("recorded fixture OpenAIServiceTier = %q, want unavailable", *turn.OpenAIServiceTier)
+	}
 	after := time.Now()
 	if turn.At.Before(before) || turn.At.After(after) || turn.RequestID != "inbound-correlation" || turn.ResponseID != "resp_redacted_recorded_buffered" ||
 		turn.Model != "gpt-5.6-sol" || turn.Transport != usage.TransportBuffered || turn.TurnIndex != 0 {
@@ -633,6 +646,179 @@ func TestCanonicalRegistryKeepsUsageMeterExactLastWithOpenAIStreamingHooksActive
 			}
 		})
 	}
+}
+
+func TestOpenAIUsageMeterCapturesExactServiceTierAcrossTransports(t *testing.T) {
+	response := syntheticOpenAIResponse([]byte(`"service_tier":"priority",`))
+	for _, tc := range []struct {
+		name      string
+		transport usage.Transport
+		kind      MessageKind
+	}{
+		{name: "buffered", transport: usage.TransportBuffered},
+		{name: "SSE", transport: usage.TransportSSE},
+		{name: "WebSocket text", transport: usage.TransportWebSocket, kind: MessageText},
+		{name: "WebSocket binary", transport: usage.TransportWebSocket, kind: MessageBinary},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			turn := observeSyntheticOpenAICompletion(t, tc.transport, tc.kind, response)
+			if turn.OpenAIServiceTier == nil || *turn.OpenAIServiceTier != "priority" {
+				t.Fatalf("OpenAIServiceTier = %v, want priority", turn.OpenAIServiceTier)
+			}
+		})
+	}
+}
+
+func TestOpenAIUsageMeterServiceTierEvidenceMatrixAcrossTransports(t *testing.T) {
+	tests := []struct {
+		name    string
+		members []byte
+		want    *string
+	}{
+		{name: "absent"},
+		{name: "null", members: []byte(`"service_tier":null,`)},
+		{name: "empty", members: []byte(`"service_tier":"",`), want: stringPointer("")},
+		{name: "known", members: []byte(`"service_tier":"default",`), want: stringPointer("default")},
+		{name: "future", members: []byte(`"service_tier":"turbo-next",`), want: stringPointer("turbo-next")},
+		{name: "whitespace control NUL and Unicode", members: []byte(`"service_tier":"  \t\u0000雪\n  ",`), want: stringPointer("  \t\x00雪\n  ")},
+		{name: "escaped string", members: []byte(`"service_tier":"\u0070riority\/x",`), want: stringPointer("priority/x")},
+		{name: "escaped exact key", members: []byte(`"\u0073ervice_tier":"fast",`), want: stringPointer("fast")},
+		{name: "nested and differently cased only", members: []byte(`"metadata":{"service_tier":"nested"},"Service_Tier":"cased",`)},
+		{name: "number", members: []byte(`"service_tier":42,`)},
+		{name: "boolean", members: []byte(`"service_tier":true,`)},
+		{name: "array", members: []byte(`"service_tier":["priority"],`)},
+		{name: "object", members: []byte(`"service_tier":{"value":"priority"},`)},
+		{name: "identical duplicate", members: []byte(`"service_tier":"priority","service_tier":"priority",`)},
+		{name: "conflicting duplicate", members: []byte(`"service_tier":"priority","service_tier":"default",`)},
+		{name: "escaped equivalent duplicate", members: []byte(`"service_tier":"priority","\u0073ervice_tier":"priority",`)},
+		{name: "invalid UTF-8", members: []byte("\"service_tier\":\"bad-\xff\",")},
+		{name: "lone high surrogate", members: []byte(`"service_tier":"\uD800",`)},
+		{name: "lone low surrogate", members: []byte(`"service_tier":"\uDC00",`)},
+		{name: "valid surrogate pair", members: []byte(`"service_tier":"\uD83D\uDE80",`), want: stringPointer("🚀")},
+		{name: "genuine literal replacement character", members: []byte(`"service_tier":"�",`), want: stringPointer("�")},
+		{name: "genuine escaped replacement character", members: []byte(`"service_tier":"\uFFFD",`), want: stringPointer("�")},
+		{name: "literal backslash-u text", members: []byte(`"service_tier":"\\uD800",`), want: stringPointer(`\uD800`)},
+		{name: "unrelated lone surrogate", members: []byte(`"service_tier":"priority","unrelated":"\uD800",`), want: stringPointer("priority")},
+		{name: "unrelated invalid UTF-8", members: []byte("\"service_tier\":\"priority\",\"unrelated\":\"\xff\","), want: stringPointer("priority")},
+	}
+	transports := []struct {
+		name      string
+		transport usage.Transport
+		kind      MessageKind
+	}{
+		{name: "buffered", transport: usage.TransportBuffered},
+		{name: "SSE", transport: usage.TransportSSE},
+		{name: "WebSocket text", transport: usage.TransportWebSocket, kind: MessageText},
+		{name: "WebSocket binary", transport: usage.TransportWebSocket, kind: MessageBinary},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			response := syntheticOpenAIResponse(tc.members)
+			for _, transport := range transports {
+				t.Run(transport.name, func(t *testing.T) {
+					turn := observeSyntheticOpenAICompletion(t, transport.transport, transport.kind, response)
+					if !reflect.DeepEqual(turn.OpenAIServiceTier, tc.want) {
+						t.Errorf("OpenAIServiceTier = %v, want %v", turn.OpenAIServiceTier, tc.want)
+					}
+					native := turn.Usage.(usage.OpenAIUsage)
+					if native.InputTokens != 1 || native.OutputTokens != 2 {
+						t.Errorf("malformed optional evidence changed native usage: %+v", native)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestOpenAIUsageMeterIgnoresEarlierEventTierEvidence(t *testing.T) {
+	sink := &memoryUsageSink{}
+	adapter := enabledOpenAIUsageStream(context.Background(), sink)
+	created := sse.Frame{
+		Type: "response.created",
+		Raw:  []byte("event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"service_tier\":\"priority\"}}\n\n"),
+	}
+	completed := sse.Frame{
+		Type: "response.completed",
+		Raw:  []byte("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-tier\",\"model\":\"reported\",\"status\":\"completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":2}}}\n\n"),
+	}
+	for _, frame := range []sse.Frame{created, completed} {
+		if got := adapter.Transform(context.Background(), frame); !reflect.DeepEqual(got, []sse.Frame{frame}) {
+			t.Fatalf("frame changed: got=%#v want=%#v", got, frame)
+		}
+	}
+	turns := sink.snapshot()
+	if len(turns) != 1 || turns[0].OpenAIServiceTier != nil {
+		t.Fatalf("Turns = %+v, want completion-local unavailable tier", turns)
+	}
+}
+
+func TestOpenAIUsageMeterOwnsTierEvidenceAcrossInputReuseAndLaterCompletions(t *testing.T) {
+	sink := &memoryUsageSink{}
+	ctx := context.Background()
+	registry := CanonicalRegistry(sink)
+	registry[len(registry)-1].Enabled = true
+	chain := registry.NewChain(ctx, endpoint.OpenAI, endpoint.RouteOpenAIResponses)
+
+	first := syntheticOpenAIResponse([]byte(`"service_tier":"priority",`))
+	if got, err := chain.RunBuffered(ctx, first); err != nil || !bytes.Equal(got, first) {
+		t.Fatalf("first completion changed or failed: got=%q err=%v", got, err)
+	}
+	clear(first)
+	second := syntheticOpenAIResponse(nil)
+	if got, err := chain.RunBuffered(ctx, second); err != nil || !bytes.Equal(got, second) {
+		t.Fatalf("second completion changed or failed: got=%q err=%v", got, err)
+	}
+
+	turns := sink.snapshot()
+	if len(turns) != 2 || turns[0].OpenAIServiceTier == nil || *turns[0].OpenAIServiceTier != "priority" ||
+		turns[1].OpenAIServiceTier != nil || turns[0].TurnIndex != 0 || turns[1].TurnIndex != 1 {
+		t.Fatalf("immutable completion evidence = %+v", turns)
+	}
+}
+
+func syntheticOpenAIResponse(members []byte) []byte {
+	response := append([]byte(`{"id":"resp-tier","model":"reported","status":"completed",`), members...)
+	return append(response, []byte(`"usage":{"input_tokens":1,"output_tokens":2}}`)...)
+}
+
+func observeSyntheticOpenAICompletion(t *testing.T, transport usage.Transport, kind MessageKind, response []byte) usage.Turn {
+	t.Helper()
+	sink := &memoryUsageSink{}
+	ctx := context.Background()
+	switch transport {
+	case usage.TransportBuffered:
+		registry := CanonicalRegistry(sink)
+		registry[len(registry)-1].Enabled = true
+		chain := registry.NewChain(ctx, endpoint.OpenAI, endpoint.RouteOpenAIResponses)
+		input := bytes.Clone(response)
+		got, err := chain.RunBuffered(ctx, input)
+		if err != nil || !bytes.Equal(got, response) || &got[0] != &input[0] {
+			t.Fatalf("buffered completion changed: got=%q err=%v", got, err)
+		}
+	case usage.TransportSSE:
+		adapter := enabledOpenAIUsageStream(ctx, sink)
+		payload := append([]byte(`{"type":"response.completed","response":`), response...)
+		payload = append(payload, '}')
+		frame := sse.Frame{Type: "response.completed", Raw: append(append([]byte("event: response.completed\ndata: "), payload...), '\n', '\n')}
+		if got := adapter.Transform(ctx, frame); !reflect.DeepEqual(got, []sse.Frame{frame}) {
+			t.Fatalf("SSE completion changed: got=%#v want=%#v", got, frame)
+		}
+	case usage.TransportWebSocket:
+		adapter := enabledOpenAIUsageWSServer(ctx, sink)
+		payload := append([]byte(`{"type":"response.completed","response":`), response...)
+		payload = append(payload, '}')
+		message := &Message{Kind: kind, Data: bytes.Clone(payload)}
+		if emit := adapter(ctx, message); !emit || message.Kind != kind || !bytes.Equal(message.Data, payload) {
+			t.Fatalf("WebSocket completion changed: emit=%t message=%+v", emit, message)
+		}
+	default:
+		t.Fatalf("unsupported synthetic transport %q", transport)
+	}
+	turns := sink.snapshot()
+	if len(turns) != 1 || turns[0].Transport != transport {
+		t.Fatalf("Turns = %+v, want one %s Turn", turns, transport)
+	}
+	return turns[0]
 }
 
 func pointerValue(value *int64) int64 {

@@ -44,6 +44,19 @@ func createUsageV1(t *testing.T) (string, *sql.DB) {
 	return path, db
 }
 
+func createUsageV2(t *testing.T) (string, *sql.DB) {
+	t.Helper()
+	path, db := createUsageV1(t)
+	migration, err := os.ReadFile("migrations/002_requested_model.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(string(migration) + "\nPRAGMA user_version=2;"); err != nil {
+		t.Fatal(err)
+	}
+	return path, db
+}
+
 func externalRows(t *testing.T, db *sql.DB, query string) [][]any {
 	t.Helper()
 	rows, err := db.Query(query)
@@ -75,7 +88,7 @@ func externalRows(t *testing.T, db *sql.DB, query string) [][]any {
 
 const usageSchemaQuery = `SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY type,name`
 
-func TestStoreRequestedModelUpgradePreservesHistoryAndMatchesFreshSchema(t *testing.T) {
+func TestStoreV1UpgradePreservesHistoryAndMatchesFreshV3Schema(t *testing.T) {
 	path, db := createUsageV1(t)
 	history := map[string][][]any{}
 	for _, table := range []string{"anthropic_turn", "openai_turn"} {
@@ -97,8 +110,11 @@ func TestStoreRequestedModelUpgradePreservesHistoryAndMatchesFreshSchema(t *test
 		}
 		for i, old := range oldRows {
 			want := append(append([]any(nil), old...), nil)
+			if table == "openai_turn" {
+				want = append(want, nil)
+			}
 			if !reflect.DeepEqual(got[i], want) {
-				t.Errorf("%s upgraded row = %#v, want unchanged history plus NULL: %#v", table, got[i], want)
+				t.Errorf("%s upgraded row = %#v, want unchanged history plus appended NULL metadata: %#v", table, got[i], want)
 			}
 		}
 	}
@@ -113,8 +129,8 @@ func TestStoreRequestedModelUpgradePreservesHistoryAndMatchesFreshSchema(t *test
 			t.Errorf("upgraded/fresh %s differ: %#v / %#v", query, got, want)
 		}
 	}
-	if got := externalRows(t, db, "PRAGMA user_version"); !reflect.DeepEqual(got, [][]any{{int64(2)}}) {
-		t.Fatalf("upgraded version = %v, want 2", got)
+	if got := externalRows(t, db, "PRAGMA user_version"); !reflect.DeepEqual(got, [][]any{{int64(3)}}) {
+		t.Fatalf("upgraded version = %v, want 3", got)
 	}
 	before := externalRows(t, db, usageSchemaQuery)
 	_ = db.Close()
@@ -130,9 +146,83 @@ func TestStoreRequestedModelUpgradePreservesHistoryAndMatchesFreshSchema(t *test
 		t.Errorf("reopening changed schema: %#v", got)
 	}
 	for table, oldRows := range history {
-		want := [][]any{append(append([]any(nil), oldRows[0]...), nil)}
+		row := append(append([]any(nil), oldRows[0]...), nil)
+		if table == "openai_turn" {
+			row = append(row, nil)
+		}
+		want := [][]any{row}
 		if got := externalRows(t, db, "SELECT * FROM "+table+" ORDER BY id"); !reflect.DeepEqual(got, want) {
 			t.Errorf("reopening changed %s history: %#v", table, got)
+		}
+	}
+}
+
+func TestStoreV2UpgradeAddsOnlyNullableOpenAIServiceTier(t *testing.T) {
+	path, db := createUsageV2(t)
+	history := map[string][][]any{}
+	for _, table := range []string{"anthropic_turn", "openai_turn"} {
+		history[table] = externalRows(t, db, "SELECT * FROM "+table+" ORDER BY id")
+	}
+	anthropicSchema := externalRows(t, db, `SELECT sql FROM sqlite_schema WHERE type='table' AND name='anthropic_turn'`)
+	_ = db.Close()
+
+	upgraded, err := sqlitestore.Open(path, testStoreLogger(io.Discard))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report := closeStore(t, upgraded); !report.DriverCleanupCompleted {
+		t.Fatal(report)
+	}
+	db = openExternal(t, path)
+	if got := externalRows(t, db, "SELECT * FROM anthropic_turn ORDER BY id"); !reflect.DeepEqual(got, history["anthropic_turn"]) {
+		t.Errorf("v2 Anthropic history changed: %#v, want %#v", got, history["anthropic_turn"])
+	}
+	wantOpenAI := [][]any{append(append([]any(nil), history["openai_turn"][0]...), nil)}
+	if got := externalRows(t, db, "SELECT * FROM openai_turn ORDER BY id"); !reflect.DeepEqual(got, wantOpenAI) {
+		t.Errorf("v2 OpenAI history = %#v, want appended NULL tier %#v", got, wantOpenAI)
+	}
+	if got := externalRows(t, db, `SELECT sql FROM sqlite_schema WHERE type='table' AND name='anthropic_turn'`); !reflect.DeepEqual(got, anthropicSchema) {
+		t.Errorf("migration 3 changed Anthropic schema: %#v, want %#v", got, anthropicSchema)
+	}
+	if got := externalRows(t, db, "PRAGMA user_version"); !reflect.DeepEqual(got, [][]any{{int64(3)}}) {
+		t.Fatalf("upgraded v2 version = %v, want 3", got)
+	}
+	freshPath, fresh := openStore(t, io.Discard)
+	if report := closeStore(t, fresh); !report.DriverCleanupCompleted {
+		t.Fatal(report)
+	}
+	freshDB := openExternal(t, freshPath)
+	if got, want := externalRows(t, db, usageSchemaQuery), externalRows(t, freshDB, usageSchemaQuery); !reflect.DeepEqual(got, want) {
+		t.Errorf("v2-upgraded/fresh schemas differ: %#v / %#v", got, want)
+	}
+}
+
+func TestStoreServiceTierMigrationFailureRollsBackEarlierPendingMigration(t *testing.T) {
+	path, db := createUsageV1(t)
+	// This external conflict allows migration 2 to run before migration 3 fails.
+	// The all-pending transaction must roll migration 2 back as well.
+	if _, err := db.Exec(`ALTER TABLE openai_turn ADD COLUMN service_tier TEXT; UPDATE openai_turn SET service_tier='sentinel'`); err != nil {
+		t.Fatal(err)
+	}
+	queries := []string{usageSchemaQuery, "PRAGMA user_version", "SELECT * FROM anthropic_turn", "SELECT * FROM openai_turn"}
+	before := make([][][]any, len(queries))
+	for i, query := range queries {
+		before[i] = externalRows(t, db, query)
+	}
+	_ = db.Close()
+
+	store, err := sqlitestore.Open(path, testStoreLogger(io.Discard))
+	if err == nil {
+		closeStore(t, store)
+		t.Fatal("Open accepted conflicting service-tier migration")
+	}
+	if !strings.Contains(err.Error(), "migration 3") {
+		t.Fatalf("Open = %v, want migration 3 failure", err)
+	}
+	db = openExternal(t, path)
+	for i, query := range queries {
+		if got := externalRows(t, db, query); !reflect.DeepEqual(got, before[i]) {
+			t.Errorf("failed later migration changed %s: %#v, want %#v", query, got, before[i])
 		}
 	}
 }

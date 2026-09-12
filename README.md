@@ -230,7 +230,11 @@ records qualifying **buffered and SSE Anthropic Messages plus buffered, SSE, and
 WebSocket OpenAI Responses** completions: all five supported Surface/transport
 paths. HTTP buffered/SSE rows also record the explicit upstream-bound
 **Requested model** separately from the unchanged upstream **Reported model**;
-WebSocket requested-model attribution remains absent. With the flag off,
+WebSocket requested-model attribution remains absent. All three OpenAI paths
+store exact nullable top-level response `service_tier` evidence independently of
+request intent and model names. Schema v3 upgrades historical OpenAI rows with
+`NULL` and leaves Anthropic schema unchanged. Current Usage reports and Estimated
+cost integrity-probe but otherwise ignore this evidence. With the flag off,
 `serve` creates no usage files or writer and installs no metering hook. See the
 [complete meter configuration and operating contract](CONFIGURATION.md#--shim-usage-meter-enabled).
 
