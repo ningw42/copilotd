@@ -70,6 +70,54 @@ func TestTariffCalculatesAnthropicWithCheckedAdditiveInputContext(t *testing.T) 
 	})
 }
 
+func TestTariffPreservesMissingRatePrecedenceWithoutSelectingAnthropicTier(t *testing.T) {
+	t.Parallel()
+
+	allMissingInput := tariffFromCost(t, `{
+		"output":1,"cache_read":1,"cache_write":1,
+		"tiers":[{"output":2,"cache_read":2,"cache_write":2,"tier":{"type":"context","size":100}}]
+	}`)
+	disjointRequiredRates := tariffFromCost(t, `{
+		"input":1,
+		"tiers":[{"output":2,"tier":{"type":"context","size":100}}]
+	}`)
+	oneUsableVector := tariffFromCost(t, `{
+		"input":1,"output":1,"cache_read":1,"cache_write":1,
+		"tiers":[{"output":2,"cache_read":2,"cache_write":2,"tier":{"type":"context","size":100}}]
+	}`)
+	zero, maximum := int64(0), int64(math.MaxInt64)
+	missingContext := usage.AnthropicUsage{
+		InputTokens: 1, OutputTokens: 1, CacheCreationInputTokens: &zero,
+	}
+	overflowingContext := usage.AnthropicUsage{
+		InputTokens: maximum, CacheCreationInputTokens: &maximum, CacheReadInputTokens: &maximum,
+	}
+	tests := []struct {
+		name       string
+		tariff     pricing.Tariff
+		native     usage.AnthropicUsage
+		wantReason pricing.ExclusionReason
+	}{
+		{name: "missing context with input rate absent from every vector", tariff: allMissingInput, native: missingContext, wantReason: pricing.ExclusionMissingRate},
+		{name: "overflowing context with input rate absent from every vector", tariff: allMissingInput, native: overflowingContext, wantReason: pricing.ExclusionMissingRate},
+		{name: "required input rate remains required for zero tokens", tariff: allMissingInput, native: usage.AnthropicUsage{CacheCreationInputTokens: &zero}, wantReason: pricing.ExclusionMissingRate},
+		{name: "rate presence is not merged across vectors", tariff: disjointRequiredRates, native: missingContext, wantReason: pricing.ExclusionMissingRate},
+		{name: "missing context wins when one vector has every required rate", tariff: oneUsableVector, native: missingContext, wantReason: pricing.ExclusionMissingUsage},
+		{name: "overflowing context wins when one vector has every required rate", tariff: oneUsableVector, native: overflowingContext, wantReason: pricing.ExclusionInconsistentUsage},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			contribution, err := tc.tariff.CalculateAnthropic(tc.native)
+			if err != nil {
+				t.Fatalf("Tariff.CalculateAnthropic() error = %v", err)
+			}
+			if contribution.Reason != tc.wantReason || contribution.Amount.String() != "0" {
+				t.Fatalf("contribution = {amount:%s reason:%q}, want no amount and reason %q", contribution.Amount.String(), contribution.Reason, tc.wantReason)
+			}
+		})
+	}
+}
+
 func TestCalculateAnthropicValuesAdditiveInputAndCompleteOutput(t *testing.T) {
 	t.Parallel()
 

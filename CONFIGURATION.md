@@ -80,9 +80,10 @@ edges advance, omitting coincident daily buckets while retaining larger-period
 nominal labels. Unsupported/non-monotonic transition behavior fails rather than
 fabricating an interval; calendar traversal is context-checked and bounded for
 custom operator data. UTC half-open intervals govern both selection and grouping,
-even if a historical clock reversal later displays yesterday. The terminal uses
-server-computed `[clipped]` and `[in progress]` flags; the latter tests the captured
-instant against the unclipped interval. Empty/future buckets invent no model rows,
+even if a historical clock reversal later displays yesterday. The JSON report
+retains server-computed `range_partial` and `in_progress` flags; static terminal
+labels show only the bucket start date. JSON `in_progress` tests
+the captured instant against the unclipped interval. Empty/future buckets invent no model rows,
 and future-dated stored Turns are not filtered out by generation time.
 
 **Terminal-local timezone:** the configuration visible to the CLI process,

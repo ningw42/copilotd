@@ -205,6 +205,7 @@ func TestSnapshotTariffUsesLegacyContextRatesOnlyWithoutStructuredTiers(t *testi
 	write8, read015 := "8", "0.15"
 	assertRates("structured", 200001, "1", "2", nil, nil)
 	assertRates("structured", 272001, "3", "4", nil, nil)
+	assertRates("legacy", 199999, "1", "2", nil, nil)
 	assertRates("legacy", 200000, "1", "2", nil, nil)
 	assertRates("legacy", 200001, "6", "7", nil, &write8)
 	assertRates("base", ^uint64(0), "1.5", "2.5", &read015, nil)

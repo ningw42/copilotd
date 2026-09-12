@@ -438,13 +438,16 @@ Unpriceable Turns still contribute to all existing native metrics and Turn
 counts. Distinguish `unknown_model`, `ambiguous_model`, `missing_rate`,
 `missing_usage`, and `inconsistent_usage` in monetary coverage. Assign one reason
 per Turn to keep reasons additive. Model resolution remains first, and a matched
-model with no tariff is `missing_rate`. When a context tier must be selected,
-missing or inconsistent complete-input evidence produces `missing_usage` or
-`inconsistent_usage` before selected-row rate checks, because no authoritative
-row is known. After selection, preserve the existing `missing_rate`,
-`missing_usage`, then `inconsistent_usage` formula precedence. Within
-`missing_rate`, check optional rates only for known positive counts; an absent
-cache count is `missing_usage`, not evidence of a missing rate requirement.
+model with no tariff is `missing_rate`. When missing or inconsistent complete-input
+evidence prevents context-tier selection, preserve `missing_rate` if every retained
+base/tier vector independently lacks a rate required by known chargeable evidence;
+do not merge rate presence across vectors or guess a tier. Required input/output
+rates remain required even for known-zero counts, while optional cache rates are
+required only for known-positive counts. If at least one retained vector has every
+rate required by the known evidence, return the context-derived `missing_usage` or
+`inconsistent_usage` reason. After selection, preserve the existing `missing_rate`,
+`missing_usage`, then `inconsistent_usage` formula precedence. An absent cache
+count alone is `missing_usage`, not evidence of a missing optional rate.
 
 This is stricter about **missing evidence** than about the agreed **tariff
 approximations**. One cache-write rate and data-driven context-tier selection do

@@ -296,6 +296,7 @@ func TestQuerySelectsLegacyContextTariffAtStrict200kBoundary(t *testing.T) {
 	}}}`, pricing.SnapshotStatus{Source: "fallback", Version: "sha256:legacy-context"})
 	zero := int64(0)
 	path := stored(t,
+		turn("2026-09-01T00:00:00Z", "legacy", usage.OpenAIUsage{InputTokens: 199999, CachedTokens: &zero, CacheWriteTokens: &zero}),
 		turn("2026-09-01T01:00:00Z", "legacy", usage.OpenAIUsage{InputTokens: 200000, CachedTokens: &zero, CacheWriteTokens: &zero}),
 		turn("2026-09-01T02:00:00Z", "legacy", usage.OpenAIUsage{InputTokens: 200001, CachedTokens: &zero, CacheWriteTokens: &zero}),
 	)
@@ -303,10 +304,16 @@ func TestQuerySelectsLegacyContextTariffAtStrict200kBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := report.Cost{Amount: amount(t, "0.600002"), PricedTurns: 2}
+	want := report.Cost{Amount: amount(t, "0.800001"), PricedTurns: 3}
 	assertCostEqual(t, got.OpenAI.Rows[0].Cost, want)
 	assertCostEqual(t, got.OpenAI.Models[0].Cost, want)
 	assertCostEqual(t, got.OpenAI.Total.Cost, want)
+	total := got.OpenAI.Total
+	input, output := total.Usage["input_tokens"], total.Usage["output_tokens"]
+	cached, cacheWrite := total.Usage["cached_tokens"], total.Usage["cache_write_tokens"]
+	if total.Turns != 3 || input.Sum == nil || *input.Sum != 600000 || input.ReportedTurns != 3 || output.Sum == nil || *output.Sum != 0 || output.ReportedTurns != 3 || cached.Sum == nil || *cached.Sum != 0 || cached.ReportedTurns != 3 || cacheWrite.Sum == nil || *cacheWrite.Sum != 0 || cacheWrite.ReportedTurns != 3 {
+		t.Fatalf("legacy boundary native aggregates changed: %+v", total)
+	}
 }
 
 func TestQueryPreservesAnthropicContextEvidenceCoverage(t *testing.T) {
@@ -355,6 +362,65 @@ func TestQueryPreservesAnthropicContextEvidenceCoverage(t *testing.T) {
 			assertCostEqual(t, got.Anthropic.Rows[0].Cost, tc.cost)
 			assertCostEqual(t, got.Anthropic.Models[0].Cost, tc.cost)
 			assertCostEqual(t, got.Anthropic.Total.Cost, tc.cost)
+		})
+	}
+}
+
+func TestQueryPreservesProvableMissingRateBeforeAnthropicContextEvidence(t *testing.T) {
+	source := pricingSourceRaw(t, `{
+		"openai":{"id":"openai","models":{}},
+		"anthropic":{"id":"anthropic","models":{
+			"missing-input":{"id":"missing-input","cost":{
+				"output":1,"cache_read":1,"cache_write":1,
+				"tiers":[{"output":2,"cache_read":2,"cache_write":2,"tier":{"type":"context","size":100}}]
+			}},
+			"one-usable":{"id":"one-usable","cost":{
+				"input":1,"output":1,"cache_read":1,"cache_write":1,
+				"tiers":[{"output":2,"cache_read":2,"cache_write":2,"tier":{"type":"context","size":100}}]
+			}}
+		}},
+		"google":{"id":"google","models":{}},
+		"xai":{"id":"xai","models":{}}
+	}`, pricing.SnapshotStatus{Source: "fetched", Version: "sha256:anthropic-context-overlap"})
+	zero, maximum := int64(0), int64(math.MaxInt64)
+	missingContext := usage.AnthropicUsage{
+		InputTokens: 1, OutputTokens: 1, CacheCreationInputTokens: &zero,
+	}
+	overflowingContext := usage.AnthropicUsage{
+		InputTokens: maximum, CacheCreationInputTokens: &maximum, CacheReadInputTokens: &maximum,
+	}
+	tests := []struct {
+		name, model string
+		native      usage.AnthropicUsage
+		cost        report.Cost
+	}{
+		{name: "missing context keeps provable missing rate", model: "missing-input", native: missingContext, cost: report.Cost{Unpriced: report.UnpricedCoverage{MissingRate: 1}}},
+		{name: "overflowing context keeps provable missing rate", model: "missing-input", native: overflowingContext, cost: report.Cost{Unpriced: report.UnpricedCoverage{MissingRate: 1}}},
+		{name: "missing context is not reordered with a usable vector", model: "one-usable", native: missingContext, cost: report.Cost{Unpriced: report.UnpricedCoverage{MissingUsage: 1}}},
+		{name: "overflowing context is not reordered with a usable vector", model: "one-usable", native: overflowingContext, cost: report.Cost{Unpriced: report.UnpricedCoverage{InconsistentUsage: 1}}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			path := stored(t, anthropicTurn("2026-09-01T01:00:00Z", tc.model, tc.native))
+			q := selection()
+			q.Surface = "anthropic"
+			got, err := report.New(path, source).Query(context.Background(), q)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertCostEqual(t, got.Anthropic.Rows[0].Cost, tc.cost)
+			assertCostEqual(t, got.Anthropic.Models[0].Cost, tc.cost)
+			assertCostEqual(t, got.Anthropic.Total.Cost, tc.cost)
+			total := got.Anthropic.Total
+			input, output := total.Usage["input_tokens"], total.Usage["output_tokens"]
+			creation := total.Usage["cache_creation_input_tokens"]
+			if total.Turns != 1 || input.Sum == nil || *input.Sum != tc.native.InputTokens || input.ReportedTurns != 1 || output.Sum == nil || *output.Sum != tc.native.OutputTokens || output.ReportedTurns != 1 || creation.Sum == nil || *creation.Sum != *tc.native.CacheCreationInputTokens || creation.ReportedTurns != 1 {
+				t.Fatalf("overlap classification changed native aggregates: %+v", total)
+			}
+			read := total.Usage["cache_read_input_tokens"]
+			if tc.native.CacheReadInputTokens == nil && (read.Sum != nil || read.ReportedTurns != 0) || tc.native.CacheReadInputTokens != nil && (read.Sum == nil || *read.Sum != *tc.native.CacheReadInputTokens || read.ReportedTurns != 1) {
+				t.Fatalf("cache-read aggregate = %+v for native %+v", read, tc.native)
+			}
 		})
 	}
 }

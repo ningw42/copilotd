@@ -12,6 +12,9 @@ func (t Tariff) CalculateAnthropic(native usage.AnthropicUsage) (Contribution, e
 	}
 	completeInput, reason := anthropicCompleteInput(native)
 	if reason != "" {
+		if t.missingAnthropicRateInEveryVector(native) {
+			return Contribution{Reason: ExclusionMissingRate}, nil
+		}
 		return Contribution{Reason: reason}, nil
 	}
 	return CalculateAnthropic(native, t.rates(completeInput))
@@ -37,6 +40,18 @@ func anthropicCompleteInput(native usage.AnthropicUsage) (uint64, ExclusionReaso
 	return total, ""
 }
 
+func (t Tariff) missingAnthropicRateInEveryVector(native usage.AnthropicUsage) bool {
+	if !missingAnthropicRate(native, t.base) {
+		return false
+	}
+	for _, tier := range t.tiers {
+		if !missingAnthropicRate(native, tier.rates) {
+			return false
+		}
+	}
+	return true
+}
+
 // CalculateAnthropic values one persisted Anthropic-native Turn at the supplied
 // selected original-provider rates; it does not select rates or resolve a
 // model. InputTokens is the uncached remainder, so cache-read and aggregate
@@ -52,13 +67,7 @@ func anthropicCompleteInput(native usage.AnthropicUsage) (uint64, ExclusionReaso
 // missing-usage, then inconsistent-usage order. Exact arithmetic errors are
 // returned without a zero or partial contribution.
 func CalculateAnthropic(native usage.AnthropicUsage, rates Rates) (Contribution, error) {
-	if rates.Input == nil || rates.Output == nil {
-		return Contribution{Reason: ExclusionMissingRate}, nil
-	}
-	if native.CacheReadInputTokens != nil && *native.CacheReadInputTokens > 0 && rates.CacheRead == nil {
-		return Contribution{Reason: ExclusionMissingRate}, nil
-	}
-	if native.CacheCreationInputTokens != nil && *native.CacheCreationInputTokens > 0 && rates.CacheWrite == nil {
+	if missingAnthropicRate(native, rates) {
 		return Contribution{Reason: ExclusionMissingRate}, nil
 	}
 	if native.CacheReadInputTokens == nil || native.CacheCreationInputTokens == nil {
@@ -77,4 +86,10 @@ func CalculateAnthropic(native usage.AnthropicUsage, rates Rates) (Contribution,
 		{tokens: cacheCreation, rate: rates.CacheWrite},
 	}
 	return sumPricedLines(lines)
+}
+
+func missingAnthropicRate(native usage.AnthropicUsage, rates Rates) bool {
+	return rates.Input == nil || rates.Output == nil ||
+		native.CacheReadInputTokens != nil && *native.CacheReadInputTokens > 0 && rates.CacheRead == nil ||
+		native.CacheCreationInputTokens != nil && *native.CacheCreationInputTokens > 0 && rates.CacheWrite == nil
 }
