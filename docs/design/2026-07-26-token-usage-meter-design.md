@@ -17,7 +17,10 @@ native tables, and validated original-byte JSON. #212 retains integrated
 contention/lifecycle evidence; #213 adds executable acceptance and native CI.
 Actual release certification is revision-specific; see the
 [verification guide](../verification/usage-reporting.md) and #213 results.
-This does not revise the native projection or writer policies documented here.
+#248 later consumes bounded OpenAI response-tier evidence for Estimated cost
+under the approved
+[service-tier pricing design](2026-09-12-openai-service-tier-pricing-design.md),
+without revising the native projection or writer policies documented here.
 
 Maintainer Ning Wang's [current approval](#maintainer-approval-2026-09-06)
 accepts the state-at-rest and Shim-observer exceptions documented in
@@ -55,7 +58,7 @@ configured local usage database (OS-specific default in §10). Both final Routes
 support buffered JSON and SSE; only OpenAI Responses supports WebSocket. The
 GitHub Copilot Surface and the Catalogs are not metered.
 
-_Current implementation (through #247):_ qualifying buffered and SSE Anthropic
+_Current implementation (through #248):_ qualifying buffered and SSE Anthropic
 Messages, buffered OpenAI Responses objects, self-contained OpenAI
 `response.completed` SSE events, and qualifying OpenAI WebSocket server Messages
 submit rows. #203 added nullable Requested-model metadata through migration 2;
@@ -640,10 +643,12 @@ ALTER TABLE openai_turn ADD COLUMN service_tier TEXT;
 
 Historical OpenAI rows acquire `NULL`; Anthropic schema and history are
 unchanged. New rows preserve the exact decoded top-level response string,
-including `""`, with no enum, default, backfill, index, or pricing
-interpretation. Fresh, v1-upgraded, and v2-upgraded databases converge on
-`user_version=3`; reopening v3 is a no-op. Current reports integrity-probe the
-column but do not scan, aggregate, expose, or value it.
+including `""`, with no enum, default, backfill, or index. Fresh, v1-upgraded,
+and v2-upgraded databases converge on `user_version=3`; reopening v3 is a no-op.
+Current reports integrity-probe the column and project at most eight bytes as a
+per-Turn pricing lookup candidate. They do not aggregate or expose the raw tier;
+unknown and overlong values use normal-pricing fallback without rewriting the
+stored evidence.
 
 ---
 
@@ -1096,11 +1101,11 @@ all four cgo-free release targets with the chosen SQLite driver (§13).
 ### Reconciled implementation docs
 
 `CONTEXT.md` defines Shim, Usage meter, and Turn without embedding this
-implementation plan. Through #247, README and `CONFIGURATION.md` describe the
+implementation plan. Through #248, README and `CONFIGURATION.md` describe the
 available opt-in database and settings, all five implemented recording paths,
 #203's four-path HTTP Requested-model attribution and migration 2, #247's
-three-path OpenAI service-tier observation and migration 3, unchanged report
-valuation/projection, and the durability, filesystem, buffering, retention,
+three-path OpenAI service-tier observation and migration 3, #248's bounded
+per-Turn service-tier valuation lookup, and the durability, filesystem, buffering, retention,
 backup, external-query, and shutdown consequences. The existing
 `docs/divergence-ledger.md` copilotd-originated error row already covers the
 meter-activated bounded-read `BadGateway`/`GatewayTimeout` Fabrications;

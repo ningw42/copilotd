@@ -73,9 +73,16 @@ pricing cached value. Its identified vendored floor is immediately available;
 best-effort refresh uses a credential-free, redirect-refusing public request and
 holds last-good on failure. Original-provider rates are limited to OpenAI,
 Anthropic, Google, and xAI. For each priceable Turn, the resolved Pricing
-model's base rate vector applies unless its complete native input strictly
+model's normal base rate vector applies unless its complete native input strictly
 exceeds a structured context threshold; the greatest matching threshold then
-selects that tier without filling omitted rates from another row. Structured
+selects that tier without filling omitted rates from another row. OpenAI Turns
+then select service mode only from the completed response's recorded tier:
+ASCII-case `fast`/`priority` uses an accepted Fast declaration, while `default`,
+unavailable, or unrecognized evidence uses normal rates. Fast base rates are
+explicit; Fast context categories are derived exactly from the same Pricing
+model and snapshot as `Fast base × normal context / normal base`. Missing or
+non-representable operands stay unpriced rather than borrowing a factor. This is
+an estimation policy, not proof of published provider pricing or availability. Structured
 `tiers[].tier.size` is authoritative for every provider. The deprecated
 `context_over_200k` row is a strict 200,000-token compatibility fallback only
 when structured tiers are absent. OpenAI context is complete `input_tokens`;
@@ -176,8 +183,8 @@ priceable Turns, while empty and priceable-free aggregates carry `"0"`. Coverage
 partitions stored Turns into priced Turns and five explicit exclusion reasons.
 In text, a partial priced subtotal has `*`, a wholly unpriced nonempty group has
 `—`, and compact period/model notes list priced/total stored Turns plus every
-nonzero exclusion reason. The header identifies models.dev standard/context
-rates, fetched/fallback provenance, and successful fetch time when present,
+nonzero exclusion reason. The header identifies models.dev rates, fetched/fallback provenance, and
+successful fetch time when present,
 followed by the current-rate and non-billing caveat. This source-level wording
 also remains accurate for a legacy daemon whose additive `context_policy`
 described highest-tier selection. A new CLI talking to an older daemon keeps native counts
@@ -233,8 +240,9 @@ paths. HTTP buffered/SSE rows also record the explicit upstream-bound
 WebSocket requested-model attribution remains absent. All three OpenAI paths
 store exact nullable top-level response `service_tier` evidence independently of
 request intent and model names. Schema v3 upgrades historical OpenAI rows with
-`NULL` and leaves Anthropic schema unchanged. Current Usage reports and Estimated
-cost integrity-probe but otherwise ignore this evidence. With the flag off,
+`NULL` and leaves Anthropic schema unchanged. Current Usage reports
+integrity-probe the column and use a bounded lookup candidate for per-Turn OpenAI
+Estimated cost without grouping or exposing the raw value. With the flag off,
 `serve` creates no usage files or writer and installs no metering hook. See the
 [complete meter configuration and operating contract](CONFIGURATION.md#--shim-usage-meter-enabled).
 
