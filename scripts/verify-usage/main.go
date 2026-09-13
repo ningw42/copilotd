@@ -419,7 +419,7 @@ func mandatoryTests(goos string) []string {
 		"internal/usage/reportcli": {
 			"TestCommandPlacesEstimatedUSDOnlyInBothPrimarySurfaceTables", "TestCommandRoundsExactUSDHalfUpToThreeFractionalDigits",
 			"TestCommandSumsExactServerAmountsBeforeRoundingPeriodTotals", "TestCommandMarksAndExplainsPartialAndEntirelyUnpricedCosts",
-			"TestCommandShowsPricingProvenanceAndEstimateCaveat", "TestCommandDetailsListsDistinctTerminalSafePricingResolutions",
+			"TestCommandShowsOnlyPricingSnapshotIdentityAndSyncTime", "TestCommandDetailsListsDistinctTerminalSafePricingResolutions",
 			"TestCommandPresentsPricingEnabledEmptySectionWithoutInventedRows", "TestCommandExplainsOlderDaemonWithoutInventingCostCoverage",
 			"TestCommandPricingJSONPreservesLiteralWireBytesIndependentOfDetails",
 			"TestCommandCostSubtotalOverflowEmitsNothingWhileJSONStaysOriginal",
