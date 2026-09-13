@@ -113,16 +113,18 @@ copilotd usage --timezone UTC --period month --since 2026-01-01 --json
 appending `/usage/v1/report`. The command is an HTTP client, never an offline
 SQLite reader. It shows exact native counts and stored-Turn coverage in
 Reported-model rows grouped by period, with a `Day`, `Week`, `Month`, or `Year`
-first-column heading. Each primary Surface table places **Est. USD** immediately
+first-column heading. Each primary Surface table places **Est. Cost ($)** immediately
 after `Model(s)` and before `Turns`; secondary native tables do not repeat money.
-Amounts use exact daemon-supplied USD values rounded half up to three fractional
-digits. Each period starts with a terminal-only `Total` derived from its validated
-model rows and separated from the model breakdown. Text sums exact amounts before
-rounding, uses checked int64 coverage/native subtotal arithmetic, and fails before
-stdout if inconsistent rows or monetary addition would overflow; `--json` still
-emits the independently validated original bytes.
-Whole-range per-model and section totals remain in JSON but are not repeated in
-the text tables. Anthropic appears first with **Uncached input**,
+Numeric amounts have a `$` prefix and use exact daemon-supplied USD values rounded
+half up to three fractional digits. Each period starts with a terminal-only `Total`
+derived from its validated model rows and separated from the model breakdown. Each
+primary table ends with a per-Surface `Grand total` from the daemon's validated
+whole-range section total, regardless of the selected period. Text sums exact
+amounts before rounding, uses checked int64 coverage/native subtotal arithmetic,
+and fails before stdout if inconsistent rows or monetary addition would overflow;
+`--json` still emits the independently validated original bytes. Whole-range
+per-model totals remain in JSON and no cross-Surface grand total is introduced.
+Anthropic appears first with **Uncached input**,
 Output, Cache create, and Cache read; OpenAI retains complete Input, Output, Cache write,
 and Cache read. TTL/thinking/reasoning subsets are never stacked onto their
 parent counts, and there is no normalized input or cross-Surface token grand

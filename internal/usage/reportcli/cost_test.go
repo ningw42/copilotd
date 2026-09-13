@@ -85,8 +85,8 @@ func TestCommandRoundsExactUSDHalfUpToThreeFractionalDigits(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !hasTableRow(text, "", "claude-observed", tc.want, "1", "12", "9", "2,000", "6,000") {
-				t.Fatalf("amount %s did not render as %s:\n%s", tc.amount, tc.want, text)
+			if !hasTableRow(text, "", "claude-observed", "$"+tc.want, "1", "12", "9", "2,000", "6,000") {
+				t.Fatalf("amount %s did not render as $%s:\n%s", tc.amount, tc.want, text)
 			}
 		})
 	}
@@ -102,8 +102,51 @@ func TestCommandSumsExactServerAmountsBeforeRoundingPeriodTotals(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			r := pricedOpenAICommandReport(t, []string{tc.amount, tc.amount}, "0")
 			text := commandOutput(t, r, false)
-			if !hasTableRow(text, "2026-09-01", "Total", tc.total, "2", "2", "2", "—", "—") {
+			if !hasTableRow(text, "2026-09-01", "Total", "$"+tc.total, "2", "2", "2", "—", "—") {
 				t.Fatalf("exact period subtotal missing for two %s cells:\n%s", tc.amount, text)
+			}
+		})
+	}
+}
+
+func TestCommandRendersGrandTotalAtBottomForEveryPeriod(t *testing.T) {
+	for _, tc := range []struct {
+		period, heading, since, until string
+	}{
+		{"day", "Day", "2026-09-01", "2026-09-02"},
+		{"week", "Week", "2026-08-31", "2026-09-07"},
+		{"month", "Month", "2026-09-01", "2026-10-01"},
+		{"year", "Year", "2026-01-01", "2027-01-01"},
+	} {
+		t.Run(tc.period, func(t *testing.T) {
+			r := pricedOpenAICommandReport(t, []string{"0.25", "0.5"}, "0.75")
+			start, err := time.Parse(time.DateOnly, tc.since)
+			if err != nil {
+				t.Fatal(err)
+			}
+			end, err := time.Parse(time.DateOnly, tc.until)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r.Period, r.Since, r.Until = tc.period, tc.since, tc.until
+			r.GeneratedAt, r.WindowStart, r.WindowEnd = end, start, end
+			r.Buckets = []report.Bucket{{StartDate: tc.since, UntilDate: tc.until, RangeStart: start, RangeEnd: end}}
+			for index := range r.OpenAI.Rows {
+				r.OpenAI.Rows[index].BucketStart = tc.since
+			}
+
+			text := commandOutput(t, r, false)
+			if !hasTableRow(text, tc.heading, "Model(s)", "Est. Cost ($)", "Turns", "Input", "Output", "Cache write", "Cache read") {
+				t.Fatalf("missing %s cost heading:\n%s", tc.period, text)
+			}
+			if !hasTableRow(text, "", "Grand total", "$0.750", "2", "2", "2", "—", "—") {
+				t.Fatalf("missing %s grand total:\n%s", tc.period, text)
+			}
+			lines := strings.Split(text, "\n")
+			for index, line := range lines {
+				if strings.Contains(line, "Grand total") && (index+1 >= len(lines) || !strings.HasPrefix(strings.TrimSpace(lines[index+1]), "╰")) {
+					t.Fatalf("%s grand total is not the final table row:\n%s", tc.period, text)
+				}
 			}
 		})
 	}
@@ -166,9 +209,10 @@ func TestCommandMarksAndExplainsPartialAndEntirelyUnpricedCosts(t *testing.T) {
 
 	text := commandOutput(t, r, false)
 	for _, want := range [][]string{
-		{"2026-09-01", "Total", "0.004*", "6", "2", "2", "—", "—"},
-		{"", "a", "0.004*", "4", "1", "1", "—", "—"},
+		{"2026-09-01", "Total", "$0.004*", "6", "2", "2", "—", "—"},
+		{"", "a", "$0.004*", "4", "1", "1", "—", "—"},
 		{"", "b", "—", "2", "1", "1", "—", "—"},
+		{"", "Grand total", "$0.004*", "6", "2", "2", "—", "—"},
 	} {
 		if !hasTableRow(text, want...) {
 			t.Errorf("missing cost coverage row %q:\n%s", want, text)
@@ -178,6 +222,7 @@ func TestCommandMarksAndExplainsPartialAndEntirelyUnpricedCosts(t *testing.T) {
 		"2026-09-01 / Total — estimated cost: 1/6 priced stored Turns; unknown_model=1; ambiguous_model=1; missing_rate=1; missing_usage=1; inconsistent_usage=1",
 		"2026-09-01 / a — estimated cost: 1/4 priced stored Turns; unknown_model=1; missing_usage=1; inconsistent_usage=1",
 		"2026-09-01 / b — estimated cost: 0/2 priced stored Turns; ambiguous_model=1; missing_rate=1",
+		"Grand total — estimated cost: 1/6 priced stored Turns; unknown_model=1; ambiguous_model=1; missing_rate=1; missing_usage=1; inconsistent_usage=1",
 	} {
 		if strings.Count(text, want) != 1 {
 			t.Errorf("cost coverage note %q count != 1:\n%s", want, text)
@@ -224,7 +269,7 @@ func TestCommandPresentsPricingEnabledEmptySectionWithoutInventedRows(t *testing
 	if strings.Count(text, "No stored Turns in the selected range.") != 1 || !strings.Contains(text, "Pricing snapshot: sha256:abcdef") {
 		t.Fatalf("pricing-enabled empty presentation is incomplete:\n%s", text)
 	}
-	assertTextExcludes(t, text, "Est. USD", "estimated cost:", "Pricing model resolutions", "unknown_model=", "missing_usage=", "Estimated original-provider cost")
+	assertTextExcludes(t, text, "Est. Cost ($)", "estimated cost:", "Pricing model resolutions", "unknown_model=", "missing_usage=", "Estimated original-provider cost")
 }
 
 func TestCommandExplainsOlderDaemonWithoutInventingCostCoverage(t *testing.T) {
@@ -233,8 +278,9 @@ func TestCommandExplainsOlderDaemonWithoutInventingCostCoverage(t *testing.T) {
 		t.Fatalf("missing exact older-daemon explanation:\n%s", text)
 	}
 	for _, want := range [][]string{
-		{"Day", "Model(s)", "Est. USD", "Turns", "Input", "Output", "Cache write", "Cache read"},
+		{"Day", "Model(s)", "Est. Cost ($)", "Turns", "Input", "Output", "Cache write", "Cache read"},
 		{"2026-09-01", "Total", "—", "2", "9,007,199,254,740,993", "12", "—", "6,000*"},
+		{"", "Grand total", "—", "2", "9,007,199,254,740,993", "12", "—", "6,000*"},
 		{"Day", "Model(s)", "Turns", "Reasoning", "Reported total"},
 	} {
 		if !hasTableRow(text, want...) {
@@ -298,7 +344,7 @@ func TestCommandPricingJSONPreservesLiteralWireBytesIndependentOfDetails(t *test
 		if text != costLayoutWire+"\n" {
 			t.Fatalf("details=%t changed original pricing JSON", details)
 		}
-		assertTextExcludes(t, text, "Est. USD", "Pricing snapshot:", "Estimated original-provider cost", "Pricing model resolutions")
+		assertTextExcludes(t, text, "Est. Cost ($)", "Pricing snapshot:", "Estimated original-provider cost", "Pricing model resolutions")
 	}
 }
 
@@ -318,7 +364,7 @@ func TestCommandCostSubtotalOverflowEmitsNothingWhileJSONStaysOriginal(t *testin
 		if err != nil {
 			t.Fatal(err)
 		}
-		if strings.Count(text, strings.Repeat("9", 128)) != 4 || !strings.HasSuffix(text, "\n") || strings.Contains(text, "Pricing snapshot:") || strings.Contains(text, "Est. USD") {
+		if strings.Count(text, strings.Repeat("9", 128)) != 4 || !strings.HasSuffix(text, "\n") || strings.Contains(text, "Pricing snapshot:") || strings.Contains(text, "Est. Cost ($)") {
 			t.Fatalf("details=%t JSON did not bypass terminal subtotal/decorations: %s", details, text)
 		}
 	}
@@ -342,26 +388,28 @@ func runCostReportCommand(t *testing.T, r report.Report, details, jsonMode bool)
 	return out.String(), err
 }
 
-func TestCommandPlacesEstimatedUSDOnlyInBothPrimarySurfaceTables(t *testing.T) {
+func TestCommandPlacesEstimatedCostOnlyInBothPrimarySurfaceTables(t *testing.T) {
 	text, err := runCostWireCommand(t, costLayoutWire, true, false, "all")
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, want := range [][]string{
-		{"Day", "Model(s)", "Est. USD", "Turns", "Uncached input", "Output", "Cache create", "Cache read"},
-		{"2026-09-01", "Total", "0.003", "1", "12", "9", "2,000", "6,000"},
-		{"", "claude-observed", "0.003", "1", "12", "9", "2,000", "6,000"},
+		{"Day", "Model(s)", "Est. Cost ($)", "Turns", "Uncached input", "Output", "Cache create", "Cache read"},
+		{"2026-09-01", "Total", "$0.003", "1", "12", "9", "2,000", "6,000"},
+		{"", "claude-observed", "$0.003", "1", "12", "9", "2,000", "6,000"},
+		{"", "Grand total", "$0.003", "1", "12", "9", "2,000", "6,000"},
 		{"Day", "Model(s)", "Turns", "Thinking", "Cache create 5m", "Cache create 1h"},
-		{"Day", "Model(s)", "Est. USD", "Turns", "Input", "Output", "Cache write", "Cache read"},
-		{"2026-09-01", "Total", "0.000", "1", "8,012", "9", "2,000", "6,000"},
-		{"", "gpt-observed", "0.000", "1", "8,012", "9", "2,000", "6,000"},
+		{"Day", "Model(s)", "Est. Cost ($)", "Turns", "Input", "Output", "Cache write", "Cache read"},
+		{"2026-09-01", "Total", "$0.000", "1", "8,012", "9", "2,000", "6,000"},
+		{"", "gpt-observed", "$0.000", "1", "8,012", "9", "2,000", "6,000"},
+		{"", "Grand total", "$0.000", "1", "8,012", "9", "2,000", "6,000"},
 		{"Day", "Model(s)", "Turns", "Reasoning", "Reported total"},
 	} {
 		if !hasTableRow(text, want...) {
 			t.Errorf("missing table row %q:\n%s", want, text)
 		}
 	}
-	if got := strings.Count(text, "Est. USD"); got != 2 {
-		t.Fatalf("Est. USD headers = %d, want one per primary Surface table:\n%s", got, text)
+	if got := strings.Count(text, "Est. Cost ($)"); got != 2 {
+		t.Fatalf("Est. Cost ($) headers = %d, want one per primary Surface table:\n%s", got, text)
 	}
 }

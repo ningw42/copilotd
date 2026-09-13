@@ -45,7 +45,7 @@ func TestCommandDetailsGroupsAnthropicNativeSubsetsByPeriod(t *testing.T) {
 			t.Errorf("missing secondary row %q: %s", want, text)
 		}
 	}
-	assertTextExcludes(t, text, "模型", "\u2066", "Reasoning", "8,012", "Grand total")
+	assertTextExcludes(t, text, "模型", "\u2066", "Reasoning", "8,012")
 }
 
 func TestCommandDetailsGroupsOpenAIReportedSecondaryValuesByPeriod(t *testing.T) {

@@ -88,17 +88,17 @@ func TestCommandAllPeriodsFromSQLiteThroughHTTPInExplicitNamedZone(t *testing.T)
 					t.Errorf("missing %q: %s", want, text)
 				}
 			}
-			// Each native table derives a period Total before the model breakdown
-			// without rendering the whole-range total as another row.
-			if strings.Count(text, "  18 ") != 4 || strings.Count(text, "  13 ") != 4 || strings.Count(text, "│ Total") != 4 {
-				t.Fatalf("period totals and model groups did not reach terminal: %s", text)
+			// Each native table derives a period Total before the model breakdown;
+			// each primary cost table ends with the validated whole-range total.
+			if strings.Count(text, "  18 ") != 4 || strings.Count(text, "  13 ") != 4 || strings.Count(text, "│ Total") != 4 || strings.Count(text, "│ Grand total │") != 2 || strings.Count(text, "  31 ") != 2 {
+				t.Fatalf("period, model, and grand totals did not reach terminal: %s", text)
 			}
-			assertTextExcludes(t, text, "  31 ", `"m"`, `├─ "`, `└─ "`, "│ All ", "Section total", "│ Range")
+			assertTextExcludes(t, text, `"m"`, `├─ "`, `└─ "`, "│ All ", "Section total", "│ Range")
 			if strings.Count(text, "\n│ "+heading) != 2 {
 				t.Fatalf("period-specific headings missing: %s", text)
 			}
-			if strings.Count(text, "\n├") != 8 {
-				t.Fatalf("missing total and period separators: %s", text)
+			if strings.Count(text, "\n├") != 10 {
+				t.Fatalf("missing total, period, and grand-total separators: %s", text)
 			}
 			assertTextExcludes(t, text, "[clipped]", "[in progress]")
 			result, err := client.Query(context.Background(), q)
