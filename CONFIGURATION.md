@@ -228,15 +228,13 @@ strings (or the governed `null` for nonempty groups with zero priceable Turns),
 and the six canonical int64 coverage strings must partition stored Turns exactly.
 Unknown additive fields remain compatible. Errors use stderr and exit 1,
 including partial/short writes or failure to write the final newline; success,
-including empty, exits 0. Text identifies original-provider models.dev rates
-and the single-write policy, fetched versus fallback source, and
-successful content-fetch time when present. This wording remains accurate for a
-legacy daemon whose additive `context_policy` described highest-tier selection.
-It states that valuation uses current accepted rates for
-persisted best-effort observations, may exclude unpriceable Turns, and is not a
-Copilot bill. A wholly absent pricing extension produces the exact older-daemon
-unavailable explanation and `—` cost cells without fabricated exclusions or local
-pricing. Raw-Turn export, HTML, charts, and cross-Surface grand totals are not
+including empty, exits 0. Text condenses available pricing provenance to a
+`Pricing snapshot` line containing the models.dev content SHA-256 and successful
+sync time when present; fetched/fallback and valuation-policy labels are omitted.
+No estimated-cost caveat is appended after the tables. A wholly absent pricing
+extension produces the exact older-daemon unavailable explanation and `—` cost
+cells without fabricated exclusions or local pricing. Raw-Turn export, HTML,
+charts, and cross-Surface grand totals are not
 provided.
 
 The same listener serves exactly `GET`/`HEAD /usage/v1/report` without inference

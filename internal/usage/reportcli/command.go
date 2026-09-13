@@ -84,13 +84,13 @@ var (
 func render(renderer *lipgloss.Renderer, endpoint string, r report.Report, details bool) (string, error) {
 	var out strings.Builder
 	surfaceTextColor := terminalBackgroundColor(renderer)
-	fmt.Fprintf(&out, "Usage report — %s\nTimezone: %s | Range: %s to %s (exclusive) | Period: %s\nQuery time: %s\n", escapeASCII(endpoint), r.Timezone, r.Since, r.Until, r.Period, r.GeneratedAt.Format(time.RFC3339Nano))
+	fmt.Fprintf(&out, "Endpoint: %s\nTimezone: %s\nRange: %s to %s (exclusive)\nPeriod: %s\nQuery time: %s\n", escapeASCII(endpoint), r.Timezone, r.Since, r.Until, r.Period, r.GeneratedAt.Format(time.RFC3339Nano))
 	if r.Pricing == nil {
 		fmt.Fprintln(&out, "Estimated cost unavailable (daemon does not provide prices)")
 	} else {
-		fmt.Fprintf(&out, "Pricing: original-provider / models.dev rates / single cache-write rate | snapshot: %s (%s)", r.Pricing.Source, r.Pricing.Version)
+		fmt.Fprintf(&out, "Pricing snapshot: %s", r.Pricing.Version)
 		if r.Pricing.LastSuccess != nil {
-			fmt.Fprintf(&out, " | last successful fetch: %s", r.Pricing.LastSuccess.UTC().Format(time.RFC3339Nano))
+			fmt.Fprintf(&out, " (%s)", r.Pricing.LastSuccess.UTC().Format(time.RFC3339Nano))
 		}
 		fmt.Fprintln(&out)
 	}
@@ -131,8 +131,6 @@ func render(renderer *lipgloss.Renderer, endpoint string, r report.Report, detai
 	}
 	if r.Pricing == nil {
 		fmt.Fprintln(&out, "Persisted successful Turns observed by the Usage meter; best-effort and potentially incomplete. Optional-count coverage refers only to stored Turns.")
-	} else {
-		fmt.Fprintln(&out, "Estimated original-provider cost for persisted best-effort observations using the daemon's current accepted models.dev rates and single cache-write rates; not a Copilot bill; may exclude unpriceable Turns.")
 	}
 	return out.String(), nil
 }

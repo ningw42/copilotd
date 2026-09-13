@@ -279,7 +279,7 @@ Keep the 8 MiB response cap, bounded fragment encoding, two admission slots, fiv
 
 Keep the existing `Est. USD` column, three-decimal rounding, model rows, period totals, secondary native tables, model-resolution details, and exclusion notes. The CLI continues to sum supplied amounts and existing coverage with checked arithmetic; it never selects rates or applies a Fast factor.
 
-Do not add provenance labels, counters, fallback/derivation notes, service-tier details, or new older-daemon capability messages, including under `--details`. The existing generic estimated-cost/non-billing caveat is sufficient. Replace only the hard-coded `standard + context` / `standard/context` wording in the pricing header and final caveat with neutral `models.dev rates` wording, so the same text remains accurate for both old and new daemons without exposing calculation provenance.
+Do not add provenance labels, counters, fallback/derivation notes, service-tier details, or new older-daemon capability messages, including under `--details`. The compact pricing line identifies only the accepted models.dev content SHA-256 and successful sync timestamp when present. Omit fetched/fallback and rate-policy wording, and do not append a generic estimated-cost/non-billing caveat.
 
 Empty-history and native-only Estimated-cost-unavailable messages remain unchanged. Keep existing terminal-safe model escaping and complete-before-stdout behavior. `--json` still emits validated original bytes, unaffected by text-only totals or wording changes.
 

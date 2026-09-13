@@ -195,46 +195,36 @@ func setCostFixtureTotal(total *report.Total, turns int64, cost report.Cost) {
 	}
 }
 
-func TestCommandShowsPricingProvenanceAndEstimateCaveat(t *testing.T) {
+func TestCommandShowsOnlyPricingSnapshotIdentityAndSyncTime(t *testing.T) {
 	for _, tc := range []struct {
-		name, body, source string
-		lastSuccess        bool
+		name, body, want string
 	}{
-		{"fetched", costLayoutWire, "fetched", true},
-		{"fallback after successful fetch", strings.Replace(costLayoutWire, `"source":"fetched"`, `"source":"fallback"`, 1), "fallback", true},
-		{"cold fallback", strings.Replace(strings.Replace(costLayoutWire, `"source":"fetched"`, `"source":"fallback"`, 1), `"last_success":"2026-09-11T11:59:00Z"`, `"last_success":null`, 1), "fallback", false},
+		{"fetched", costLayoutWire, "Pricing snapshot: sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef (2026-09-11T11:59:00Z)"},
+		{"fallback after successful fetch", strings.Replace(costLayoutWire, `"source":"fetched"`, `"source":"fallback"`, 1), "Pricing snapshot: sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef (2026-09-11T11:59:00Z)"},
+		{"cold fallback", strings.Replace(strings.Replace(costLayoutWire, `"source":"fetched"`, `"source":"fallback"`, 1), `"last_success":"2026-09-11T11:59:00Z"`, `"last_success":null`, 1), "Pricing snapshot: sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			text, err := runCostWireCommand(t, tc.body, false, false, "all")
 			if err != nil {
 				t.Fatal(err)
 			}
-			for _, want := range []string{
-				"Pricing: original-provider / models.dev rates / single cache-write rate",
-				"snapshot: " + tc.source + " (sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef)",
-				"Estimated original-provider cost for persisted best-effort observations using the daemon's current accepted models.dev rates and single cache-write rates; not a Copilot bill; may exclude unpriceable Turns.",
-			} {
-				if !strings.Contains(text, want) {
-					t.Errorf("missing pricing provenance/caveat %q:\n%s", want, text)
-				}
+			if !strings.Contains(text, tc.want+"\n") {
+				t.Errorf("missing pricing snapshot %q:\n%s", tc.want, text)
 			}
-			fetchText := "last successful fetch: 2026-09-11T11:59:00Z"
-			if tc.lastSuccess && !strings.Contains(text, fetchText) {
-				t.Errorf("missing successful fetch time:\n%s", text)
-			}
-			if !tc.lastSuccess && strings.Contains(text, "last successful fetch:") {
-				t.Errorf("cold fallback invented a successful fetch time:\n%s", text)
-			}
+			assertTextExcludes(t, text,
+				"Pricing: original-provider", "snapshot: fetched", "snapshot: fallback",
+				"last successful fetch:", "Estimated original-provider cost for persisted best-effort observations",
+			)
 		})
 	}
 }
 
 func TestCommandPresentsPricingEnabledEmptySectionWithoutInventedRows(t *testing.T) {
 	text := commandOutput(t, pricedOpenAICommandReport(t, nil, "0"), true)
-	if strings.Count(text, "No stored Turns in the selected range.") != 1 || !strings.Contains(text, "Pricing: original-provider / models.dev rates / single cache-write rate") || !strings.Contains(text, "Estimated original-provider cost") {
+	if strings.Count(text, "No stored Turns in the selected range.") != 1 || !strings.Contains(text, "Pricing snapshot: sha256:abcdef") {
 		t.Fatalf("pricing-enabled empty presentation is incomplete:\n%s", text)
 	}
-	assertTextExcludes(t, text, "Est. USD", "estimated cost:", "Pricing model resolutions", "unknown_model=", "missing_usage=")
+	assertTextExcludes(t, text, "Est. USD", "estimated cost:", "Pricing model resolutions", "unknown_model=", "missing_usage=", "Estimated original-provider cost")
 }
 
 func TestCommandExplainsOlderDaemonWithoutInventingCostCoverage(t *testing.T) {
@@ -251,7 +241,7 @@ func TestCommandExplainsOlderDaemonWithoutInventingCostCoverage(t *testing.T) {
 			t.Errorf("older-daemon native row missing %q:\n%s", want, text)
 		}
 	}
-	assertTextExcludes(t, text, "estimated cost:", "unknown_model=", "ambiguous_model=", "missing_rate=", "missing_usage=", "inconsistent_usage=", "Pricing: original-provider")
+	assertTextExcludes(t, text, "estimated cost:", "unknown_model=", "ambiguous_model=", "missing_rate=", "missing_usage=", "inconsistent_usage=", "Pricing snapshot:")
 }
 
 func TestCommandDetailsListsDistinctTerminalSafePricingResolutions(t *testing.T) {
@@ -308,7 +298,7 @@ func TestCommandPricingJSONPreservesLiteralWireBytesIndependentOfDetails(t *test
 		if text != costLayoutWire+"\n" {
 			t.Fatalf("details=%t changed original pricing JSON", details)
 		}
-		assertTextExcludes(t, text, "Est. USD", "Pricing: original-provider", "Estimated original-provider cost", "Pricing model resolutions")
+		assertTextExcludes(t, text, "Est. USD", "Pricing snapshot:", "Estimated original-provider cost", "Pricing model resolutions")
 	}
 }
 
@@ -328,7 +318,7 @@ func TestCommandCostSubtotalOverflowEmitsNothingWhileJSONStaysOriginal(t *testin
 		if err != nil {
 			t.Fatal(err)
 		}
-		if strings.Count(text, strings.Repeat("9", 128)) != 4 || !strings.HasSuffix(text, "\n") || strings.Contains(text, "Pricing: original-provider") || strings.Contains(text, "Est. USD") {
+		if strings.Count(text, strings.Repeat("9", 128)) != 4 || !strings.HasSuffix(text, "\n") || strings.Contains(text, "Pricing snapshot:") || strings.Contains(text, "Est. USD") {
 			t.Fatalf("details=%t JSON did not bypass terminal subtotal/decorations: %s", details, text)
 		}
 	}

@@ -54,7 +54,8 @@ existing Nix development shell (native CI uses setup-go).
 - Acceptance includes both Surfaces/all, four periods, independent/default
   month bounds, explicit flag/env/TOML and process-discovered zones, exact case/
   whitespace/Unicode filters, compact/details/JSON, native and pricing coverage,
-  provenance/caveats, scope/help/root/version/operands, prefix-preserving proxying,
+  pricing snapshot identity/sync time, scope/help/root/version/operands,
+  prefix-preserving proxying,
   empty/disabled/unreachable/older-daemon/protocol errors, and real output-write
   errors. A frozen owned HTTP boundary verifies original JSON bytes and additive
   fields.
