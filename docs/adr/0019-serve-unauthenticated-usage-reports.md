@@ -99,8 +99,8 @@ period cost totals, coverage notes, provenance/caveat text, and resolution detai
 without repeating money in secondary tables or introducing a cross-Surface total.
 The current terminal presentation labels that column `Est. Cost ($)`, prefixes
 numeric values with `$`, and ends each primary table with the validated per-Surface
-whole-range `Grand total` regardless of period; it still introduces no
-cross-Surface total. #248
+whole-range `Total` in the period column with a blank `Model(s)` cell, regardless
+of period; it still introduces no cross-Surface total. #248
 adds per-Turn OpenAI response-tier valuation inside the pricing module: bounded
 `fast`/`priority` evidence selects accepted explicit Fast base rates and exact
 same-model/same-snapshot derived Fast context rates. It adds no report fields,

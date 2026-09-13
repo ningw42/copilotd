@@ -118,12 +118,13 @@ after `Model(s)` and before `Turns`; secondary native tables do not repeat money
 Numeric amounts have a `$` prefix and use exact daemon-supplied USD values rounded
 half up to three fractional digits. Each period starts with a terminal-only `Total`
 derived from its validated model rows and separated from the model breakdown. Each
-primary table ends with a per-Surface `Grand total` from the daemon's validated
-whole-range section total, regardless of the selected period. Text sums exact
-amounts before rounding, uses checked int64 coverage/native subtotal arithmetic,
-and fails before stdout if inconsistent rows or monetary addition would overflow;
-`--json` still emits the independently validated original bytes. Whole-range
-per-model totals remain in JSON and no cross-Surface grand total is introduced.
+primary table ends with a per-Surface whole-range `Total` in the period column,
+leaving `Model(s)` blank, from the daemon's validated section total regardless of
+the selected period. Text sums exact amounts before rounding, uses checked int64
+coverage/native subtotal arithmetic, and fails before stdout if inconsistent rows
+or monetary addition would overflow; `--json` still emits the independently
+validated original bytes. Whole-range per-model totals remain in JSON and no
+cross-Surface total is introduced.
 Anthropic appears first with **Uncached input**,
 Output, Cache create, and Cache read; OpenAI retains complete Input, Output, Cache write,
 and Cache read. TTL/thinking/reasoning subsets are never stacked onto their
@@ -193,7 +194,7 @@ keeps native counts usable and says
 `Estimated cost unavailable (daemon does not provide prices)`;
 it never prices locally. `--details` does not change JSON or make another request.
 There is no raw-Turn export, HTML, chart output, or cross-Surface monetary/token
-grand total.
+total.
 [Contention and lifecycle integration evidence](docs/research/2026-09-08-usage-reporting-concurrency.md)
 includes real blocked TCP output and native SQLite cleanup; the
 [release verification guide](docs/verification/usage-reporting.md) separates

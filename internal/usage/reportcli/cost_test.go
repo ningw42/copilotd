@@ -109,7 +109,7 @@ func TestCommandSumsExactServerAmountsBeforeRoundingPeriodTotals(t *testing.T) {
 	}
 }
 
-func TestCommandRendersGrandTotalAtBottomForEveryPeriod(t *testing.T) {
+func TestCommandRendersWholeRangeTotalInPeriodColumnAtBottom(t *testing.T) {
 	for _, tc := range []struct {
 		period, heading, since, until string
 	}{
@@ -139,13 +139,15 @@ func TestCommandRendersGrandTotalAtBottomForEveryPeriod(t *testing.T) {
 			if !hasTableRow(text, tc.heading, "Model(s)", "Est. Cost ($)", "Turns", "Input", "Output", "Cache write", "Cache read") {
 				t.Fatalf("missing %s cost heading:\n%s", tc.period, text)
 			}
-			if !hasTableRow(text, "", "Grand total", "$0.750", "2", "2", "2", "—", "—") {
-				t.Fatalf("missing %s grand total:\n%s", tc.period, text)
+			if !hasTableRow(text, "Total", "", "$0.750", "2", "2", "2", "—", "—") {
+				t.Fatalf("missing %s whole-range total in period column:\n%s", tc.period, text)
 			}
 			lines := strings.Split(text, "\n")
 			for index, line := range lines {
-				if strings.Contains(line, "Grand total") && (index+1 >= len(lines) || !strings.HasPrefix(strings.TrimSpace(lines[index+1]), "╰")) {
-					t.Fatalf("%s grand total is not the final table row:\n%s", tc.period, text)
+				cells := strings.Split(line, "│")
+				if len(cells) >= 3 && strings.TrimSpace(cells[1]) == "Total" && strings.TrimSpace(cells[2]) == "" &&
+					(index+1 >= len(lines) || !strings.HasPrefix(strings.TrimSpace(lines[index+1]), "╰")) {
+					t.Fatalf("%s whole-range total is not the final table row:\n%s", tc.period, text)
 				}
 			}
 		})
@@ -212,7 +214,7 @@ func TestCommandMarksAndExplainsPartialAndEntirelyUnpricedCosts(t *testing.T) {
 		{"2026-09-01", "Total", "$0.004*", "6", "2", "2", "—", "—"},
 		{"", "a", "$0.004*", "4", "1", "1", "—", "—"},
 		{"", "b", "—", "2", "1", "1", "—", "—"},
-		{"", "Grand total", "$0.004*", "6", "2", "2", "—", "—"},
+		{"Total", "", "$0.004*", "6", "2", "2", "—", "—"},
 	} {
 		if !hasTableRow(text, want...) {
 			t.Errorf("missing cost coverage row %q:\n%s", want, text)
@@ -222,7 +224,7 @@ func TestCommandMarksAndExplainsPartialAndEntirelyUnpricedCosts(t *testing.T) {
 		"2026-09-01 / Total — estimated cost: 1/6 priced stored Turns; unknown_model=1; ambiguous_model=1; missing_rate=1; missing_usage=1; inconsistent_usage=1",
 		"2026-09-01 / a — estimated cost: 1/4 priced stored Turns; unknown_model=1; missing_usage=1; inconsistent_usage=1",
 		"2026-09-01 / b — estimated cost: 0/2 priced stored Turns; ambiguous_model=1; missing_rate=1",
-		"Grand total — estimated cost: 1/6 priced stored Turns; unknown_model=1; ambiguous_model=1; missing_rate=1; missing_usage=1; inconsistent_usage=1",
+		"  Total — estimated cost: 1/6 priced stored Turns; unknown_model=1; ambiguous_model=1; missing_rate=1; missing_usage=1; inconsistent_usage=1",
 	} {
 		if strings.Count(text, want) != 1 {
 			t.Errorf("cost coverage note %q count != 1:\n%s", want, text)
@@ -280,7 +282,7 @@ func TestCommandExplainsOlderDaemonWithoutInventingCostCoverage(t *testing.T) {
 	for _, want := range [][]string{
 		{"Day", "Model(s)", "Est. Cost ($)", "Turns", "Input", "Output", "Cache write", "Cache read"},
 		{"2026-09-01", "Total", "—", "2", "9,007,199,254,740,993", "12", "—", "6,000*"},
-		{"", "Grand total", "—", "2", "9,007,199,254,740,993", "12", "—", "6,000*"},
+		{"Total", "", "—", "2", "9,007,199,254,740,993", "12", "—", "6,000*"},
 		{"Day", "Model(s)", "Turns", "Reasoning", "Reported total"},
 	} {
 		if !hasTableRow(text, want...) {
@@ -397,12 +399,12 @@ func TestCommandPlacesEstimatedCostOnlyInBothPrimarySurfaceTables(t *testing.T) 
 		{"Day", "Model(s)", "Est. Cost ($)", "Turns", "Uncached input", "Output", "Cache create", "Cache read"},
 		{"2026-09-01", "Total", "$0.003", "1", "12", "9", "2,000", "6,000"},
 		{"", "claude-observed", "$0.003", "1", "12", "9", "2,000", "6,000"},
-		{"", "Grand total", "$0.003", "1", "12", "9", "2,000", "6,000"},
+		{"Total", "", "$0.003", "1", "12", "9", "2,000", "6,000"},
 		{"Day", "Model(s)", "Turns", "Thinking", "Cache create 5m", "Cache create 1h"},
 		{"Day", "Model(s)", "Est. Cost ($)", "Turns", "Input", "Output", "Cache write", "Cache read"},
 		{"2026-09-01", "Total", "$0.000", "1", "8,012", "9", "2,000", "6,000"},
 		{"", "gpt-observed", "$0.000", "1", "8,012", "9", "2,000", "6,000"},
-		{"", "Grand total", "$0.000", "1", "8,012", "9", "2,000", "6,000"},
+		{"Total", "", "$0.000", "1", "8,012", "9", "2,000", "6,000"},
 		{"Day", "Model(s)", "Turns", "Reasoning", "Reported total"},
 	} {
 		if !hasTableRow(text, want...) {

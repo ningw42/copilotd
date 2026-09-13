@@ -181,21 +181,22 @@ comma-separated exact counts and ASCII-escaped model identities. Every primary
 Surface table places `Est. Cost ($)` after `Model(s)` and before `Turns`; numeric
 amounts carry a `$` prefix and round supplied exact amounts half up to three
 fractional digits. Terminal period totals add exact amounts before rounding, and
-each primary table ends with a per-Surface `Grand total` from the validated
-whole-range section total regardless of period. No cross-Surface grand total is
-introduced. A partial monetary subtotal has `*`; an entirely unpriced nonempty
-group has `—`; period/model/grand-total notes list priced/total stored Turns and
-each nonzero exclusion reason. Native `—` still means unreported, and native `*`
-still denotes partial optional-count coverage. Anthropic renders first with
+each primary table ends with a per-Surface whole-range `Total` in the period
+column, leaving `Model(s)` blank, from the validated section total regardless of
+period. No cross-Surface total is introduced. A partial monetary subtotal has
+`*`; an entirely unpriced nonempty group has `—`; period/model/whole-range-total
+notes list priced/total stored Turns and each nonzero exclusion reason. Native `—`
+still means unreported, and native `*` still denotes partial optional-count
+coverage. Anthropic renders first with
 Turns, Uncached input, Output, Cache create, and Cache read; OpenAI follows with
 Turns, Input, Output, Cache write, and Cache read.
 Each text section groups Reported-model rows by period and labels the first
 column as `Day`, `Week`, `Month`, or `Year`. A period starts with `Total`, followed
 by a horizontal rule and its model breakdown; another rule separates the next
 period. Whole-range per-model totals remain JSON-only, while each primary text
-table ends with its section's whole-range `Grand total`. A reported zero stays
-zero; an empty selection is explicitly labeled, not represented as proof of no
-consumption.
+table ends with its section's whole-range `Total` in the first column and a blank
+`Model(s)` cell. A reported zero stays zero; an empty selection is explicitly
+labeled, not represented as proof of no consumption.
 
 `--details` adds secondary native tables for the same period totals and
 Reported-model breakdowns, plus one de-duplicated terminal-safe list of distinct
@@ -238,8 +239,7 @@ sync time when present; fetched/fallback and valuation-policy labels are omitted
 No estimated-cost caveat is appended after the tables. A wholly absent pricing
 extension produces the exact older-daemon unavailable explanation and `—` cost
 cells without fabricated exclusions or local pricing. Raw-Turn export, HTML,
-charts, and cross-Surface grand totals are not
-provided.
+charts, and cross-Surface totals are not provided.
 
 The same listener serves exactly `GET`/`HEAD /usage/v1/report` without inference
 authentication or readiness/upstream work. A disabled meter returns

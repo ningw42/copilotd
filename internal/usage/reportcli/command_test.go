@@ -193,7 +193,7 @@ func TestCommandRendersPeriodTotalsBeforeModelBreakdowns(t *testing.T) {
 		t.Fatalf("period total does not precede model breakdown:\n%s", text)
 	}
 	if strings.Count(text, "\n├") != 5 {
-		t.Fatalf("total, period, and grand-total separators missing:\n%s", text)
+		t.Fatalf("total, period, and whole-range-total separators missing:\n%s", text)
 	}
 }
 
@@ -343,7 +343,7 @@ func TestCommandEscapesBoundarySpacesWithoutModelCollisions(t *testing.T) {
 			continue
 		}
 		cells := strings.Split(line, "│")
-		if len(cells) == 10 && strings.TrimSpace(cells[1]) == "" && strings.TrimSpace(cells[2]) != "Grand total" {
+		if len(cells) == 10 && strings.TrimSpace(cells[1]) == "" {
 			got = append(got, strings.TrimSpace(cells[2]))
 		}
 	}
@@ -495,7 +495,7 @@ func TestCommandRendersAnthropicNativeCoverageWithoutPeriodAnnotations(t *testin
 		}
 	}
 	if strings.Count(anthropic, "\n├") != 3 {
-		t.Fatalf("period total and grand total were not separated from one period's models: %s", anthropic)
+		t.Fatalf("period and whole-range totals were not separated from one period's models: %s", anthropic)
 	}
 	assertTextExcludes(t, text, "\x1b", "\u202e", `├─ "`, `└─ "`, "│ All ", "│ Period ", "[clipped]", "[in progress]")
 	assertTextExcludes(t, anthropic, `"a\x1b\n\u202e"`, `"z"`, "Cache write")

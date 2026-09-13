@@ -584,10 +584,13 @@ func TestUsageCostExecutableAcceptance(t *testing.T) {
 	}
 
 	text := usageExec(t, binary, nil, 0, "usage", "--endpoint", h.baseURL, "--timezone", "UTC", "--since", "2026-09-01", "--until", "2026-09-02", "--details")
-	for _, want := range []string{"Est. Cost ($)", "$37.000*", "$34.000", "Grand total", "Pricing snapshot: sha256:", "Pricing model resolutions (Reported → Pricing)", "gpt-tiered → openai/gpt-tiered (exact)", "gpt-tiered-fast → openai/gpt-tiered (suffix)", "shared → ambiguous", "unknown → unknown"} {
+	for _, want := range []string{"Est. Cost ($)", "$37.000*", "$34.000", "\n│ Total", "Pricing snapshot: sha256:", "Pricing model resolutions (Reported → Pricing)", "gpt-tiered → openai/gpt-tiered (exact)", "gpt-tiered-fast → openai/gpt-tiered (suffix)", "shared → ambiguous", "unknown → unknown"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("actual executable text missing %q: %s", want, text)
 		}
+	}
+	if strings.Contains(text, "Grand total") {
+		t.Errorf("actual executable text retained old whole-range label: %s", text)
 	}
 
 	artifact.Store(usageCostArtifactSecond)

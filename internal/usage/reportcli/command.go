@@ -162,10 +162,10 @@ func renderTables(renderer *lipgloss.Renderer, out *strings.Builder, period stri
 		return err
 	}
 	if includeCost {
-		rendered, coverage := renderTotal("Grand total", section.Total, columns, true, pricingAvailable)
-		rows = append(rows, append([]string{""}, rendered...))
+		rendered, coverage := renderTotal("", section.Total, columns, true, pricingAvailable)
+		rows = append(rows, append([]string{"Total"}, rendered...))
 		for _, note := range coverage {
-			notes = append(notes, "Grand total — "+note)
+			notes = append(notes, "Total — "+note)
 		}
 	}
 	renderTable(renderer, out, tableHeaders(period, columns, includeCost), rows)
