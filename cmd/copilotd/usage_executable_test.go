@@ -240,19 +240,26 @@ func TestUsageExecutableAcceptance(t *testing.T) {
 	})
 	t.Run("process_timezone", func(t *testing.T) {
 		args := []string{"usage", "--endpoint", endpoint, "--since", "2026-09-01", "--until", "2026-09-02", "--json"}
-		for _, zone := range []string{"Europe/Berlin", ""} {
-			code := 0
+		var windowsName string
+		for _, zone := range []string{"Europe/Berlin", "", ":"} {
 			if runtime.GOOS == "windows" {
-				code = 1
+				r := usageExecutableReport(t, usageExec(t, binary, map[string]string{"TZ": zone}, 0, args...))
+				if windowsName == "" {
+					windowsName = r.Timezone
+				}
+				if r.Timezone != windowsName {
+					t.Fatalf("Windows TZ changed native selection: TZ=%q timezone=%q want=%q", zone, r.Timezone, windowsName)
+				}
+				continue
 			}
-			out := usageExec(t, binary, map[string]string{"TZ": zone}, code, args...)
-			if runtime.GOOS == "windows" {
+			if zone == ":" {
+				out := usageExec(t, binary, map[string]string{"TZ": zone}, 1, args...)
 				if !strings.Contains(out, "--timezone Area/City") {
 					t.Fatal(out)
 				}
 				continue
 			}
-			r := usageExecutableReport(t, out)
+			r := usageExecutableReport(t, usageExec(t, binary, map[string]string{"TZ": zone}, 0, args...))
 			want := zone
 			if want == "" {
 				want = "UTC"
@@ -261,22 +268,23 @@ func TestUsageExecutableAcceptance(t *testing.T) {
 				t.Fatalf("process timezone: %q", r.Timezone)
 			}
 		}
-		out := usageExec(t, binary, map[string]string{"TZ": ":"}, 1, args...)
-		if !strings.Contains(out, "--timezone Area/City") {
-			t.Fatal(out)
-		}
 		if runtime.GOOS == "windows" {
 			absent := filepath.Join(t.TempDir(), "absent")
+			env := map[string]string{"GOROOT": absent, "ZONEINFO": absent, "TZ": "ignored"}
+			automatic := usageExecutableReport(t, usageExec(t, binary, env, 0, args...))
+			if automatic.Timezone != windowsName {
+				t.Fatalf("Windows embedded automatic selection=%q want=%q", automatic.Timezone, windowsName)
+			}
 			for _, zone := range []string{"Europe/Berlin", "UTC"} {
-				r := usageExecutableReport(t, usageExec(t, binary, map[string]string{"GOROOT": absent, "ZONEINFO": absent, "TZ": "ignored"}, 0, append(args, "--timezone", zone)...))
+				r := usageExecutableReport(t, usageExec(t, binary, env, 0, append(args, "--timezone", zone)...))
 				if r.Timezone != zone {
-					t.Fatal("Windows embedded zone changed")
+					t.Fatal("Windows embedded explicit zone changed")
 				}
 			}
 			if _, err := os.Stat(absent); !os.IsNotExist(err) {
 				t.Fatalf("runtime timezone sources not absent: %v", err)
 			}
-			t.Log("native Windows explicit embedded loading with absent runtime GOROOT/ZONEINFO; no Unix platform fallback exists")
+			t.Log("native Windows automatic and explicit embedded loading passed with absent runtime GOROOT/ZONEINFO; Windows TZ was ignored")
 		}
 	})
 	t.Run("system_timezone", func(t *testing.T) {
@@ -289,24 +297,40 @@ func TestUsageExecutableAcceptance(t *testing.T) {
 			}
 		}
 		usageExecEvidence(t, "system-observation", observations)
-		out := usageExec(t, binary, nil, -1, "usage", "--endpoint", endpoint, "--json")
+		systemEndpoint := endpoint
+		var calls atomic.Int32
+		var failureEndpoint *httptest.Server
+		if os.Getenv("COPILOTD_TEST_SYSTEM_ERROR") != "" {
+			failureEndpoint = httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { calls.Add(1) }))
+			defer failureEndpoint.Close()
+			systemEndpoint = failureEndpoint.URL
+		}
+		out := usageExec(t, binary, nil, -1, "usage", "--endpoint", systemEndpoint, "--json")
+		if wantError := os.Getenv("COPILOTD_TEST_SYSTEM_ERROR"); wantError != "" {
+			if json.Valid([]byte(out)) || !strings.Contains(out, wantError) || !strings.Contains(out, "--timezone Area/City") || calls.Load() != 0 {
+				t.Fatalf("controlled Windows failure=%q calls=%d output=%s", wantError, calls.Load(), out)
+			}
+			t.Logf("native Windows controlled failure occurred before HTTP: %s", wantError)
+			return
+		}
 		if json.Valid([]byte(out)) {
 			r := usageExecutableReport(t, out)
-			if runtime.GOOS == "windows" {
-				t.Fatal("Windows must not auto-discover")
-			}
 			if want := os.Getenv("COPILOTD_TEST_SYSTEM_ZONE"); want != "" && r.Timezone != want {
 				t.Fatalf("system zone=%q want=%q", r.Timezone, want)
 			}
-			t.Logf("native system-link discovery succeeded: %s", r.Timezone)
+			if runtime.GOOS == "windows" {
+				t.Logf("native Windows representative CLDR detection succeeded: %s", r.Timezone)
+			} else {
+				t.Logf("native system-link discovery succeeded: %s", r.Timezone)
+			}
 		} else {
 			if !strings.Contains(out, "--timezone Area/City") {
 				t.Fatal(out)
 			}
-			if os.Getenv("COPILOTD_TEST_SYSTEM_ZONE") != "" {
-				t.Fatal("controlled native system discovery is mandatory")
+			if runtime.GOOS == "windows" || os.Getenv("COPILOTD_TEST_SYSTEM_ZONE") != "" {
+				t.Fatal("controlled or native Windows system discovery is mandatory")
 			}
-			t.Log("untouched configuration intentionally unsupported; controlled native CI run must separately demonstrate supported system-link discovery")
+			t.Log("untouched Unix configuration intentionally unsupported; controlled native CI run must separately demonstrate supported system-link discovery")
 		}
 	})
 	t.Run("informational_and_local_errors", func(t *testing.T) {
@@ -317,7 +341,7 @@ func TestUsageExecutableAcceptance(t *testing.T) {
 		env := map[string]string{"COPILOTD_CONFIG": filepath.Join(root, "missing.toml"), "COPILOTD_ENDPOINT": edge.URL, "TZ": ":", "ZONEINFO": "/absent", "HOME": root, "LOCALAPPDATA": root, "XDG_CONFIG_HOME": root}
 		for _, args := range [][]string{nil, {"--help"}, {"help", "usage"}, {"usage", "--help"}, {"version"}, {"serve", "--help"}} {
 			out := usageExec(t, binary, env, 0, args...)
-			if len(args) > 0 && args[0] == "usage" && (!strings.Contains(out, "native Windows requires explicit") || strings.Contains(out, "--apikey")) {
+			if len(args) > 0 && args[0] == "usage" && (!strings.Contains(out, "representative Windows CLDR mapping") || strings.Contains(out, "--apikey")) {
 				t.Fatal(out)
 			}
 		}

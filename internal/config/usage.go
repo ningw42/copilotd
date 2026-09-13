@@ -33,7 +33,7 @@ func RegisterUsage(fs *ff.FlagSet) *UsageFlags {
 		stringField("period", "day", func(c *UsageConfig) *string { return &c.Period }, oneOf([]string{"day", "week", "month", "year"}), "calendar grouping: day, week, month, year (does not change range)"),
 		stringField("since", "", func(c *UsageConfig) *string { return &c.Since }, nil, "inclusive YYYY-MM-DD (omitted: current month's first day in requested zone)"),
 		stringField("until", "", func(c *UsageConfig) *string { return &c.Until }, nil, "exclusive YYYY-MM-DD (omitted: next month's first day in requested zone)"),
-		optionalStringField("timezone", func(c *UsageConfig) **string { return &c.Timezone }, "named Area/City or UTC (omitted: terminal-local on supported Unix; native Windows requires explicit)"),
+		optionalStringField("timezone", func(c *UsageConfig) **string { return &c.Timezone }, "named Area/City or UTC (omitted: terminal-local Unix or representative Windows CLDR mapping; exact territory then 001; dynamic-timezone API failure, empty/custom/unmapped key, disabled DST, missing default, or unloadable mapping requires explicit)"),
 		stringField("surface", "all", func(c *UsageConfig) *string { return &c.Surface }, oneOf([]string{"all", "anthropic", "openai"}), "native Surface selection: all, anthropic, openai"),
 		optionalStringField("model", func(c *UsageConfig) **string { return &c.Model }, "exact non-empty UTF-8 Reported model (case/whitespace preserved; no aliases)"),
 		boolField("details", false, func(c *UsageConfig) *bool { return &c.Details }, "secondary native tables and Pricing-model resolutions"),

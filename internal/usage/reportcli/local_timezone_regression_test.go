@@ -14,6 +14,11 @@ import (
 // These retained boundary cases exercise the implemented policy through Run;
 // the development log distinguishes them from the preceding red/green tracers.
 func TestCommandLocalTimezoneConfigurationRegressions(t *testing.T) {
+	windowsCentralUS := func(f timezoneFiles) {
+		f.system.windowsEvidence = func() windowsTimezoneEvidence {
+			return windowsTimezoneEvidence{DynamicStatus: windowsEvidenceSuccess, KeyName: "Central Standard Time", TerritoryStatus: windowsEvidenceSuccess, Territory: "US"}
+		}
+	}
 	for _, tc := range []struct {
 		name, goos string
 		env        map[string]string
@@ -25,9 +30,9 @@ func TestCommandLocalTimezoneConfigurationRegressions(t *testing.T) {
 		{"configured UTC", "linux", map[string]string{"TZ": ""}, nil, "UTC"},
 		{"macOS configured UTC", "darwin", map[string]string{"TZ": ""}, nil, "UTC"},
 		{"empty data overrides", "linux", map[string]string{"TZ": "Etc/GMT+5", "TZDIR": "", "ZONEINFO": ""}, nil, "Etc/GMT+5"},
-		{"Windows ignores named TZ", "windows", map[string]string{"TZ": "Europe/Berlin"}, nil, ""},
-		{"Windows ignores empty TZ", "windows", map[string]string{"TZ": ""}, nil, ""},
-		{"Windows absent TZ", "windows", nil, nil, ""},
+		{"Windows ignores named TZ", "windows", map[string]string{"TZ": "Europe/Berlin"}, windowsCentralUS, "America/Chicago"},
+		{"Windows ignores empty TZ", "windows", map[string]string{"TZ": ""}, windowsCentralUS, "America/Chicago"},
+		{"Windows absent TZ", "windows", nil, windowsCentralUS, "America/Chicago"},
 		{"lone colon", "linux", map[string]string{"TZ": ":"}, nil, ""},
 		{"two colons", "linux", map[string]string{"TZ": "::Europe/Berlin"}, nil, ""},
 		{"Local is not discovery", "linux", map[string]string{"TZ": "Local"}, nil, ""},

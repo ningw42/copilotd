@@ -11,8 +11,9 @@
 design's historical no-built-in-query non-goal with unauthenticated daemon-owned
 reports and a terminal HTTP client. #207–#209 implement native Anthropic/OpenAI
 and combined reports with all calendar periods, named zones, and independent
-month defaults; #210 adds supported Unix terminal-local discovery and native
-Windows explicit-only behavior. #211 adds exact Reported-model filters, detailed
+month defaults; #210 adds supported Unix terminal-local discovery, and #256
+adds representative native-Windows detection from direct Win32 evidence and
+pinned CLDR 48 mappings. #211 adds exact Reported-model filters, detailed
 native tables, and validated original-byte JSON. #212 retains integrated
 contention/lifecycle evidence; #213 adds executable acceptance and native CI.
 Actual release certification is revision-specific; see the

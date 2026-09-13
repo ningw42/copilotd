@@ -5,7 +5,8 @@
 The native reporting contract in
 [ADR-0019](../adr/0019-serve-unauthenticated-usage-reports.md) and the
 [design](../design/2026-09-07-usage-reporting-design.md) is implemented by
-#207–#211. [#212 evidence](../research/2026-09-08-usage-reporting-concurrency.md)
+#207–#211, with #256 adding representative native-Windows timezone detection.
+[#212 evidence](../research/2026-09-08-usage-reporting-concurrency.md)
 retains real inference/report concurrency, native SQLite interruption/cleanup,
 TCP backpressure, and graceful/forced drain tests. #213 adds real-executable
 acceptance, the native pipeline, and final local verification. The additive
@@ -147,8 +148,14 @@ inventory also names cost-source floor/fetch/fallback isolation, one-snapshot
 reporting, public CLI rounding/exact-total/coverage/compatibility behavior, and
 the actual cost executable test so those capabilities cannot disappear behind a
 package-level pass.
-Bodyless work-deadline precedence is also required. Unix SIGPIPE (including
-malformed flags and help-validation errors with closed stderr) and INT/TERM
+Bodyless work-deadline precedence is also required. On Windows, explicit passes
+are required for the real Win32 timezone adapter and the test-only effective-year/
+per-year representative transition comparison. Each controlled timezone case has
+its own uncached actual-executable log and mandatory subtest accounting. All four
+controlled cases require separately accounted native adapter evidence; successful
+selections additionally require annual-rule evidence.
+Unix SIGPIPE (including malformed flags and help-validation errors with closed
+stderr) and INT/TERM
 executable checks are mandatory on Linux/macOS and explicit `not_applicable`
 entries on Windows, where their build tags exclude them.
 All tests execute; this inventory does not replace or narrow the suite.
@@ -169,14 +176,26 @@ CGO-disabled SQLite/integration tests remain mandatory on both Windows targets.
 ### Timezone evidence is platform-specific
 
 Every native acceptance run invokes the actual CLI with `TZ`, `TZDIR`, and
-`ZONEINFO` absent and captures `/etc/localtime`, recognized root aliases and
-resolved paths on Unix. A supported image records its accepted name; an
-unsupported untouched configuration must retain the correct override guidance.
+`ZONEINFO` absent. Unix captures `/etc/localtime`, recognized root aliases and
+resolved paths; Windows records bounded direct-API key/DST/territory/bias/transition
+and CLDR selection/loader evidence. Rejections distinguish a loader that was not
+attempted from one that failed, and a loader failure retains the attempted ordered
+candidates, selected name, and mapping reason. A supported image records its
+accepted name; an unsupported untouched Unix configuration retains the correct
+override guidance.
 Then Linux/macOS CI separately installs a known `Europe/Berlin` system symlink
 on the **disposable hosted VM**, tests the real system-link path with no explicit
-zone, and restores the original link/file. Commands, results and controlled-vs-
-untouched labels are recorded. `-native-ci` refuses to mutate a local machine.
-This does not relax discovery policy or mislabel a named `TZ` as system discovery.
+zone, and restores the original link/file. Windows CI snapshots `tzutil /g` and
+`Get-WinHomeLocation` state, immediately defers restoration, and verifies both
+restored values after all controlled cases. It also records the bounded
+`TimeZoneInfo.Local.Id` value at each observation as an independent cross-check;
+that .NET value is neither a production input nor a required equality with the
+`_dstoff` form returned by `tzutil`. Setup, state mismatch, test failure,
+restore command failure, or restore mismatch fails verification. Commands, results
+and controlled-vs-untouched labels are recorded. `-native-ci` refuses to mutate a
+local machine. PowerShell and `tzutil` are verification tools only; production
+calls Win32 directly. This does not relax Unix discovery policy or mislabel a
+named `TZ` as system discovery.
 
 - Linux also requires the two static-executable `unshare -Ur chroot` tests. The
   no-host-data jail contains only the executable; the discovery jail separately
@@ -187,11 +206,25 @@ This does not relax discovery policy or mislabel a named `TZ` as system discover
   failure is a blocker. Isolation fixtures resolve absolute host `unshare` and
   `chroot` paths before sanitizing the child environment; `PATH=/absent` proves
   the jailed CLI needs neither developer search paths nor companion tools.
-- Native Windows requires explicit named zones in flag/env/TOML, including
-  `Europe/Berlin` and `UTC`, and intentional no-auto guidance even with OS `TZ`.
-  Both daemon and CLI run with absent runtime `ZONEINFO`/`GOROOT` sources after
-  build. Windows has no Unix platform zoneinfo fallback, so these are actual
-  embedded-loading observations on each native architecture.
+- Native Windows preserves explicit flag/environment/TOML overrides, ignores OS
+  `TZ` for detection, and runs both automatic and explicit names with absent
+  runtime `ZONEINFO`/`GOROOT` after build. The controlled actual-executable cases
+  set home location to US and require: `Central Standard Time` →
+  `America/Chicago` by exact territory; `China Standard Time` → `Asia/Shanghai`
+  and `Nepal Standard Time` → `Asia/Katmandu` by `001` fallback; and
+  `Central Standard Time_dstoff` → dynamic-DST-disabled failure before any HTTP.
+  Every controlled state reruns the native adapter evidence test, including the
+  disabled state where shared loading must be recorded as `not_attempted`.
+  Successful selections also run the test-only
+  `GetDynamicTimeZoneInformationEffectiveYears`/
+  `GetTimeZoneInformationForYear` evidence. Representative annual Windows rules
+  are compared to the selected IANA rules over bounded years; a fixed zone with
+  no Dynamic DST registry range records `ERROR_FILE_NOT_FOUND` as
+  `no_dynamic_range` and still compares per-year fixed rules using only the base
+  bias because standard/daylight biases are ignored without transitions. This
+  comparison is validation evidence, never production selection logic. Windows has no Unix
+  platform zoneinfo fallback, so absent runtime sources are actual embedded-loading
+  observations on each native architecture.
 - Normal macOS named loading/system discovery is **not** no-host-data isolation.
   Setting only `ZONEINFO`/`GOROOT` absent does not remove its platform zone files.
   No macOS no-host-data sandbox claim is made; Darwin still requires libSystem.
@@ -242,6 +275,15 @@ nix flake check
 # Native local Linux CGO0 full suite, build metadata, CLI evidence and isolation;
 # no local system setting changes (do not pass -native-ci):
 nix develop -c go run ./scripts/verify-usage -target linux/amd64 -runner local-nix
+```
+
+On a native Windows amd64 development host, run the corresponding local gate
+without changing the host timezone or location:
+
+```powershell
+$env:CGO_ENABLED = '0'
+go run ./scripts/verify-usage -target windows/amd64 -runner local
+Remove-Item Env:CGO_ENABLED
 ```
 
 Also build `./cmd/copilotd` with `CGO_ENABLED=0` for all four release target pairs
@@ -419,7 +461,8 @@ are not superseded by a green rerun or by these setup changes:
   `os.Readlink` observations as Unix slash names. Each created fixture checks
   that the observed target round-trips to its authored name, without stripping
   volume prefixes or replacing real symlink/Lstat/Open operations. Production
-  timezone discovery and Windows explicit-only policy are unchanged.
+  timezone discovery and the then-current Windows explicit-only policy were
+  unchanged by those corrections; #256 later supersedes the Windows policy.
 - **Backpressure:** Windows buffered complete legal ~6.29 MB (>6 MiB) report bodies,
   so the original fixture had not blocked an application write. Only the slow
   scenarios now use real accepted TCP sockets with a requested 16 KiB send

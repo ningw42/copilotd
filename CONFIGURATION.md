@@ -53,8 +53,8 @@ exit 1; complete reports (including empty reports) exit 0.
 
 **Currently supported:** `--surface all` (the default), `anthropic`, or `openai`,
 with `--period day|week|month|year` and a named timezone. Omitted `--timezone`
-selects supported terminal-local configuration on Linux/macOS; native Windows
-requires an explicit override.
+selects supported terminal-local configuration on Linux/macOS or a representative
+pinned-CLDR mapping from native Windows evidence.
 `--since` (inclusive) and `--until` (exclusive) are strict `YYYY-MM-DD`, between
 `1970-01-01` and `9999-01-01`, with since before until. Each omitted bound
 **independently** selects the current month's first day or the next month's first
@@ -118,10 +118,22 @@ second precedence order.
   changes, or selected directory identity/type changes, fail. Unrelated directory
   size/mtime activity and later changes to unused roots do not. Do not reverse-match
   bytes, current offsets/abbreviations, `time.Local`, or stale `/etc/timezone` metadata.
-- Native Windows always requires `--timezone`, `COPILOTD_TIMEZONE`, or selected
-  TOML `timezone`. No registry/CLDR mapping or Windows `TZ` inference is used.
-  WSL follows Linux. Explicit named loading retains the embedded fallback on
-  every supported target; no generated name allowlist is introduced.
+- On native Windows, call `GetDynamicTimeZoneInformation` directly and require
+  a nonempty registry key with dynamic daylight behavior enabled. Read a user
+  ISO territory through `GetUserDefaultGeoName` when available and usable. Select
+  the first ordered CLDR 48 candidate for the exact key/territory mapping; if
+  territory lookup is unavailable, malformed, or unmapped for the key, select
+  the first candidate from that key's `001` mapping. The result is representative,
+  not a claim about the user's unique city, and it is accepted only after shared
+  timezone loading succeeds. Dynamic-timezone API failures, empty/custom/unmapped
+  keys, disabled dynamic daylight behavior, missing `001` defaults, and unloadable names require
+  an explicit override before HTTP. Production does not infer from Windows `TZ`,
+  current offsets, localized names, `time.Local`, PowerShell, or .NET, and never
+  silently selects UTC. WSL follows Linux. CLDR 48 source, Unicode license,
+  immutable identity, generator, and upgrade procedure live under
+  `internal/usage/reportcli/windowszonesdata`; a data upgrade is separately
+  reviewed. Explicit named loading retains the embedded fallback on every
+  supported target.
 
 Failure exits 1 before HTTP with bounded guidance such as
 `cannot determine a named local timezone (unidentifiable or ambiguous zone file); pass --timezone Area/City (or --timezone UTC)`.

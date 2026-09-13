@@ -2,8 +2,9 @@
 
 **Status:** agreed design; #207–#210 implement native Anthropic/OpenAI and combined
 reports with all four calendar periods, named zones, independent month defaults,
-baseline safeguards, and conservative Unix terminal-local timezone discovery
-(native Windows explicit-only). #211 adds exact UTF-8 Reported-model filters,
+baseline safeguards, and conservative Unix terminal-local timezone discovery.
+#256 adds representative native-Windows detection from direct Win32 evidence and
+pinned CLDR 48 mappings. #211 adds exact UTF-8 Reported-model filters,
 detailed native tables, and validated original-byte CLI JSON. #212 retains
 [concurrency/lifecycle evidence](../research/2026-09-08-usage-reporting-concurrency.md),
 including the corrected test-client connection-ownership regression. #213 adds
@@ -336,11 +337,21 @@ resolves and no explicit timezone override was supplied:
 3. **No metadata guesses:** never use `/etc/timezone` alone (it can be stale),
    compare the current offset/abbreviation, or reverse-match zone-file bytes.
    Missing/unidentifiable configuration fails with explicit-override guidance.
-4. **Native Windows:** v1 requires `--timezone` or its configuration/environment
-   equivalent. Windows dynamic timezone keys and CLDR default mappings do not
-   establish one unambiguous IANA location; no mapping dependency is introduced.
-   Do not treat Windows `TZ` as Unix discovery when Go's Windows initialization
-   ignores it. WSL uses the Linux procedure.
+4. **Native Windows:** read `TimeZoneKeyName` and
+   `DynamicDaylightTimeDisabled` directly with `GetDynamicTimeZoneInformation`.
+   Reject a failed dynamic-timezone call, empty/custom/unmapped key, or disabled
+   dynamic daylight behavior. Read a two-letter user ISO territory with
+   `GetUserDefaultGeoName`
+   when that API succeeds. Preserve CLDR 48 candidate order: select the first
+   candidate for the exact key/territory pair, or the first candidate for that
+   key's `001` mapping when territory is unavailable, malformed, or has no exact
+   mapping. Validate the selected IANA-style name through the shared report
+   timezone loader before HTTP. Missing defaults and unloadable selected names
+   are errors. This is deliberately a **representative** mapping, not evidence of
+   a unique city. Production calls Win32 directly and does not use Windows `TZ`,
+   current offsets, localized standard/daylight names, `time.Local`, PowerShell,
+   .NET, ICU, or territory alone as identity evidence. It never silently selects
+   UTC. WSL uses the Linux procedure.
 
 An explicitly empty `--timezone`/`COPILOTD_TIMEZONE`/TOML value is still invalid;
 it is not the OS `TZ` setting. Explicit overrides bypass discovery, not name
@@ -350,12 +361,17 @@ The raw HTTP route requires `timezone`; absence is 400, not a daemon-local or UT
 default.
 
 The [timezone research](../research/2026-09-07-usage-report-timezones.md) records
-primary sources and the CGO-disabled loading probes. Its generated name-allowlist
-option is **not selected for v1**: the interface promises a validated loadable
-identifier and daemon-owned rules, not certification that operator-supplied
-`ZONEINFO` data is pristine IANA data. A maintained name registry or embedded-only
-rules snapshot would add build/data ownership without guaranteeing that a
-terminal's custom rules match the daemon. Custom automatic-discovery inputs are
+primary sources and the original conservative Unix/Windows-v1 disposition; #256
+supersedes only that document's native-Windows explicit-only decision. Its
+separate generated IANA name-allowlist option remains **not selected**: the
+interface promises a validated loadable identifier and daemon-owned rules, not
+certification that operator-supplied `ZONEINFO` data is pristine IANA data. The
+new Windows mapping table is instead a pinned transformation from native Windows
+key/territory evidence to ordered CLDR candidates. Its release-48 XML, Unicode
+license, immutable source identity, offline deterministic generator, provenance,
+and separately reviewed upgrade policy live in
+`internal/usage/reportcli/windowszonesdata`. It does not force embedded-only rules
+or make explicit operator data pristine. Custom automatic-discovery inputs are
 rejected instead. Newer-than-bundled names may require a newer daemon; never
 mislabel that error as UTC. #210 implements the Unix discovery procedure with
 40-hop component-aware traversal and bounded TZif verification (at most 1 MiB).
@@ -367,10 +383,16 @@ consistency proof. The final recheck covers that filename path, the establishing
 root alias, selected directory identity/type, symlink targets, and regular TZif
 identity/mode/size/mtime. Directory size/mtime alone and later changes to unused
 or initially absent alternative roots are deliberately outside that proof.
-Public-command fixtures cover Linux/macOS layouts and Windows explicit-only
-behavior; Linux static-executable isolation also covers system discovery and
-embedded loading. Native execution remains a revision-specific release-verification
-obligation; deterministic fixtures are not certification.
+Public-command fixtures cover Linux/macOS layouts and injected Windows evidence
+policies; Windows native tests call the real APIs and actual executable. Linux
+static-executable isolation also covers system discovery and embedded loading.
+Native execution remains a revision-specific release-verification obligation;
+deterministic fixtures are not certification. On disposable `-native-ci` Windows
+hosts, verification snapshots timezone/home-location state, defers fail-closed
+restoration, and exercises Central/US exact mapping, China/US and Nepal/US `001`
+fallbacks, plus dynamic-DST-disabled failure before HTTP. Test-only effective-year
+and per-year APIs compare representative Windows annual rules with the selected
+IANA rules; production selection does not depend on that comparison.
 See the [verification pipeline and evidence guide](../verification/usage-reporting.md).
 
 ### Range and buckets
@@ -966,6 +988,12 @@ literal expected reports, not tests coupled to private SQL strings.
   daemon-down/older-daemon errors, bounded bodies, timeout, and cancellation.
 - Explicit timezone precedence, terminal-local named detection, ambiguous or
   missing detection errors, and no fallback to daemon local time or UTC.
+  Native Windows covers exact-territory/ordered-first/`001` fallback, unavailable
+  territory, API/custom/empty/unmapped/disabled-DST/unloadable failures, forbidden
+  non-identity hints, and shared-loader validation through deterministic injected
+  fixtures. Both native architectures additionally require real Win32 adapter,
+  controlled actual-executable, embedded-loading, and annual-rule comparison
+  passes with fail-closed verifier accounting.
 - Exact HTTP query parameters; terminal and daemon hosts with different zones;
   no API key, GitHub OAuth token, database path, or Upstream call dependency.
 - Both native period-grouped layouts, presentation-derived `Total` rows,
@@ -995,7 +1023,8 @@ policy stays in the owning module, not duplicated across tickets or renderers.
 | [#207](https://github.com/ningw42/copilotd/issues/207) — daily OpenAI end to end | Sections 2–4 and 6–11 for explicit OpenAI/day/UTC/date bounds: report value, real schema-v2 reader, all baseline safeguards, report-specific errors, local HTTP handler, client validation, isolated config, compact output, and exposure docs | None |
 | [#208](https://github.com/ningw42/copilotd/issues/208) — Anthropic and combined reports | Sections 6, 8, 9, 11: native Anthropic counts, combined snapshot, attribution, empty/unselected sections, and whole-request budgets | #207 |
 | [#209](https://github.com/ningw42/copilotd/issues/209) — periods and explicit named zones | Sections 4–5 and 11: all periods, default bounds, named-zone validation/loading, calendar edges and regression cases | #207 |
-| [#210](https://github.com/ningw42/copilotd/issues/210) — terminal-local timezone default | Sections 4–5 and 11: presence-aware overrides, conservative platform discovery, failure guidance, and resolver tests | #209 |
+| [#210](https://github.com/ningw42/copilotd/issues/210) — terminal-local timezone default | Sections 4–5 and 11: presence-aware overrides, conservative Unix discovery, native-Windows explicit-only v1 baseline, failure guidance, and resolver tests | #209 |
+| [#256](https://github.com/ningw42/copilotd/issues/256) — native Windows timezone detection | Sections 4–5 and 11: direct Win32 evidence, pinned CLDR 48 representative mapping, controlled actual-executable/native-rule evidence, failure guidance, and documentation | #210, #213 |
 | [#211](https://github.com/ningw42/copilotd/issues/211) — filters, details, JSON | Sections 4, 6, 8–9, 11: exact UTF-8 model filters and guarded predicates, detailed native tables, validated original-byte JSON, and output-error tests | #208 |
 | [#212](https://github.com/ningw42/copilotd/issues/212) — concurrent inference and shutdown | Sections 7–8, 10–11: integrated contention/admission/cancellation/slow-reader/shutdown evidence and pinned-driver characterization | #208 |
 | [#213](https://github.com/ningw42/copilotd/issues/213) — release verification | Sections 10–12: complete executable acceptance, documentation/status agreement, revision-specific native-platform run evidence, and the full verification suite | #210, #211, #212 |

@@ -23,8 +23,9 @@ the in-memory-only treatment of Copilot tokens or cached values.
 the original external-query-only scope with daemon-owned reports and an HTTP
 terminal client. Reports support Anthropic, OpenAI, or both, with all calendar
 periods, named zones, and independent month defaults (#207–#209). #210 adds
-conservative terminal-local discovery on supported Unix configurations, with
-native Windows explicit-only. #211 adds exact Reported-model filters, detailed
+conservative terminal-local discovery on supported Unix configurations; #256
+adds representative native-Windows detection from direct Win32 evidence and
+pinned CLDR 48 mappings. #211 adds exact Reported-model filters, detailed
 native tables, and validated original-byte JSON. #212 retains integrated
 contention/lifecycle evidence. #213 adds executable acceptance and native CI;
 actual target/revision certification is tracked in its retained results, not
