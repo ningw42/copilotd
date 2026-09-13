@@ -4,8 +4,11 @@
 Targets: linux/amd64, windows/amd64, windows/arm64, darwin/arm64; CGO disabled.
 
 **Design disposition:** the [reporting design](../design/2026-09-07-usage-reporting-design.md)
-selects the conservative platform approach below, but not the optional generated
-name allowlist. It also recognizes an explicitly empty Unix OS `TZ` as the
+originally selected the conservative platform approach below, but not the optional
+generated name allowlist. Issue #256 later supersedes this document's native-Windows
+explicit-only recommendation with a direct-Win32, representative pinned-CLDR-48
+mapping; the Unix analysis and rejection of a general IANA-name allowlist remain
+applicable. The design also recognizes an explicitly empty Unix OS `TZ` as the
 configured UTC choice, rather than treating that case as failed discovery.
 Recommendations below remain research alternatives; the design owns policy.
 

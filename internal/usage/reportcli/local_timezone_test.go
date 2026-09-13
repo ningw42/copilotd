@@ -557,17 +557,64 @@ func TestCommandInvalidUnixTZNeedsSafeGuidanceBeforeHTTP(t *testing.T) {
 	}
 }
 
-func TestCommandNativeWindowsRequiresExplicitTimezone(t *testing.T) {
+func TestCommandNativeWindowsUsesRepresentativeCLDRMappingAndIgnoresTZ(t *testing.T) {
 	client, options, requested := localTimezoneCommand(t)
-	options.localSystem = &localTimezoneSystem{goos: "windows", lookupEnv: func(key string) (string, bool) {
-		if key == "TZ" {
-			return "Europe/Berlin", true
-		}
-		return "", false
-	}}
+	options.localSystem = &localTimezoneSystem{
+		goos: "windows",
+		lookupEnv: func(string) (string, bool) {
+			t.Fatal("native Windows discovery inspected Unix environment")
+			return "", false
+		},
+		windowsEvidence: func() windowsTimezoneEvidence {
+			return windowsTimezoneEvidence{dynamicStatus: windowsEvidenceSuccess, keyName: "Central Standard Time", territoryStatus: windowsEvidenceSuccess, territory: "US"}
+		},
+	}
+	var out bytes.Buffer
+	if err := Run(context.Background(), client, options, &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(*requested) != 1 || (*requested)[0] != "America/Chicago" || !strings.Contains(out.String(), "Timezone: America/Chicago") {
+		t.Fatalf("requests=%v stdout=%s", *requested, out.String())
+	}
+}
+
+func TestCommandNativeWindowsForbidsNonIdentityHintsAndTerritoryAlone(t *testing.T) {
+	previous := time.Local
+	// A localized display-style name and current offset exposed through
+	// time.Local are intentionally not part of windowsTimezoneEvidence.
+	time.Local = time.FixedZone("Central Standard Time", -6*60*60)
+	t.Cleanup(func() { time.Local = previous })
+	client, options, requested := localTimezoneCommand(t)
+	options.localSystem = &localTimezoneSystem{
+		goos:      "windows",
+		lookupEnv: func(key string) (string, bool) { return "America/Chicago", key == "TZ" },
+		windowsEvidence: func() windowsTimezoneEvidence {
+			// Territory without a successful nonempty registry key is not identity.
+			return windowsTimezoneEvidence{dynamicStatus: windowsEvidenceSuccess, territoryStatus: windowsEvidenceSuccess, territory: "US"}
+		},
+		windowsCandidates: func(string, string) []string {
+			t.Fatal("territory, Windows TZ, localized name, or current offset reached candidate lookup")
+			return nil
+		},
+	}
 	var out bytes.Buffer
 	err := Run(context.Background(), client, options, &out)
-	if err == nil || !strings.Contains(err.Error(), "native Windows") || !strings.Contains(err.Error(), "--timezone Area/City") || len(*requested) != 0 || out.Len() != 0 {
+	if err == nil || !strings.Contains(err.Error(), "key is empty or custom") || len(*requested) != 0 || out.Len() != 0 {
+		t.Fatalf("err=%v requests=%v stdout=%s", err, *requested, out.String())
+	}
+}
+
+func TestCommandNativeWindowsDynamicDSTDisabledFailsBeforeHTTP(t *testing.T) {
+	client, options, requested := localTimezoneCommand(t)
+	options.localSystem = &localTimezoneSystem{
+		goos: "windows",
+		windowsEvidence: func() windowsTimezoneEvidence {
+			return windowsTimezoneEvidence{dynamicStatus: windowsEvidenceSuccess, keyName: "Central Standard Time", dynamicDaylightTimeDisabled: true}
+		},
+	}
+	var out bytes.Buffer
+	err := Run(context.Background(), client, options, &out)
+	if err == nil || !strings.Contains(err.Error(), "dynamic daylight time is disabled") || !strings.Contains(err.Error(), "--timezone Area/City") || len(*requested) != 0 || out.Len() != 0 {
 		t.Fatalf("err=%v requests=%v stdout=%s", err, *requested, out.String())
 	}
 }
@@ -577,6 +624,7 @@ func TestCommandCustomZONEINFORequiresOverrideBeforeHTTP(t *testing.T) {
 	t.Setenv("TZDIR", "")
 	t.Setenv("ZONEINFO", "/custom")
 	client, options, requested := localTimezoneCommand(t)
+	options.localSystem = &localTimezoneSystem{goos: "linux", lookupEnv: os.LookupEnv}
 	var out bytes.Buffer
 	err := Run(context.Background(), client, options, &out)
 	if err == nil || !strings.Contains(err.Error(), "--timezone Area/City") || len(*requested) != 0 || out.Len() != 0 {
@@ -589,6 +637,7 @@ func TestCommandCustomTZDIRRequiresOverrideBeforeHTTP(t *testing.T) {
 	t.Setenv("TZDIR", "/custom\x1b[31m")
 	t.Setenv("ZONEINFO", "")
 	client, options, requested := localTimezoneCommand(t)
+	options.localSystem = &localTimezoneSystem{goos: "linux", lookupEnv: os.LookupEnv}
 	var out bytes.Buffer
 	err := Run(context.Background(), client, options, &out)
 	if err == nil || !strings.Contains(err.Error(), "cannot determine a named local timezone") || !strings.Contains(err.Error(), "--timezone Area/City") || strings.ContainsAny(err.Error(), "\x1b\n") || len(err.Error()) > 300 || len(*requested) != 0 || out.Len() != 0 {

@@ -3,8 +3,10 @@
 **Status:** maintainer-approved direction on 2026-09-07; native Anthropic, OpenAI,
 and combined reports with all calendar periods, explicit named zones, and month
 range defaults implemented in #207–#209; #210 adds conservative Unix terminal-local
-timezone discovery and the native Windows explicit-only policy. #211 adds exact
-Reported-model filters, detailed native tables, and validated original-byte JSON.
+timezone discovery. #256 revises native Windows omission from explicit-only to a
+documented representative CLDR 48 mapping derived from direct Win32 evidence.
+#211 adds exact Reported-model filters, detailed native tables, and validated
+original-byte JSON.
 #212 retains integrated concurrency/lifecycle evidence; #213 adds complete
 executable acceptance and the native pipeline. The estimated-cost follow-up adds
 daemon-owned valuation in #236 and its atomic additive version-1 HTTP contract in
@@ -57,14 +59,19 @@ not an inference-authentication exemption accidentally inherited from probes.
   inference readiness or writer admission. Work/admission limits reduce normal
   interference but are not resource isolation from untrusted traffic.
 - The CLI defaults to the terminal host's named timezone and sends it explicitly.
-  Ambiguous local detection requires `--timezone`; neither a current UTC offset
-  nor the daemon's local clock silently replaces that choice. Filesystem
-  discovery initially evaluates every recognized root for ambiguity, forbidden
-  provenance, and unreadable evidence. After one name is selected, its final
-  consistency check is deliberately limited to the selected filename path and
-  the root alias that established that name. Selected directory identity/type,
-  symlink, and TZif changes still fail; unrelated directory size/mtime activity
-  and later changes to unused roots do not.
+  Ambiguous or unsupported local detection requires `--timezone`; neither a
+  current UTC offset nor the daemon's local clock silently replaces that choice.
+  Unix filesystem discovery initially evaluates every recognized root for
+  ambiguity, forbidden provenance, and unreadable evidence. After one name is
+  selected, its final consistency check is deliberately limited to the selected
+  filename path and the root alias that established that name. Selected directory
+  identity/type, symlink, and TZif changes still fail; unrelated directory
+  size/mtime activity and later changes to unused roots do not. Native Windows
+  instead uses direct `GetDynamicTimeZoneInformation` key/disabled-DST evidence
+  plus usable `GetUserDefaultGeoName` territory. It selects the first ordered
+  pinned-CLDR-48 exact-territory candidate, falling back to that key's first `001`
+  candidate when territory is unavailable, malformed, or unmapped. This is a
+  representative mapping policy, not discovery of a unique city.
 - The CLI requires a running reachable daemon; offline history and reporting
   while the Usage meter is disabled remain outside this design.
 - The HTTP handler has no upstream dependency and is not a project Endpoint,
@@ -77,8 +84,14 @@ current-month date defaults, and period-grouped native terminal sections. Both
 selected histories share one snapshot and request-wide limits. Omitted report
 timezones now use supported configuration visible to the CLI process on Linux/macOS;
 SSH/container/WSL execution does not discover a physical workstation outside it.
-Native Windows and unsupported/ambiguous configurations require an explicit name,
-not an offset, registry mapping, copied-file guess, or silent UTC fallback.
+Native Windows uses only the direct Win32 and pinned mapping policy above; Windows
+`TZ`, localized names, current offsets, `time.Local`, PowerShell, and .NET are not
+production identity inputs. Failed calls, empty/custom/unmapped keys, disabled
+dynamic daylight behavior, missing defaults, unloadable selected names, and
+unsupported/ambiguous Unix configurations require an explicit name before HTTP;
+there is no silent UTC fallback. Explicit flag/environment/selected-TOML values
+retain precedence and validation. The report protocol and daemon-owned calendar
+arithmetic are unchanged: only the accepted IANA-style name crosses HTTP.
 Native evidence and its platform limits are recorded in the
 [verification guide](../verification/usage-reporting.md) and revision-specific
 #213 run results; failed runs retain diagnostic artifacts, while successful runs

@@ -100,7 +100,7 @@ Reports support Anthropic and OpenAI, separately or together (the default), with
 daily, Monday-weekly, monthly, or yearly groups in a named timezone:
 
 ```sh
-copilotd usage # Current month, daily groups, supported Unix terminal-local zone
+copilotd usage # Current month, daily groups, terminal-local named zone
 copilotd usage --timezone Europe/Berlin # Explicit override on every platform
 copilotd usage --period week --timezone US/Eastern --since 2026-09-01 --until 2026-10-01
 copilotd usage --timezone UTC --surface openai --model gpt-example --details
@@ -157,8 +157,16 @@ Copied/custom files, ambiguous names, unsupported rules, and `TZDIR` or
 `ZONEINFO` values outside recognized system zoneinfo root paths cannot be
 discovered: pass `--timezone Area/City` (or `--timezone UTC`). NixOS's
 system-exported `TZDIR=/etc/zoneinfo` is recognized.
-Native Windows always requires an explicit timezone, also settable through
-`COPILOTD_TIMEZONE` or selected TOML. Explicit choices bypass discovery, not name
+On native Windows, omission reads the registry time-zone key and dynamic-DST
+state directly through Win32, then maps it to a **representative** IANA name from
+pinned CLDR 48 data. A usable two-letter user territory selects the first ordered
+exact-territory candidate; unavailable, invalid, or unmapped territory uses that
+key's first `001` candidate. This does not identify a unique city. Failed native
+calls, empty/custom/unmapped keys, disabled dynamic daylight behavior, missing
+defaults, and unloadable selected names fail before HTTP with explicit-override
+guidance. Windows `TZ`, current offsets, localized names, `time.Local`, PowerShell,
+and .NET are not production identity inputs; WSL follows Linux. Explicit flag,
+`COPILOTD_TIMEZONE`, or selected-TOML choices still bypass discovery but not name
 validation. Native runtime claims are revision-specific: see the
 [verification guide](docs/verification/usage-reporting.md) and the retained
 [#213 results](https://github.com/ningw42/copilotd/issues/213), not runner labels or
