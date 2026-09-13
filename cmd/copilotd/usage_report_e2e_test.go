@@ -116,7 +116,7 @@ func TestAnthropicAndCombinedUsageCommandThroughProductionListener(t *testing.T)
 			if strings.Index(text, " Anthropic \n") > strings.Index(text, " OpenAI \n") {
 				t.Fatalf("native section order: %s", text)
 			}
-			assertTextExcludes(t, text, `├─ "`, `└─ "`, "│ All ", "Model totals", "Section total", "│ Range")
+			assertTextExcludes(t, text, `├─ "`, `└─ "`, "Model totals", "Section total", "│ Range")
 		}
 	}
 }

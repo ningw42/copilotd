@@ -70,7 +70,7 @@ func TestUsageExecutableAcceptance(t *testing.T) {
 				t.Fatalf("missing %q: %s", want, out)
 			}
 		}
-		assertTextExcludes(t, out, "Reasoning", `"Model"`, `├─ "`, `└─ "`, "│ All ", "Model totals", "Section total", "│ Range", "Persisted successful Turns observed by the Usage meter", "Optional-count coverage refers only to stored Turns")
+		assertTextExcludes(t, out, "Reasoning", `"Model"`, `├─ "`, `└─ "`, "Model totals", "Section total", "│ Range", "Persisted successful Turns observed by the Usage meter", "Optional-count coverage refers only to stored Turns")
 	})
 	t.Run("periods_surfaces_and_exact_filters", func(t *testing.T) {
 		for _, period := range []struct{ name, start string }{{"day", "2026-09-01"}, {"week", "2026-08-31"}, {"month", "2026-09-01"}, {"year", "2026-01-01"}} {
@@ -584,10 +584,21 @@ func TestUsageCostExecutableAcceptance(t *testing.T) {
 	}
 
 	text := usageExec(t, binary, nil, 0, "usage", "--endpoint", h.baseURL, "--timezone", "UTC", "--since", "2026-09-01", "--until", "2026-09-02", "--details")
-	for _, want := range []string{"Est. Cost ($)", "$37.000*", "$34.000", "Grand total", "Pricing snapshot: sha256:", "Pricing model resolutions (Reported → Pricing)", "gpt-tiered → openai/gpt-tiered (exact)", "gpt-tiered-fast → openai/gpt-tiered (suffix)", "shared → ambiguous", "unknown → unknown"} {
+	for _, want := range []string{"Est. Cost ($)", "$37.000*", "$34.000", "Pricing snapshot: sha256:", "Pricing model resolutions (Reported → Pricing)", "gpt-tiered → openai/gpt-tiered (exact)", "gpt-tiered-fast → openai/gpt-tiered (suffix)", "shared → ambiguous", "unknown → unknown"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("actual executable text missing %q: %s", want, text)
 		}
+	}
+	wholeRangeAll := false
+	for _, line := range strings.Split(text, "\n") {
+		cells := strings.Split(line, "│")
+		if len(cells) >= 3 && strings.TrimSpace(cells[1]) == "Total" && strings.TrimSpace(cells[2]) == "All" {
+			wholeRangeAll = true
+			break
+		}
+	}
+	if !wholeRangeAll || strings.Contains(text, "Grand total") {
+		t.Errorf("actual executable text missing the whole-range Total/All row: %s", text)
 	}
 
 	artifact.Store(usageCostArtifactSecond)

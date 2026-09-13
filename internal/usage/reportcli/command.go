@@ -162,10 +162,10 @@ func renderTables(renderer *lipgloss.Renderer, out *strings.Builder, period stri
 		return err
 	}
 	if includeCost {
-		rendered, coverage := renderTotal("Grand total", section.Total, columns, true, pricingAvailable)
-		rows = append(rows, append([]string{""}, rendered...))
+		rendered, coverage := renderTotal("All", section.Total, columns, true, pricingAvailable)
+		rows = append(rows, append([]string{"Total"}, rendered...))
 		for _, note := range coverage {
-			notes = append(notes, "Grand total — "+note)
+			notes = append(notes, "Total / All — "+note)
 		}
 	}
 	renderTable(renderer, out, tableHeaders(period, columns, includeCost), rows)
@@ -187,10 +187,10 @@ func groupedRows(rows []report.Row, columns []metricColumn, includeCost, pricing
 		if err != nil {
 			return nil, nil, err
 		}
-		renderedTotal, totalCoverage := renderTotal("Total", total, columns, includeCost, pricingAvailable)
+		renderedTotal, totalCoverage := renderTotal("All", total, columns, includeCost, pricingAvailable)
 		renderedGroups = append(renderedGroups, append([]string{bucket}, renderedTotal...))
 		for _, note := range totalCoverage {
-			notes = append(notes, bucket+" / Total — "+note)
+			notes = append(notes, bucket+" / All — "+note)
 		}
 
 		width := 3 + len(columns)

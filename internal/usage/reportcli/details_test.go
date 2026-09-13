@@ -38,7 +38,7 @@ func TestCommandDetailsGroupsAnthropicNativeSubsetsByPeriod(t *testing.T) {
 		}
 	}
 	for _, want := range [][]string{
-		{"2026-09-01", "Total", "2", "4*", "0*", "—"},
+		{"2026-09-01", "All", "2", "4*", "0*", "—"},
 		{"", `\u6a21\u578b\t\u2066\n`, "2", "4*", "0*", "—"},
 	} {
 		if !hasTableRow(text, want...) {
@@ -85,14 +85,14 @@ func TestCommandDetailsGroupsOpenAIReportedSecondaryValuesByPeriod(t *testing.T)
 		}
 	}
 	for _, want := range [][]string{
-		{"2026-09-01", "Total", "2", "0*", "—"},
+		{"2026-09-01", "All", "2", "0*", "—"},
 		{"", `evil\x1b[31m\n\u202e`, "2", "0*", "—"},
 	} {
 		if !hasTableRow(text, want...) {
 			t.Errorf("missing secondary row %q: %s", want, text)
 		}
 	}
-	assertTextExcludes(t, text, "\x1b", "\u202e", `"evil\x1b[31m\n\u202e"`, `├─ "`, `└─ "`, "│ All ", "[clipped]", "[in progress]", "Model totals", "Section total", "│ Range", "reported total: 1/2 stored Turns", "9,223,372,036,854,775,807")
+	assertTextExcludes(t, text, "\x1b", "\u202e", `"evil\x1b[31m\n\u202e"`, `├─ "`, `└─ "`, "[clipped]", "[in progress]", "Model totals", "Section total", "│ Range", "reported total: 1/2 stored Turns", "9,223,372,036,854,775,807")
 	options.Details = false
 	out.Reset()
 	if err := reportcli.Run(context.Background(), client, options, &out); err != nil {
