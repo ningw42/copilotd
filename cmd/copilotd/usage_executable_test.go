@@ -584,7 +584,7 @@ func TestUsageCostExecutableAcceptance(t *testing.T) {
 	}
 
 	text := usageExec(t, binary, nil, 0, "usage", "--endpoint", h.baseURL, "--timezone", "UTC", "--since", "2026-09-01", "--until", "2026-09-02", "--details")
-	for _, want := range []string{"Est. USD", "37.000*", "34.000", "Pricing: original-provider / models.dev rates / single cache-write rate", "Pricing model resolutions (Reported → Pricing)", "gpt-tiered → openai/gpt-tiered (exact)", "gpt-tiered-fast → openai/gpt-tiered (suffix)", "shared → ambiguous", "unknown → unknown"} {
+	for _, want := range []string{"Est. USD", "37.000*", "34.000", "Pricing snapshot: sha256:", "Pricing model resolutions (Reported → Pricing)", "gpt-tiered → openai/gpt-tiered (exact)", "gpt-tiered-fast → openai/gpt-tiered (suffix)", "shared → ambiguous", "unknown → unknown"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("actual executable text missing %q: %s", want, text)
 		}
