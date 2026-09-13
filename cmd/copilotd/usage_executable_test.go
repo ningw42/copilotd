@@ -341,7 +341,7 @@ func TestUsageExecutableAcceptance(t *testing.T) {
 		env := map[string]string{"COPILOTD_CONFIG": filepath.Join(root, "missing.toml"), "COPILOTD_ENDPOINT": edge.URL, "TZ": ":", "ZONEINFO": "/absent", "HOME": root, "LOCALAPPDATA": root, "XDG_CONFIG_HOME": root}
 		for _, args := range [][]string{nil, {"--help"}, {"help", "usage"}, {"usage", "--help"}, {"version"}, {"serve", "--help"}} {
 			out := usageExec(t, binary, env, 0, args...)
-			if len(args) > 0 && args[0] == "usage" && (!strings.Contains(out, "representative CLDR mapping on native Windows") || strings.Contains(out, "--apikey")) {
+			if len(args) > 0 && args[0] == "usage" && (!strings.Contains(out, "representative Windows CLDR mapping") || strings.Contains(out, "--apikey")) {
 				t.Fatal(out)
 			}
 		}

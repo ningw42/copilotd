@@ -2,15 +2,19 @@ package reportcli
 
 import "encoding/json"
 
-const (
-	windowsEvidenceSuccess     = "success"
-	windowsEvidenceFailed      = "failed"
-	windowsEvidenceUnavailable = "unavailable"
-)
+type windowsEvidenceStatus string
 
 const (
-	windowsMappingExactTerritory = "exact_territory"
-	windowsMappingWorldDefault   = "world_default"
+	windowsEvidenceSuccess     windowsEvidenceStatus = "success"
+	windowsEvidenceFailed      windowsEvidenceStatus = "failed"
+	windowsEvidenceUnavailable windowsEvidenceStatus = "unavailable"
+)
+
+type windowsMappingSource string
+
+const (
+	windowsMappingExactTerritory windowsMappingSource = "exact_territory"
+	windowsMappingWorldDefault   windowsMappingSource = "world_default"
 )
 
 type windowsTransition struct {
@@ -25,7 +29,7 @@ type windowsTransition struct {
 }
 
 type windowsTimezoneEvidence struct {
-	dynamicStatus               string
+	dynamicStatus               windowsEvidenceStatus
 	dynamicAPIStatus            uint32
 	dynamicAPIStatusName        string
 	dynamicErrorCode            uint32
@@ -36,7 +40,7 @@ type windowsTimezoneEvidence struct {
 	daylightBias                int32
 	standardTransition          windowsTransition
 	daylightTransition          windowsTransition
-	territoryStatus             string
+	territoryStatus             windowsEvidenceStatus
 	territoryErrorCode          uint32
 	territory                   string
 }
@@ -58,17 +62,17 @@ func (e windowsTimezoneEvidence) MarshalJSON() ([]byte, error) {
 		TerritoryErrorCode          uint32            `json:"territory_error_code,omitempty"`
 		Territory                   string            `json:"territory,omitempty"`
 	}{
-		DynamicStatus: e.dynamicStatus, DynamicAPIStatus: e.dynamicAPIStatus, DynamicAPIStatusName: e.dynamicAPIStatusName,
+		DynamicStatus: string(e.dynamicStatus), DynamicAPIStatus: e.dynamicAPIStatus, DynamicAPIStatusName: e.dynamicAPIStatusName,
 		DynamicErrorCode: e.dynamicErrorCode, KeyName: e.keyName, DynamicDaylightTimeDisabled: e.dynamicDaylightTimeDisabled,
 		Bias: e.bias, StandardBias: e.standardBias, DaylightBias: e.daylightBias,
 		StandardTransition: e.standardTransition, DaylightTransition: e.daylightTransition,
-		TerritoryStatus: e.territoryStatus, TerritoryErrorCode: e.territoryErrorCode, Territory: e.territory,
+		TerritoryStatus: string(e.territoryStatus), TerritoryErrorCode: e.territoryErrorCode, Territory: e.territory,
 	})
 }
 
 type windowsTimezoneResolution struct {
 	name       string
-	mapping    string
+	mapping    windowsMappingSource
 	candidates []string
 }
 

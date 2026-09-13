@@ -143,10 +143,10 @@ func TestWindowsTimezoneVerificationInventory(t *testing.T) {
 		t.Fatalf("Windows mandatory inventory = %s", required)
 	}
 	cases := controlledWindowsTimezoneCases()
-	want := "central_us_exact=Central Standard Time/US/America/Chicago/;china_us_world=China Standard Time/US/Asia/Shanghai/;nepal_us_world=Nepal Standard Time/US/Asia/Katmandu/;central_dst_disabled=Central Standard Time_dstoff/US//dynamic daylight time is disabled"
+	want := "central_us_exact=Central Standard Time/US/America/Chicago/exact_territory/;china_us_world=China Standard Time/US/Asia/Shanghai/world_default/;nepal_us_world=Nepal Standard Time/US/Asia/Katmandu/world_default/;central_dst_disabled=Central Standard Time_dstoff/US///dynamic daylight time is disabled"
 	var got []string
 	for _, test := range cases {
-		got = append(got, test.name+"="+test.windowsKey+"/"+test.territory+"/"+test.wantZone+"/"+test.wantError)
+		got = append(got, test.name+"="+test.windowsKey+"/"+test.territory+"/"+test.wantZone+"/"+test.wantMapping+"/"+test.wantError)
 	}
 	if strings.Join(got, ";") != want {
 		t.Fatalf("controlled Windows timezone cases = %s, want %s", strings.Join(got, ";"), want)

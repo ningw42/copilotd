@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"runtime"
 	"syscall"
 	"testing"
@@ -91,21 +92,21 @@ func readNativeWindowsRuleEvidence(selected string) (windowsNativeRuleEvidence, 
 		uintptr(unsafe.Pointer(&evidence.LastYear)),
 	)
 	evidence.EffectiveStatus = uint32(result)
-	evidence.EffectiveStatusName = windowsEvidenceSuccess
+	evidence.EffectiveStatusName = string(windowsEvidenceSuccess)
 	// A stock fixed-offset key may have no Dynamic DST registry subkey. The API
 	// reports ERROR_FILE_NOT_FOUND and no range; GetTimeZoneInformationForYear
 	// still provides the representative annual rules to compare.
 	if result == uintptr(syscall.ERROR_FILE_NOT_FOUND) {
 		evidence.EffectiveStatusName = "no_dynamic_range"
 	} else if result != 0 {
-		evidence.EffectiveStatusName = windowsEvidenceFailed
+		evidence.EffectiveStatusName = string(windowsEvidenceFailed)
 		return evidence, fmt.Errorf("GetDynamicTimeZoneInformationEffectiveYears failed with status %d", result)
 	}
 	if err := windowsGetTimeZoneInformationForYearProc.Find(); err != nil {
 		return evidence, errors.New("GetTimeZoneInformationForYear unavailable")
 	}
 	for _, year := range representativeWindowsRuleYears(evidence.FirstYear, evidence.LastYear) {
-		annual := windowsAnnualRuleEvidence{Year: year, Status: windowsEvidenceFailed}
+		annual := windowsAnnualRuleEvidence{Year: year, Status: string(windowsEvidenceFailed)}
 		var information windowsTimeZoneInformation
 		ok, _, yearErr := windowsGetTimeZoneInformationForYearProc.Call(
 			uintptr(year),
@@ -117,7 +118,7 @@ func readNativeWindowsRuleEvidence(selected string) (windowsNativeRuleEvidence, 
 			evidence.Years = append(evidence.Years, annual)
 			return evidence, fmt.Errorf("GetTimeZoneInformationForYear failed for %d with code %d", year, annual.ErrorCode)
 		}
-		annual.Status = windowsEvidenceSuccess
+		annual.Status = string(windowsEvidenceSuccess)
 		annual.Bias = information.Bias
 		annual.StandardBias = information.StandardBias
 		annual.DaylightBias = information.DaylightBias
@@ -359,7 +360,7 @@ func TestWindowsNativeTimezoneAdapterUsesRealAPIs(t *testing.T) {
 	}{
 		OSBuild: version.BuildNumber, Architecture: runtime.GOARCH, Evidence: evidence,
 		CLDRRelease: windowszonesdata.CLDRRelease, CLDRSource: windowszonesdata.SourceSHA256,
-		Candidates: result.candidates, Selected: result.name, Mapping: result.mapping, Loader: "failed",
+		Candidates: result.candidates, Selected: result.name, Mapping: string(result.mapping), Loader: "failed",
 	}
 	if resolveErr == nil {
 		record.Loader = "success"
@@ -377,5 +378,14 @@ func TestWindowsNativeTimezoneAdapterUsesRealAPIs(t *testing.T) {
 	}
 	if resolveErr != nil || result.name == "" {
 		t.Fatalf("real native evidence did not resolve and load: result=%+v error=%v", result, resolveErr)
+	}
+	if want := os.Getenv("COPILOTD_TEST_WINDOWS_TERRITORY"); want != "" && (evidence.territoryStatus != windowsEvidenceSuccess || evidence.territory != want) {
+		t.Fatalf("real GetUserDefaultGeoName evidence status=%q territory=%q, want success/%q", evidence.territoryStatus, evidence.territory, want)
+	}
+	if want := os.Getenv("COPILOTD_TEST_WINDOWS_MAPPING_SOURCE"); want != "" && string(result.mapping) != want {
+		t.Fatalf("real native mapping source=%q, want %q", result.mapping, want)
+	}
+	if want := os.Getenv("COPILOTD_TEST_SYSTEM_ZONE"); want != "" && result.name != want {
+		t.Fatalf("real native selected name=%q, want %q", result.name, want)
 	}
 }

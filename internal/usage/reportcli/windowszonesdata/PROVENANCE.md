@@ -49,15 +49,15 @@ shape and required `001` defaults, sorts map keys for stable Go output, and
 preserves candidate order:
 
 ```sh
-go generate ./internal/usage/reportcli/windowszonesdata
+nix develop -c go generate ./internal/usage/reportcli/windowszonesdata
 # Or directly:
-go run ./scripts/generate-windows-zones
+nix develop -c go run ./scripts/generate-windows-zones
 ```
 
 Check that generated output is current without modifying the tree:
 
 ```sh
-go run ./scripts/generate-windows-zones -check
+nix develop -c go run ./scripts/generate-windows-zones -check
 ```
 
 The package tests run the check with `GOPROXY=off`, pin the independent source

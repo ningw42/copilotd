@@ -265,8 +265,15 @@ nix flake check
 # Native local Linux CGO0 full suite, build metadata, CLI evidence and isolation;
 # no local system setting changes (do not pass -native-ci):
 nix develop -c go run ./scripts/verify-usage -target linux/amd64 -runner local-nix
-# On a native Windows amd64 development host (also leaves timezone/location untouched):
-CGO_ENABLED=0 go run ./scripts/verify-usage -target windows/amd64 -runner local
+```
+
+On a native Windows amd64 development host, run the corresponding local gate
+without changing the host timezone or location:
+
+```powershell
+$env:CGO_ENABLED = '0'
+go run ./scripts/verify-usage -target windows/amd64 -runner local
+Remove-Item Env:CGO_ENABLED
 ```
 
 Also build `./cmd/copilotd` with `CGO_ENABLED=0` for all four release target pairs

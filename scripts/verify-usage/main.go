@@ -282,18 +282,19 @@ func restoreWindowsTimezoneHost(host windowsTimezoneHost, original windowsHostTi
 }
 
 type controlledWindowsTimezoneCase struct {
-	name       string
-	windowsKey string
-	territory  string
-	wantZone   string
-	wantError  string
+	name        string
+	windowsKey  string
+	territory   string
+	wantZone    string
+	wantMapping string
+	wantError   string
 }
 
 func controlledWindowsTimezoneCases() []controlledWindowsTimezoneCase {
 	return []controlledWindowsTimezoneCase{
-		{name: "central_us_exact", windowsKey: "Central Standard Time", territory: "US", wantZone: "America/Chicago"},
-		{name: "china_us_world", windowsKey: "China Standard Time", territory: "US", wantZone: "Asia/Shanghai"},
-		{name: "nepal_us_world", windowsKey: "Nepal Standard Time", territory: "US", wantZone: "Asia/Katmandu"},
+		{name: "central_us_exact", windowsKey: "Central Standard Time", territory: "US", wantZone: "America/Chicago", wantMapping: "exact_territory"},
+		{name: "china_us_world", windowsKey: "China Standard Time", territory: "US", wantZone: "Asia/Shanghai", wantMapping: "world_default"},
+		{name: "nepal_us_world", windowsKey: "Nepal Standard Time", territory: "US", wantZone: "Asia/Katmandu", wantMapping: "world_default"},
 		{name: "central_dst_disabled", windowsKey: "Central Standard Time_dstoff", territory: "US", wantError: "dynamic daylight time is disabled"},
 	}
 }
@@ -375,9 +376,11 @@ func (v *verification) controlledWindowsTimezones() error {
 	defer func() { v.env = originalEnvironment }()
 	return runControlledWindowsTimezoneCases(host, controlledWindowsTimezoneCases(), func(test controlledWindowsTimezoneCase) error {
 		v.env = withEnvironment(originalEnvironment, map[string]string{
-			"COPILOTD_TEST_SYSTEM_CONFIGURATION": "controlled Windows timezone/home location on disposable VM; restored after test",
-			"COPILOTD_TEST_SYSTEM_ZONE":          test.wantZone,
-			"COPILOTD_TEST_SYSTEM_ERROR":         test.wantError,
+			"COPILOTD_TEST_SYSTEM_CONFIGURATION":   "controlled Windows timezone/home location on disposable VM; restored after test",
+			"COPILOTD_TEST_SYSTEM_ZONE":            test.wantZone,
+			"COPILOTD_TEST_SYSTEM_ERROR":           test.wantError,
+			"COPILOTD_TEST_WINDOWS_TERRITORY":      test.territory,
+			"COPILOTD_TEST_WINDOWS_MAPPING_SOURCE": test.wantMapping,
 		})
 		logName := "controlled-windows-" + test.name
 		_, testErr := v.run(logName, "go", "test", "-json", "./cmd/copilotd", "-run", "^TestUsageExecutableAcceptance$/^system_timezone$", "-count=1")

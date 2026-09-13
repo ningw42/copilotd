@@ -592,10 +592,6 @@ func TestCommandNativeWindowsForbidsNonIdentityHintsAndTerritoryAlone(t *testing
 			// Territory without a successful nonempty registry key is not identity.
 			return windowsTimezoneEvidence{dynamicStatus: windowsEvidenceSuccess, territoryStatus: windowsEvidenceSuccess, territory: "US"}
 		},
-		windowsCandidates: func(string, string) []string {
-			t.Fatal("territory, Windows TZ, localized name, or current offset reached candidate lookup")
-			return nil
-		},
 	}
 	var out bytes.Buffer
 	err := Run(context.Background(), client, options, &out)

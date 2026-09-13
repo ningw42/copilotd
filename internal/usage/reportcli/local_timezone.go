@@ -18,14 +18,12 @@ import (
 // Platform, environment, and filesystem are process-local external dependencies.
 // Fixtures stay private; Run's public interface exposes no resolver controls.
 type localTimezoneSystem struct {
-	goos              string
-	lookupEnv         func(string) (string, bool)
-	readlink          func(string) (string, error)
-	lstat             func(string) (os.FileInfo, error)
-	open              func(string) (*os.File, error)
-	windowsEvidence   func() windowsTimezoneEvidence
-	windowsCandidates func(key, territory string) []string
-	windowsLoader     func(name string) error
+	goos            string
+	lookupEnv       func(string) (string, bool)
+	readlink        func(string) (string, error)
+	lstat           func(string) (os.FileInfo, error)
+	open            func(string) (*os.File, error)
+	windowsEvidence func() windowsTimezoneEvidence
 }
 
 func processTimezoneSystem() *localTimezoneSystem {
@@ -61,18 +59,14 @@ func (s *localTimezoneSystem) discover() (string, error) {
 		if s.windowsEvidence == nil {
 			return "", localTimezoneError("Windows timezone API failed")
 		}
-		candidates := s.windowsCandidates
-		if candidates == nil {
-			candidates = windowszonesdata.Candidates
-		}
-		loader := s.windowsLoader
-		if loader == nil {
-			loader = func(name string) error {
+		resolved, err := resolveWindowsTimezone(
+			s.windowsEvidence,
+			windowszonesdata.Candidates,
+			func(name string) error {
 				_, err := report.LoadTimezone(name)
 				return err
-			}
-		}
-		resolved, err := resolveWindowsTimezone(s.windowsEvidence, candidates, loader)
+			},
+		)
 		if err != nil {
 			return "", err
 		}
