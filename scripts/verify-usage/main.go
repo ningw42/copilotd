@@ -417,7 +417,7 @@ func mandatoryTests(goos string) []string {
 			"TestHandlerBodylessWorkTimeoutSurvivesDeadlineScheduling", "TestHandlerMapsAggregationOverflowAndReleasesAdmission", "TestClientDefaultTLSRejectsUntrustedCertificateBeforeHTTP",
 		},
 		"internal/usage/reportcli": {
-			"TestCommandPlacesEstimatedUSDOnlyInBothPrimarySurfaceTables", "TestCommandRoundsExactUSDHalfUpToThreeFractionalDigits",
+			"TestCommandPlacesEstimatedCostOnlyInBothPrimarySurfaceTables", "TestCommandRoundsExactUSDHalfUpToThreeFractionalDigits",
 			"TestCommandSumsExactServerAmountsBeforeRoundingPeriodTotals", "TestCommandMarksAndExplainsPartialAndEntirelyUnpricedCosts",
 			"TestCommandShowsOnlyPricingSnapshotIdentityAndSyncTime", "TestCommandDetailsListsDistinctTerminalSafePricingResolutions",
 			"TestCommandPresentsPricingEnabledEmptySectionWithoutInventedRows", "TestCommandExplainsOlderDaemonWithoutInventingCostCoverage",
