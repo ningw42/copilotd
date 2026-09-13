@@ -173,10 +173,10 @@ func TestCommandRendersPeriodTotalsBeforeModelBreakdowns(t *testing.T) {
 	})
 	text := commandOutput(t, r, false)
 	for _, day := range []string{"2026-09-01", "2026-09-02"} {
-		if !hasTableRow(text, day, "Total", "—", "6", "60", "6", "—", "3*") {
-			t.Errorf("missing period total for %s:\n%s", day, text)
+		if !hasTableRow(text, day, "All", "—", "6", "60", "6", "—", "3*") {
+			t.Errorf("missing period All row for %s:\n%s", day, text)
 		}
-		want := day + " / Total — cache read: 3/6 stored Turns"
+		want := day + " / All — cache read: 3/6 stored Turns"
 		if strings.Count(text, want) != 1 {
 			t.Errorf("period coverage %q count != 1:\n%s", want, text)
 		}
@@ -189,8 +189,8 @@ func TestCommandRendersPeriodTotalsBeforeModelBreakdowns(t *testing.T) {
 			t.Errorf("missing model breakdown row %q:\n%s", want, text)
 		}
 	}
-	if total, model := strings.Index(text, "Total"), strings.Index(text, "alpha"); total < 0 || model < 0 || total > model {
-		t.Fatalf("period total does not precede model breakdown:\n%s", text)
+	if all, model := strings.Index(text, "All"), strings.Index(text, "alpha"); all < 0 || model < 0 || all > model {
+		t.Fatalf("period All row does not precede model breakdown:\n%s", text)
 	}
 	if strings.Count(text, "\n├") != 5 {
 		t.Fatalf("total, period, and whole-range-total separators missing:\n%s", text)
@@ -210,12 +210,12 @@ func TestCommandFormatsModelAndPeriodTotalMetricsIdentically(t *testing.T) {
 	text := commandOutput(t, r, true)
 	for _, want := range [][]string{
 		// Primary columns: unavailable cost, complete, reported zero, NULL, and partial.
-		{"2026-09-01", "Total", "—", "2", "12", "0", "—", "3*"},
+		{"2026-09-01", "All", "—", "2", "12", "0", "—", "3*"},
 		{"", "model", "—", "2", "12", "0", "—", "3*"},
 		// Secondary columns cover complete and partial, then NULL and reported zero.
-		{"2026-09-01", "Total", "2", "4", "9*"},
+		{"2026-09-01", "All", "2", "4", "9*"},
 		{"", "model", "2", "4", "9*"},
-		{"2026-09-02", "Total", "2", "—", "0"},
+		{"2026-09-02", "All", "2", "—", "0"},
 		{"", "model", "2", "—", "0"},
 	} {
 		if !hasTableRow(text, want...) {
@@ -223,9 +223,9 @@ func TestCommandFormatsModelAndPeriodTotalMetricsIdentically(t *testing.T) {
 		}
 	}
 	for _, want := range []string{
-		"2026-09-01 / Total — cache read: 1/2 stored Turns",
+		"2026-09-01 / All — cache read: 1/2 stored Turns",
 		"2026-09-01 / model — cache read: 1/2 stored Turns",
-		"2026-09-01 / Total — reported total: 1/2 stored Turns",
+		"2026-09-01 / All — reported total: 1/2 stored Turns",
 		"2026-09-01 / model — reported total: 1/2 stored Turns",
 	} {
 		if strings.Count(text, want) != 1 {
@@ -320,13 +320,13 @@ func TestCommandPeriodTotalAcceptsMaxInt64AndPreservesCoverage(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !hasTableRow(text, "2026-09-01", "Total", "—", maxText, maxText, "0", "0", "0*") {
+			if !hasTableRow(text, "2026-09-01", "All", "—", maxText, maxText, "0", "0", "0*") {
 				t.Fatalf("missing exact MaxInt64 subtotal with reported-zero and partial coverage:\n%s", text)
 			}
-			if !strings.Contains(text, "2026-09-01 / Total — cache read: "+partialText) {
+			if !strings.Contains(text, "2026-09-01 / All — cache read: "+partialText) {
 				t.Fatalf("missing exact partial coverage:\n%s", text)
 			}
-			if details && !hasTableRow(text, "2026-09-01", "Total", maxText, "—", "—") {
+			if details && !hasTableRow(text, "2026-09-01", "All", maxText, "—", "—") {
 				t.Fatalf("all-NULL secondary subtotal changed:\n%s", text)
 			}
 		})
@@ -486,7 +486,7 @@ func TestCommandRendersAnthropicNativeCoverageWithoutPeriodAnnotations(t *testin
 		}
 	}
 	for _, want := range [][]string{
-		{"2026-09-01", "Total", "—", "3", "9,007,199,254,741,005", "12", "2,000*", "0*"},
+		{"2026-09-01", "All", "—", "3", "9,007,199,254,741,005", "12", "2,000*", "0*"},
 		{"", `a\x1b\n\u202e`, "—", "2", "12", "9", "2,000*", "0*"},
 		{"", "z", "—", "1", "9,007,199,254,740,993", "3", "—", "—"},
 	} {
@@ -497,7 +497,7 @@ func TestCommandRendersAnthropicNativeCoverageWithoutPeriodAnnotations(t *testin
 	if strings.Count(anthropic, "\n├") != 3 {
 		t.Fatalf("period and whole-range totals were not separated from one period's models: %s", anthropic)
 	}
-	assertTextExcludes(t, text, "\x1b", "\u202e", `├─ "`, `└─ "`, "│ All ", "│ Period ", "[clipped]", "[in progress]")
+	assertTextExcludes(t, text, "\x1b", "\u202e", `├─ "`, `└─ "`, "│ Period ", "[clipped]", "[in progress]")
 	assertTextExcludes(t, anthropic, `"a\x1b\n\u202e"`, `"z"`, "Cache write")
 	assertTextExcludes(t, openai, "Uncached input")
 	if !strings.Contains(openai, "6,000*") {
@@ -525,7 +525,7 @@ func TestCommandRendersServerValuesSafelyAndReturnsOutputFailures(t *testing.T) 
 			t.Errorf("missing %q in:\n%s", want, text)
 		}
 	}
-	assertTextExcludes(t, text, "\x1b", "\u202e", "Usage report —", `Endpoint: "`, `Timezone: "UTC"`, "Timezone: UTC |", " | Range:", " | Period:", `"evil\x1b[31m\n\u202e"`, `├─ "`, `└─ "`, "│ All ", "Model totals", "Section total", "│ Range")
+	assertTextExcludes(t, text, "\x1b", "\u202e", "Usage report —", `Endpoint: "`, `Timezone: "UTC"`, "Timezone: UTC |", " | Range:", " | Period:", `"evil\x1b[31m\n\u202e"`, `├─ "`, `└─ "`, "Model totals", "Section total", "│ Range")
 	if err := reportcli.Run(context.Background(), client, options, brokenOutput{}); err == nil {
 		t.Fatal("output failure succeeded")
 	}

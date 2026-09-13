@@ -88,13 +88,13 @@ func TestCommandAllPeriodsFromSQLiteThroughHTTPInExplicitNamedZone(t *testing.T)
 					t.Errorf("missing %q: %s", want, text)
 				}
 			}
-			// Each native table derives a period Total before the model breakdown;
-			// each primary cost table ends with the validated whole-range Total in
-			// the period column.
-			if strings.Count(text, "  18 ") != 4 || strings.Count(text, "  13 ") != 4 || strings.Count(text, "│ Total") != 6 || strings.Count(text, "\n│ Total ") != 2 || strings.Count(text, "  31 ") != 2 {
-				t.Fatalf("period, model, and whole-range totals did not reach terminal: %s", text)
+			// Each native table derives a period All row before the model breakdown;
+			// each primary cost table ends with the validated whole-range Total/All
+			// row.
+			if strings.Count(text, "  18 ") != 4 || strings.Count(text, "  13 ") != 4 || strings.Count(text, "\n│ Total ") != 2 || strings.Count(text, "│ All") != 6 || strings.Count(text, "  31 ") != 2 {
+				t.Fatalf("period, model, and whole-range aggregates did not reach terminal: %s", text)
 			}
-			assertTextExcludes(t, text, `"m"`, `├─ "`, `└─ "`, "│ All ", "Section total", "│ Range")
+			assertTextExcludes(t, text, `"m"`, `├─ "`, `└─ "`, "Section total", "│ Range")
 			if strings.Count(text, "\n│ "+heading) != 2 {
 				t.Fatalf("period-specific headings missing: %s", text)
 			}

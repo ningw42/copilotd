@@ -116,12 +116,13 @@ Reported-model rows grouped by period, with a `Day`, `Week`, `Month`, or `Year`
 first-column heading. Each primary Surface table places **Est. Cost ($)** immediately
 after `Model(s)` and before `Turns`; secondary native tables do not repeat money.
 Numeric amounts have a `$` prefix and use exact daemon-supplied USD values rounded
-half up to three fractional digits. Each period starts with a terminal-only `Total`
-derived from its validated model rows and separated from the model breakdown. Each
-primary table ends with a per-Surface whole-range `Total` in the period column,
-leaving `Model(s)` blank, from the daemon's validated section total regardless of
-the selected period. Text sums exact amounts before rounding, uses checked int64
-coverage/native subtotal arithmetic, and fails before stdout if inconsistent rows
+half up to three fractional digits. Each period starts with a terminal-only `All`
+in `Model(s)`, derived from its validated model rows and separated from the model
+breakdown. Each primary table ends with a per-Surface whole-range row containing
+`Total` in the period column and `All` in `Model(s)`, from the daemon's validated
+section total regardless of the selected period. Text sums exact amounts before
+rounding, uses checked int64 coverage/native subtotal arithmetic, and fails before
+stdout if inconsistent rows
 or monetary addition would overflow; `--json` still emits the independently
 validated original bytes. Whole-range per-model totals remain in JSON and no
 cross-Surface total is introduced.
@@ -185,9 +186,10 @@ exact nonnegative decimal strings; `null` means a nonempty aggregate has no
 priceable Turns, while empty and priceable-free aggregates carry `"0"`. Coverage
 partitions stored Turns into priced Turns and five explicit exclusion reasons.
 In text, a partial priced subtotal has `*`, a wholly unpriced nonempty group has
-`—`, and compact period/model notes list priced/total stored Turns plus every
-nonzero exclusion reason. The compact `Pricing snapshot` line identifies the
-accepted models.dev bytes by SHA-256 and appends the successful sync time when
+`—`, and compact period/model, period/`All`, and `Total`/`All` notes list
+priced/total stored Turns plus every nonzero exclusion reason. The compact
+`Pricing snapshot` line identifies the accepted models.dev bytes by SHA-256 and
+appends the successful sync time when
 present; it omits fetched/fallback and valuation-policy labels. Text reports do
 not add a trailing estimated-cost caveat. A new CLI talking to an older daemon
 keeps native counts usable and says
