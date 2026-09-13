@@ -68,7 +68,7 @@
           # Non-vendored: go.mod/go.sum are the source of truth; a single
           # vendorHash covers the whole fetched dependency set. It changes only
           # when dependencies change.
-          vendorHash = "sha256-HAlWhLFyb3ygUXM56hSh9Kdx/FMiM2ctAL9CeRsvzbU=";
+          vendorHash = "sha256-hf+aCbbDjGOHABCEvj2F7MbsZullpbdSqmkedd7sfIA=";
 
           # CGO off -> a truly static binary on Linux. On Darwin, Go always links
           # libSystem (Apple ships no fully-static binaries), so the aarch64-darwin
