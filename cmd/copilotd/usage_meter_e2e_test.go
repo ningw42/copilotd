@@ -735,6 +735,55 @@ func TestRunBoundServeRetainsOpenAIWebSocketUsageWhenSessionLaterFails(t *testin
 	}
 }
 
+type downstreamWriteFailureListener struct {
+	net.Listener
+	armed      chan struct{}
+	failed     chan struct{}
+	armOnce    sync.Once
+	failedOnce sync.Once
+}
+
+func newDownstreamWriteFailureListener(t *testing.T) *downstreamWriteFailureListener {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	return &downstreamWriteFailureListener{
+		Listener: listener,
+		armed:    make(chan struct{}),
+		failed:   make(chan struct{}),
+	}
+}
+
+func (l *downstreamWriteFailureListener) Accept() (net.Conn, error) {
+	conn, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	return &downstreamWriteFailureConn{Conn: conn, listener: l}, nil
+}
+
+func (l *downstreamWriteFailureListener) Arm() {
+	l.armOnce.Do(func() { close(l.armed) })
+}
+
+type downstreamWriteFailureConn struct {
+	net.Conn
+	listener *downstreamWriteFailureListener
+}
+
+func (c *downstreamWriteFailureConn) Write(payload []byte) (int, error) {
+	select {
+	case <-c.listener.armed:
+		c.listener.failedOnce.Do(func() { close(c.listener.failed) })
+		return 0, errors.New("forced downstream write failure")
+	default:
+		return c.Conn.Write(payload)
+	}
+}
+
 type heldServerMessageShim struct {
 	entered     chan struct{}
 	release     chan struct{}
@@ -771,7 +820,7 @@ func withHeldServerMessageShim(held *heldServerMessageShim) func(shim.Registry) 
 
 func TestRunBoundServeRetainsOpenAIWebSocketUsageObservedBeforeDownstreamWriteFailure(t *testing.T) {
 	completion := []byte(`{"type":"response.completed","response":{"id":"resp-before-write-failure","model":"reported-before-write-failure","status":"completed","usage":{"input_tokens":13,"output_tokens":21}}}`)
-	upstreamClosed := make(chan struct{})
+	upstreamClosed := make(chan websocket.StatusCode, 1)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := websocket.Accept(w, r, nil)
 		if err != nil {
@@ -786,17 +835,19 @@ func TestRunBoundServeRetainsOpenAIWebSocketUsageObservedBeforeDownstreamWriteFa
 			t.Errorf("write completion before downstream failure: %v", err)
 			return
 		}
-		_, _, _ = conn.Read(context.Background())
-		close(upstreamClosed)
+		_, _, err = conn.Read(context.Background())
+		upstreamClosed <- websocket.CloseStatus(err)
 	}))
 	t.Cleanup(upstream.Close)
 
 	held := newHeldServerMessageShim()
 	t.Cleanup(held.Release)
+	listener := newDownstreamWriteFailureListener(t)
 	var logs bytes.Buffer
 	base := newPhase4Logger(t, &logs)
-	harness := startUsageMeterServeHarness(t, upstream.URL, base, nil, withHeldServerMessageShim(held))
+	harness := startUsageMeterServeHarness(t, upstream.URL, base, nil, withHeldServerMessageShim(held), listener)
 	conn := dialUsageMeterWebSocket(t, harness.baseURL, "websocket-downstream-write-failure")
+	t.Cleanup(func() { _ = conn.CloseNow() })
 	if err := conn.Write(context.Background(), websocket.MessageText, []byte(`{"type":"response.create"}`)); err != nil {
 		t.Fatalf("write client Message: %v", err)
 	}
@@ -805,13 +856,23 @@ func TestRunBoundServeRetainsOpenAIWebSocketUsageObservedBeforeDownstreamWriteFa
 	case <-time.After(2 * time.Second):
 		t.Fatal("outer Shim did not hold the Message after the Usage meter observed it")
 	}
-	_ = conn.CloseNow()
-	select {
-	case <-upstreamClosed:
-	case <-time.After(2 * time.Second):
-		t.Fatal("proxy did not observe the downstream close before the held Message was released")
-	}
+	// The WebSocket handshake and usage observation are complete. The next
+	// downstream transport write is therefore the released completion itself.
+	listener.Arm()
 	held.Release()
+	select {
+	case <-listener.failed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("proxy did not attempt the forced downstream write")
+	}
+	select {
+	case got := <-upstreamClosed:
+		if got != websocket.StatusInternalError {
+			t.Fatalf("upstream close status = %v, want 1011 after forced downstream write failure", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("proxy did not process the forced downstream write failure")
+	}
 
 	db, report := externalUsageDB(t, harness)
 	assertCleanUsageReport(t, report)
