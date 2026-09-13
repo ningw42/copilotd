@@ -93,10 +93,14 @@ at every aggregate level, and row/model pricing matches. #241 selects any
 models.dev context tariff per persisted Turn from complete Surface-native input
 and removes the presentation-only `pricing.context_policy` member without
 replacing it; the client tolerates that member from an older daemon as additive
-data. #238 places `Est. USD`
-after `Model(s)` in each primary Surface table, adds exact-before-rounding period
-cost totals, coverage notes, provenance/caveat text, and resolution details without
-repeating money in secondary tables or introducing a cross-Surface total. #248
+data. #238 initially placed the Estimated-cost column
+after `Model(s)` in each primary Surface table and added exact-before-rounding
+period cost totals, coverage notes, provenance/caveat text, and resolution details
+without repeating money in secondary tables or introducing a cross-Surface total.
+The current terminal presentation labels that column `Est. Cost ($)`, prefixes
+numeric values with `$`, and ends each primary table with the validated per-Surface
+whole-range `Grand total` regardless of period; it still introduces no
+cross-Surface total. #248
 adds per-Turn OpenAI response-tier valuation inside the pricing module: bounded
 `fast`/`priority` evidence selects accepted explicit Fast base rates and exact
 same-model/same-snapshot derived Fast context rates. It adds no report fields,

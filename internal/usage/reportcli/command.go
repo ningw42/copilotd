@@ -1,6 +1,7 @@
 // Package reportcli orchestrates a one-shot HTTP report and safe terminal
 // presentation. It never opens SQLite or replaces server aggregates; text
-// derives checked, presentation-only period subtotals.
+// derives checked, presentation-only period subtotals and renders each
+// Surface's validated whole-range total.
 package reportcli
 
 import (
@@ -160,6 +161,13 @@ func renderTables(renderer *lipgloss.Renderer, out *strings.Builder, period stri
 	if err != nil || len(rows) == 0 {
 		return err
 	}
+	if includeCost {
+		rendered, coverage := renderTotal("Grand total", section.Total, columns, true, pricingAvailable)
+		rows = append(rows, append([]string{""}, rendered...))
+		for _, note := range coverage {
+			notes = append(notes, "Grand total — "+note)
+		}
+	}
 	renderTable(renderer, out, tableHeaders(period, columns, includeCost), rows)
 	renderCoverage(out, notes)
 	return nil
@@ -314,7 +322,7 @@ func tableHeaders(period string, columns []metricColumn, includeCost bool) []str
 	heading := strings.ToUpper(period[:1]) + period[1:]
 	headers := []string{heading, "Model(s)"}
 	if includeCost {
-		headers = append(headers, "Est. USD")
+		headers = append(headers, "Est. Cost ($)")
 	}
 	headers = append(headers, "Turns")
 	for _, column := range columns {
@@ -346,7 +354,7 @@ func renderTotal(model string, total report.Total, columns []metricColumn, inclu
 	if includeCost {
 		value := "—"
 		if pricingAvailable && total.Cost.Amount != nil {
-			value = formatUSD(*total.Cost.Amount)
+			value = "$" + formatUSD(*total.Cost.Amount)
 			if total.Cost.PricedTurns < total.Turns {
 				value += "*"
 			}

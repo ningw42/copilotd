@@ -192,8 +192,8 @@ func TestCommandRendersPeriodTotalsBeforeModelBreakdowns(t *testing.T) {
 	if total, model := strings.Index(text, "Total"), strings.Index(text, "alpha"); total < 0 || model < 0 || total > model {
 		t.Fatalf("period total does not precede model breakdown:\n%s", text)
 	}
-	if strings.Count(text, "\n├") != 4 {
-		t.Fatalf("total and period separators missing:\n%s", text)
+	if strings.Count(text, "\n├") != 5 {
+		t.Fatalf("total, period, and grand-total separators missing:\n%s", text)
 	}
 }
 
@@ -343,7 +343,7 @@ func TestCommandEscapesBoundarySpacesWithoutModelCollisions(t *testing.T) {
 			continue
 		}
 		cells := strings.Split(line, "│")
-		if len(cells) == 10 && strings.TrimSpace(cells[1]) == "" {
+		if len(cells) == 10 && strings.TrimSpace(cells[1]) == "" && strings.TrimSpace(cells[2]) != "Grand total" {
 			got = append(got, strings.TrimSpace(cells[2]))
 		}
 	}
@@ -494,10 +494,10 @@ func TestCommandRendersAnthropicNativeCoverageWithoutPeriodAnnotations(t *testin
 			t.Errorf("missing grouped row %q: %s", want, anthropic)
 		}
 	}
-	if strings.Count(anthropic, "\n├") != 2 {
-		t.Fatalf("total was not separated from one period's models: %s", anthropic)
+	if strings.Count(anthropic, "\n├") != 3 {
+		t.Fatalf("period total and grand total were not separated from one period's models: %s", anthropic)
 	}
-	assertTextExcludes(t, text, "\x1b", "\u202e", "Grand total", `├─ "`, `└─ "`, "│ All ", "│ Period ", "[clipped]", "[in progress]")
+	assertTextExcludes(t, text, "\x1b", "\u202e", `├─ "`, `└─ "`, "│ All ", "│ Period ", "[clipped]", "[in progress]")
 	assertTextExcludes(t, anthropic, `"a\x1b\n\u202e"`, `"z"`, "Cache write")
 	assertTextExcludes(t, openai, "Uncached input")
 	if !strings.Contains(openai, "6,000*") {

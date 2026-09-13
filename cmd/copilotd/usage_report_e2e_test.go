@@ -91,8 +91,8 @@ func TestAnthropicAndCombinedUsageCommandThroughProductionListener(t *testing.T)
 	}
 	for _, surface := range []string{"anthropic", "openai", "all", ""} {
 		text := invoke(surface)
-		if strings.Contains(text, "requested-alias") || strings.Contains(text, "Grand total") || strings.Contains(text, "No stored Turns") {
-			t.Fatalf("invented identity/total/empty data: %s", text)
+		if strings.Contains(text, "requested-alias") || strings.Contains(text, "No stored Turns") {
+			t.Fatalf("invented identity/empty data: %s", text)
 		}
 		if surface != "openai" {
 			for _, want := range []string{" Anthropic \n", "Uncached input", "Cache create", "claude-reported", "2,000", "6,000"} {

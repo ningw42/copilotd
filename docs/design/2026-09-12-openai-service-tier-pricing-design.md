@@ -277,7 +277,7 @@ Keep the 8 MiB response cap, bounded fragment encoding, two admission slots, fiv
 
 ## Terminal presentation
 
-Keep the existing `Est. USD` column, three-decimal rounding, model rows, period totals, secondary native tables, model-resolution details, and exclusion notes. The CLI continues to sum supplied amounts and existing coverage with checked arithmetic; it never selects rates or applies a Fast factor.
+Keep the existing Estimated-cost presentation behavior: the `Est. Cost ($)` column, `$`-prefixed three-decimal numeric values, model rows, period totals, each primary table's per-Surface whole-range `Grand total`, secondary native tables, model-resolution details, and exclusion notes. The CLI continues to sum supplied amounts and existing coverage for period totals with checked arithmetic and uses the supplied section total for the Grand total; it never selects rates or applies a Fast factor.
 
 Do not add provenance labels, counters, fallback/derivation notes, service-tier details, or new older-daemon capability messages, including under `--details`. The compact pricing line identifies only the accepted models.dev content SHA-256 and successful sync timestamp when present. Omit fetched/fallback and rate-policy wording, and do not append a generic estimated-cost/non-billing caveat.
 

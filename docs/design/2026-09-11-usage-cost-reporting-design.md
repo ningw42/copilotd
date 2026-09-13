@@ -603,34 +603,39 @@ model resolution.
 
 ## 8. Terminal presentation
 
-Add **Est. USD** immediately after **Model(s)** and before **Turns** in each
-Surface's primary table, including its existing period `Total` row:
+Add **Est. Cost ($)** immediately after **Model(s)** and before **Turns** in
+each Surface's primary table, including its period `Total` and whole-range
+`Grand total` rows:
 
 ```text
-Day | Model(s) | Est. USD | Turns | ...native token columns...
+Day | Model(s) | Est. Cost ($) | Turns | ...native token columns...
 ```
 
 The first column still uses the selected period's label. Keep the current
 grouping/layout and separate native Surfaces. Secondary native tables do not
-repeat the monetary column. This feature does not add a cross-Surface token
-total or a new grand-total layout.
+repeat the monetary column. Each primary table ends with its validated
+per-Surface section total labeled `Grand total`, regardless of period. This
+presentation does not add a cross-Surface token or monetary total.
 
 The CLI accumulates unrounded amounts, priced-Turn counts, and reason counts from
-validated model rows for the period total. It neither chooses rates nor resolves
-models. Preserve checked arithmetic and complete-before-stdout behavior.
+validated model rows for each period total. The Grand total uses the daemon's
+validated whole-range section total rather than reconstructing it. The CLI
+neither chooses rates nor resolves models. Preserve checked arithmetic and
+complete-before-stdout behavior.
 
-**Agreed display precision:** exactly three decimal places in USD, rounded half
-up for nonnegative values. For example, `0.003157` renders as `0.003`, `0.0035`
-as `0.004`, and `0.0004` as `0.000`. Both exact zero and sufficiently small
-positive amounts render as `0.000`; JSON retains full exactness. Totals sum
-exact amounts before display rounding, so they need not equal the sum of already
-rounded cells.
+**Agreed display precision:** prefix numeric values with `$` and use exactly
+three decimal places in USD, rounded half up for nonnegative values. For example,
+`0.003157` renders as `$0.003`, `0.0035` as `$0.004`, and `0.0004` as `$0.000`.
+Both exact zero and sufficiently small positive amounts render as `$0.000`; JSON
+retains full exactness. Period totals sum exact amounts before display rounding,
+so they need not equal the sum of already rounded cells.
 
 - `—`: no priceable Turns in a nonempty group.
 - `*`: a monetary subtotal with incomplete pricing coverage.
-- A compact note identifies the period/model or `Total`, priced/total stored
-  Turns, and nonzero exclusion reasons. Entirely unpriced groups also receive a
-  note; unlike optional native metrics, zero monetary coverage needs explanation.
+- A compact note identifies the period/model, period `Total`, or whole-range
+  `Grand total`, priced/total stored Turns, and nonzero exclusion reasons.
+  Entirely unpriced groups also receive a note; unlike optional native metrics,
+  zero monetary coverage needs explanation.
 - A short `Pricing snapshot: <version> (<timestamp>)` line identifies the
   effective models.dev content SHA-256 and, when available, the successful sync
   time. Omit the timestamp when the daemon reports none; do not call it the
@@ -641,8 +646,8 @@ rounded cells.
   the existing terminal-safe policy.
 
 Do not append an estimated-cost caveat after the tables. Pricing coverage notes
-and the `Est. USD` heading retain the necessary local context without a repeated
-footer.
+and the `Est. Cost ($)` heading retain the necessary local context without a
+repeated footer.
 
 ## 9. Failure and resource behavior
 

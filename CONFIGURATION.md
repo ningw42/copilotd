@@ -178,20 +178,24 @@ rules. Their Turns, sum, and coverage arithmetic is checked int64; overflow of
 inconsistent rows fails the complete text rendering before stdout, while JSON
 continues to emit the independently validated original bytes. Text uses
 comma-separated exact counts and ASCII-escaped model identities. Every primary
-Surface table places `Est. USD` after `Model(s)` and before `Turns`; supplied exact
-amounts round half up to three fractional digits, and terminal period totals add
-exact amounts before rounding. A partial monetary subtotal has `*`; an entirely
-unpriced nonempty group has `—`; period/model notes list priced/total stored Turns
-and each nonzero exclusion reason. Native `—` still means unreported, and native
-`*` still denotes partial optional-count coverage. Anthropic renders first with
+Surface table places `Est. Cost ($)` after `Model(s)` and before `Turns`; numeric
+amounts carry a `$` prefix and round supplied exact amounts half up to three
+fractional digits. Terminal period totals add exact amounts before rounding, and
+each primary table ends with a per-Surface `Grand total` from the validated
+whole-range section total regardless of period. No cross-Surface grand total is
+introduced. A partial monetary subtotal has `*`; an entirely unpriced nonempty
+group has `—`; period/model/grand-total notes list priced/total stored Turns and
+each nonzero exclusion reason. Native `—` still means unreported, and native `*`
+still denotes partial optional-count coverage. Anthropic renders first with
 Turns, Uncached input, Output, Cache create, and Cache read; OpenAI follows with
 Turns, Input, Output, Cache write, and Cache read.
 Each text section groups Reported-model rows by period and labels the first
 column as `Day`, `Week`, `Month`, or `Year`. A period starts with `Total`, followed
 by a horizontal rule and its model breakdown; another rule separates the next
-period. Whole-range per-model and section totals remain in JSON but are not
-rendered as duplicate text rows. A reported zero stays zero; an empty
-selection is explicitly labeled, not represented as proof of no consumption.
+period. Whole-range per-model totals remain JSON-only, while each primary text
+table ends with its section's whole-range `Grand total`. A reported zero stays
+zero; an empty selection is explicitly labeled, not represented as proof of no
+consumption.
 
 `--details` adds secondary native tables for the same period totals and
 Reported-model breakdowns, plus one de-duplicated terminal-safe list of distinct
