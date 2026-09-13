@@ -566,7 +566,7 @@ func TestCommandNativeWindowsUsesRepresentativeCLDRMappingAndIgnoresTZ(t *testin
 			return "", false
 		},
 		windowsEvidence: func() windowsTimezoneEvidence {
-			return windowsTimezoneEvidence{dynamicStatus: windowsEvidenceSuccess, keyName: "Central Standard Time", territoryStatus: windowsEvidenceSuccess, territory: "US"}
+			return windowsTimezoneEvidence{DynamicStatus: windowsEvidenceSuccess, KeyName: "Central Standard Time", TerritoryStatus: windowsEvidenceSuccess, Territory: "US"}
 		},
 	}
 	var out bytes.Buffer
@@ -590,7 +590,7 @@ func TestCommandNativeWindowsForbidsNonIdentityHintsAndTerritoryAlone(t *testing
 		lookupEnv: func(key string) (string, bool) { return "America/Chicago", key == "TZ" },
 		windowsEvidence: func() windowsTimezoneEvidence {
 			// Territory without a successful nonempty registry key is not identity.
-			return windowsTimezoneEvidence{dynamicStatus: windowsEvidenceSuccess, territoryStatus: windowsEvidenceSuccess, territory: "US"}
+			return windowsTimezoneEvidence{DynamicStatus: windowsEvidenceSuccess, TerritoryStatus: windowsEvidenceSuccess, Territory: "US"}
 		},
 	}
 	var out bytes.Buffer
@@ -605,7 +605,7 @@ func TestCommandNativeWindowsDynamicDSTDisabledFailsBeforeHTTP(t *testing.T) {
 	options.localSystem = &localTimezoneSystem{
 		goos: "windows",
 		windowsEvidence: func() windowsTimezoneEvidence {
-			return windowsTimezoneEvidence{dynamicStatus: windowsEvidenceSuccess, keyName: "Central Standard Time", dynamicDaylightTimeDisabled: true}
+			return windowsTimezoneEvidence{DynamicStatus: windowsEvidenceSuccess, KeyName: "Central Standard Time", DynamicDaylightTimeDisabled: true}
 		},
 	}
 	var out bytes.Buffer

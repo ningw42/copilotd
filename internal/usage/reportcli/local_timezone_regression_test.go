@@ -16,7 +16,7 @@ import (
 func TestCommandLocalTimezoneConfigurationRegressions(t *testing.T) {
 	windowsCentralUS := func(f timezoneFiles) {
 		f.system.windowsEvidence = func() windowsTimezoneEvidence {
-			return windowsTimezoneEvidence{dynamicStatus: windowsEvidenceSuccess, keyName: "Central Standard Time", territoryStatus: windowsEvidenceSuccess, territory: "US"}
+			return windowsTimezoneEvidence{DynamicStatus: windowsEvidenceSuccess, KeyName: "Central Standard Time", TerritoryStatus: windowsEvidenceSuccess, Territory: "US"}
 		}
 	}
 	for _, tc := range []struct {

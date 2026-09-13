@@ -1,7 +1,5 @@
 package reportcli
 
-import "encoding/json"
-
 type windowsEvidenceStatus string
 
 const (
@@ -29,45 +27,20 @@ type windowsTransition struct {
 }
 
 type windowsTimezoneEvidence struct {
-	dynamicStatus               windowsEvidenceStatus
-	dynamicAPIStatus            uint32
-	dynamicAPIStatusName        string
-	dynamicErrorCode            uint32
-	keyName                     string
-	dynamicDaylightTimeDisabled bool
-	bias                        int32
-	standardBias                int32
-	daylightBias                int32
-	standardTransition          windowsTransition
-	daylightTransition          windowsTransition
-	territoryStatus             windowsEvidenceStatus
-	territoryErrorCode          uint32
-	territory                   string
-}
-
-func (e windowsTimezoneEvidence) MarshalJSON() ([]byte, error) {
-	return json.Marshal(struct {
-		DynamicStatus               string            `json:"dynamic_status"`
-		DynamicAPIStatus            uint32            `json:"dynamic_api_status"`
-		DynamicAPIStatusName        string            `json:"dynamic_api_status_name,omitempty"`
-		DynamicErrorCode            uint32            `json:"dynamic_error_code,omitempty"`
-		KeyName                     string            `json:"key"`
-		DynamicDaylightTimeDisabled bool              `json:"dynamic_daylight_time_disabled"`
-		Bias                        int32             `json:"bias"`
-		StandardBias                int32             `json:"standard_bias"`
-		DaylightBias                int32             `json:"daylight_bias"`
-		StandardTransition          windowsTransition `json:"standard_transition"`
-		DaylightTransition          windowsTransition `json:"daylight_transition"`
-		TerritoryStatus             string            `json:"territory_status"`
-		TerritoryErrorCode          uint32            `json:"territory_error_code,omitempty"`
-		Territory                   string            `json:"territory,omitempty"`
-	}{
-		DynamicStatus: string(e.dynamicStatus), DynamicAPIStatus: e.dynamicAPIStatus, DynamicAPIStatusName: e.dynamicAPIStatusName,
-		DynamicErrorCode: e.dynamicErrorCode, KeyName: e.keyName, DynamicDaylightTimeDisabled: e.dynamicDaylightTimeDisabled,
-		Bias: e.bias, StandardBias: e.standardBias, DaylightBias: e.daylightBias,
-		StandardTransition: e.standardTransition, DaylightTransition: e.daylightTransition,
-		TerritoryStatus: string(e.territoryStatus), TerritoryErrorCode: e.territoryErrorCode, Territory: e.territory,
-	})
+	DynamicStatus               windowsEvidenceStatus `json:"dynamic_status"`
+	DynamicAPIStatus            uint32                `json:"dynamic_api_status"`
+	DynamicAPIStatusName        string                `json:"dynamic_api_status_name,omitempty"`
+	DynamicErrorCode            uint32                `json:"dynamic_error_code,omitempty"`
+	KeyName                     string                `json:"key"`
+	DynamicDaylightTimeDisabled bool                  `json:"dynamic_daylight_time_disabled"`
+	Bias                        int32                 `json:"bias"`
+	StandardBias                int32                 `json:"standard_bias"`
+	DaylightBias                int32                 `json:"daylight_bias"`
+	StandardTransition          windowsTransition     `json:"standard_transition"`
+	DaylightTransition          windowsTransition     `json:"daylight_transition"`
+	TerritoryStatus             windowsEvidenceStatus `json:"territory_status"`
+	TerritoryErrorCode          uint32                `json:"territory_error_code,omitempty"`
+	Territory                   string                `json:"territory,omitempty"`
 }
 
 type windowsTimezoneResolution struct {
@@ -82,24 +55,24 @@ func resolveWindowsTimezone(
 	load func(name string) error,
 ) (windowsTimezoneResolution, error) {
 	observed := evidence()
-	if observed.dynamicStatus != windowsEvidenceSuccess {
+	if observed.DynamicStatus != windowsEvidenceSuccess {
 		return windowsTimezoneResolution{}, localTimezoneError("Windows dynamic timezone API failed")
 	}
-	if observed.keyName == "" {
+	if observed.KeyName == "" {
 		return windowsTimezoneResolution{}, localTimezoneError("Windows timezone key is empty or custom")
 	}
-	if observed.dynamicDaylightTimeDisabled {
+	if observed.DynamicDaylightTimeDisabled {
 		return windowsTimezoneResolution{}, localTimezoneError("Windows dynamic daylight time is disabled")
 	}
-	territory := observed.territory
+	territory := observed.Territory
 	mapping := windowsMappingExactTerritory
-	if observed.territoryStatus != windowsEvidenceSuccess || !usableWindowsTerritory(territory) {
+	if observed.TerritoryStatus != windowsEvidenceSuccess || !usableWindowsTerritory(territory) {
 		territory = "001"
 		mapping = windowsMappingWorldDefault
 	}
-	resolved := candidates(observed.keyName, territory)
+	resolved := candidates(observed.KeyName, territory)
 	if len(resolved) == 0 && mapping == windowsMappingExactTerritory {
-		resolved = candidates(observed.keyName, "001")
+		resolved = candidates(observed.KeyName, "001")
 		mapping = windowsMappingWorldDefault
 	}
 	if len(resolved) == 0 {
@@ -113,5 +86,5 @@ func resolveWindowsTimezone(
 }
 
 func usableWindowsTerritory(territory string) bool {
-	return len(territory) == 2 && territory[0] >= 'A' && territory[0] <= 'Z' && territory[1] >= 'A' && territory[1] <= 'Z'
+	return territory != "ZZ" && len(territory) == 2 && territory[0] >= 'A' && territory[0] <= 'Z' && territory[1] >= 'A' && territory[1] <= 'Z'
 }

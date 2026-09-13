@@ -3,6 +3,7 @@ package windowszonesdata
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -12,8 +13,42 @@ import (
 	"github.com/ningw42/copilotd/internal/usage/report"
 )
 
+type testIdentityRecord struct {
+	Repository string `json:"repository"`
+	Release    string `json:"release"`
+	Tag        string `json:"tag"`
+	Commit     string `json:"commit"`
+	Tree       string `json:"tree"`
+	Source     struct {
+		Path    string `json:"path"`
+		GitBlob string `json:"git_blob"`
+		Size    int    `json:"size"`
+		SHA256  string `json:"sha256"`
+	} `json:"source"`
+	License struct {
+		Path    string `json:"path"`
+		GitBlob string `json:"git_blob"`
+		Size    int    `json:"size"`
+		SHA256  string `json:"sha256"`
+		SPDX    string `json:"spdx"`
+	} `json:"license"`
+}
+
+func readTestIdentity(t *testing.T) testIdentityRecord {
+	t.Helper()
+	raw, err := os.ReadFile("identity.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var identity testIdentityRecord
+	if err := json.Unmarshal(raw, &identity); err != nil {
+		t.Fatal(err)
+	}
+	return identity
+}
+
 func TestCLDRRelease48IdentityMatchesVendoredSourceAndLicense(t *testing.T) {
-	identity := Identity()
+	identity := readTestIdentity(t)
 	if identity.Repository != "https://github.com/unicode-org/cldr" || identity.Release != "48" || identity.Tag != "release-48" ||
 		identity.Commit != "acd6d88ae493633240e19a87a721076a8a75c310" || identity.Tree != "bafae8fc919257506cb84327781ce4912b9b0c0b" ||
 		identity.Source.Path != "common/supplemental/windowsZones.xml" || identity.Source.GitBlob != "26a62c3f0645851fa13ebddbce9b6f20528d5777" ||
@@ -42,7 +77,11 @@ func TestCLDRRelease48IdentityMatchesVendoredSourceAndLicense(t *testing.T) {
 			t.Fatalf("%s identity: size=%d sha256=%s", artifact.name, len(data), hex.EncodeToString(sum[:]))
 		}
 	}
-	if !strings.Contains(string(License()), "SPDX-License-Identifier: Unicode-3.0") {
+	license, err := os.ReadFile("LICENSE")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(license), "SPDX-License-Identifier: Unicode-3.0") {
 		t.Fatal("vendored license is not the pinned Unicode License V3 text")
 	}
 }

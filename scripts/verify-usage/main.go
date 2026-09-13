@@ -281,10 +281,14 @@ func restoreWindowsTimezoneHost(host windowsTimezoneHost, original windowsHostTi
 	return errors.Join(timezoneErr, homeErr, stateErr, mismatch)
 }
 
+const (
+	controlledWindowsTerritory = "US"
+	controlledWindowsHomeGeoID = 244
+)
+
 type controlledWindowsTimezoneCase struct {
 	name        string
 	windowsKey  string
-	territory   string
 	wantZone    string
 	wantMapping string
 	wantError   string
@@ -292,10 +296,10 @@ type controlledWindowsTimezoneCase struct {
 
 func controlledWindowsTimezoneCases() []controlledWindowsTimezoneCase {
 	return []controlledWindowsTimezoneCase{
-		{name: "central_us_exact", windowsKey: "Central Standard Time", territory: "US", wantZone: "America/Chicago", wantMapping: "exact_territory"},
-		{name: "china_us_world", windowsKey: "China Standard Time", territory: "US", wantZone: "Asia/Shanghai", wantMapping: "world_default"},
-		{name: "nepal_us_world", windowsKey: "Nepal Standard Time", territory: "US", wantZone: "Asia/Katmandu", wantMapping: "world_default"},
-		{name: "central_dst_disabled", windowsKey: "Central Standard Time_dstoff", territory: "US", wantError: "dynamic daylight time is disabled"},
+		{name: "central_us_exact", windowsKey: "Central Standard Time", wantZone: "America/Chicago", wantMapping: "exact_territory"},
+		{name: "china_us_world", windowsKey: "China Standard Time", wantZone: "Asia/Shanghai", wantMapping: "world_default"},
+		{name: "nepal_us_world", windowsKey: "Nepal Standard Time", wantZone: "Asia/Katmandu", wantMapping: "world_default"},
+		{name: "central_dst_disabled", windowsKey: "Central Standard Time_dstoff", wantError: "dynamic daylight time is disabled"},
 	}
 }
 
@@ -309,10 +313,7 @@ func runControlledWindowsTimezoneCases(host windowsTimezoneHost, cases []control
 	}()
 
 	for _, test := range cases {
-		if test.territory != "US" {
-			return fmt.Errorf("controlled Windows territory %q has no approved GeoID", test.territory)
-		}
-		desired := windowsHostTimezoneState{Timezone: test.windowsKey, HomeGeoID: 244}
+		desired := windowsHostTimezoneState{Timezone: test.windowsKey, HomeGeoID: controlledWindowsHomeGeoID}
 		label := "setup-" + test.name
 		if err := host.setTimezone(label, desired.Timezone); err != nil {
 			return fmt.Errorf("set controlled Windows timezone for %s: %w", test.name, err)
@@ -341,7 +342,8 @@ type commandWindowsTimezoneHost struct {
 func (h commandWindowsTimezoneHost) state(label string) (windowsHostTimezoneState, error) {
 	timezone, timezoneErr := h.verification.run("windows-timezone-"+label, "tzutil.exe", "/g")
 	homeGeoID, homeErr := h.verification.run("windows-home-location-"+label, "pwsh", "-NoProfile", "-NonInteractive", "-Command", "$ErrorActionPreference = 'Stop'; [int](Get-WinHomeLocation).GeoId")
-	if err := errors.Join(timezoneErr, homeErr); err != nil {
+	localID, localIDErr := h.verification.run("windows-timezoneinfo-local-id-"+label, "pwsh", "-NoProfile", "-NonInteractive", "-Command", "$ErrorActionPreference = 'Stop'; [TimeZoneInfo]::Local.Id")
+	if err := errors.Join(timezoneErr, homeErr, localIDErr); err != nil {
 		return windowsHostTimezoneState{}, err
 	}
 	state := windowsHostTimezoneState{Timezone: strings.TrimSpace(timezone)}
@@ -353,7 +355,16 @@ func (h commandWindowsTimezoneHost) state(label string) (windowsHostTimezoneStat
 		return windowsHostTimezoneState{}, fmt.Errorf("unexpected Get-WinHomeLocation GeoId %q", homeGeoID)
 	}
 	state.HomeGeoID = geoID
-	if err := h.verification.json("windows-host-state-"+label+".json", state); err != nil {
+	localID = strings.TrimSpace(localID)
+	if localID == "" || len(localID) > 256 || strings.ContainsAny(localID, "\r\n") {
+		return windowsHostTimezoneState{}, fmt.Errorf("unexpected TimeZoneInfo.Local.Id output %q", localID)
+	}
+	observation := struct {
+		Timezone            string `json:"timezone"`
+		HomeGeoID           int    `json:"home_geo_id"`
+		TimeZoneInfoLocalID string `json:"time_zone_info_local_id"`
+	}{Timezone: state.Timezone, HomeGeoID: state.HomeGeoID, TimeZoneInfoLocalID: localID}
+	if err := h.verification.json("windows-host-state-"+label+".json", observation); err != nil {
 		return windowsHostTimezoneState{}, err
 	}
 	return state, nil
@@ -379,21 +390,23 @@ func (v *verification) controlledWindowsTimezones() error {
 			"COPILOTD_TEST_SYSTEM_CONFIGURATION":   "controlled Windows timezone/home location on disposable VM; restored after test",
 			"COPILOTD_TEST_SYSTEM_ZONE":            test.wantZone,
 			"COPILOTD_TEST_SYSTEM_ERROR":           test.wantError,
-			"COPILOTD_TEST_WINDOWS_TERRITORY":      test.territory,
+			"COPILOTD_TEST_WINDOWS_TERRITORY":      controlledWindowsTerritory,
 			"COPILOTD_TEST_WINDOWS_MAPPING_SOURCE": test.wantMapping,
 		})
 		logName := "controlled-windows-" + test.name
 		_, testErr := v.run(logName, "go", "test", "-json", "./cmd/copilotd", "-run", "^TestUsageExecutableAcceptance$/^system_timezone$", "-count=1")
 		accountErr := v.account(logName+".log", []string{"cmd/copilotd:TestUsageExecutableAcceptance/system_timezone"})
-		var nativeTestErr, nativeAccountErr error
+		nativeTests := []string{"TestWindowsNativeTimezoneAdapterUsesRealAPIs"}
 		if test.wantError == "" {
-			nativeLogName := "controlled-windows-native-" + test.name
-			_, nativeTestErr = v.run(nativeLogName, "go", "test", "-json", "./internal/usage/reportcli", "-run", "^(TestWindowsNativeTimezoneAdapterUsesRealAPIs|TestWindowsNativeTimezoneTransitionEvidenceUsesRealAPIs)$", "-count=1")
-			nativeAccountErr = v.account(nativeLogName+".log", []string{
-				"internal/usage/reportcli:TestWindowsNativeTimezoneAdapterUsesRealAPIs",
-				"internal/usage/reportcli:TestWindowsNativeTimezoneTransitionEvidenceUsesRealAPIs",
-			})
+			nativeTests = append(nativeTests, "TestWindowsNativeTimezoneTransitionEvidenceUsesRealAPIs")
 		}
+		nativeLogName := "controlled-windows-native-" + test.name
+		_, nativeTestErr := v.run(nativeLogName, "go", "test", "-json", "./internal/usage/reportcli", "-run", "^("+strings.Join(nativeTests, "|")+")$", "-count=1")
+		requiredNativeTests := make([]string, 0, len(nativeTests))
+		for _, name := range nativeTests {
+			requiredNativeTests = append(requiredNativeTests, "internal/usage/reportcli:"+name)
+		}
+		nativeAccountErr := v.account(nativeLogName+".log", requiredNativeTests)
 		return errors.Join(testErr, accountErr, nativeTestErr, nativeAccountErr)
 	})
 }
@@ -615,7 +628,12 @@ func mandatoryTests(goos string) []string {
 	}
 	if goos == "windows" {
 		groups["internal/usage/sqlitestore"] = append(groups["internal/usage/sqlitestore"], "TestStoreWindowsPermissionsAreExplicitlyBestEffort")
-		groups["internal/usage/reportcli"] = append(groups["internal/usage/reportcli"], "TestWindowsNativeTimezoneAdapterUsesRealAPIs", "TestWindowsNativeTimezoneTransitionEvidenceUsesRealAPIs")
+		groups["internal/usage/reportcli"] = append(groups["internal/usage/reportcli"],
+			"TestWindowsAnnualRuleComparisonIgnoresBiasesWithoutTransitions",
+			"TestWindowsNativeTimezoneAdapterUsesRealAPIs",
+			"TestWindowsNativeTimezoneTransitionEvidenceUsesRealAPIs",
+			"TestWindowsResolutionEvidenceDistinguishesUnattemptedAndFailedLoading",
+		)
 	} else {
 		groups["internal/usage/report"] = append(groups["internal/usage/report"], "TestQueryDeniedDatabaseReadIsGenericUnavailable")
 		groups["cmd/copilotd"] = append(groups["cmd/copilotd"], "TestUsageExecutableInformationalCommandsRetainSIGPIPE", "TestUsageExecutableCancellationUsesCLIErrorPath", "TestUsageExecutableMalformedFlagsWithClosedStderrPipe", "TestUsageExecutableMalformedHelpWithClosedStderrPipe")

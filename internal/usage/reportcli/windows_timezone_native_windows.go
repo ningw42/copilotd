@@ -58,17 +58,17 @@ func configureNativeWindowsTimezoneSystem(system *localTimezoneSystem) {
 func readNativeWindowsTimezoneEvidence() windowsTimezoneEvidence {
 	var information windowsDynamicTimeZoneInformation
 	if err := windowsGetDynamicTimeZoneInfoProc.Find(); err != nil {
-		return windowsTimezoneEvidence{dynamicStatus: windowsEvidenceUnavailable, dynamicErrorCode: windowsErrorCode(err)}
+		return windowsTimezoneEvidence{DynamicStatus: windowsEvidenceUnavailable, DynamicErrorCode: windowsErrorCode(err)}
 	}
 	status, _, callErr := windowsGetDynamicTimeZoneInfoProc.Call(uintptr(unsafe.Pointer(&information)))
 	evidence := classifyWindowsDynamicTimezone(&information, status, callErr)
-	if evidence.dynamicStatus != windowsEvidenceSuccess {
+	if evidence.DynamicStatus != windowsEvidenceSuccess {
 		return evidence
 	}
 
 	if err := windowsGetUserDefaultGeoNameProc.Find(); err != nil {
-		evidence.territoryStatus = windowsEvidenceUnavailable
-		evidence.territoryErrorCode = windowsErrorCode(err)
+		evidence.TerritoryStatus = windowsEvidenceUnavailable
+		evidence.TerritoryErrorCode = windowsErrorCode(err)
 		return evidence
 	}
 	var territory [windowsGeoNameLength]uint16
@@ -83,9 +83,9 @@ func readNativeWindowsTimezoneEvidence() windowsTimezoneEvidence {
 func classifyWindowsDynamicTimezone(information *windowsDynamicTimeZoneInformation, status uintptr, callErr error) windowsTimezoneEvidence {
 	if status == windowsTimeZoneIDInvalid {
 		return windowsTimezoneEvidence{
-			dynamicStatus:    windowsEvidenceFailed,
-			dynamicAPIStatus: uint32(status),
-			dynamicErrorCode: windowsErrorCode(callErr),
+			DynamicStatus:    windowsEvidenceFailed,
+			DynamicAPIStatus: uint32(status),
+			DynamicErrorCode: windowsErrorCode(callErr),
 		}
 	}
 	statusName := "unknown"
@@ -98,29 +98,29 @@ func classifyWindowsDynamicTimezone(information *windowsDynamicTimeZoneInformati
 	// Win32 defines last-error only for TIME_ZONE_ID_INVALID. In particular,
 	// never consume Proc.Call's stale last-error after a successful status.
 	return windowsTimezoneEvidence{
-		dynamicStatus:               windowsEvidenceSuccess,
-		dynamicAPIStatus:            uint32(status),
-		dynamicAPIStatusName:        statusName,
-		keyName:                     windows.UTF16ToString(information.TimeZoneKeyName[:]),
-		dynamicDaylightTimeDisabled: information.DynamicDaylightTimeDisabled != 0,
-		bias:                        information.Bias,
-		standardBias:                information.StandardBias,
-		daylightBias:                information.DaylightBias,
-		standardTransition:          windowsTransitionFromSystemTime(information.StandardDate),
-		daylightTransition:          windowsTransitionFromSystemTime(information.DaylightDate),
+		DynamicStatus:               windowsEvidenceSuccess,
+		DynamicAPIStatus:            uint32(status),
+		DynamicAPIStatusName:        statusName,
+		KeyName:                     windows.UTF16ToString(information.TimeZoneKeyName[:]),
+		DynamicDaylightTimeDisabled: information.DynamicDaylightTimeDisabled != 0,
+		Bias:                        information.Bias,
+		StandardBias:                information.StandardBias,
+		DaylightBias:                information.DaylightBias,
+		StandardTransition:          windowsTransitionFromSystemTime(information.StandardDate),
+		DaylightTransition:          windowsTransitionFromSystemTime(information.DaylightDate),
 	}
 }
 
 func classifyWindowsTerritory(evidence *windowsTimezoneEvidence, buffer []uint16, result uintptr, callErr error) {
 	if result == 0 {
-		evidence.territoryStatus = windowsEvidenceFailed
-		evidence.territoryErrorCode = windowsErrorCode(callErr)
+		evidence.TerritoryStatus = windowsEvidenceFailed
+		evidence.TerritoryErrorCode = windowsErrorCode(callErr)
 		return
 	}
 	// Like the dynamic-timezone API, successful Win32 BOOL results do not make
 	// a retained last-error meaningful.
-	evidence.territoryStatus = windowsEvidenceSuccess
-	evidence.territory = windows.UTF16ToString(buffer)
+	evidence.TerritoryStatus = windowsEvidenceSuccess
+	evidence.Territory = windows.UTF16ToString(buffer)
 }
 
 func windowsTransitionFromSystemTime(value windowsSystemTime) windowsTransition {

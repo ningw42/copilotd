@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -171,16 +172,17 @@ func representativeWindowsRuleYears(first, last uint32) []uint16 {
 }
 
 func compareWindowsAnnualRule(location *time.Location, year int, information windowsTimeZoneInformation) ([]windowsRuleComparison, error) {
-	standardOffset := -int(information.Bias+information.StandardBias) * 60
-	daylightOffset := -int(information.Bias+information.DaylightBias) * 60
 	standard := windowsTransitionFromSystemTime(information.StandardDate)
 	daylight := windowsTransitionFromSystemTime(information.DaylightDate)
 	if standard.Month == 0 && daylight.Month == 0 {
+		fixedOffset := -int(information.Bias) * 60
 		return []windowsRuleComparison{
-			compareWindowsOffsets(location, "fixed-january", time.Date(year, time.January, 15, 12, 0, 0, 0, time.UTC), standardOffset, standardOffset),
-			compareWindowsOffsets(location, "fixed-july", time.Date(year, time.July, 15, 12, 0, 0, 0, time.UTC), standardOffset, standardOffset),
+			compareWindowsOffsets(location, "fixed-january", time.Date(year, time.January, 15, 12, 0, 0, 0, time.UTC), fixedOffset, fixedOffset),
+			compareWindowsOffsets(location, "fixed-july", time.Date(year, time.July, 15, 12, 0, 0, 0, time.UTC), fixedOffset, fixedOffset),
 		}, nil
 	}
+	standardOffset := -int(information.Bias+information.StandardBias) * 60
+	daylightOffset := -int(information.Bias+information.DaylightBias) * 60
 	if standard.Month == 0 || daylight.Month == 0 {
 		return nil, errors.New("only one Windows daylight transition is defined")
 	}
@@ -271,6 +273,27 @@ func TestWindowsAnnualRuleComparisonUsesPreTransitionBiases(t *testing.T) {
 	}
 }
 
+func TestWindowsAnnualRuleComparisonIgnoresBiasesWithoutTransitions(t *testing.T) {
+	location, err := report.LoadTimezone("Asia/Katmandu")
+	if err != nil {
+		t.Fatal(err)
+	}
+	comparisons, err := compareWindowsAnnualRule(location, 2026, windowsTimeZoneInformation{
+		Bias: -345, StandardBias: 60, DaylightBias: -60,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(comparisons) != 2 {
+		t.Fatalf("fixed comparisons = %+v", comparisons)
+	}
+	for _, comparison := range comparisons {
+		if comparison.ExpectedBefore != 20700 || comparison.ExpectedAfter != 20700 || !comparison.Matches {
+			t.Errorf("fixed comparison consumed ignored bias: %+v", comparison)
+		}
+	}
+}
+
 func TestWindowsNativeTimezoneTransitionEvidenceUsesRealAPIs(t *testing.T) {
 	evidence := readNativeWindowsTimezoneEvidence()
 	resolution, err := resolveWindowsTimezone(
@@ -312,6 +335,79 @@ func TestWindowsNativeTimezoneTransitionEvidenceUsesRealAPIs(t *testing.T) {
 	}
 }
 
+const (
+	windowsLoaderNotAttempted = "not_attempted"
+	windowsLoaderFailed       = "failed"
+	windowsLoaderSucceeded    = "success"
+)
+
+type windowsResolutionEvidence struct {
+	Candidates      []string             `json:"ordered_candidates,omitempty"`
+	Selected        string               `json:"selected_name,omitempty"`
+	Mapping         windowsMappingSource `json:"selection_reason,omitempty"`
+	Loader          string               `json:"shared_loader"`
+	ResolutionError string               `json:"resolution_error,omitempty"`
+}
+
+func captureWindowsResolutionEvidence(
+	evidence windowsTimezoneEvidence,
+	candidates func(key, territory string) []string,
+	load func(name string) error,
+) (windowsTimezoneResolution, error, windowsResolutionEvidence) {
+	trace := windowsResolutionEvidence{Loader: windowsLoaderNotAttempted}
+	result, err := resolveWindowsTimezone(
+		func() windowsTimezoneEvidence { return evidence },
+		func(key, territory string) []string {
+			resolved := candidates(key, territory)
+			if len(resolved) != 0 {
+				trace.Candidates = append([]string(nil), resolved...)
+				trace.Selected = resolved[0]
+				trace.Mapping = windowsMappingExactTerritory
+				if territory == "001" {
+					trace.Mapping = windowsMappingWorldDefault
+				}
+			}
+			return resolved
+		},
+		func(name string) error {
+			trace.Selected = name
+			if err := load(name); err != nil {
+				trace.Loader = windowsLoaderFailed
+				return err
+			}
+			trace.Loader = windowsLoaderSucceeded
+			return nil
+		},
+	)
+	if err != nil {
+		trace.ResolutionError = err.Error()
+	}
+	return result, err, trace
+}
+
+func TestWindowsResolutionEvidenceDistinguishesUnattemptedAndFailedLoading(t *testing.T) {
+	t.Run("disabled dynamic daylight never attempts mapping or loading", func(t *testing.T) {
+		_, err, trace := captureWindowsResolutionEvidence(
+			windowsTimezoneEvidence{DynamicStatus: windowsEvidenceSuccess, KeyName: "Central Standard Time", DynamicDaylightTimeDisabled: true},
+			func(string, string) []string { t.Fatal("candidate lookup reached"); return nil },
+			func(string) error { t.Fatal("loader reached"); return nil },
+		)
+		if err == nil || !strings.Contains(err.Error(), "dynamic daylight time is disabled") || trace.Loader != windowsLoaderNotAttempted || len(trace.Candidates) != 0 || trace.Selected != "" || trace.Mapping != "" {
+			t.Fatalf("error=%v evidence=%+v", err, trace)
+		}
+	})
+	t.Run("loader failure retains attempted selection", func(t *testing.T) {
+		_, err, trace := captureWindowsResolutionEvidence(
+			windowsTimezoneEvidence{DynamicStatus: windowsEvidenceSuccess, KeyName: "Central Standard Time", TerritoryStatus: windowsEvidenceSuccess, Territory: "US"},
+			func(string, string) []string { return []string{"Unavailable/First", "America/Chicago"} },
+			func(string) error { return errors.New("unloadable") },
+		)
+		if err == nil || trace.Loader != windowsLoaderFailed || trace.Selected != "Unavailable/First" || trace.Mapping != windowsMappingExactTerritory || fmt.Sprint(trace.Candidates) != "[Unavailable/First America/Chicago]" {
+			t.Fatalf("error=%v evidence=%+v", err, trace)
+		}
+	})
+}
+
 func TestWindowsNativeTimezoneAdapterUsesRealAPIs(t *testing.T) {
 	if unsafe.Sizeof(windowsSystemTime{}) != 16 || unsafe.Sizeof(windowsDynamicTimeZoneInformation{}) != 432 {
 		t.Fatalf("native layouts: SYSTEMTIME=%d DYNAMIC_TIME_ZONE_INFORMATION=%d", unsafe.Sizeof(windowsSystemTime{}), unsafe.Sizeof(windowsDynamicTimeZoneInformation{}))
@@ -327,7 +423,7 @@ func TestWindowsNativeTimezoneAdapterUsesRealAPIs(t *testing.T) {
 	// status must not be rejected because syscall retained an older error.
 	stale := windowsDynamicTimeZoneInformation{TimeZoneKeyName: utf16Array128("Central Standard Time")}
 	staleEvidence := classifyWindowsDynamicTimezone(&stale, windowsTimeZoneIDDaylight, syscall.Errno(5))
-	if staleEvidence.dynamicStatus != windowsEvidenceSuccess || staleEvidence.keyName != "Central Standard Time" || staleEvidence.dynamicErrorCode != 0 {
+	if staleEvidence.DynamicStatus != windowsEvidenceSuccess || staleEvidence.KeyName != "Central Standard Time" || staleEvidence.DynamicErrorCode != 0 {
 		t.Fatalf("successful status consumed stale last-error: %+v", staleEvidence)
 	}
 	territory := windowsTimezoneEvidence{}
@@ -336,34 +432,33 @@ func TestWindowsNativeTimezoneAdapterUsesRealAPIs(t *testing.T) {
 		t.Fatal(err)
 	}
 	classifyWindowsTerritory(&territory, encodedTerritory, 1, syscall.Errno(5))
-	if territory.territoryStatus != windowsEvidenceSuccess || territory.territory != "US" || territory.territoryErrorCode != 0 {
+	if territory.TerritoryStatus != windowsEvidenceSuccess || territory.Territory != "US" || territory.TerritoryErrorCode != 0 {
 		t.Fatalf("successful territory result consumed stale last-error: %+v", territory)
 	}
 
 	evidence := readNativeWindowsTimezoneEvidence()
-	result, resolveErr := resolveWindowsTimezone(
-		func() windowsTimezoneEvidence { return evidence },
+	result, resolveErr, resolutionEvidence := captureWindowsResolutionEvidence(
+		evidence,
 		windowszonesdata.Candidates,
 		func(name string) error { _, err := report.LoadTimezone(name); return err },
 	)
 	version := windows.RtlGetVersion()
 	record := struct {
-		OSBuild      uint32                  `json:"os_build"`
-		Architecture string                  `json:"process_architecture"`
-		Evidence     windowsTimezoneEvidence `json:"native_evidence"`
-		CLDRRelease  string                  `json:"cldr_release"`
-		CLDRSource   string                  `json:"cldr_source_sha256"`
-		Candidates   []string                `json:"ordered_candidates,omitempty"`
-		Selected     string                  `json:"selected_name,omitempty"`
-		Mapping      string                  `json:"selection_reason,omitempty"`
-		Loader       string                  `json:"shared_loader"`
+		OSBuild        uint32                  `json:"os_build"`
+		Architecture   string                  `json:"process_architecture"`
+		Evidence       windowsTimezoneEvidence `json:"native_evidence"`
+		CLDRRelease    string                  `json:"cldr_release"`
+		CLDRSource     string                  `json:"cldr_source_sha256"`
+		Candidates     []string                `json:"ordered_candidates,omitempty"`
+		Selected       string                  `json:"selected_name,omitempty"`
+		Mapping        windowsMappingSource    `json:"selection_reason,omitempty"`
+		Loader          string                  `json:"shared_loader"`
+		ResolutionError string                  `json:"resolution_error,omitempty"`
 	}{
 		OSBuild: version.BuildNumber, Architecture: runtime.GOARCH, Evidence: evidence,
 		CLDRRelease: windowszonesdata.CLDRRelease, CLDRSource: windowszonesdata.SourceSHA256,
-		Candidates: result.candidates, Selected: result.name, Mapping: string(result.mapping), Loader: "failed",
-	}
-	if resolveErr == nil {
-		record.Loader = "success"
+		Candidates: resolutionEvidence.Candidates, Selected: resolutionEvidence.Selected,
+		Mapping: resolutionEvidence.Mapping, Loader: resolutionEvidence.Loader, ResolutionError: resolutionEvidence.ResolutionError,
 	}
 	encoded, err := json.Marshal(record)
 	if err != nil {
@@ -373,17 +468,29 @@ func TestWindowsNativeTimezoneAdapterUsesRealAPIs(t *testing.T) {
 		t.Fatalf("native evidence exceeds bound: %d", len(encoded))
 	}
 	t.Logf("windows_timezone_native_evidence=%s", encoded)
-	if evidence.dynamicStatus != windowsEvidenceSuccess || evidence.keyName == "" {
+	if evidence.DynamicStatus != windowsEvidenceSuccess || evidence.KeyName == "" {
 		t.Fatalf("real GetDynamicTimeZoneInformation evidence is unusable: %+v", evidence)
 	}
-	if resolveErr != nil || result.name == "" {
-		t.Fatalf("real native evidence did not resolve and load: result=%+v error=%v", result, resolveErr)
+	if want := os.Getenv("COPILOTD_TEST_WINDOWS_TERRITORY"); want != "" && (evidence.TerritoryStatus != windowsEvidenceSuccess || evidence.Territory != want) {
+		t.Fatalf("real GetUserDefaultGeoName evidence status=%q territory=%q, want success/%q", evidence.TerritoryStatus, evidence.Territory, want)
 	}
-	if want := os.Getenv("COPILOTD_TEST_WINDOWS_TERRITORY"); want != "" && (evidence.territoryStatus != windowsEvidenceSuccess || evidence.territory != want) {
-		t.Fatalf("real GetUserDefaultGeoName evidence status=%q territory=%q, want success/%q", evidence.territoryStatus, evidence.territory, want)
+	if wantError := os.Getenv("COPILOTD_TEST_SYSTEM_ERROR"); wantError != "" {
+		if resolveErr == nil || !strings.Contains(resolveErr.Error(), wantError) {
+			t.Fatalf("real native rejection error=%v, want %q", resolveErr, wantError)
+		}
+		if resolutionEvidence.Loader != windowsLoaderNotAttempted || len(resolutionEvidence.Candidates) != 0 || resolutionEvidence.Selected != "" || resolutionEvidence.Mapping != "" {
+			t.Fatalf("rejected native evidence unexpectedly attempted selection or loading: %+v", resolutionEvidence)
+		}
+		if strings.Contains(wantError, "dynamic daylight time is disabled") && !evidence.DynamicDaylightTimeDisabled {
+			t.Fatalf("expected disabled dynamic daylight evidence: %+v", evidence)
+		}
+		return
 	}
-	if want := os.Getenv("COPILOTD_TEST_WINDOWS_MAPPING_SOURCE"); want != "" && string(result.mapping) != want {
-		t.Fatalf("real native mapping source=%q, want %q", result.mapping, want)
+	if resolveErr != nil || result.name == "" || resolutionEvidence.Loader != windowsLoaderSucceeded {
+		t.Fatalf("real native evidence did not resolve and load: result=%+v evidence=%+v error=%v", result, resolutionEvidence, resolveErr)
+	}
+	if want := os.Getenv("COPILOTD_TEST_WINDOWS_MAPPING_SOURCE"); want != "" && string(resolutionEvidence.Mapping) != want {
+		t.Fatalf("real native mapping source=%q, want %q", resolutionEvidence.Mapping, want)
 	}
 	if want := os.Getenv("COPILOTD_TEST_SYSTEM_ZONE"); want != "" && result.name != want {
 		t.Fatalf("real native selected name=%q, want %q", result.name, want)

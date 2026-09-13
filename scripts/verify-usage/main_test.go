@@ -60,7 +60,7 @@ func TestControlledWindowsTimezoneRestoresAfterTestFailure(t *testing.T) {
 	if host.current != (windowsHostTimezoneState{Timezone: "Pacific Standard Time_dstoff", HomeGeoID: 39}) {
 		t.Fatalf("host was not restored: %+v", host.current)
 	}
-	wantEvents := "state:snapshot;timezone:setup-central_us_exact:Central Standard Time;home:setup-central_us_exact:244;state:setup-check-central_us_exact;test;timezone:restore:Pacific Standard Time_dstoff;home:restore:39;state:restore-check"
+	wantEvents := fmt.Sprintf("state:snapshot;timezone:setup-central_us_exact:Central Standard Time;home:setup-central_us_exact:%d;state:setup-check-central_us_exact;test;timezone:restore:Pacific Standard Time_dstoff;home:restore:39;state:restore-check", controlledWindowsHomeGeoID)
 	if got := strings.Join(host.events, ";"); got != wantEvents {
 		t.Fatalf("events = %s, want %s", got, wantEvents)
 	}
@@ -106,7 +106,7 @@ func TestControlledWindowsTimezoneRunsEveryApprovedCaseAndRestoresOnce(t *testin
 	host := &fakeWindowsTimezoneHost{current: original}
 	var ran []string
 	err := runControlledWindowsTimezoneCases(host, controlledWindowsTimezoneCases(), func(test controlledWindowsTimezoneCase) error {
-		if host.current != (windowsHostTimezoneState{Timezone: test.windowsKey, HomeGeoID: 244}) {
+		if host.current != (windowsHostTimezoneState{Timezone: test.windowsKey, HomeGeoID: controlledWindowsHomeGeoID}) {
 			t.Fatalf("%s ran under %+v", test.name, host.current)
 		}
 		ran = append(ran, test.name)
@@ -137,8 +137,10 @@ func TestControlledWindowsTimezoneRunsEveryApprovedCaseAndRestoresOnce(t *testin
 
 func TestWindowsTimezoneVerificationInventory(t *testing.T) {
 	required := fmt.Sprint(mandatoryTests("windows"))
-	if !strings.Contains(required, "internal/usage/reportcli:TestWindowsNativeTimezoneAdapterUsesRealAPIs") ||
+	if !strings.Contains(required, "internal/usage/reportcli:TestWindowsAnnualRuleComparisonIgnoresBiasesWithoutTransitions") ||
+		!strings.Contains(required, "internal/usage/reportcli:TestWindowsNativeTimezoneAdapterUsesRealAPIs") ||
 		!strings.Contains(required, "internal/usage/reportcli:TestWindowsNativeTimezoneTransitionEvidenceUsesRealAPIs") ||
+		!strings.Contains(required, "internal/usage/reportcli:TestWindowsResolutionEvidenceDistinguishesUnattemptedAndFailedLoading") ||
 		!strings.Contains(required, "cmd/copilotd:TestUsageExecutableAcceptance/system_timezone") {
 		t.Fatalf("Windows mandatory inventory = %s", required)
 	}
@@ -146,7 +148,7 @@ func TestWindowsTimezoneVerificationInventory(t *testing.T) {
 	want := "central_us_exact=Central Standard Time/US/America/Chicago/exact_territory/;china_us_world=China Standard Time/US/Asia/Shanghai/world_default/;nepal_us_world=Nepal Standard Time/US/Asia/Katmandu/world_default/;central_dst_disabled=Central Standard Time_dstoff/US///dynamic daylight time is disabled"
 	var got []string
 	for _, test := range cases {
-		got = append(got, test.name+"="+test.windowsKey+"/"+test.territory+"/"+test.wantZone+"/"+test.wantMapping+"/"+test.wantError)
+		got = append(got, test.name+"="+test.windowsKey+"/"+controlledWindowsTerritory+"/"+test.wantZone+"/"+test.wantMapping+"/"+test.wantError)
 	}
 	if strings.Join(got, ";") != want {
 		t.Fatalf("controlled Windows timezone cases = %s, want %s", strings.Join(got, ";"), want)

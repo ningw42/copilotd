@@ -151,8 +151,9 @@ package-level pass.
 Bodyless work-deadline precedence is also required. On Windows, explicit passes
 are required for the real Win32 timezone adapter and the test-only effective-year/
 per-year representative transition comparison. Each controlled timezone case has
-its own uncached actual-executable log and mandatory subtest accounting; successful
-controlled cases also require separately accounted native adapter/rule evidence.
+its own uncached actual-executable log and mandatory subtest accounting. All four
+controlled cases require separately accounted native adapter evidence; successful
+selections additionally require annual-rule evidence.
 Unix SIGPIPE (including malformed flags and help-validation errors with closed
 stderr) and INT/TERM
 executable checks are mandatory on Linux/macOS and explicit `not_applicable`
@@ -177,13 +178,19 @@ CGO-disabled SQLite/integration tests remain mandatory on both Windows targets.
 Every native acceptance run invokes the actual CLI with `TZ`, `TZDIR`, and
 `ZONEINFO` absent. Unix captures `/etc/localtime`, recognized root aliases and
 resolved paths; Windows records bounded direct-API key/DST/territory/bias/transition
-and CLDR selection/loader evidence. A supported image records its accepted name;
-an unsupported untouched Unix configuration retains the correct override guidance.
+and CLDR selection/loader evidence. Rejections distinguish a loader that was not
+attempted from one that failed, and a loader failure retains the attempted ordered
+candidates, selected name, and mapping reason. A supported image records its
+accepted name; an unsupported untouched Unix configuration retains the correct
+override guidance.
 Then Linux/macOS CI separately installs a known `Europe/Berlin` system symlink
 on the **disposable hosted VM**, tests the real system-link path with no explicit
 zone, and restores the original link/file. Windows CI snapshots `tzutil /g` and
 `Get-WinHomeLocation` state, immediately defers restoration, and verifies both
-restored values after all controlled cases. Setup, state mismatch, test failure,
+restored values after all controlled cases. It also records the bounded
+`TimeZoneInfo.Local.Id` value at each observation as an independent cross-check;
+that .NET value is neither a production input nor a required equality with the
+`_dstoff` form returned by `tzutil`. Setup, state mismatch, test failure,
 restore command failure, or restore mismatch fails verification. Commands, results
 and controlled-vs-untouched labels are recorded. `-native-ci` refuses to mutate a
 local machine. PowerShell and `tzutil` are verification tools only; production
@@ -206,13 +213,16 @@ named `TZ` as system discovery.
   `America/Chicago` by exact territory; `China Standard Time` → `Asia/Shanghai`
   and `Nepal Standard Time` → `Asia/Katmandu` by `001` fallback; and
   `Central Standard Time_dstoff` → dynamic-DST-disabled failure before any HTTP.
-  Successful controlled states rerun the native adapter and test-only
+  Every controlled state reruns the native adapter evidence test, including the
+  disabled state where shared loading must be recorded as `not_attempted`.
+  Successful selections also run the test-only
   `GetDynamicTimeZoneInformationEffectiveYears`/
   `GetTimeZoneInformationForYear` evidence. Representative annual Windows rules
   are compared to the selected IANA rules over bounded years; a fixed zone with
   no Dynamic DST registry range records `ERROR_FILE_NOT_FOUND` as
-  `no_dynamic_range` and still compares per-year fixed rules. This comparison is
-  validation evidence, never production selection logic. Windows has no Unix
+  `no_dynamic_range` and still compares per-year fixed rules using only the base
+  bias because standard/daylight biases are ignored without transitions. This
+  comparison is validation evidence, never production selection logic. Windows has no Unix
   platform zoneinfo fallback, so absent runtime sources are actual embedded-loading
   observations on each native architecture.
 - Normal macOS named loading/system discovery is **not** no-host-data isolation.
