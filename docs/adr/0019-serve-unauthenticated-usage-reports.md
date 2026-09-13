@@ -86,8 +86,8 @@ timezones now use supported configuration visible to the CLI process on Linux/ma
 SSH/container/WSL execution does not discover a physical workstation outside it.
 Native Windows uses only the direct Win32 and pinned mapping policy above; Windows
 `TZ`, localized names, current offsets, `time.Local`, PowerShell, and .NET are not
-production identity inputs. Failed calls, empty/custom/unmapped keys, disabled
-dynamic daylight behavior, missing defaults, unloadable selected names, and
+production identity inputs. Failed dynamic-timezone calls, empty/custom/unmapped
+keys, disabled dynamic daylight behavior, missing defaults, unloadable selected names, and
 unsupported/ambiguous Unix configurations require an explicit name before HTTP;
 there is no silent UTC fallback. Explicit flag/environment/selected-TOML values
 retain precedence and validation. The report protocol and daemon-owned calendar

@@ -83,7 +83,7 @@ func resolveWindowsTimezone(
 ) (windowsTimezoneResolution, error) {
 	observed := evidence()
 	if observed.dynamicStatus != windowsEvidenceSuccess {
-		return windowsTimezoneResolution{}, localTimezoneError("Windows timezone API failed")
+		return windowsTimezoneResolution{}, localTimezoneError("Windows dynamic timezone API failed")
 	}
 	if observed.keyName == "" {
 		return windowsTimezoneResolution{}, localTimezoneError("Windows timezone key is empty or custom")

@@ -161,10 +161,11 @@ On native Windows, omission reads the registry time-zone key and dynamic-DST
 state directly through Win32, then maps it to a **representative** IANA name from
 pinned CLDR 48 data. A usable two-letter user territory selects the first ordered
 exact-territory candidate; unavailable, invalid, or unmapped territory uses that
-key's first `001` candidate. This does not identify a unique city. Failed native
-calls, empty/custom/unmapped keys, disabled dynamic daylight behavior, missing
-defaults, and unloadable selected names fail before HTTP with explicit-override
-guidance. Windows `TZ`, current offsets, localized names, `time.Local`, PowerShell,
+key's first `001` candidate. This does not identify a unique city. Failed
+dynamic-timezone calls, empty/custom/unmapped keys, disabled dynamic daylight
+behavior, missing defaults, and unloadable selected names fail before HTTP
+with explicit-override guidance. Windows `TZ`, current offsets, localized names,
+`time.Local`, PowerShell,
 and .NET are not production identity inputs; WSL follows Linux. Explicit flag,
 `COPILOTD_TIMEZONE`, or selected-TOML choices still bypass discovery but not name
 validation. Native runtime claims are revision-specific: see the

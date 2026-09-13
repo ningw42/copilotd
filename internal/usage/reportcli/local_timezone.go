@@ -57,7 +57,7 @@ func recognizedTimezoneRoot(goos, name string) bool {
 func (s *localTimezoneSystem) discover() (string, error) {
 	if s.goos == "windows" {
 		if s.windowsEvidence == nil {
-			return "", localTimezoneError("Windows timezone API failed")
+			return "", localTimezoneError("Windows dynamic timezone API failed")
 		}
 		resolved, err := resolveWindowsTimezone(
 			s.windowsEvidence,

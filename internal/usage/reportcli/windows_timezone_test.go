@@ -12,7 +12,7 @@ func TestWindowsTimezoneResolverRejectsUnusableDynamicEvidenceBeforeDependencies
 		evidence windowsTimezoneEvidence
 		reason   string
 	}{
-		{name: "API failure", evidence: windowsTimezoneEvidence{dynamicStatus: "failed"}, reason: "Windows timezone API failed"},
+		{name: "API failure", evidence: windowsTimezoneEvidence{dynamicStatus: "failed"}, reason: "Windows dynamic timezone API failed"},
 		{name: "empty key", evidence: windowsTimezoneEvidence{dynamicStatus: windowsEvidenceSuccess}, reason: "Windows timezone key is empty or custom"},
 		{name: "dynamic DST disabled", evidence: windowsTimezoneEvidence{dynamicStatus: windowsEvidenceSuccess, keyName: "Central Standard Time", dynamicDaylightTimeDisabled: true}, reason: "Windows dynamic daylight time is disabled"},
 	} {

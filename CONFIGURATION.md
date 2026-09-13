@@ -125,8 +125,8 @@ second precedence order.
   territory lookup is unavailable, malformed, or unmapped for the key, select
   the first candidate from that key's `001` mapping. The result is representative,
   not a claim about the user's unique city, and it is accepted only after shared
-  timezone loading succeeds. API failures, empty/custom/unmapped keys, disabled
-  dynamic daylight behavior, missing `001` defaults, and unloadable names require
+  timezone loading succeeds. Dynamic-timezone API failures, empty/custom/unmapped
+  keys, disabled dynamic daylight behavior, missing `001` defaults, and unloadable names require
   an explicit override before HTTP. Production does not infer from Windows `TZ`,
   current offsets, localized names, `time.Local`, PowerShell, or .NET, and never
   silently selects UTC. WSL follows Linux. CLDR 48 source, Unicode license,

@@ -339,8 +339,9 @@ resolves and no explicit timezone override was supplied:
    Missing/unidentifiable configuration fails with explicit-override guidance.
 4. **Native Windows:** read `TimeZoneKeyName` and
    `DynamicDaylightTimeDisabled` directly with `GetDynamicTimeZoneInformation`.
-   Reject a failed call, empty/custom/unmapped key, or disabled dynamic daylight
-   behavior. Read a two-letter user ISO territory with `GetUserDefaultGeoName`
+   Reject a failed dynamic-timezone call, empty/custom/unmapped key, or disabled
+   dynamic daylight behavior. Read a two-letter user ISO territory with
+   `GetUserDefaultGeoName`
    when that API succeeds. Preserve CLDR 48 candidate order: select the first
    candidate for the exact key/territory pair, or the first candidate for that
    key's `001` mapping when territory is unavailable, malformed, or has no exact
