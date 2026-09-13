@@ -11,9 +11,10 @@ TCP backpressure, and graceful/forced drain tests. #213 adds real-executable
 acceptance, the native pipeline, and final local verification. The additive
 [estimated-cost design](../design/2026-09-11-usage-cost-reporting-design.md) is
 implemented through #232–#238, including CLI rendering and deterministic local
-pricing-source executable acceptance. It inherits this same-revision native gate;
-implementation or local Linux evidence alone is not renewed four-platform
-certification.
+pricing-source executable acceptance. #248 adds reported OpenAI service-tier
+valuation, exact Fast/context composition, and transport-to-report acceptance.
+It inherits this same-revision native gate; implementation or local Linux
+evidence alone is not renewed four-platform certification.
 
 **A pipeline definition, cross-build, or local Linux pass is not four-platform
 certification.** The authoritative release result is the implementation SHA,
@@ -37,7 +38,7 @@ existing Nix development shell (native CI uses setup-go).
 
 - Public `sqlitestore.Open/Record/Close` supplies **synthetic prior history**.
   Actual `copilotd serve` and `copilotd usage` processes then use the real listener,
-  schema-v2 database, writer startup, read-only reporter and HTTP client. Synthetic
+  schema-v3 database, writer startup, read-only reporter and HTTP client. Synthetic
   prerequisite API key/GitHub OAuth token values are never live credentials.
   Discovery/refresh is disabled; the initial HTTPS Exchange CONNECT is observed
   and refused by a loopback proxy that never opens a tunnel. Reports still work.
@@ -63,12 +64,20 @@ existing Nix development shell (native CI uses setup-go).
   fixed OpenAI/Anthropic/combined history covers matched/unknown/ambiguous models,
   Surface-independent original-provider identity, per-Turn context-tier selection
   and one aggregate cache-write rate, a short OpenAI-native Turn valued at base
-  rates, exact current-price and identity repricing without new database writes,
+  rates, a response-`priority` Turn valued with explicit Fast and derived context
+  rates across pricing refreshes, exact current-price and identity repricing
+  without new database writes,
   report-time no-network behavior, omission of presentation-only
   `pricing.context_policy`, and a coherent old snapshot while replacement refresh
   is deliberately blocked. The ordinary
   actual-`serve` acceptance separately pins refresh to `0` and uses the embedded
   floor; neither path contacts models.dev.
+  The buffered, SSE, and WebSocket real-listener fixtures additionally carry
+  synthetic absent/null/empty/unknown/`default`/`priority`/`fast`
+  completed-response evidence through the production meter, SQLite writer,
+  reporter, embedded pricing floor, and actual CLI while preserving forwarded
+  payloads. A Fast request whose response reports `default` is valued normally.
+  No external pricing or inference service is contacted.
   No OS can carry embedded NUL in argv; its identity contract remains tested at
   Go command and HTTP/report seams, not falsely claimed as a native argv case.
 - Windows process cleanup uses `Kill`, not an unsupported `os.Interrupt`; this

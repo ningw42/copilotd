@@ -261,7 +261,7 @@ Fresh, historical-v1, and historical-v2 databases converge on the same v3 schema
 Reopening v3 makes no schema or history change. Migration failure must roll back
 all pending changes and the version bump together.
 
-## Reports and the accepted staging interval
+## Reports after the accepted staging interval
 
 Add `service_tier` to the OpenAI `SELECT ... LIMIT 0` integrity probe in
 `internal/usage/report/read.go`. The reporter must still require exact equality
@@ -273,16 +273,16 @@ Do not describe this presence probe as full DDL validation: it checks the
 explicit columns used by the contract, while store tests pin types, nullability,
 constraints, and indexes. Do not expand that verification policy in this issue.
 
-The numeric SELECT, `OpenAIMetrics()`, Turn valuation, aggregation, report wire
-schema version 1, and CLI presentation remain unchanged. No new report-time scan
-destination is needed. Tests should demonstrate identical reports for otherwise
-identical stored histories with different service-tier strings.
-
-Until the cost-calculation slice lands, reports continue existing base/context
-valuation and ignore the new evidence. This accepted interval does not establish
-that a reported non-default tier has Standard billing. External SQLite inspection
-can see the stored evidence immediately; its meaning is independent of whether
-current reports consume it.
+The later approved
+[service-tier pricing design](2026-09-12-openai-service-tier-pricing-design.md)
+ends the staging interval. The numeric SELECT and `OpenAIMetrics()` remain
+unchanged, but the OpenAI reader appends a separately bounded lookup candidate
+and passes it to per-Turn valuation. Recorded `fast`/`priority` evidence can now
+change exact amounts and existing priced/unpriced coverage; aggregation, report
+wire schema version 1, and CLI structure remain unchanged. Unknown, unavailable,
+or overlong evidence follows normal base/context fallback without altering the
+stored observation. This supersedes the former identical-report staging test;
+the capture and response-authority contract in this document remains unchanged.
 
 ## Verification plan
 

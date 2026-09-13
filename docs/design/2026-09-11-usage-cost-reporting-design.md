@@ -1,9 +1,9 @@
 # Estimated cost in Usage reports
 
-**Status:** implemented through #238 and amended by #241: pricing/source,
-matching, native calculators, per-Turn context-tier selection, daemon-owned
-aggregation, additive HTTP transport, CLI presentation, and local synthetic
-executable acceptance. Final full-suite/race/flake and same-revision
+**Status:** implemented through #248 and amended by #241/#248: pricing/source,
+matching, native calculators, per-Turn context- and OpenAI response-tier
+selection, daemon-owned aggregation, additive HTTP transport, CLI presentation,
+and local synthetic executable acceptance. Final full-suite/race/flake and same-revision
 native-platform certification remain release gates, not inferred from this status.
 **Date:** 2026-09-11
 **Extends:** [Usage reporting](2026-09-07-usage-reporting-design.md)
@@ -16,6 +16,18 @@ projection keyed by content hash, seeds the floor during enabled construction
 outside report work, and may retain parsed state across reports and HTTP response
 writing. Projection misses use the calling report's work context; each report
 still applies its identity budget and cancellation.
+
+**OpenAI service-tier amendment:** The approved
+[service-tier pricing design](2026-09-12-openai-service-tier-pricing-design.md)
+supersedes this document's earlier experimental-mode exclusion. For OpenAI
+Pricing models, accepted `experimental.modes` Fast declarations supply explicit
+Fast base rates. A completed response's recorded `fast` or `priority` evidence
+selects them; unavailable, `default`, or unrecognized evidence selects normal
+rates. A selected context tier composes each category exactly as `Fast base ×
+normal selected-context / normal base`, without cross-category/model borrowing
+or rounding. This is an Estimated-cost policy wherever a provider comparator is
+unpublished, not a billing or availability claim. Report, coverage, provenance,
+HTTP schema, and CLI shapes remain unchanged.
 
 ## 1. Agreed direction
 
@@ -48,8 +60,8 @@ The maintainer chose:
    `Model(s)` and before `Turns`; round displayed USD amounts to three digits
    after the decimal point. Calculate and sum exact amounts before rounding.
 
-The remaining sections propose concrete details for approval. They do not claim
-those details are already implemented or separately approved.
+The remaining sections record the implemented contract, including the amendments
+above; revision-specific verification and native certification remain separate.
 
 ### Meaning of the number
 
@@ -68,8 +80,8 @@ additions for approval with this design.
 
 No historical rate storage, database migration, pricing in the Usage meter,
 Copilot billing reconciliation, currency conversion, tax/discount accounting,
-fast/flex/batch/priority reconstruction, cache-TTL pricing, new token-count
-projection, configurable price overrides, live Catalog dependency, arbitrary
+service-mode support beyond approved OpenAI Fast response evidence, cache-TTL
+pricing, new token-count projection, configurable price overrides, live Catalog dependency, arbitrary
 reseller fallback, or CLI-side token-to-money calculation.
 
 ## 2. Existing contracts retained
@@ -215,6 +227,12 @@ Rates are nonnegative base-10 decimals. Proposed numeric bounds are at most 18
 integer and 18 fractional digits after expansion; reject an unsupported rate
 rather than rounding it or allowing an exponent to cause unbounded allocation.
 Unknown price fields are ignored; malformed recognized fields reject the fetch.
+For OpenAI models only, optional `experimental.modes` containers are admitted
+strictly. At most one `fast`/`priority` declaration (by ASCII-folded mode name or
+wire `provider.body.service_tier`) is retained; contradictions, collisions,
+malformed recognized mode rates, and explicit Fast context shapes reject the
+snapshot. A declaration may have missing rates or exist without top-level
+normal cost. Other service modes remain outside the projection.
 
 Parse accepted bytes into one immutable derived projection per effective content
 hash, not once per report. Seed the embedded-floor projection only when an
@@ -371,9 +389,22 @@ not fill it from the base or another tier.
 
 Reject malformed or duplicate structured thresholds rather than depending on
 input order, and validate recognized base, structured, and legacy rows even when
-one is not selected. Experimental mode rates are not selected. The optional
-`reasoning` rate does not create an extra charge: this feature values the complete
-native output count once at the output rate.
+one is not selected. OpenAI Fast is the only selected experimental mode. Its
+explicit base vector applies in the base context band. For every retained normal
+context row, construct one immutable Fast vector once per pricing projection,
+independently per category:
+
+```text
+derived_fast_context = explicit_fast_base × selected_normal_context / normal_base
+```
+
+Use exact rational arithmetic and admit only a finite canonical result within
+the source Rate's 18-integer/18-fractional-digit bounds. A missing operand, zero
+normal-base denominator, non-terminating result, or out-of-bounds result leaves
+that category absent; an explicit zero numerator/context rate with a positive
+denominator remains zero. Never borrow another category, mode, model, or
+snapshot's factor. The optional `reasoning` rate does not create an extra charge:
+this feature values the complete native output count once at the output rate.
 
 Derive complete input from the persisted native Surface, independently of the
 Pricing model's provider. OpenAI uses complete `input_tokens`. Anthropic uses a
@@ -600,8 +631,8 @@ rounded cells.
 - A compact note identifies the period/model or `Total`, priced/total stored
   Turns, and nonzero exclusion reasons. Entirely unpriced groups also receive a
   note; unlike optional native metrics, zero monetary coverage needs explanation.
-- A short header identifies original-provider models.dev standard/context rates
-  and whether the effective snapshot is fetched or fallback. This remains true
+- A short header identifies original-provider models.dev rates and whether the
+  effective snapshot is fetched or fallback. This remains true
   when the new client accepts an older daemon's additive highest-tier policy
   member without interpreting it. Include the successful fetch
   time when available; do not call it the price's effective date.
@@ -610,8 +641,8 @@ rounded cells.
   the existing terminal-safe policy.
 
 Always state that this is estimated original-provider cost for persisted,
-best-effort observations; uses the daemon's current accepted models.dev
-standard/context and single cache-write rates; is not a Copilot bill; and may
+best-effort observations; uses the daemon's current accepted models.dev rates
+and single cache-write rates; is not a Copilot bill; and may
 exclude unpriceable Turns. This wording must remain accurate when reading a
 legacy highest-tier daemon. This should be
 short explanatory text, not a new interactive presentation.

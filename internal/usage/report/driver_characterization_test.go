@@ -5,10 +5,13 @@ import (
 	"database/sql"
 	"errors"
 	"path/filepath"
+	"reflect"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/ningw42/copilotd/internal/usage/pricing"
 	"github.com/ningw42/copilotd/internal/usage/sqlitestore"
 )
 
@@ -70,6 +73,63 @@ func TestPinnedDriverFirstReadOnlyWALConnections(t *testing.T) {
 	var busy, pages, checkpointed int
 	if err := writer.QueryRow("PRAGMA wal_checkpoint(TRUNCATE)").Scan(&busy, &pages, &checkpointed); err != nil || busy != 0 || pages != 0 || checkpointed != 0 {
 		t.Fatalf("first-open cleanup retained WAL: %d/%d/%d %v", busy, pages, checkpointed, err)
+	}
+}
+
+func TestPinnedDriverServiceTierLookupCandidates(t *testing.T) {
+	// Synthetic values characterize the prescribed SQL expression at the real
+	// driver boundary. This is NOT the production-query regression oracle:
+	// TestQueryBoundsUnrecognizedOpenAIServiceTierBeforeLookup measures actual
+	// report transfer allocations, and TestQueryIgnoresNonTextOpenAIServiceTierCandidate
+	// detects loss of its type guard through actual report valuation.
+	db, err := sql.Open("sqlite", sqlitestore.LiteralFileURL(filepath.Join(t.TempDir(), "tier-candidates.db")).String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TABLE evidence(service_tier)`); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name   string
+		stored any
+		want   sql.NullString
+	}{
+		{name: "SQL NULL"},
+		{name: "empty text", stored: "", want: sql.NullString{Valid: true}},
+		{name: "ASCII casing unchanged", stored: "PrIoRiTy", want: sql.NullString{String: "PrIoRiTy", Valid: true}},
+		{name: "default unchanged", stored: "DEFAULT", want: sql.NullString{String: "DEFAULT", Valid: true}},
+		{name: "at byte limit", stored: "12345678", want: sql.NullString{String: "12345678", Valid: true}},
+		{name: "in-range NUL unchanged", stored: "fast\x00", want: sql.NullString{String: "fast\x00", Valid: true}},
+		{name: "overlong", stored: strings.Repeat("x", 1<<20)},
+		{name: "embedded NUL does not hide overlong bytes", stored: "fast\x00tail"},
+		{name: "byte count not character count", stored: "界界界"},
+		{name: "blob that spells priority", stored: []byte("priority")},
+		{name: "nontext integer", stored: int64(42)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := db.Exec("DELETE FROM evidence"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec("INSERT INTO evidence VALUES(?)", tc.stored); err != nil {
+				t.Fatal(err)
+			}
+			var candidate sql.NullString
+			if err := db.QueryRow(`SELECT CASE WHEN typeof(service_tier)='text'
+				AND octet_length(service_tier)<=? THEN service_tier ELSE NULL END FROM evidence`, pricing.MaxServiceTierLookupBytes).Scan(&candidate); err != nil {
+				t.Fatal(err)
+			}
+			if candidate != tc.want {
+				t.Fatalf("lookup candidate: valid=%t bytes=%d, want valid=%t bytes=%d", candidate.Valid, len(candidate.String), tc.want.Valid, len(tc.want.String))
+			}
+			var unchanged any
+			if err := db.QueryRow("SELECT service_tier FROM evidence").Scan(&unchanged); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(unchanged, tc.stored) {
+				t.Fatal("lookup changed the exact stored value or its SQL type")
+			}
+		})
 	}
 }
 

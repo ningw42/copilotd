@@ -228,8 +228,8 @@ strings (or the governed `null` for nonempty groups with zero priceable Turns),
 and the six canonical int64 coverage strings must partition stored Turns exactly.
 Unknown additive fields remain compatible. Errors use stderr and exit 1,
 including partial/short writes or failure to write the final newline; success,
-including empty, exits 0. Text identifies original-provider models.dev
-standard/context and single-write rates, fetched versus fallback source, and
+including empty, exits 0. Text identifies original-provider models.dev rates
+and the single-write policy, fetched versus fallback source, and
 successful content-fetch time when present. This wording remains accurate for a
 legacy daemon whose additive `context_policy` described highest-tier selection.
 It states that valuation uses current accepted rates for
@@ -426,15 +426,30 @@ When enabled, `serve` registers the memory-only `usage_prices` cached value befo
 cache priming. It starts from the identified vendored `models.dev/api.json` floor,
 refreshes best effort, and retains last-good on fetch or validation failure. The
 selected original-provider namespaces are OpenAI, Anthropic, Google, and xAI.
-Rate selection is data-driven rather than provider-specific: every priceable
-Turn starts from its Pricing model's base vector and selects the tier with the
-greatest threshold strictly below complete native input. Structured
-`tiers[].tier.size` is authoritative; deprecated `context_over_200k` is a strict
-200,000-token fallback only when structured tiers are absent. OpenAI uses
-complete `input_tokens`; Anthropic uses checked uncached input plus cache creation
-plus cache read. Selected rows never inherit omitted optional rates from another
-row. Prices are current benchmark inputs, never persisted tariff history or
-Copilot billing. Refresh failure is visible in `/readyz` but does not change readiness,
+Context selection is data-driven rather than provider-specific: every Turn
+selects the Pricing model vector at the greatest threshold strictly below
+complete native input. Structured `tiers[].tier.size` is authoritative;
+deprecated `context_over_200k` is a strict 200,000-token fallback only when
+structured tiers are absent. OpenAI uses complete `input_tokens`; Anthropic uses
+checked uncached input plus cache creation plus cache read. Selected rows never
+inherit omitted optional rates from another row.
+
+For OpenAI only, the accepted models.dev projection also admits at most one Fast
+declaration from `experimental.modes`. A completed response tier equal to `fast`
+or `priority` under ASCII-only case folding selects that declaration; `default`,
+missing, empty, unrecognized, or Fast evidence without a declaration uses normal
+base/context rates. Base-band Fast rates are explicit. At a selected context
+tier, each available category is derived exactly from the same model and snapshot
+as `Fast base × normal context / normal base`; no cross-category/model factor is
+borrowed and no result is rounded. Missing operands, zero normal-base
+denominators, non-terminating decimals, or results outside the Rate bounds leave
+the category unavailable and use existing `missing_rate` coverage when required.
+This can estimate combinations without published OpenAI comparators and does not
+claim provider availability or billing. Flex, Scale, Ultrafast, Batch, and other
+modes remain normal-pricing fallback.
+
+Prices are current benchmark inputs, never persisted tariff history or Copilot
+billing. Refresh failure is visible in `/readyz` but does not change readiness,
 inference, or native Usage report availability. The existing version-1 report
 protocol exposes the captured dataset/content identity/source/success time,
 exact USD priced-Turn subtotals and exclusion coverage at all aggregate levels,
@@ -568,10 +583,10 @@ The GitHub Copilot Surface, raw `/models`, provider/Codex Catalogs, and
 `/v1/messages/count_tokens` are not metered. Built-in calendar native-Surface aggregation
 is available through [`usage`](#usage); Copilot billing reconciliation,
 historical tariffs, automatic pruning, per-key attribution, and other non-token
-usage projection remain out of scope. Current reports and Estimated cost ignore
-stored `service_tier`; the field is immediately visible only to external SQLite
-inspection, and this staging interval does not classify non-default evidence as
-Standard billing.
+usage projection remain out of scope. Reports project only in-range text
+`service_tier` values of at most eight bytes as ephemeral pricing lookup evidence;
+they neither export nor group the raw tier. Longer/non-text/unknown values use
+normal fallback and remain unchanged for external SQLite inspection.
 External SQLite tooling still supports either native table, for example:
 
 ```sh

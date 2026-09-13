@@ -72,9 +72,11 @@ best-effort durability, or bounded writer finalization.
 store and aggregate each Surface's counts with their native meanings. Do not
 create normalized input columns or infer a provider total. The original v1
 report projection required no migration beyond the then-current schema v2.
-The writer now owns schema v3, whose nullable OpenAI `service_tier` metadata is
-integrity-probed but is not scanned, aggregated, exposed, or valued by report
-wire-schema version 1.
+The writer now owns schema v3. Its nullable OpenAI `service_tier` metadata is
+integrity-probed and projected as a bounded per-Turn pricing lookup candidate,
+but is not grouped, aggregated, or exposed. The approved
+[service-tier pricing design](2026-09-12-openai-service-tier-pricing-design.md)
+uses that candidate without changing report wire-schema version 1.
 
 The served HTTP path is a local handler, **not an Endpoint, Route, or Surface**
 in the project's domain vocabulary: it has no upstream dependency. Do not add a
@@ -705,10 +707,13 @@ For each admitted query:
    incompatible encoding/schema returns `usage_unavailable`. No lazy
    migration or partial-schema interpretation. Keep compatibility and literal
    path policy aligned with store-owned facts, not an independent schema.
-4. Select only `at_ms`, a **size-guarded** Reported model plus its byte-length
-   metadata, and the frozen native counts—never Requested model or service-tier
-   evidence—with bound half-open timestamp and
-   optional exact-model predicates. Guard the model in SQLite before its full
+4. Select `at_ms`, a **size-guarded** Reported model plus its byte-length
+   metadata, and the frozen native counts—never Requested model—with bound
+   half-open timestamp and optional exact-model predicates. For OpenAI only,
+   append `service_tier` after the unchanged numeric destinations through a
+   pricing-owned byte guard: return text of at most eight bytes and SQL `NULL`
+   otherwise. This is ephemeral lookup evidence, not another metric, grouping
+   key, retained identity, or exported observation. Guard the model in SQLite before its full
    identity is transferred, as specified below; do not first scan an unbounded
    string and then check its Go length. Use the existing timestamp indexes and
    stream in timestamp order. Do not fetch prompt data, correlation IDs,
