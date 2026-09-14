@@ -81,6 +81,35 @@ func startUsageMeterServeHarness(t *testing.T, upstreamURL string, base *slog.Lo
 	return startUsageMeterServeHarnessWithPricing(t, upstreamURL, base, configure, decorate, remote, listeners...)
 }
 
+// These fixed, synthetic rates value the recorded gpt-5.6-sol completions below.
+// The model ID joins the inference evidence; the rates are independent of the
+// moving embedded floor and are not a statement of current provider prices.
+func startUsageMeterServeHarnessWithSyntheticPricing(t *testing.T, upstreamURL string) *usageMeterServeHarness {
+	t.Helper()
+	const artifact = `{
+  "openai":{"id":"openai","models":{
+    "gpt-5.6-sol":{"id":"gpt-5.6-sol",
+      "cost":{"input":4,"output":20,"cache_read":0.4,"cache_write":5,
+        "tiers":[{"input":8,"output":30,"cache_read":0.8,"cache_write":10,"tier":{"type":"context","size":272000}}]},
+      "experimental":{"modes":{"fast":{"cost":{"input":8,"output":40,"cache_read":0.8,"cache_write":10},"provider":{"body":{"service_tier":"priority"}}}}}
+    }
+  }},
+  "anthropic":{"id":"anthropic","models":{}},
+  "google":{"id":"google","models":{}},
+  "xai":{"id":"xai","models":{}}
+}`
+	prices := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, artifact)
+	}))
+	t.Cleanup(prices.Close)
+	harness := startUsageMeterServeHarnessWithPricing(t, upstreamURL, discardLogger(t), func(cfg *config.ServeConfig) {
+		cfg.UsagePricingRefreshInterval = time.Hour
+	}, nil, pricing.NewRemote(prices.URL, prices.Client().Transport))
+	waitForUsagePriceSource(t, harness, "fetched")
+	return harness
+}
+
 // startUsageMeterServeHarnessWithPricing replaces only the existing public
 // pricing source edge for deterministic executable acceptance. Runtime flags and
 // production composition remain unchanged.
@@ -361,7 +390,7 @@ func TestRunBoundServeMetersBufferedOpenAIResponseWithoutChangingPayload(t *test
 		_, _ = w.Write(fixture)
 	}))
 	t.Cleanup(upstream.Close)
-	harness := startUsageMeterServeHarness(t, upstream.URL, discardLogger(t), nil, nil)
+	harness := startUsageMeterServeHarnessWithSyntheticPricing(t, upstream.URL)
 
 	req, err := http.NewRequest(http.MethodPost, harness.baseURL+"/openai/v1/responses", strings.NewReader(`{"model":"requested-model","service_tier":"priority"}`))
 	if err != nil {
@@ -425,7 +454,7 @@ func TestRunBoundServeMetersOpenAISSECompletionWithoutChangingFrames(t *testing.
 		_, _ = w.Write(fixture)
 	}))
 	t.Cleanup(upstream.Close)
-	harness := startUsageMeterServeHarness(t, upstream.URL, discardLogger(t), nil, nil)
+	harness := startUsageMeterServeHarnessWithSyntheticPricing(t, upstream.URL)
 
 	req, err := http.NewRequest(http.MethodPost, harness.baseURL+"/openai/v1/responses", strings.NewReader(`{"model":"requested-model"}`))
 	if err != nil {
@@ -531,7 +560,7 @@ func TestRunBoundServeMetersOpenAIWebSocketCompletionsWithoutChangingMessages(t 
 		_ = conn.Close(websocket.StatusNormalClosure, "completed")
 	}))
 	t.Cleanup(upstream.Close)
-	harness := startUsageMeterServeHarness(t, upstream.URL, discardLogger(t), nil, nil)
+	harness := startUsageMeterServeHarnessWithSyntheticPricing(t, upstream.URL)
 	baseURL := harness.baseURL
 
 	httpRequest, err := http.NewRequest(http.MethodPost, baseURL+"/openai/v1/responses", strings.NewReader(`{"model":"requested-http-model"}`))

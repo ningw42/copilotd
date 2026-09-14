@@ -76,7 +76,7 @@ accounting are unchanged by these derived values.
 
    ```sh
    nix fmt
-   nix develop -c go test ./internal/usage/pricing/... -count=1
+   nix develop -c go test ./internal/usage/pricing/... ./cmd/copilotd -count=1
    nix flake check
    ```
 

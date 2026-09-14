@@ -47,8 +47,10 @@ existing Nix development shell (native CI uses setup-go).
   Anthropic completion and the recorded September OpenAI buffered fixture through
   the **in-process production daemon**, meter and normal asynchronous writer,
   then invokes the actual CLI executable. It verifies every recorded OpenAI native
-  aggregate and the embedded gpt-5.6-sol base-rate valuation for twelve input
-  tokens. This closes the observation-to-output chain without claiming that the
+  aggregate and a fixed synthetic gpt-5.6-sol base-rate valuation for twelve input
+  tokens. The existing test pricing edge supplies the synthetic artifact and the
+  fixture waits for its acceptance before inference. This closes the
+  observation-to-output chain without claiming that the
   prior history setup itself was live inference. Existing buffered/SSE/WebSocket and
   concurrency fixtures remain retained; no public upstream compatibility claim
   follows from synthetic responses.
@@ -77,7 +79,7 @@ existing Nix development shell (native CI uses setup-go).
   The buffered, SSE, and WebSocket real-listener fixtures additionally carry
   synthetic absent/null/empty/unknown/`default`/`priority`/`fast`
   completed-response evidence through the production meter, SQLite writer,
-  reporter, embedded pricing floor, and actual CLI while preserving forwarded
+  reporter, fixed synthetic pricing, and actual CLI while preserving forwarded
   payloads. A Fast request whose response reports `default` is valued normally.
   No external pricing or inference service is contacted.
   No OS can carry embedded NUL in argv; its identity contract remains tested at
@@ -87,6 +89,16 @@ existing Nix development shell (native CI uses setup-go).
   in-process graceful/forced tests still exercise the production lifecycle.
   The #212 client-ownership correction closes test-owned idle connections before
   drain; it did not change production timeouts or hide cleanup failures.
+
+Pricing-floor bump verification covers both `./internal/usage/pricing/...` and
+`./cmd/copilotd`; pricing-package checks alone miss the inference-to-CLI amount
+oracles. For a local simulation, overlay only `modelsdevdata/api.json` and its
+matching `identity.json`, changing accepted rates or model membership. Pass the
+overlay through `GOFLAGS=-overlay=/absolute/path/to/overlay.json` so the child
+`go build` also receives it, and leave `COPILOTD_TEST_BINARY` unset so the
+executable is rebuilt. Both packages must pass without changing literal amount
+expectations. The ordinary offline/pinned-floor fixtures remain separate from
+the fixed synthetic source used by arithmetic acceptance.
 
 ## Native pipeline and evidence
 

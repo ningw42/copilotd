@@ -134,7 +134,7 @@ func TestUsageExecutableAcceptance(t *testing.T) {
 			}
 		}))
 		defer upstream.Close()
-		h := startUsageMeterServeHarness(t, upstream.URL, discardLogger(t), nil, nil)
+		h := startUsageMeterServeHarnessWithSyntheticPricing(t, upstream.URL)
 		client := &http.Client{Transport: http.DefaultTransport.(*http.Transport).Clone()}
 		defer client.CloseIdleConnections()
 		before := time.Now().UTC()
@@ -170,7 +170,7 @@ func TestUsageExecutableAcceptance(t *testing.T) {
 				}
 				cost := priced.OpenAI.Total.Cost
 				if cost.Amount == nil || *cost.Amount != "0.000168" || cost.PricedTurns != "1" {
-					t.Fatalf("recorded 12-token context did not use gpt-5.6-sol base rates: %+v", cost)
+					t.Fatalf("recorded 12-token context did not use synthetic gpt-5.6-sol base rates: %+v", cost)
 				}
 				break
 			}
@@ -182,7 +182,7 @@ func TestUsageExecutableAcceptance(t *testing.T) {
 		if err := h.stopAfterClient(client); err != nil {
 			t.Fatal(err)
 		}
-		t.Log("recorded September OpenAI fixture and synthetic Anthropic inference -> in-process production daemon/meter/writer -> actual usage executable; gpt-5.6-sol short context uses embedded base rates and preserves every native aggregate")
+		t.Log("recorded September OpenAI fixture and synthetic Anthropic inference -> in-process production daemon/meter/writer with fixed synthetic pricing -> actual usage executable; gpt-5.6-sol short context uses synthetic base rates and preserves every native aggregate")
 	})
 	t.Run("details", func(t *testing.T) {
 		out := usageExec(t, binary, nil, 0, append(base, "--model", "Model", "--details")...)
