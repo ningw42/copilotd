@@ -444,14 +444,14 @@ func TestWindowsNativeTimezoneAdapterUsesRealAPIs(t *testing.T) {
 	)
 	version := windows.RtlGetVersion()
 	record := struct {
-		OSBuild        uint32                  `json:"os_build"`
-		Architecture   string                  `json:"process_architecture"`
-		Evidence       windowsTimezoneEvidence `json:"native_evidence"`
-		CLDRRelease    string                  `json:"cldr_release"`
-		CLDRSource     string                  `json:"cldr_source_sha256"`
-		Candidates     []string                `json:"ordered_candidates,omitempty"`
-		Selected       string                  `json:"selected_name,omitempty"`
-		Mapping        windowsMappingSource    `json:"selection_reason,omitempty"`
+		OSBuild         uint32                  `json:"os_build"`
+		Architecture    string                  `json:"process_architecture"`
+		Evidence        windowsTimezoneEvidence `json:"native_evidence"`
+		CLDRRelease     string                  `json:"cldr_release"`
+		CLDRSource      string                  `json:"cldr_source_sha256"`
+		Candidates      []string                `json:"ordered_candidates,omitempty"`
+		Selected        string                  `json:"selected_name,omitempty"`
+		Mapping         windowsMappingSource    `json:"selection_reason,omitempty"`
 		Loader          string                  `json:"shared_loader"`
 		ResolutionError string                  `json:"resolution_error,omitempty"`
 	}{
