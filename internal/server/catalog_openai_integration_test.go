@@ -84,10 +84,12 @@ func TestCodexCatalogAliasOverRealListener(t *testing.T) {
 	}
 	var envelope struct {
 		Models []struct {
-			Slug             string `json:"slug"`
-			DisplayName      string `json:"display_name"`
-			BaseInstructions string `json:"base_instructions"`
-			Reviewer         string `json:"auto_review_model_override"`
+			Slug          string `json:"slug"`
+			DisplayName   string `json:"display_name"`
+			ModelMessages struct {
+				InstructionsTemplate string `json:"instructions_template"`
+			} `json:"model_messages"`
+			Reviewer string `json:"auto_review_model_override"`
 		} `json:"models"`
 	}
 	if err := json.Unmarshal(body, &envelope); err != nil {
@@ -96,7 +98,7 @@ func TestCodexCatalogAliasOverRealListener(t *testing.T) {
 	if len(envelope.Models) != 1 || envelope.Models[0].Slug != alias {
 		t.Fatalf("catalog models = %+v, want sole alias %q", envelope.Models, alias)
 	}
-	if envelope.Models[0].DisplayName != "GPT-5.4" || envelope.Models[0].BaseInstructions == "" {
+	if envelope.Models[0].DisplayName != "GPT-5.4" || envelope.Models[0].ModelMessages.InstructionsTemplate == "" {
 		t.Errorf("alias metadata = %+v, want complete gpt-5.4 source metadata", envelope.Models[0])
 	}
 	if envelope.Models[0].Reviewer != alias {
@@ -292,7 +294,7 @@ func TestCodexCatalogAliasWarningsOverRealListener(t *testing.T) {
 func TestCodexCatalogPerModelReviewerOverRealListener(t *testing.T) {
 	const (
 		mainModel = "gpt-5.6-sol"
-		reviewer  = "gpt-5.4-mini"
+		reviewer  = "gpt-5.6-luna"
 	)
 	captured, err := os.ReadFile("../catalog/testdata/copilot-models-2026-07-18.json")
 	if err != nil {
@@ -566,7 +568,7 @@ func TestCodexCatalogConfigWiringWarningAndAccessLogConfidentiality(t *testing.T
 		modelBodySecret = "model-body-secret-59"
 		vendorSecret    = "vendor-body-secret-59"
 		copilotToken    = "copilot-token-secret-59"
-		mainModel       = "gpt-5.4-mini"
+		mainModel       = "gpt-5.6-luna"
 		reviewer        = "configured-missing-reviewer"
 	)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

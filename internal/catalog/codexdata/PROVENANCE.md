@@ -37,22 +37,38 @@ they are not used as the vendored snapshot identity.
 
 ## Current snapshot audit delta
 
-The embedded floor advanced to [`rust-v0.154.0`][current-release] on 2026-09-10.
+The embedded floor advanced to [`rust-v0.155.1`][current-release] on 2026-09-19.
 GitHub reported the release as stable and mutable (`draft: false`,
 `prerelease: false`, `immutable: false`); its annotated tag and peeled commit
 were unsigned. The commit and individual Git blob IDs recorded in `release.json`
-are therefore the durable identities. The recorded executable archive digest
-matched GitHub's release-asset digest, its decompressed binary matched the
-recorded executable digest, and the binary reported `codex-cli 0.154.0`.
+are therefore the durable identities. The recorded manifest and executable
+archive digests matched GitHub's release-asset digests, the decompressed binary
+matched the recorded executable digest, and the binary reported
+`codex-cli 0.155.1`. All three opt-in executable catalog checks passed against
+that binary, including command-auth merging, wholesale replacement, default
+selection, and alias visibility.
 
-Relative to `rust-v0.153.4`, the vendored `models.json` retains eleven entries
-and `gpt-6-astra` as the bundled default. Its only content change adds
-`supports_experimental_context: true` to `gpt-6-astra`. Codex's `ModelInfo`
-contract adds that default-false field and an optional `guardian` policy;
-copilotd accepts and preserves both through its unknown-field fidelity rule.
-The upstream model merge/default manager and provider-default sources are
-byte-identical to the historical baseline. Guardian review was refactored, but
-the model-override and provider-default selection block remains in force.
+Relative to `rust-v0.154.0`, the vendored `models.json` removes `gpt-5.2` and
+`gpt-5.4-mini`, leaving nine entries and `gpt-6-astra` as the bundled default.
+The eight retained entries that had legacy `base_instructions` remove that
+field; all nine now use a non-empty canonical
+`model_messages.instructions_template`. No retained field value or instruction
+template changes, and no new catalog field is introduced. The `ModelInfo`,
+`ModelMessages`, `ModelsResponse`, and Guardian policy schemas are unchanged
+from `rust-v0.154.0`, so the current accept contract needs no production change.
+Snapshot-backed renderer and listener tests now assert canonical templates and
+use retained models; synthetic legacy-instruction tests remain in place.
+
+Upstream now scopes remote catalogs and ETags to provider/auth identity and can
+use an authoritative catalog for opt-in native OpenAI API-key discovery.
+[Command-auth providers are excluded from that new discovery branch][current-models-endpoint]:
+they still merge over the bundle, replacing matching slugs wholesale and
+appending new ones. Default selection remains priority-ordered and picker-visible.
+The provider-default Guardian reviewer remains `gpt-5.6-luna` for command/API-key
+auth and `codex-auto-review` for ChatGPT auth; the selection implementation moved
+to the [Guardian reviewer extension][current-guardian] without changing the
+model-override precedence or catalog fallback.
+
 `LICENSE` and `NOTICE` are byte-identical to the previous vendored copies.
 First-party evidence is the GitHub [release response][current-release],
 [tag object][current-tag-object], [peeled commit][current-commit], current
@@ -288,14 +304,16 @@ the independent literal `defaultConfig` expectations in
 default rows in [`CONFIGURATION.md`](../../../CONFIGURATION.md). Synthetic test
 fixture versions remain unchanged; a fallback bump alone does not retarget them.
 
-[current-release]: https://api.github.com/repos/openai/codex/releases/385887902
-[current-tag-object]: https://api.github.com/repos/openai/codex/git/tags/36eab01061df3cde5f95ec20a526777b430091ba
-[current-commit]: https://github.com/openai/codex/commit/6b9826e3aa83b1a5947db50f4332cb9c65f1b340
-[current-catalog-raw]: https://raw.githubusercontent.com/openai/codex/6b9826e3aa83b1a5947db50f4332cb9c65f1b340/codex-rs/models-manager/models.json
-[current-model-types]: https://github.com/openai/codex/blob/6b9826e3aa83b1a5947db50f4332cb9c65f1b340/codex-rs/protocol/src/openai_models.rs
-[current-manager]: https://github.com/openai/codex/blob/6b9826e3aa83b1a5947db50f4332cb9c65f1b340/codex-rs/models-manager/src/manager.rs
-[current-provider]: https://github.com/openai/codex/blob/6b9826e3aa83b1a5947db50f4332cb9c65f1b340/codex-rs/model-provider/src/provider.rs
-[current-codex-binary]: https://github.com/openai/codex/releases/download/rust-v0.154.0/codex-x86_64-unknown-linux-musl.zst
+[current-release]: https://api.github.com/repos/openai/codex/releases/391752266
+[current-tag-object]: https://api.github.com/repos/openai/codex/git/tags/4e21628f9ec9ee656650cd2b62ef92225725b5ac
+[current-commit]: https://github.com/openai/codex/commit/be2951ea34f0d295ed0becf97079f92fa5f6950e
+[current-catalog-raw]: https://raw.githubusercontent.com/openai/codex/be2951ea34f0d295ed0becf97079f92fa5f6950e/codex-rs/models-manager/models.json
+[current-model-types]: https://github.com/openai/codex/blob/be2951ea34f0d295ed0becf97079f92fa5f6950e/codex-rs/protocol/src/openai_models.rs
+[current-manager]: https://github.com/openai/codex/blob/be2951ea34f0d295ed0becf97079f92fa5f6950e/codex-rs/models-manager/src/manager.rs
+[current-models-endpoint]: https://github.com/openai/codex/blob/be2951ea34f0d295ed0becf97079f92fa5f6950e/codex-rs/model-provider/src/models_endpoint.rs#L78-L170
+[current-provider]: https://github.com/openai/codex/blob/be2951ea34f0d295ed0becf97079f92fa5f6950e/codex-rs/model-provider/src/provider.rs
+[current-guardian]: https://github.com/openai/codex/blob/be2951ea34f0d295ed0becf97079f92fa5f6950e/codex-rs/ext/guardian-reviewer/src/model.rs#L1-L76
+[current-codex-binary]: https://github.com/openai/codex/releases/download/rust-v0.155.1/codex-x86_64-unknown-linux-musl.zst
 [audit-release]: https://api.github.com/repos/openai/codex/releases/383061770
 [audit-tag-object]: https://api.github.com/repos/openai/codex/git/tags/042fb41b7c813ac7999105e886b2b7aa715b5081
 [audit-commit]: https://github.com/openai/codex/commit/3d2ee51ca2d5db578f328aa75e20aa22c0197c9a

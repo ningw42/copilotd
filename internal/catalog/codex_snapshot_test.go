@@ -11,9 +11,7 @@ import (
 func TestEmbeddedCodexModelsLoadAtStartup(t *testing.T) {
 	wantSlugs := []string{
 		"codex-auto-review",
-		"gpt-5.2",
 		"gpt-5.4",
-		"gpt-5.4-mini",
 		"gpt-5.5",
 		"gpt-5.6-luna",
 		"gpt-5.6-sol",

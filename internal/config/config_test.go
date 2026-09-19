@@ -66,7 +66,7 @@ func defaultConfig() ServeConfig {
 		MaxBufferedResponseBytes:     33554432,
 		CodexCatalogRefreshInterval:  24 * time.Hour,
 		StartupMintRetries:           3,
-		VSCodeVersionFallback:        "1.137.0",
+		VSCodeVersionFallback:        "1.138.0",
 		PluginVersionFallback:        "0.48.1",
 		CopilotIntegrationID:         "vscode-chat",
 		GithubAPIVersion:             "2025-04-01",

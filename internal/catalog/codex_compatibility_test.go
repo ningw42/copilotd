@@ -145,7 +145,7 @@ func TestVendoredCodexCatalogRoundTripFidelity(t *testing.T) {
 	}
 	entries := decodeRenderedCodex(t, recorder.Body.Bytes())
 	wantSlugs := []string{
-		"gpt-5.4-mini", "gpt-5.4", "gpt-5.5",
+		"gpt-5.4", "gpt-5.5",
 		"gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra",
 	}
 	if got := renderedSlugs(t, entries); !reflect.DeepEqual(got, wantSlugs) {
