@@ -87,7 +87,8 @@ type codexModelMessages struct {
 	PersistentInstructions *string            `json:"persistent_instructions"`
 	Tools                  *codexToolMessages `json:"tools"`
 	InstructionsTemplate   *string            `json:"instructions_template"`
-	// Codex treats absent or null variables as literal-template mode.
+	// Deprecated upstream: Codex decodes but no longer renders the variables;
+	// instructions_template is always literal text.
 	InstructionsVariables *codexModelInstructionVariables `json:"instructions_variables"`
 	Approvals             *codexApprovalMessages          `json:"approvals"`
 	CollaborationModes    *codexCollaborationModeMessages `json:"collaboration_modes"`
@@ -491,8 +492,8 @@ func validateCodexInstructionSource(index int, fields map[string]json.RawMessage
 		instructionsTemplate = messages.InstructionsTemplate
 	}
 	if instructionsTemplate != nil {
-		// Serde accepts Some(""), but get_model_instructions then sends an
-		// empty instruction string. Keep the complete-entry semantic gate.
+		// Serde accepts Some(""), but Codex then sends the literal empty
+		// template as its instructions. Keep the complete-entry semantic gate.
 		if *instructionsTemplate == "" {
 			return fmt.Errorf("models[%d] has empty model_messages instructions_template", index)
 		}

@@ -37,37 +37,62 @@ they are not used as the vendored snapshot identity.
 
 ## Current snapshot audit delta
 
-The embedded floor advanced to [`rust-v0.155.1`][current-release] on 2026-09-19.
+The embedded floor advanced to [`rust-v0.156.1`][current-release] on 2026-09-23.
 GitHub reported the release as stable and mutable (`draft: false`,
 `prerelease: false`, `immutable: false`); its annotated tag and peeled commit
 were unsigned. The commit and individual Git blob IDs recorded in `release.json`
 are therefore the durable identities. The recorded manifest and executable
 archive digests matched GitHub's release-asset digests, the decompressed binary
 matched the recorded executable digest, and the binary reported
-`codex-cli 0.155.1`. All three opt-in executable catalog checks passed against
+`codex-cli 0.156.1`. All three opt-in executable catalog checks passed against
 that binary, including command-auth merging, wholesale replacement, default
 selection, and alias visibility.
 
-Relative to `rust-v0.154.0`, the vendored `models.json` removes `gpt-5.2` and
-`gpt-5.4-mini`, leaving nine entries and `gpt-6-astra` as the bundled default.
-The eight retained entries that had legacy `base_instructions` remove that
-field; all nine now use a non-empty canonical
-`model_messages.instructions_template`. No retained field value or instruction
-template changes, and no new catalog field is introduced. The `ModelInfo`,
-`ModelMessages`, `ModelsResponse`, and Guardian policy schemas are unchanged
-from `rust-v0.154.0`, so the current accept contract needs no production change.
-Snapshot-backed renderer and listener tests now assert canonical templates and
-use retained models; synthetic legacy-instruction tests remain in place.
+Relative to `rust-v0.155.1`, the vendored `models.json` adds `gpt-6-sol`
+(priority 2) and `gpt-6-luna` (priority 3), leaving eleven entries and
+`gpt-6-astra` (priority 1) as the bundled default. Both new entries are
+picker-visible, `supported_in_api: true`, use only a non-empty canonical
+`model_messages.instructions_template`, and carry an explicit `guardian: null`.
+Retained entries change only descriptions, `upgrade` pointers, and two
+instruction templates: `gpt-6-astra`,
+`gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, and `gpt-5.5` have new
+descriptions; `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.5` now advertise an
+`upgrade` to `gpt-6-sol`, `gpt-5.6-luna` to `gpt-6-luna`, and the `gpt-5.4`
+retirement upgrade moves from `gpt-5.6-terra` to `gpt-6-sol`. `gpt-5.5` and
+`gpt-5.4` replace their `{{ personality }}` placeholder with a literal
+`# Personality` section and set `instructions_variables` to `null`, so no entry
+now carries personality variables or a placeholder.
 
-Upstream now scopes remote catalogs and ETags to provider/auth identity and can
-use an authoritative catalog for opt-in native OpenAI API-key discovery.
-[Command-auth providers are excluded from that new discovery branch][current-models-endpoint]:
-they still merge over the bundle, replacing matching slugs wholesale and
-appending new ones. Default selection remains priority-ordered and picker-visible.
-The provider-default Guardian reviewer remains `gpt-5.6-luna` for command/API-key
-auth and `codex-auto-review` for ChatGPT auth; the selection implementation moved
-to the [Guardian reviewer extension][current-guardian] without changing the
-model-override precedence or catalog fallback.
+The [`ModelInfo` source][current-model-types] adds the optional
+`available_access_programs` object (a `cyber` program list that filters unknown
+program names) and the default-false `supports_reasoning_effort_updates` flag.
+`ToolMessages` adds an optional `multi_agent` section of per-tool messages for
+the six Multi-Agent V2 tools, and `ToolMessage` adds an optional JSON-Schema
+`parameters` string. `GuardianModelPolicy` drops the `code_mode` scope and adds
+the defaulted `other_tools` and `unscored_action` members plus the optional
+`initial_cua_call` and `sandboxed_exec_commands` flags. The vendored bundle
+exercises none of these except the null `guardian` policy. As with the
+`rust-v0.154.0` additions, copilotd accepts and preserves them through its
+unknown-field fidelity rule, so the accept contract needs no production change.
+
+Upstream also removed personality rendering. `instructions_template` is now
+always literal text; `instructions_variables` is decoded only for older
+catalogs, and the legacy `base_instructions` serialization mirrors the template
+verbatim. This supersedes the historical baseline's default-personality
+rendering observation below. Legacy `base_instructions` promotion when the
+canonical template is absent is unchanged, so copilotd's instruction-source gate
+is unchanged; only its explanatory comments were corrected.
+
+The [manager's bundled-only gate][current-manager-gate] now also treats
+provider-configured keys (`env_key`, `experimental_bearer_token`) as API-key
+auth. A new opt-in provider `model_catalog_url` can [redirect catalog
+discovery][current-models-endpoint]. Command-auth providers remain excluded from
+the bundled-only gate: they still fetch `<base_url>/models?client_version=...`
+and merge over the bundle, replacing matching slugs wholesale and appending new
+ones. Merge and default selection are unchanged. The provider-default Guardian
+reviewer remains `gpt-5.6-luna` for command/API-key auth and
+`codex-auto-review` for ChatGPT auth, and [reviewer selection][current-guardian]
+is byte-identical to `rust-v0.155.1`.
 
 `LICENSE` and `NOTICE` are byte-identical to the previous vendored copies.
 First-party evidence is the GitHub [release response][current-release],
@@ -304,16 +329,17 @@ the independent literal `defaultConfig` expectations in
 default rows in [`CONFIGURATION.md`](../../../CONFIGURATION.md). Synthetic test
 fixture versions remain unchanged; a fallback bump alone does not retarget them.
 
-[current-release]: https://api.github.com/repos/openai/codex/releases/391752266
-[current-tag-object]: https://api.github.com/repos/openai/codex/git/tags/4e21628f9ec9ee656650cd2b62ef92225725b5ac
-[current-commit]: https://github.com/openai/codex/commit/be2951ea34f0d295ed0becf97079f92fa5f6950e
-[current-catalog-raw]: https://raw.githubusercontent.com/openai/codex/be2951ea34f0d295ed0becf97079f92fa5f6950e/codex-rs/models-manager/models.json
-[current-model-types]: https://github.com/openai/codex/blob/be2951ea34f0d295ed0becf97079f92fa5f6950e/codex-rs/protocol/src/openai_models.rs
-[current-manager]: https://github.com/openai/codex/blob/be2951ea34f0d295ed0becf97079f92fa5f6950e/codex-rs/models-manager/src/manager.rs
-[current-models-endpoint]: https://github.com/openai/codex/blob/be2951ea34f0d295ed0becf97079f92fa5f6950e/codex-rs/model-provider/src/models_endpoint.rs#L78-L170
-[current-provider]: https://github.com/openai/codex/blob/be2951ea34f0d295ed0becf97079f92fa5f6950e/codex-rs/model-provider/src/provider.rs
-[current-guardian]: https://github.com/openai/codex/blob/be2951ea34f0d295ed0becf97079f92fa5f6950e/codex-rs/ext/guardian-reviewer/src/model.rs#L1-L76
-[current-codex-binary]: https://github.com/openai/codex/releases/download/rust-v0.155.1/codex-x86_64-unknown-linux-musl.zst
+[current-release]: https://api.github.com/repos/openai/codex/releases/394258789
+[current-tag-object]: https://api.github.com/repos/openai/codex/git/tags/81e8e29b2956dfe9b092c63953a9ed282781e77c
+[current-commit]: https://github.com/openai/codex/commit/b412ff32c417f855c2b2d1581b77058eed87c84b
+[current-catalog-raw]: https://raw.githubusercontent.com/openai/codex/b412ff32c417f855c2b2d1581b77058eed87c84b/codex-rs/models-manager/models.json
+[current-model-types]: https://github.com/openai/codex/blob/b412ff32c417f855c2b2d1581b77058eed87c84b/codex-rs/protocol/src/openai_models.rs
+[current-manager]: https://github.com/openai/codex/blob/b412ff32c417f855c2b2d1581b77058eed87c84b/codex-rs/models-manager/src/manager.rs
+[current-manager-gate]: https://github.com/openai/codex/blob/b412ff32c417f855c2b2d1581b77058eed87c84b/codex-rs/models-manager/src/manager.rs#L480-L564
+[current-models-endpoint]: https://github.com/openai/codex/blob/b412ff32c417f855c2b2d1581b77058eed87c84b/codex-rs/model-provider/src/models_endpoint.rs#L90-L209
+[current-provider]: https://github.com/openai/codex/blob/b412ff32c417f855c2b2d1581b77058eed87c84b/codex-rs/model-provider/src/provider.rs
+[current-guardian]: https://github.com/openai/codex/blob/b412ff32c417f855c2b2d1581b77058eed87c84b/codex-rs/ext/guardian-reviewer/src/model.rs#L1-L76
+[current-codex-binary]: https://github.com/openai/codex/releases/download/rust-v0.156.1/codex-x86_64-unknown-linux-musl.zst
 [audit-release]: https://api.github.com/repos/openai/codex/releases/383061770
 [audit-tag-object]: https://api.github.com/repos/openai/codex/git/tags/042fb41b7c813ac7999105e886b2b7aa715b5081
 [audit-commit]: https://github.com/openai/codex/commit/3d2ee51ca2d5db578f328aa75e20aa22c0197c9a
