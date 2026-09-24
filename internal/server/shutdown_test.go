@@ -21,6 +21,13 @@ import (
 	"github.com/ningw42/copilotd/internal/wsforward"
 )
 
+// fixtureIOTimeout is the mixed-transport fixture's own watchdog over its
+// synchronous SSE HTTP I/O (headers, frames, EOF). It is deliberately a fixed
+// local bound, independent of the shutdown grace or stream idle timeouts under
+// test, and comfortably beyond every drain observation window used here, so a
+// broken forwarding or termination path fails the test instead of hanging it.
+const fixtureIOTimeout = 15 * time.Second
+
 // mixedTransportFixture runs a real copilotd Server on an ephemeral listener
 // in front of an upstream that serves both a Responses WebSocket and a
 // Responses SSE stream which stays open until releaseSSE closes.
@@ -31,6 +38,18 @@ type mixedTransportFixture struct {
 	ws         *websocket.Conn
 	sseBody    io.ReadCloser
 	sseReader  *bufio.Reader
+	// sseWatchdog expires after fixtureIOTimeout, cancelling the SSE request
+	// and closing its body so blocked reads return.
+	sseWatchdog context.Context
+}
+
+// requireServerOriginatedSSEEnd fails if the SSE stream ended because the
+// fixture's own watchdog cancelled it rather than because the server closed it.
+func (f *mixedTransportFixture) requireServerOriginatedSSEEnd(t *testing.T, what string, err error) {
+	t.Helper()
+	if watchdogErr := f.sseWatchdog.Err(); watchdogErr != nil {
+		t.Fatalf("%s ended by the fixture's %v SSE I/O watchdog (%v, read error %v), not by the server", what, fixtureIOTimeout, watchdogErr, err)
+	}
 }
 
 func startMixedTransportFixture(t *testing.T, shutdownTimeout time.Duration) *mixedTransportFixture {
@@ -118,7 +137,10 @@ func startMixedTransportFixture(t *testing.T, shutdownTimeout time.Duration) *mi
 	}
 	fixture.ws = ws
 
-	request, err := http.NewRequestWithContext(context.Background(), http.MethodPost, "http://"+base+"/openai/v1/responses", strings.NewReader(`{"model":"gpt","stream":true}`))
+	sseWatchdog, cancelSSE := context.WithTimeout(context.Background(), fixtureIOTimeout)
+	t.Cleanup(cancelSSE)
+	fixture.sseWatchdog = sseWatchdog
+	request, err := http.NewRequestWithContext(sseWatchdog, http.MethodPost, "http://"+base+"/openai/v1/responses", strings.NewReader(`{"model":"gpt","stream":true}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,9 +148,13 @@ func startMixedTransportFixture(t *testing.T, shutdownTimeout time.Duration) *mi
 	request.Header.Set("Content-Type", "application/json")
 	sseResponse, err := http.DefaultClient.Do(request)
 	if err != nil {
-		t.Fatalf("POST SSE: %v", err)
+		t.Fatalf("POST SSE: %v (watchdog: %v)", err, sseWatchdog.Err())
 	}
 	t.Cleanup(func() { _ = sseResponse.Body.Close() })
+	// Request cancellation already aborts body reads; closing the body as well
+	// keeps the bound independent of transport behaviour.
+	stopWatchdogClose := context.AfterFunc(sseWatchdog, func() { _ = sseResponse.Body.Close() })
+	t.Cleanup(func() { stopWatchdogClose() })
 	if sseResponse.StatusCode != http.StatusOK {
 		t.Fatalf("SSE status = %d, want 200", sseResponse.StatusCode)
 	}
@@ -136,7 +162,7 @@ func startMixedTransportFixture(t *testing.T, shutdownTimeout time.Duration) *mi
 	fixture.sseReader = bufio.NewReader(sseResponse.Body)
 	first, err := readSSEFrame(fixture.sseReader)
 	if err != nil || !strings.Contains(first, "response.created") {
-		t.Fatalf("first SSE frame = %q, %v", first, err)
+		t.Fatalf("first SSE frame = %q, %v (watchdog: %v)", first, err, sseWatchdog.Err())
 	}
 	return fixture
 }
@@ -204,11 +230,12 @@ func TestShutdownSendsWebSocketGoingAwayWhileSSEOverrunsGracePeriod(t *testing.T
 	}
 
 	select {
-	case <-sseEnded:
+	case err := <-sseEnded:
+		fixture.requireServerOriginatedSSEEnd(t, "SSE force-close", err)
 		if elapsed := time.Since(cancelledAt); elapsed < shutdownTimeout-100*time.Millisecond {
 			t.Errorf("SSE ended after %v, want force-close at the %v deadline", elapsed, shutdownTimeout)
 		}
-	case <-time.After(shutdownTimeout + 5*time.Second):
+	case <-time.After(fixtureIOTimeout + time.Second):
 		t.Fatal("SSE was not force-closed after the shutdown deadline")
 	}
 	select {
@@ -240,11 +267,14 @@ func TestShutdownCompletesCleanlyWhenSSEFinishesAfterWebSocketDrain(t *testing.T
 
 	frame, err := readSSEFrame(fixture.sseReader)
 	if err != nil || !strings.Contains(frame, "response.completed") {
+		fixture.requireServerOriginatedSSEEnd(t, "final SSE frame read", err)
 		t.Fatalf("final SSE frame = %q, %v", frame, err)
 	}
 	if rest, err := io.ReadAll(fixture.sseReader); err != nil {
+		fixture.requireServerOriginatedSSEEnd(t, "SSE EOF read", err)
 		t.Fatalf("SSE body ended with %v after %q, want clean completion", err, rest)
 	}
+	fixture.requireServerOriginatedSSEEnd(t, "clean SSE completion", nil)
 	select {
 	case err := <-fixture.runErr:
 		if err != nil {

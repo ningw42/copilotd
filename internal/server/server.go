@@ -12,7 +12,6 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"sync"
 	"time"
 
 	"github.com/ningw42/copilotd/internal/catalog"
@@ -126,20 +125,10 @@ func (s *Server) shutdown() error {
 	// Close WebSocket admission first so late upgrades are refused, then drain
 	// both transports at once: neither may consume the other's grace period.
 	s.ws.StartDrain()
-	var (
-		wg             sync.WaitGroup
-		httpErr, wsErr error
-	)
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		httpErr = s.http.Shutdown(shutdownCtx)
-	}()
-	go func() {
-		defer wg.Done()
-		wsErr = s.ws.Shutdown(shutdownCtx)
-	}()
-	wg.Wait()
+	httpDone := make(chan error, 1)
+	go func() { httpDone <- s.http.Shutdown(shutdownCtx) }()
+	wsErr := s.ws.Shutdown(shutdownCtx)
+	httpErr := <-httpDone
 	if httpErr == nil && wsErr == nil {
 		return nil
 	}
