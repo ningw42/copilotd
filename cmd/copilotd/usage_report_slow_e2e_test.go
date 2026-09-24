@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/ningw42/copilotd/internal/config"
+	"github.com/ningw42/copilotd/internal/server"
 	"github.com/ningw42/copilotd/internal/usage/report"
 	"github.com/ningw42/copilotd/internal/usage/reporthttp"
 )
@@ -407,8 +408,8 @@ func TestUsageForcedDrainCancelsRealSQLiteReadAndInference(t *testing.T) {
 		}
 	}
 	started := time.Now()
-	if err := h.stop(); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("forced read drain: %v", err)
+	if err := h.stop(); !errors.Is(err, server.ErrForcedDrain) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("forced read drain = %v, want server.ErrForcedDrain wrapping deadline exceeded", err)
 	}
 	elapsed := time.Since(started)
 	if elapsed < 15*time.Millisecond || elapsed > 500*time.Millisecond {

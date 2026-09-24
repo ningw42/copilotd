@@ -26,6 +26,7 @@ import (
 	"github.com/ningw42/copilotd/internal/config"
 	"github.com/ningw42/copilotd/internal/endpoint"
 	"github.com/ningw42/copilotd/internal/logging"
+	"github.com/ningw42/copilotd/internal/server"
 	"github.com/ningw42/copilotd/internal/shim"
 	"github.com/ningw42/copilotd/internal/sse"
 	"github.com/ningw42/copilotd/internal/usage"
@@ -1102,8 +1103,8 @@ func TestRunBoundServeForcedWebSocketDrainAndFreshUsageFinalizationAreBounded(t 
 	drainStarted := time.Now()
 	serveErr := harness.stop()
 	drainElapsed := time.Since(drainStarted)
-	if !errors.Is(serveErr, context.DeadlineExceeded) {
-		t.Fatalf("forced drain error = %v, want deadline exceeded", serveErr)
+	if !errors.Is(serveErr, server.ErrForcedDrain) || !errors.Is(serveErr, context.DeadlineExceeded) {
+		t.Fatalf("forced drain error = %v, want server.ErrForcedDrain wrapping deadline exceeded", serveErr)
 	}
 	if drainElapsed < 50*time.Millisecond || drainElapsed > 500*time.Millisecond {
 		t.Errorf("forced drain elapsed = %s, want one bounded shutdown interval", drainElapsed)
@@ -1129,43 +1130,69 @@ func TestRunBoundServeForcedWebSocketDrainAndFreshUsageFinalizationAreBounded(t 
 	held.Release()
 }
 
-type blockingServerErrorLogState struct {
+type blockingForcedDrainWarnState struct {
 	entered     chan struct{}
 	release     chan struct{}
 	enteredOnce sync.Once
 	releaseOnce sync.Once
 }
 
-func (s *blockingServerErrorLogState) Release() {
+func (s *blockingForcedDrainWarnState) Release() {
 	s.releaseOnce.Do(func() { close(s.release) })
 }
 
-type blockingServerErrorLogHandler struct {
-	inner slog.Handler
-	state *blockingServerErrorLogState
+// blockingForcedDrainWarnHandler blocks on the forced-drain warning, which it
+// identifies structurally: Warn level, the cmd/copilotd component attached by
+// logging.ForComponent, and an error attribute matching server.ErrForcedDrain.
+type blockingForcedDrainWarnHandler struct {
+	inner     slog.Handler
+	state     *blockingForcedDrainWarnState
+	component string
 }
 
-func (h blockingServerErrorLogHandler) Enabled(ctx context.Context, level slog.Level) bool {
+func (h blockingForcedDrainWarnHandler) Enabled(ctx context.Context, level slog.Level) bool {
 	return h.inner.Enabled(ctx, level)
 }
 
-func (h blockingServerErrorLogHandler) Handle(ctx context.Context, record slog.Record) error {
-	if record.Message == "server error" {
+func (h blockingForcedDrainWarnHandler) Handle(ctx context.Context, record slog.Record) error {
+	if h.isForcedDrainWarning(record) {
 		h.state.enteredOnce.Do(func() { close(h.state.entered) })
 		<-h.state.release
 	}
 	return h.inner.Handle(ctx, record)
 }
 
-func (h blockingServerErrorLogHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
-	return blockingServerErrorLogHandler{inner: h.inner.WithAttrs(attrs), state: h.state}
+func (h blockingForcedDrainWarnHandler) isForcedDrainWarning(record slog.Record) bool {
+	if record.Level != slog.LevelWarn || h.component != "cmd/copilotd" {
+		return false
+	}
+	forced := false
+	record.Attrs(func(attr slog.Attr) bool {
+		if attr.Key == logging.ErrorKey {
+			err, ok := attr.Value.Any().(error)
+			forced = ok && errors.Is(err, server.ErrForcedDrain)
+			return false
+		}
+		return true
+	})
+	return forced
 }
 
-func (h blockingServerErrorLogHandler) WithGroup(name string) slog.Handler {
-	return blockingServerErrorLogHandler{inner: h.inner.WithGroup(name), state: h.state}
+func (h blockingForcedDrainWarnHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	component := h.component
+	for _, attr := range attrs {
+		if attr.Key == logging.ComponentKey {
+			component = attr.Value.String()
+		}
+	}
+	return blockingForcedDrainWarnHandler{inner: h.inner.WithAttrs(attrs), state: h.state, component: component}
 }
 
-func TestRunBoundServeStopsUsageAdmissionBeforeReportingForcedDrainError(t *testing.T) {
+func (h blockingForcedDrainWarnHandler) WithGroup(name string) slog.Handler {
+	return blockingForcedDrainWarnHandler{inner: h.inner.WithGroup(name), state: h.state, component: h.component}
+}
+
+func TestRunBoundServeStopsUsageAdmissionBeforeWarningForcedDrain(t *testing.T) {
 	completion := []byte(`{"type":"response.completed","response":{"id":"resp-before-forced-drain-log","model":"reported-before-forced-drain-log","status":"completed","usage":{"input_tokens":1,"output_tokens":2}}}`)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := websocket.Accept(w, r, nil)
@@ -1183,9 +1210,9 @@ func TestRunBoundServeStopsUsageAdmissionBeforeReportingForcedDrainError(t *test
 
 	held := newHeldServerMessageShim()
 	t.Cleanup(held.Release)
-	logState := &blockingServerErrorLogState{entered: make(chan struct{}), release: make(chan struct{})}
+	logState := &blockingForcedDrainWarnState{entered: make(chan struct{}), release: make(chan struct{})}
 	t.Cleanup(logState.Release)
-	base := slog.New(blockingServerErrorLogHandler{
+	base := slog.New(blockingForcedDrainWarnHandler{
 		inner: slog.NewTextHandler(io.Discard, nil),
 		state: logState,
 	})
@@ -1210,14 +1237,14 @@ func TestRunBoundServeStopsUsageAdmissionBeforeReportingForcedDrainError(t *test
 	select {
 	case <-logState.entered:
 	case <-time.After(2 * time.Second):
-		t.Fatal("forced drain did not reach synchronous server-error logging")
+		t.Fatal("forced drain did not reach the synchronous forced-drain warning")
 	}
 
 	assertTruncatedUsageResponseClosed(t, slowReport)
 
 	// Model a producer that was already in flight when the forced drain returned.
 	// The production serve lifecycle, not the harness, must already have cut off
-	// admission before entering the synchronous logger.
+	// admission before entering the synchronous forced-drain warning.
 	harness.store.Record(usage.Turn{
 		At:         time.UnixMilli(1_750_000_000_000),
 		RequestID:  "forced-drain-error-log-order",
@@ -1227,15 +1254,15 @@ func TestRunBoundServeStopsUsageAdmissionBeforeReportingForcedDrainError(t *test
 		Usage:      usage.OpenAIUsage{InputTokens: 3, OutputTokens: 5},
 	})
 	logState.Release()
-	if err := <-stopDone; !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("forced drain error = %v, want deadline exceeded", err)
+	if err := <-stopDone; !errors.Is(err, server.ErrForcedDrain) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("forced drain error = %v, want server.ErrForcedDrain wrapping deadline exceeded", err)
 	}
 	held.Release()
 
 	report := harness.closeStore()
 	wantReport := sqlitestore.Report{LateAfterCutoffDrops: 1, DriverCleanupCompleted: true}
 	if report != wantReport {
-		t.Fatalf("usage shutdown report = %+v, want one producer rejected before server-error logging and otherwise clean %+v", report, wantReport)
+		t.Fatalf("usage shutdown report = %+v, want one producer rejected before the forced-drain warning and otherwise clean %+v", report, wantReport)
 	}
 	db, err := sql.Open("sqlite", harness.cfg.UsageDBPath)
 	if err != nil {
@@ -1253,7 +1280,7 @@ func TestRunBoundServeStopsUsageAdmissionBeforeReportingForcedDrainError(t *test
 		t.Errorf("completion observed before forced drain persisted %d rows, want one", observedRows)
 	}
 	if lateRows != 0 {
-		t.Errorf("late producer persisted %d rows while server-error logging was blocked, want none", lateRows)
+		t.Errorf("late producer persisted %d rows while the forced-drain warning was blocked, want none", lateRows)
 	}
 }
 

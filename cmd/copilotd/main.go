@@ -63,8 +63,10 @@ const (
 // exit code. Args, env, and the output streams are injected so dispatch and the
 // version/validation paths can be tested without touching process globals.
 //
-// Exit codes: version -> 0; bare/help -> 0; config error -> 1; bind or
-// serve error -> 1; unknown subcommand -> 1.
+// Exit codes: version -> 0; bare/help -> 0; clean serve shutdown -> 0;
+// signal-driven drain forced only by --shutdown-timeout expiring (logged at
+// Warn) -> 0; config error -> 1; bind or genuine serve/shutdown error -> 1;
+// unknown subcommand -> 1.
 func run(args []string, lookupEnv func(string) (string, bool), stdout, stderr io.Writer) int {
 	root := buildCommand(lookupEnv, stdout, stderr)
 	err := root.Parse(args)
@@ -319,6 +321,9 @@ func rejectSurplusOperands(command string, args []string, allowed int) error {
 // background task. Errors after the logger is up are reported through it and
 // returned as errServeFailed so the caller does not double-report them; a
 // pre-logger config error is returned raw for the top-level translator to print.
+// A drain whose only failure was the shutdown grace period expiring
+// (server.ErrForcedDrain, already logged at Warn by runBoundServe) is operator
+// policy success and returns nil; see serveOutcome.
 func runServe(ctx context.Context, flags *config.ServeFlags, lookupEnv func(string) (string, bool)) error {
 	cfg, err := flags.Resolve(lookupEnv)
 	if err != nil {
@@ -401,10 +406,18 @@ func runServe(ctx context.Context, flags *config.ServeFlags, lookupEnv func(stri
 		stop()
 	}()
 
-	if err := runBoundServe(serveCtx, cfg, base, mgr, imp, codexModels, usagePricing, cacheRegistry, registry, ln, usageStore); err != nil {
-		return errServeFailed
+	return serveOutcome(runBoundServe(serveCtx, cfg, base, mgr, imp, codexModels, usagePricing, cacheRegistry, registry, ln, usageStore))
+}
+
+// serveOutcome maps runBoundServe's raw Server.Run result to runServe's
+// outcome. A clean drain and a timeout-only forced drain (recognized solely by
+// server.ErrForcedDrain, never a bare context.DeadlineExceeded) exit 0; every
+// other failure was already logged and becomes errServeFailed (exit 1).
+func serveOutcome(err error) error {
+	if err == nil || errors.Is(err, server.ErrForcedDrain) {
+		return nil
 	}
-	return nil
+	return errServeFailed
 }
 
 // runBoundServe starts the background impersonation/mint lifecycle only after
@@ -413,8 +426,11 @@ func runServe(ctx context.Context, flags *config.ServeFlags, lookupEnv func(stri
 // /healthz and the locally-ready /readyz available while bounded startup
 // discovery is in progress. Neither discovery nor startup mint outcomes gate
 // readiness or request admission. When usageStore is non-nil, admission remains
-// open through Server.Run and is cut off immediately on return, before a serve
-// error is synchronously logged.
+// open through Server.Run and is cut off immediately on return, before the
+// outcome is synchronously logged. A forced drain (server.ErrForcedDrain) is
+// logged once at Warn with the configured timeout; any other error at Error.
+// Either way the raw Server.Run result is returned unchanged, so callers and
+// tests can still tell a forced drain from a clean one.
 func runBoundServe(ctx context.Context, cfg config.ServeConfig, base *slog.Logger, mgr *identity.Manager, imp *impersonation.Set, codexModels *cache.Value[[]byte], usagePricing pricing.Source, cacheRegistry *cache.Registry, registry shim.Registry, ln net.Listener, usageStore *sqlitestore.Store) error {
 	go runServeStartup(ctx, cacheRegistry, mgr, logging.ForComponent(base, "cmd/copilotd"))
 	catalogs := catalog.RenderDescriptors{
@@ -459,8 +475,14 @@ func runBoundServe(ctx context.Context, cfg config.ServeConfig, base *slog.Logge
 	if usageStore != nil {
 		usageStore.StopAdmission()
 	}
-	if serveErr != nil {
-		logging.ForComponent(base, "cmd/copilotd").Error("server error", slog.Any(logging.ErrorKey, serveErr))
+	logger := logging.ForComponent(base, "cmd/copilotd")
+	switch {
+	case errors.Is(serveErr, server.ErrForcedDrain):
+		logger.Warn("forced drain",
+			slog.Any(logging.ErrorKey, serveErr),
+			slog.Duration(logging.TimeoutKey, cfg.ShutdownTimeout))
+	case serveErr != nil:
+		logger.Error("server error", slog.Any(logging.ErrorKey, serveErr))
 	}
 	return serveErr
 }

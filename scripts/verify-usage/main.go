@@ -620,7 +620,7 @@ func mandatoryTests(goos string) []string {
 			"TestUsageGracefulDrainFinishesReportAndInferenceBeforeWriterCutoff", "TestUsageStorageFailuresDoNotChangeInferenceReadinessOrWriterAdmission", "TestUsageEncodedLimitRejectsWholeRealReportAndReleasesSlots",
 			"TestRunBoundServeMetersBufferedOpenAIResponseWithoutChangingPayload", "TestRunBoundServeMetersOpenAISSECompletionWithoutChangingFrames", "TestRunBoundServeMetersOpenAIWebSocketCompletionsWithoutChangingMessages",
 			"TestUsageReportClientTeardownClosesAnUnusedDialBeforeGracefulStop", "TestDailyOpenAIUsageCommandThroughProductionListener",
-			"TestRunBoundServeForcedWebSocketDrainAndFreshUsageFinalizationAreBounded", "TestRunBoundServeStopsUsageAdmissionBeforeReportingForcedDrainError",
+			"TestRunBoundServeForcedWebSocketDrainAndFreshUsageFinalizationAreBounded", "TestRunBoundServeStopsUsageAdmissionBeforeWarningForcedDrain",
 		},
 	}
 	if goos == "linux" {
