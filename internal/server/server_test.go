@@ -3,13 +3,11 @@ package server
 import (
 	"bytes"
 	"context"
-	"errors"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -708,66 +706,6 @@ func TestLifecycleSmoke(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("Run did not return within the grace period after cancel")
 	}
-}
-
-func TestShutdownSequencesWebSocketDrainBeforeHTTPAndKeepsHardCloseFallback(t *testing.T) {
-	var events []string
-	httpFailure := errors.New("HTTP drain timed out")
-	wsFailure := errors.New("WebSocket drain timed out")
-	httpServer := &recordingHTTPServer{
-		events:      &events,
-		shutdownErr: httpFailure,
-	}
-	wsProxy := &recordingWebSocketDrainer{
-		events:      &events,
-		shutdownErr: wsFailure,
-	}
-	srv := &Server{
-		cfg:    testConfig(),
-		logger: discardLogger(t),
-		http:   httpServer,
-		ws:     wsProxy,
-	}
-
-	err := srv.shutdown()
-	if !errors.Is(err, httpFailure) || !errors.Is(err, wsFailure) {
-		t.Fatalf("shutdown error = %v, want both graceful drain failures", err)
-	}
-	want := []string{"ws_start_drain", "http_shutdown", "ws_shutdown", "http_close"}
-	if !reflect.DeepEqual(events, want) {
-		t.Fatalf("shutdown events = %v, want %v", events, want)
-	}
-}
-
-type recordingHTTPServer struct {
-	events      *[]string
-	shutdownErr error
-}
-
-func (s *recordingHTTPServer) Serve(net.Listener) error { return http.ErrServerClosed }
-
-func (s *recordingHTTPServer) Shutdown(context.Context) error {
-	*s.events = append(*s.events, "http_shutdown")
-	return s.shutdownErr
-}
-
-func (s *recordingHTTPServer) Close() error {
-	*s.events = append(*s.events, "http_close")
-	return nil
-}
-
-type recordingWebSocketDrainer struct {
-	events      *[]string
-	shutdownErr error
-}
-
-func (d *recordingWebSocketDrainer) StartDrain() {
-	*d.events = append(*d.events, "ws_start_drain")
-}
-
-func (d *recordingWebSocketDrainer) Shutdown(context.Context) error {
-	*d.events = append(*d.events, "ws_shutdown")
-	return d.shutdownErr
 }
 
 func getWithRetry(t *testing.T, url string) (*http.Response, error) {

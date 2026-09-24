@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/ningw42/copilotd/internal/catalog"
@@ -35,6 +36,12 @@ const (
 	readTimeout  = 0 * time.Second
 	writeTimeout = 0 * time.Second
 )
+
+// ErrForcedDrain marks a Run result whose only failure is that the configured
+// shutdown grace period expired before every HTTP request and WebSocket
+// session drained, so the survivors were force-closed. It always wraps the
+// underlying drain causes, including context.DeadlineExceeded.
+var ErrForcedDrain = errors.New("shutdown grace period expired; remaining connections force-closed")
 
 // Server owns the configured http.Server and drives its lifecycle.
 type Server struct {
@@ -83,9 +90,17 @@ func New(cfg config.ServeConfig, logger, catalogLogger *slog.Logger, dependencyE
 	}
 }
 
-// Run serves on ln until ctx is cancelled, then shuts down gracefully within
-// the configured timeout, falling back to a hard close if that overruns. A
-// clean shutdown returns nil; http.ErrServerClosed is not treated as an error.
+// Run serves on ln until ctx is cancelled, then drains within the configured
+// shutdown timeout. Cancellation closes WebSocket admission and drains HTTP
+// requests and WebSocket sessions concurrently under one shared grace
+// deadline; if either drain fails, the remaining connections are hard-closed.
+//
+// A clean drain returns nil; http.ErrServerClosed is not treated as an error.
+// When the grace period expired and every drain failure was that deadline,
+// Run returns an error matching ErrForcedDrain (and context.DeadlineExceeded)
+// so callers can distinguish a forced drain from a clean one. Any genuine
+// drain or serve failure, including one combined with a timeout, is returned
+// as an ordinary error without ErrForcedDrain.
 func (s *Server) Run(ctx context.Context, ln net.Listener) error {
 	serveErr := make(chan error, 1)
 	go func() {
@@ -108,13 +123,39 @@ func (s *Server) shutdown() error {
 	s.logger.Info("shutting down", slog.Duration(logging.TimeoutKey, s.cfg.ShutdownTimeout))
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), s.cfg.ShutdownTimeout)
 	defer cancel()
+	// Close WebSocket admission first so late upgrades are refused, then drain
+	// both transports at once: neither may consume the other's grace period.
 	s.ws.StartDrain()
-	httpErr := s.http.Shutdown(shutdownCtx)
-	wsErr := s.ws.Shutdown(shutdownCtx)
-	if err := errors.Join(httpErr, wsErr); err != nil {
-		// Graceful shutdown overran; force the remaining connections closed.
-		_ = s.http.Close()
-		return fmt.Errorf("graceful shutdown: %w", err)
+	var (
+		wg             sync.WaitGroup
+		httpErr, wsErr error
+	)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		httpErr = s.http.Shutdown(shutdownCtx)
+	}()
+	go func() {
+		defer wg.Done()
+		wsErr = s.ws.Shutdown(shutdownCtx)
+	}()
+	wg.Wait()
+	if httpErr == nil && wsErr == nil {
+		return nil
 	}
-	return nil
+	// Graceful drain failed; force the remaining connections closed.
+	_ = s.http.Close()
+	joined := errors.Join(httpErr, wsErr)
+	// Classify before the deferred cancel runs: only an actually expired grace
+	// deadline with deadline-only drain failures is a forced drain.
+	if errors.Is(shutdownCtx.Err(), context.DeadlineExceeded) && deadlineOnly(httpErr) && deadlineOnly(wsErr) {
+		return fmt.Errorf("graceful shutdown: %w: %w", ErrForcedDrain, joined)
+	}
+	return fmt.Errorf("graceful shutdown: %w", joined)
+}
+
+// deadlineOnly reports whether one drain result is either success or the
+// shutdown deadline, classified per drain before the results are joined.
+func deadlineOnly(err error) bool {
+	return err == nil || errors.Is(err, context.DeadlineExceeded)
 }
