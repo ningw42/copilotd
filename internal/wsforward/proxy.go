@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"net/http/httptrace"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -43,7 +42,13 @@ type Proxy struct {
 	drainCtx    context.Context
 	cancelDrain context.CancelFunc
 	wg          sync.WaitGroup
-	draining    atomic.Bool
+
+	// admissionMu makes the drain check and WaitGroup registration of an
+	// admitted handler one decision relative to StartDrain: handlers register
+	// only while admission is open, and Shutdown waits only after it closes,
+	// so no Add can race a Wait that is crossing zero.
+	admissionMu     sync.Mutex
+	admissionClosed bool
 
 	sessionsMu sync.Mutex
 	sessions   map[*activeSession]struct{}
@@ -147,17 +152,16 @@ func (p *Proxy) Handler(ep endpoint.WSForward) http.HandlerFunc {
 	upstreamRoute := ep.Upstream()
 	return func(w http.ResponseWriter, r *http.Request) {
 		handshakeStart := time.Now()
-		p.wg.Add(1)
+		if !p.admit() {
+			apierror.Write(w, surface, apierror.NotReady, "the server is shutting down")
+			p.metrics.observeAccept(AcceptRejected)
+			return
+		}
 		defer p.wg.Done()
 		phaseCtx, cancelPhase := context.WithCancel(r.Context())
 		stopForceCancel := context.AfterFunc(p.baseCtx, cancelPhase)
 		defer stopForceCancel()
 		defer cancelPhase()
-		if p.draining.Load() {
-			apierror.Write(w, surface, apierror.NotReady, "the server is shutting down")
-			p.metrics.observeAccept(AcceptRejected)
-			return
-		}
 
 		if !isWebSocketUpgrade(r) {
 			apierror.Write(w, surface, apierror.NotAWebSocketUpgrade, "request is not a WebSocket upgrade")
@@ -254,6 +258,20 @@ func (p *Proxy) Handler(ep endpoint.WSForward) http.HandlerFunc {
 	}
 }
 
+// admit registers one handler with the drain WaitGroup when admission is still
+// open. A rejected handler never touches the WaitGroup, so it cannot race
+// Shutdown's wait; an admitted one stays counted through credential resolution,
+// dialing, and the session.
+func (p *Proxy) admit() bool {
+	p.admissionMu.Lock()
+	defer p.admissionMu.Unlock()
+	if p.admissionClosed {
+		return false
+	}
+	p.wg.Add(1)
+	return true
+}
+
 func acceptOutcome(failure *upstream.Failure) AcceptOutcome {
 	if failure.Kind == apierror.NotReady {
 		return AcceptRejected
@@ -286,16 +304,21 @@ func (p *Proxy) forceCloseSessions() {
 	}
 }
 
-// StartDrain makes subsequent upgrade attempts fail before any upstream work.
-// It is separate from Shutdown so the HTTP server can refuse upgrades before
-// it begins draining non-hijacked requests.
+// StartDrain permanently closes admission: upgrade requests that reach the
+// handler afterwards are refused with 503 before any upstream work and without
+// registering for the drain. It is separate from Shutdown so the server can
+// close admission before it drains HTTP and WebSocket work concurrently.
+// Admission never reopens.
 func (p *Proxy) StartDrain() {
-	p.draining.Store(true)
+	p.admissionMu.Lock()
+	defer p.admissionMu.Unlock()
+	p.admissionClosed = true
 }
 
-// Shutdown starts draining, asks live sessions to close with 1001, and waits
-// for every registered handler until ctx expires. Established survivors are
-// force-closed when the caller's deadline wins.
+// Shutdown closes admission, asks live sessions to close with 1001, and waits
+// for every admitted handler until ctx expires. Established survivors are
+// force-closed when the caller's deadline wins. It is safe to call again after
+// an earlier drain.
 func (p *Proxy) Shutdown(ctx context.Context) error {
 	p.StartDrain()
 	p.cancelDrain()
