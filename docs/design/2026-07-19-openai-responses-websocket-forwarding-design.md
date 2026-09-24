@@ -1,7 +1,12 @@
 # OpenAI Responses WebSocket forwarding (payload-opaque)
 
 Status: approved 2026-07-19; revised 2026-07-19 after a design-grilling pass;
-revised 2026-07-20 to add an establishment-time log record.
+revised 2026-07-20 to add an establishment-time log record; amended for
+[#261](https://github.com/ningw42/copilotd/issues/261): admission and drain
+registration are one mutex-protected decision, and HTTP and WebSocket drain
+concurrently under one shutdown deadline. The earlier unlocked
+`Add`-before-check registration and serial HTTP-then-WebSocket drain are
+superseded; counting mid-accept work is not.
 Design for adding a WebSocket transport to copilotd's OpenAI Responses surface.
 It is grounded in
 [the 2026-07-19 research note](../research/2026-07-19-responses-websocket-mode.md)
@@ -69,7 +74,7 @@ them.
 | Where the code lives | New `internal/wsforward` package | Clean isolation; the HTTP `Forwarder` stays HTTP-only. The WS dial builds its own minimal handshake headers, so little is actually shared with the HTTP header path. |
 | Catalog membership | Keep the exact `/responses` filter (no change) | Identical to a union today (every `ws:/responses` model in the capture also advertises `/responses`); never lists a model an HTTP client cannot call; least code. |
 | Graceful shutdown | Drain with deadline (WaitGroup + base context) | `http.Server.Shutdown` does not wait for hijacked conns; drain sends a close frame and bounds the wait, giving clean sockets on restart. |
-| Drain registration | `wg.Add(1)` at the **top** of the handler, before the draining check | Makes the WaitGroup count *accepted* sessions (incl. mid-dial), not just established ones; `Add`-before-check closes the drain race with no lock. |
+| Drain registration | One admission-mutex decision at the **top** of the handler: check admission and `wg.Add(1)` together, before any other work (amended by #261) | Makes the WaitGroup count *accepted* sessions (incl. mid-credential and mid-dial), not just established ones. `StartDrain` closes admission under the same lock and `Shutdown` waits only afterwards, so a rejected late request never touches the WaitGroup and no `Add` can race a `Wait` crossing zero. The original unlocked `Add`-before-check could reuse the WaitGroup during `Wait`. |
 | Session context | Phase-split: pre-upgrade under `r.Context()`, post-upgrade pumps under `WithCancel(baseCtx)` only | Each cancel signal is live in exactly one phase; after `Hijack`, `r.Context()` no longer cancels on client death, so `baseCtx` is the single post-upgrade authority and Read errors detect the peer. |
 | Handshake timeout | Dedicated `--ws-handshake-timeout` knob, default **10s** | A handshake returns `101` sub-second or is wrong; a tuned explicit knob beats borrowing an unrelated 600s timeout. |
 | Write liveness | Per-write deadline = existing `writeTimeout` (90s) | A stuck-but-open slow reader blocks a pump forever with no total cap; a per-write bound reaps it without capping a healthy long turn. |
@@ -99,7 +104,8 @@ type Proxy struct {
     baseCtx  context.Context
     cancel   context.CancelFunc
     wg       sync.WaitGroup
-    draining atomic.Bool
+    admissionMu     sync.Mutex // guards admission check + wg.Add (§3.1, #261)
+    admissionClosed bool
 }
 
 func New(provider identity.Provider, dialClient *http.Client,
@@ -130,14 +136,19 @@ failure is clean, and the handler **blocks for the whole session** (it runs the
 pumps under `errgroup.Wait`), which is what lets the outer `accessLog` line carry
 a real status and full-request duration (§7):
 
-1. **Register.** `wg.Add(1); defer wg.Done()` **first**, before any other step, so
-   the drain WaitGroup counts every accepted session — including one still in the
-   dial/handshake below — not just established ones.
-2. **Draining check.** If `p.draining.Load()`, write a pre-upgrade `apierror`
-   503 (`NotReady`) and return. (Ordered after step 1 so `Shutdown`'s
-   `draining.Store(true)` → `wg.Wait()` can never skip an in-flight accept: an
-   accepted session either registered before the store and is awaited, or reads
-   `draining==true` after it and bails.)
+1. **Admit and register.** **First**, before any other step, take the admission
+   mutex: if admission is still open, `wg.Add(1)` under that lock (with
+   `defer wg.Done()`), so the drain WaitGroup counts every accepted session —
+   including one still resolving its credential or in the dial/handshake below —
+   not just established ones.
+2. **Reject after drain.** If admission is closed, write a pre-upgrade
+   `apierror` 503 (`NotReady`), book `AcceptRejected`, and return without
+   registering, creating phase contexts, or doing upstream work. `StartDrain`
+   closes admission under the same mutex and `Shutdown` starts `wg.Wait()` only
+   afterwards, so an in-flight accept is either registered and awaited or
+   rejected without ever touching the WaitGroup. (Amended by #261: the original
+   unlocked `Add`-before-check let a rejected late request `Add` while `Wait`
+   was crossing zero.)
 3. **Validate the upgrade.** Lightweight header check: `Upgrade: websocket`
    (token-wise), a non-empty `Sec-WebSocket-Key`, and `Sec-WebSocket-Version: 13`.
    A request that is not a valid upgrade gets a pre-upgrade `apierror` 426
@@ -398,17 +409,25 @@ transport exists, but no WS-only model is currently hidden). No
   `defaultWebSocketHandshakeTimeout = 10 * time.Second`), validated positive like
   its duration siblings.
 - **Shutdown.** `server.shutdown()`
-  ([server.go](../../internal/server/server.go#L85-L95)) sequences:
-  1. `p.draining.Store(true)` (refuse new upgrades → 503).
-  2. `s.http.Shutdown(shutdownCtx)` — stops the listener and drains in-flight
-     non-hijacked requests (it returns without waiting for hijacked WS conns).
-  3. `wsProxy.Shutdown(shutdownCtx)` — `cancel()` the base context (each session's
-     pumps unblock, sending a `1001` going-away close), then `wg.Wait()` bounded
-     by `shutdownCtx`; on deadline, close the captured upgraded transports so an
-     in-progress library close handshake is interrupted rather than serialized
-     behind. Because `wg.Add` is at the top of the handler (§3.1), `Wait` covers
-     sessions still in dial/handshake, not just established ones.
-  4. Existing hard `s.http.Close()` fallback remains.
+  ([server.go](../../internal/server/server.go)) sequences (amended by #261;
+  the original serial HTTP-then-WebSocket drain let an open SSE stream consume
+  the WebSocket grace period):
+  1. `wsProxy.StartDrain()` closes admission (refuse new upgrades → 503).
+  2. Concurrently, under the **same** `shutdownCtx`, and waiting for both:
+     - `s.http.Shutdown(shutdownCtx)` — stops the listener and drains in-flight
+       non-hijacked requests (it returns without waiting for hijacked WS conns).
+     - `wsProxy.Shutdown(shutdownCtx)` — signal the drain (each session's pumps
+       send a `1001` going-away close), then `wg.Wait()` bounded by
+       `shutdownCtx`; on deadline, cancel the base context and close the
+       captured upgraded transports so an in-progress library close handshake
+       is interrupted rather than serialized behind. Because registration is
+       at the top of the handler (§3.1), `Wait` covers sessions still in
+       credential resolution or dial/handshake, not just established ones.
+  3. When either drain fails, the existing hard `s.http.Close()` fallback runs.
+     If the grace deadline actually expired and each drain failure is that
+     deadline, `Run` returns an error matching `server.ErrForcedDrain`;
+     `cmd/copilotd` logs it once at Warn and exits 0. Genuine drain errors stay
+     ordinary errors (Error log, exit 1).
 - **`cmd/copilotd/main.go`** builds the dial client, the two WS counters, and the
   `Proxy` (passing `cfg.WebSocketHandshakeTimeout`, `cfg.WriteTimeout`,
   `cfg.MaxRequestBytes`), and passes the `Proxy` to `server.New` alongside the
@@ -443,8 +462,11 @@ echo/scripted servers for **both** upstream and downstream. Coverage:
 9. Upstream dial failure (refused and timeout) → clean pre-101 502 / 504.
 10. Handler panic after upgrade → recovered; session closed.
 11. Graceful shutdown drains an active session within the deadline, then
-    force-closes a straggler; and a session still mid-accept (registered by the
-    top-of-handler `wg.Add`) is drained rather than skipped.
+    force-closes a straggler; a session still mid-accept (registered at the top
+    of the handler) is drained rather than skipped; late upgrades racing the
+    last admitted handler are rejected without WaitGroup reuse or upstream work
+    (`-race`); and with SSE open, the WebSocket `1001` still arrives promptly
+    because both transports drain concurrently (amended by #261).
 12. Slow-reader write stall → the per-write deadline trips and the session is torn
     down (no goroutine leak).
 13. Three-record logging: the establishment record appears immediately after

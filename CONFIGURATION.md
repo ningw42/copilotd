@@ -352,8 +352,13 @@ port.
 
 ### `--shutdown-timeout`
 
-Sets the positive grace period for HTTP/WebSocket drain before a forced close.
-When the Usage meter is enabled, the store receives one fresh timeout of the
+Sets the positive grace period for shutdown drain before a forced close. On
+shutdown, in-flight HTTP requests (including SSE streams) and WebSocket sessions
+drain together under this one grace period, so a long SSE stream does not delay
+WebSocket `1001` close frames. If the period expires with only timeouts, the
+surviving connections are force-closed, a warning is logged, and the process
+still exits `0`; a genuine shutdown error exits `1`. When the Usage meter is
+enabled, the store receives one fresh timeout of the
 same length only after server drain returns. The default can therefore allow
 about `20s` of HTTP/WebSocket plus SQLite coordinator wait in total: up to `10s`
 for drain and then up to `10s` for final usage flush and native cleanup. The
