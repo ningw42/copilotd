@@ -154,8 +154,9 @@ func TestProxyShutdownWaitsForAdmittedHandlerMidCredential(t *testing.T) {
 	shutdownErr := make(chan error, 1)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	proxy.StartDrain()
 	go func() { shutdownErr <- proxy.Shutdown(ctx) }()
-	assertShutdownPendingUntilRelease(t, shutdownErr, func() { close(provider.release) })
+	assertShutdownPendingUntilRelease(t, proxy.Handler(endpoint.OpenAIResponsesWS()), shutdownErr, func() { close(provider.release) })
 	<-handlerDone
 }
 
@@ -188,20 +189,29 @@ func TestProxyShutdownWaitsForAdmittedHandlerMidDial(t *testing.T) {
 	shutdownErr := make(chan error, 1)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	proxy.StartDrain()
 	go func() { shutdownErr <- proxy.Shutdown(ctx) }()
-	assertShutdownPendingUntilRelease(t, shutdownErr, func() { close(releaseDial) })
+	assertShutdownPendingUntilRelease(t, proxy.Handler(endpoint.OpenAIResponsesWS()), shutdownErr, func() { close(releaseDial) })
 	<-handlerDone
 }
 
 // assertShutdownPendingUntilRelease proves the admitted handler is still
-// counted: a late upgrade is rejected while Shutdown keeps waiting, and
-// Shutdown completes cleanly only after release lets the handler finish.
-func assertShutdownPendingUntilRelease(t *testing.T, shutdownErr <-chan error, release func()) {
+// counted: with admission already closed, a late upgrade is rejected with 503
+// while Shutdown keeps waiting, and Shutdown completes cleanly only after
+// release lets the admitted handler finish.
+func assertShutdownPendingUntilRelease(t *testing.T, handler http.Handler, shutdownErr <-chan error, release func()) {
 	t.Helper()
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, validUpgradeRequest())
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("late upgrade status = %d, want 503", recorder.Code)
+	}
+	// A negative observation needs a window; a skipped handler would let
+	// Shutdown return immediately.
 	select {
 	case err := <-shutdownErr:
 		t.Fatalf("shutdown returned %v while an admitted handler was still running", err)
-	default:
+	case <-time.After(100 * time.Millisecond):
 	}
 	release()
 	select {

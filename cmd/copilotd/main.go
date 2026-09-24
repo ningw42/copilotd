@@ -478,7 +478,7 @@ func runBoundServe(ctx context.Context, cfg config.ServeConfig, base *slog.Logge
 	logger := logging.ForComponent(base, "cmd/copilotd")
 	switch {
 	case errors.Is(serveErr, server.ErrForcedDrain):
-		logger.Warn("shutdown grace period expired; forced remaining connections closed",
+		logger.Warn("forced drain",
 			slog.Any(logging.ErrorKey, serveErr),
 			slog.Duration(logging.TimeoutKey, cfg.ShutdownTimeout))
 	case serveErr != nil:
