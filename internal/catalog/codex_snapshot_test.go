@@ -622,7 +622,8 @@ func validCodexModelsBytes(t *testing.T, slug, prompt string) []byte {
 // completeCodexEntry returns a synthetic Codex ModelInfo entry that passes the
 // complete-entry accept contract the vendored snapshot must pass. fields replace
 // or add top-level members, so an entry carries only the properties its test
-// is about; its display name and instructions are distinct per slug.
+// is about. Only its display name and legacy base_instructions vary by slug;
+// the canonical instructions_template, which takes precedence, is shared.
 func completeCodexEntry(slug string, fields map[string]any) map[string]any {
 	entry := map[string]any{
 		"slug":                         slug,
