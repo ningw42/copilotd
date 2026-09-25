@@ -14,6 +14,59 @@ It is grounded in
 [the 2026-07-19 research note](../research/2026-07-19-responses-websocket-mode.md)
 and the current code.
 
+> **Superseded historical detail.** This dated design predates the shared
+> upstream call and the terminal request summary, and its original text omits
+> the pre-upgrade phase's cancellation rules. Text marked "amended by #261" or
+> "amended by #269" is current. Where the original text conflicts with the
+> contracts below, the contracts win. For current signatures,
+> `internal/wsforward` is authoritative.
+>
+> - **Logging** (§2 "Access logging", §3.1 step 7, §7's records, §11 item 13,
+>   §13): superseded by
+>   [ADR-0015](../adr/0015-govern-log-record-structure-with-ordinary-slog.md)
+>   and the
+>   [terminal request summary design](2026-08-31-terminal-request-summary-design.md).
+>   An established session emits one immediate `websocket established` Info
+>   milestone (`status=101`, `handshake_duration`) and one terminal access
+>   record. There is no separate `websocket session` record. The forwarder
+>   publishes the terminal reason, close code, and directional message and
+>   byte counts to access through `requestsummary.RecordWebSocket`. Access
+>   reports the downstream HTTP body bytes actually written (`0` for a `101`)
+>   and the whole-request duration. A pre-upgrade return emits no milestone or
+>   session facts. Conditional diagnostic records, such as the
+>   `upstream call failed` record for a classified failure, follow their own
+>   rules.
+> - **Upstream preparation** (§2 "Where the code lives", the §3
+>   `Proxy`/`New`/`Handler` sketch, §3.1 step 4, §3.2, §9 "Route"):
+>   superseded by
+>   [ADR-0013](../adr/0013-govern-authenticated-upstream-calls-in-internal-upstream.md),
+>   the
+>   [upstream call concentration design](2026-07-26-upstream-call-concentration-design.md),
+>   and the typed Endpoint contract
+>   ([ADR-0007](../adr/0007-served-endpoints-as-typed-contracts.md)). `New`
+>   takes the shared `*upstream.Caller`, and the server registers
+>   `Handler(ep)` for `endpoint.OpenAIResponsesWS()`. The handler builds its
+>   handshake request with `Caller.Prepare` from that contract's upstream
+>   Route. Prepare
+>   resolves the credential, joins the Route onto the credential's base URL,
+>   and carries the raw query, including a bare `?`. It then applies the
+>   shared outbound header policy: bearer token, credential headers, the
+>   resolved `X-Request-Id`, and the client's headers minus hop-by-hop,
+>   `Connection`-listed, `Authorization`, `X-Api-Key`, `Host`,
+>   `Content-Length`, and every `Sec-WebSocket-*` header. `wsforward` still
+>   owns `websocket.Dial` and the raw-connection capture.
+> - **Pre-upgrade phase and cancellation** (§2 "Session context", §3.1 steps
+>   4–5 and the paragraph after them, §4's "Credential failure" row, §7's
+>   accept counter): credential resolution and the dial run under a
+>   pre-upgrade phase context derived from `r.Context()`. Forced shutdown
+>   also cancels that context, and the dial adds `dialTimeout` on top. A
+>   credential failure is 503 `NotReady` only while the caller is live; a
+>   caller deadline is 504 `GatewayTimeout`. A cancelled phase writes nothing
+>   and books no accept outcome, an exception to the once-per-handshake
+>   counting in §3.1 and §7. A deadline-bearing error still wins over
+>   cancellation (§3.1 step 5). A late request after drain still gets 503 and
+>   `rejected`.
+
 ## 1. Goal and scope
 
 Add a **pure, dumb, payload-opaque** WebSocket forwarder for the OpenAI Responses
@@ -266,7 +319,7 @@ Behavior splits on whether the downstream 101 has been sent.
 | Not a WebSocket upgrade | `apierror` 426 `NotAWebSocketUpgrade` | — |
 | Missing/invalid local key | `apierror` 401 (existing auth MW) | — |
 | Credential failure | `apierror` 503 `NotReady` | — |
-| Upstream unreachable: no response, or a `101` that fails handshake verification (amended by #269) | `apierror` 502 `BadGateway` | — |
+| No relayable upstream response: no response, or a `101` that fails handshake verification (amended by #269) | `apierror` 502 `BadGateway` | — |
 | Upstream answers the handshake with a final non-101 (amended by #269) | relayed: Copilot's status and filtered headers; body only when provably complete | — |
 | Upstream dial timeout | `apierror` 504 `GatewayTimeout` | — |
 | Upstream closed / errored mid-session | — | propagate upstream close code; else `1011` |

@@ -386,32 +386,9 @@ func TestProxyTimesOutHandshakeRejectionWhoseBodyStallsPastDialDeadline(t *testi
 
 func TestProxyWritesNothingWhenClientLeavesDuringHandshakeRejectionBody(t *testing.T) {
 	bodyEntered := make(chan struct{})
-	provider := identity.NewStatic(identity.Credential{BaseURL: "http://upstream.invalid", Token: "copilot-token"}, true)
-	observed := &recordingWsMetrics{}
-	proxy := newAdmissionTestProxy(provider, stalledRejectionClient(bodyEntered), WsMetrics{Accept: observed, SessionTerminal: observed})
-	t.Cleanup(func() { shutdownPreupgradeTestProxy(t, proxy) })
-	requestCtx, cancelRequest := context.WithCancel(context.Background())
-	defer cancelRequest()
-	recorder := httptest.NewRecorder()
-	recorder.Code = 0 // distinguish untouched from an explicit WriteHeader(200)
-	handlerDone := make(chan struct{})
-	go func() {
-		defer close(handlerDone)
-		proxy.Handler(endpoint.OpenAIResponsesWS()).ServeHTTP(recorder, validUpgradeRequest().WithContext(requestCtx))
-	}()
-	select {
-	case <-bodyEntered:
-	case <-time.After(time.Second):
-		t.Fatal("dial did not start reading the rejection body")
-	}
 
-	cancelRequest()
+	recorder, observed := serveUntilClientLeaves(t, stalledRejectionClient(bodyEntered), bodyEntered)
 
-	select {
-	case <-handlerDone:
-	case <-time.After(time.Second):
-		t.Fatal("handler did not stop after the client left mid-rejection")
-	}
 	assertNoPreUpgradeResponse(t, recorder, observed)
 }
 
@@ -422,31 +399,9 @@ func TestProxyTimesOutDeadlineBearingDialErrorAfterClientLeaves(t *testing.T) {
 		<-request.Context().Done()
 		return nil, fmt.Errorf("upstream handshake: %w", context.DeadlineExceeded)
 	})}
-	provider := identity.NewStatic(identity.Credential{BaseURL: "http://upstream.invalid", Token: "copilot-token"}, true)
-	observed := &recordingWsMetrics{}
-	proxy := newAdmissionTestProxy(provider, dialClient, WsMetrics{Accept: observed, SessionTerminal: observed})
-	t.Cleanup(func() { shutdownPreupgradeTestProxy(t, proxy) })
-	requestCtx, cancelRequest := context.WithCancel(context.Background())
-	defer cancelRequest()
-	recorder := httptest.NewRecorder()
-	handlerDone := make(chan struct{})
-	go func() {
-		defer close(handlerDone)
-		proxy.Handler(endpoint.OpenAIResponsesWS()).ServeHTTP(recorder, validUpgradeRequest().WithContext(requestCtx))
-	}()
-	select {
-	case <-requestEntered:
-	case <-time.After(time.Second):
-		t.Fatal("upstream handshake did not start")
-	}
 
-	cancelRequest()
+	recorder, observed := serveUntilClientLeaves(t, dialClient, requestEntered)
 
-	select {
-	case <-handlerDone:
-	case <-time.After(time.Second):
-		t.Fatal("handler did not stop after the client left")
-	}
 	if recorder.Code != http.StatusGatewayTimeout {
 		t.Errorf("status = %d, want 504: a deadline-bearing error wins over cancellation", recorder.Code)
 	}
@@ -631,6 +586,41 @@ func serveUpgradeAgainst(t *testing.T, baseURL string, client *http.Client, dial
 		t.Errorf("pre-upgrade terminal observations = %v, want none", terminals)
 	}
 	return recorder, accepts
+}
+
+// serveUntilClientLeaves serves one valid upgrade through a proxy dialing with
+// dialClient, cancels the inbound request once entered closes, and waits for
+// the handler. The recorder starts at Code 0 so an untouched response is
+// distinguishable from an explicit WriteHeader(200).
+func serveUntilClientLeaves(t *testing.T, dialClient *http.Client, entered <-chan struct{}) (*httptest.ResponseRecorder, *recordingWsMetrics) {
+	t.Helper()
+	provider := identity.NewStatic(identity.Credential{BaseURL: "http://upstream.invalid", Token: "copilot-token"}, true)
+	observed := &recordingWsMetrics{}
+	proxy := newAdmissionTestProxy(provider, dialClient, WsMetrics{Accept: observed, SessionTerminal: observed})
+	t.Cleanup(func() { shutdownPreupgradeTestProxy(t, proxy) })
+	requestCtx, cancelRequest := context.WithCancel(context.Background())
+	defer cancelRequest()
+	recorder := httptest.NewRecorder()
+	recorder.Code = 0
+	handlerDone := make(chan struct{})
+	go func() {
+		defer close(handlerDone)
+		proxy.Handler(endpoint.OpenAIResponsesWS()).ServeHTTP(recorder, validUpgradeRequest().WithContext(requestCtx))
+	}()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("upstream handshake did not reach the point where the client leaves")
+	}
+
+	cancelRequest()
+
+	select {
+	case <-handlerDone:
+	case <-time.After(time.Second):
+		t.Fatal("handler did not stop after the client left")
+	}
+	return recorder, observed
 }
 
 // assertRelayedWithoutBody checks a relayed rejection whose body was omitted:
