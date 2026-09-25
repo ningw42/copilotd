@@ -6,11 +6,66 @@ revised 2026-07-20 to add an establishment-time log record; amended for
 registration are one mutex-protected decision, and HTTP and WebSocket drain
 concurrently under one shutdown deadline. The earlier unlocked
 `Add`-before-check registration and serial HTTP-then-WebSocket drain are
-superseded; counting mid-accept work is not.
+superseded; counting mid-accept work is not. Amended for
+[#269](https://github.com/ningw42/copilotd/issues/269): a final non-101 answer
+to the upstream handshake is relayed rather than reported as a copilotd 502.
 Design for adding a WebSocket transport to copilotd's OpenAI Responses surface.
 It is grounded in
 [the 2026-07-19 research note](../research/2026-07-19-responses-websocket-mode.md)
 and the current code.
+
+> **Superseded historical detail.** This dated design predates the shared
+> upstream call and the terminal request summary, and its original text omits
+> the pre-upgrade phase's cancellation rules. Text marked "amended by #261" or
+> "amended by #269" is current. Where the original text conflicts with the
+> contracts below, the contracts win. For current signatures,
+> `internal/wsforward` is authoritative.
+>
+> - **Logging** (§2 "Access logging", §3.1 step 7, §7's records, §11 item 13,
+>   §13): superseded by
+>   [ADR-0015](../adr/0015-govern-log-record-structure-with-ordinary-slog.md)
+>   and the
+>   [terminal request summary design](2026-08-31-terminal-request-summary-design.md).
+>   An established session emits one immediate `websocket established` Info
+>   milestone (`status=101`, `handshake_duration`) and one terminal access
+>   record. There is no separate `websocket session` record. The forwarder
+>   publishes the terminal reason, close code, and directional message and
+>   byte counts to access through `requestsummary.RecordWebSocket`. Access
+>   reports the downstream HTTP body bytes actually written (`0` for a `101`)
+>   and the whole-request duration. A pre-upgrade return emits no milestone or
+>   session facts. Conditional diagnostic records, such as the
+>   `upstream call failed` record for a classified failure, follow their own
+>   rules.
+> - **Upstream preparation** (§2 "Where the code lives", the §3
+>   `Proxy`/`New`/`Handler` sketch, §3.1 step 4, §3.2, §9 "Route"):
+>   superseded by
+>   [ADR-0013](../adr/0013-govern-authenticated-upstream-calls-in-internal-upstream.md),
+>   the
+>   [upstream call concentration design](2026-07-26-upstream-call-concentration-design.md),
+>   and the typed Endpoint contract
+>   ([ADR-0007](../adr/0007-served-endpoints-as-typed-contracts.md)). `New`
+>   takes the shared `*upstream.Caller`, and the server registers
+>   `Handler(ep)` for `endpoint.OpenAIResponsesWS()`. The handler builds its
+>   handshake request with `Caller.Prepare` from that contract's upstream
+>   Route. Prepare
+>   resolves the credential, joins the Route onto the credential's base URL,
+>   and carries the raw query, including a bare `?`. It then applies the
+>   shared outbound header policy: bearer token, credential headers, the
+>   resolved `X-Request-Id`, and the client's headers minus hop-by-hop,
+>   `Connection`-listed, `Authorization`, `X-Api-Key`, `Host`,
+>   `Content-Length`, and every `Sec-WebSocket-*` header. `wsforward` still
+>   owns `websocket.Dial` and the raw-connection capture.
+> - **Pre-upgrade phase and cancellation** (§2 "Session context", §3.1 steps
+>   4–5 and the paragraph after them, §4's "Credential failure" row, §7's
+>   accept counter): credential resolution and the dial run under a
+>   pre-upgrade phase context derived from `r.Context()`. Forced shutdown
+>   also cancels that context, and the dial adds `dialTimeout` on top. A
+>   credential failure is 503 `NotReady` only while the caller is live; a
+>   caller deadline is 504 `GatewayTimeout`. A cancelled phase writes nothing
+>   and books no accept outcome, an exception to the once-per-handshake
+>   counting in §3.1 and §7. A deadline-bearing error still wins over
+>   cancellation (§3.1 step 5). A late request after drain still gets 503 and
+>   `rejected`.
 
 ## 1. Goal and scope
 
@@ -158,11 +213,28 @@ a real status and full-request duration (§7):
    error, pre-upgrade `apierror` 503 (`NotReady`).
 5. **Dial upstream first.** Build the upstream URL and handshake headers (§3.2)
    and dial under `context.WithTimeout(r.Context(), p.dialTimeout)`. On failure,
-   map to a pre-upgrade `apierror`: 504 (`GatewayTimeout`) on deadline, else 502
-   (`BadGateway`). **This happens before the downstream 101** (research slice 11),
-   so the client's handshake library sees a normal non-101 HTTP error. On success,
-   log the upstream `X-Request-Id` from the `101` handshake response for
-   correlation, mirroring the HTTP path
+   decide in this order (amended by #269):
+   1. a deadline → pre-upgrade `apierror` 504 (`GatewayTimeout`), even when the
+      dial also returned a response;
+   2. otherwise a cancelled phase (client left, or forced shutdown) → nothing
+      written, even when the dial also returned a response;
+   3. otherwise a final non-101 upstream answer (for example Copilot's
+      `401`/`403`/`429`) → **relayed**: Copilot's status and headers under the
+      shared response-header policy, with its body only when provably complete
+      (§4);
+   4. anything else — no response at all, or a `101` that fails handshake
+      verification — → pre-upgrade `apierror` 502 (`BadGateway`).
+
+   Rules 1, 2 and 4 stay with `Caller.Classify`, which keeps classification in
+   `internal/upstream` as ADR-0013 requires. Before it relays, the handler only
+   checks that neither a deadline nor a cancellation is present. It never
+   decides which of the two wins, and it never calls `Classify` for an
+   ordinary rejection, because `Classify` logs. The original "504 on deadline,
+   else 502" reported a reachable Copilot that rejected the handshake as
+   unreachable and dropped its `Retry-After`. **This happens before the
+   downstream 101** (research slice 11), so the client's handshake library sees
+   a normal non-101 HTTP response. On success, log the upstream `X-Request-Id`
+   from the `101` handshake response for correlation, mirroring the HTTP path
    ([logUpstreamRequestID](../../internal/forward/forward.go#L431-L442)).
 6. **Accept downstream.** Only now upgrade the client connection (send 101) via
    `websocket.Accept`, with `AcceptOptions{InsecureSkipVerify: true}` (§5) and the
@@ -247,17 +319,25 @@ Behavior splits on whether the downstream 101 has been sent.
 | Not a WebSocket upgrade | `apierror` 426 `NotAWebSocketUpgrade` | — |
 | Missing/invalid local key | `apierror` 401 (existing auth MW) | — |
 | Credential failure | `apierror` 503 `NotReady` | — |
-| Upstream dial refused | `apierror` 502 `BadGateway` | — |
+| No relayable upstream response: no response, or a `101` that fails handshake verification (amended by #269) | `apierror` 502 `BadGateway` | — |
+| Upstream answers the handshake with a final non-101 (amended by #269) | relayed: Copilot's status and filtered headers; body only when provably complete | — |
 | Upstream dial timeout | `apierror` 504 `GatewayTimeout` | — |
 | Upstream closed / errored mid-session | — | propagate upstream close code; else `1011` |
 | Oversize message | — | `1009` (library-driven) |
 | Client vanished / closed | — | cancel sibling; close upstream `1001`/normal |
 | Handler panic after upgrade | — | `recoverMW` recovers; both conns closed via defers |
 
-Pre-upgrade errors use the OpenAI `apierror` dialect
-([apierror.Write](../../internal/apierror/apierror.go#L102)), so a non-101 HTTP
-response carries a well-formed OpenAI error body. Post-upgrade, no HTTP error is
-possible; the only signal is the WebSocket close code.
+copilotd-originated pre-upgrade errors use the OpenAI `apierror` dialect
+([apierror.Write](../../internal/apierror/apierror.go#L102)), so each carries a
+well-formed OpenAI error body. A relayed upstream rejection carries Copilot's
+own body instead, or none (amended by #269): coder/websocket retains at most
+the first 1024 body bytes and discards its read error, so copilotd relays the
+body only when `Response.ContentLength` is non-negative and equal to the
+retained length, and otherwise sends an empty body with `Content-Length: 0`.
+That drop is the divergence ledger's Omission row, and it deliberately
+includes complete bodies of unknown length and bodies the dial transport
+decompressed. Post-upgrade, no HTTP error is possible; the only signal is the
+WebSocket close code.
 
 Client disconnects are swallowed (no error surfaced), consistent with the HTTP
 path's treatment of a vanished caller
@@ -311,8 +391,11 @@ Add one `Kind` for the not-an-upgrade case, since no existing kind fits:
   well-formed row for every surface so the table stays total, following the
   existing `BackgroundUnsupported` precedent (OpenAI-only in practice but total).
 
-No other `apierror` changes: dial and readiness failures reuse `BadGateway`,
-`GatewayTimeout`, and `NotReady`.
+No other `apierror` changes: dial failures with no relayable final non-101
+response (no response, or a `101` that fails verification) reuse `BadGateway`,
+dial deadlines reuse `GatewayTimeout`, and readiness failures reuse `NotReady`.
+A final non-101 upstream answer is relayed, not mapped to a kind (amended by
+#269).
 
 ## 7. Telemetry, metrics, and logging (bare minimum)
 
@@ -339,10 +422,14 @@ lifetime — the same property the HTTP stream path relies on
   `request_id`, plus `ws=true`.
   `status` is captured for free — `Accept` calls `w.WriteHeader(101)` before
   hijacking, so `statusWriter` records `101`; a pre-upgrade failure sets its
-  status (`426`/`503`/`502`/`504`) through `apierror.Write` on the same writer.
+  status (`426`/`503`/`502`/`504`) through `apierror.Write` on the same writer,
+  and a relayed upstream rejection sets Copilot's status (amended by #269).
   `bytes` is `0`, which is truthful for a bodyless `101`. Its duration is the
   full request lifetime. A pre-upgrade failure produces **only** this record (no
-  establishment or session record).
+  establishment or session record). A relayed rejection, like the HTTP path's
+  upstream error status, emits no `upstream call failed` record: its access
+  record is Info below 500 and Warn at 500 and above, and carries
+  `upstream_request_id` when Copilot's id differs (amended by #269).
 - **WS session record** (`websocket session`, emitted by the `wsforward` handler
   at close, post-upgrade only): `msgs_c2u`, `msgs_u2c`, `bytes_c2u`, `bytes_u2c`,
   `close_code`, `terminal_reason`, and `duration` measured **from
@@ -363,7 +450,8 @@ discipline (fixed arrays keep labels bounded), each observed exactly once:
 
 - **Accept counter** — `established`, `rejected`, `dial_failed` — observed once at
   handshake resolution. `rejected` covers the pre-upgrade `426`/`503` cases,
-  `dial_failed` the `502`/`504` dial cases, `established` the `101`. (`401` never
+  `dial_failed` the `502`/`504` dial cases and relayed final non-101 upstream
+  answers (amended by #269), `established` the `101`. (A local `401` never
   reaches this path — `authMW` rejects it first.)
 - **Session-terminal counter** — `client_closed`, `upstream_closed`, `error` —
   observed once at close, established sessions only. `client_closed` is the normal
@@ -459,7 +547,12 @@ echo/scripted servers for **both** upstream and downstream. Coverage:
 7. Client-close and upstream-close code propagation.
 8. Half-failure: one side dies → the sibling is torn down and both conns close
    exactly once.
-9. Upstream dial failure (refused and timeout) → clean pre-101 502 / 504.
+9. Upstream dial failure (no response, a `101` that fails verification, and
+   timeout) → clean pre-101 502 / 504. A final non-101 upstream answer
+   (`401`/`403`/`429`/`503`) → Copilot's status and filtered headers relayed,
+   the body only when provably complete (each completeness case tested
+   separately), and a deadline or client departure still winning over a
+   present response (amended by #269).
 10. Handler panic after upgrade → recovered; session closed.
 11. Graceful shutdown drains an active session within the deadline, then
     force-closes a straggler; a session still mid-accept (registered at the top

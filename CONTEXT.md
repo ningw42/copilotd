@@ -362,8 +362,8 @@ _Avoid_: id rewriting (unqualified); id minting (nothing is minted).
 
 **Divergence ledger**:
 The complete accounting of every way copilotd's wire output departs from pure
-verbatim forwarding of Copilot. Two kinds today — **Fabrication** and **Alteration** —
-each identified off-band (request-id, logs), never by a field on the wire. The
+verbatim forwarding of Copilot. Three kinds — **Fabrication**, **Alteration**, and
+**Omission** — each identified off-band (request-id, logs), never by a field on the wire. The
 enumeration lives in `docs/divergence-ledger.md`, one entry per divergence pointing at
 its authoritative source; this glossary defines only the kinds.
 _Avoid_: cataloguing individual divergences here — that is the ledger doc's job.
@@ -381,12 +381,13 @@ genuine upstream id per `output_index`. Opt-in and off by default; enumerated by
 divergence ledger and exposed through a config flag. Transport-owned Alterations
 are additionally enumerated by the shim registry.
 
-**Omission** (anticipated):
-The latent third divergence kind — dropping or coalescing Copilot-forwarded
-content. The shim seam permits it (`emit=false`, coalesce-via-state), but no
-shipped divergence drops or coalesces forwarded content. The Codex catalog's
-governed reviewer-field removal is classified as an **Alteration** under
-ADR-0005 rather than an Omission.
+**Omission**:
+A divergence that drops or coalesces **Copilot-forwarded content**, fabricating
+nothing: the wire carries less of Copilot's content than Copilot sent, never
+content Copilot did not send, and its framing describes only what is actually
+sent. The shim seam also permits it (`emit=false`, coalesce-via-state). The
+Codex catalog's governed reviewer-field removal is classified as an
+**Alteration** under ADR-0005 rather than an Omission.
 
 ### Caching
 
