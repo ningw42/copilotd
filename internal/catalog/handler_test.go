@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -95,6 +96,54 @@ func TestHandlerRecordsShapeOnlyAfterSuccessfulRender(t *testing.T) {
 	}
 }
 
+func TestHandlerRejectsAnEnabledCodexCatalogWithoutAModelsSource(t *testing.T) {
+	defer func() {
+		got := recover()
+		if got == nil {
+			t.Fatal("Handler accepted an enabled Codex catalog without a models source, want construction panic")
+		}
+		if message := fmt.Sprint(got); !strings.Contains(message, "Codex models source") {
+			t.Errorf("panic = %q, want it to name the missing Codex models source", message)
+		}
+	}()
+
+	Handler(discardHandlerLogger(), endpoint.OpenAICatalog(), Rendering{
+		Render: RenderOpenAI,
+		Codex: CodexDescriptor{
+			Enabled:      true,
+			RenderConfig: CodexRenderConfig{AutoReviewModel: "gpt-5.4"},
+		},
+	}, stubSource{status: http.StatusOK, body: []byte(`{"data":[]}`)})
+}
+
+func TestHandlerAcceptsADisabledCodexCatalogWithoutAModelsSource(t *testing.T) {
+	handler := Handler(discardHandlerLogger(), endpoint.OpenAICatalog(), Rendering{
+		Render: RenderOpenAI,
+		Codex:  CodexDescriptor{RenderConfig: CodexRenderConfig{AutoReviewModel: "gpt-5.4"}},
+	}, stubSource{status: http.StatusOK, body: []byte(`{"data":[]}`)})
+	recorder := httptest.NewRecorder()
+
+	handler(recorder, httptest.NewRequest(http.MethodGet, "/openai/v1/models?client_version=fixture", nil))
+
+	if got, want := recorder.Body.String(), `{"object":"list","data":[]}`; recorder.Code != http.StatusOK || got != want {
+		t.Errorf("disabled Codex catalog = %d %s, want provider-shaped %s", recorder.Code, got, want)
+	}
+}
+
+func TestRenderOneRejectsAnEnabledCodexCatalogWithoutAModelsSource(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "/openai/v1/models?client_version=fixture", nil)
+	_, _, err := RenderOne(endpoint.OpenAICatalog(), Rendering{
+		Render: RenderOpenAI,
+		Codex: CodexDescriptor{
+			Enabled:      true,
+			RenderConfig: CodexRenderConfig{AutoReviewModel: "gpt-5.4"},
+		},
+	}, request, []Model{{ID: "gpt-5.4", Vendor: "OpenAI"}}, request.Context(), discardHandlerLogger())
+	if err == nil || !strings.Contains(err.Error(), "Codex models source") {
+		t.Fatalf("RenderOne error = %v, want the missing Codex models source named", err)
+	}
+}
+
 func TestRenderOneReturnsTheShapeThatMatchesItsRepresentation(t *testing.T) {
 	models := []Model{{ID: "gpt-5.4", Vendor: "OpenAI"}}
 	tests := []struct {
@@ -118,6 +167,7 @@ func TestRenderOneReturnsTheShapeThatMatchesItsRepresentation(t *testing.T) {
 				Render: RenderOpenAI,
 				Codex: CodexDescriptor{
 					Enabled:      true,
+					Models:       pinnedCodexModels(t, "gpt-5.4"),
 					RenderConfig: CodexRenderConfig{AutoReviewModel: "gpt-5.4"},
 				},
 			},
@@ -177,6 +227,7 @@ func TestHandlerNegotiatesCodexShapeOnlyWhenEveryGateIsOpen(t *testing.T) {
 				Render: RenderOpenAI,
 				Codex: CodexDescriptor{
 					Enabled: tc.enabled,
+					Models:  pinnedCodexModels(t, "gpt-5.4"),
 					RenderConfig: CodexRenderConfig{
 						ModelAliases:    tc.aliases,
 						AutoReviewModel: tc.reviewer,
@@ -219,6 +270,7 @@ func TestHandlerCodexHEADMatchesGETHeadersAndSuppressesBody(t *testing.T) {
 		Render: RenderOpenAI,
 		Codex: CodexDescriptor{
 			Enabled: true,
+			Models:  pinnedCodexModels(t, "gpt-5.4"),
 			RenderConfig: CodexRenderConfig{
 				ModelAliases: map[string]string{alias: "gpt-5.4"},
 			},
@@ -265,6 +317,7 @@ func TestHandlerLogsEverySkippedCodexReviewer(t *testing.T) {
 		Render: RenderOpenAI,
 		Codex: CodexDescriptor{
 			Enabled: true,
+			Models:  pinnedCodexModels(t, "gpt-5.4"),
 			RenderConfig: CodexRenderConfig{
 				AutoReviewModel: "missing-reviewer",
 			},
@@ -311,6 +364,7 @@ func TestHandlerLogsEveryUnappliedCodexAliasOnEveryRequest(t *testing.T) {
 		Render: RenderOpenAI,
 		Codex: CodexDescriptor{
 			Enabled: true,
+			Models:  pinnedCodexModels(t, shadowed, "gpt-5.5", "gpt-5.6-sol"),
 			RenderConfig: CodexRenderConfig{ModelAliases: map[string]string{
 				notForwarded:  "gpt-5.6-sol",
 				missingSource: "gpt-no-such-source",
@@ -369,23 +423,9 @@ func discardHandlerLogger() *slog.Logger {
 }
 
 func TestHandlerRendersCodexFromCurrentCachedBytes(t *testing.T) {
+	fallback := validCodexModelsBytes(t, "gpt-fallback", "fallback prompt")
 	fresh := codexModelsBytesWithoutField(t, "base_instructions")
-	registry := cache.NewRegistry()
-	modelsValue := cache.New(discardHandlerLogger(), cache.Cacheable[[]byte]{
-		Fallback:        embeddedCodexModels,
-		FallbackVersion: embeddedCodexModelsVersion,
-		TTL:             time.Hour,
-		Fetch: func(context.Context) ([]byte, string, error) {
-			return fresh, "rust-v1.2.3", nil
-		},
-		Hash: hashModels,
-		Validate: func(currentBytes []byte) error {
-			_, err := validateCodexModels(currentBytes)
-			return err
-		},
-	})
-	registry.Register(modelsValue)
-	registry.Prime(context.Background())
+	modelsValue := testCodexModelsValue(t, fallback, fresh, nil)
 
 	upstreamBody := []byte(`{"data":[{"id":"gpt-test","model_picker_enabled":true,"supported_endpoints":["/responses"]}]}`)
 	handler := Handler(discardHandlerLogger(), endpoint.OpenAICatalog(), Rendering{
@@ -414,6 +454,7 @@ func TestHandlerRendersCodexFromCurrentCachedBytes(t *testing.T) {
 func TestHandlerRendersAliasFromCurrentAndFallbackCodexModels(t *testing.T) {
 	const alias = "gpt-alias"
 	upstreamBody := []byte(`{"data":[{"id":"` + alias + `","vendor":"OpenAI","model_picker_enabled":true,"supported_endpoints":["/responses"]}]}`)
+	fallback := codexModelsBytes(t, completeCodexEntry("gpt-fallback-source", map[string]any{"display_name": "Fallback model"}))
 
 	tests := []struct {
 		name        string
@@ -423,15 +464,15 @@ func TestHandlerRendersAliasFromCurrentAndFallbackCodexModels(t *testing.T) {
 	}{
 		{
 			name:        "accepted current bytes",
-			models:      testCodexModelsValue(t, validCodexModelsBytes(t, "gpt-source", "fresh prompt"), nil),
+			models:      testCodexModelsValue(t, fallback, validCodexModelsBytes(t, "gpt-source", "fresh prompt"), nil),
 			source:      "gpt-source",
 			displayName: "Fresh model",
 		},
 		{
-			name:        "embedded fallback after refresh failure",
-			models:      testCodexModelsValue(t, nil, errors.New("refresh failed")),
-			source:      "gpt-5.4",
-			displayName: "GPT-5.4",
+			name:        "fallback after refresh failure",
+			models:      testCodexModelsValue(t, fallback, nil, errors.New("refresh failed")),
+			source:      "gpt-fallback-source",
+			displayName: "Fallback model",
 		},
 	}
 	for _, tc := range tests {
@@ -487,7 +528,7 @@ func TestHandlerAliasFailuresRemainOpenAIBadGateway(t *testing.T) {
 		models       *cache.Value[[]byte]
 		wantMessage  string
 	}{
-		{name: "invalid live Copilot JSON", upstreamBody: []byte(`{"data":[`), wantMessage: "upstream models response was invalid"},
+		{name: "invalid live Copilot JSON", upstreamBody: []byte(`{"data":[`), models: pinnedCodexModels(t, "gpt-5.4"), wantMessage: "upstream models response was invalid"},
 		{name: "invalid current Codex bytes", upstreamBody: validUpstream, models: invalidCurrent, wantMessage: "could not render the models catalog"},
 	}
 	for _, tc := range tests {
@@ -515,11 +556,13 @@ func TestHandlerAliasFailuresRemainOpenAIBadGateway(t *testing.T) {
 	}
 }
 
-func testCodexModelsValue(t *testing.T, current []byte, fetchErr error) *cache.Value[[]byte] {
+// testCodexModelsValue returns a Codex Models source that starts from synthetic
+// fallback bytes and has already made one refresh attempt for current.
+func testCodexModelsValue(t *testing.T, fallback, current []byte, fetchErr error) *cache.Value[[]byte] {
 	t.Helper()
 	modelsValue := cache.New(discardHandlerLogger(), cache.Cacheable[[]byte]{
-		Fallback:        embeddedCodexModels,
-		FallbackVersion: embeddedCodexModelsVersion,
+		Fallback:        fallback,
+		FallbackVersion: "synthetic-fallback",
 		TTL:             time.Hour,
 		Fetch: func(context.Context) ([]byte, string, error) {
 			return current, "rust-v1.2.3", fetchErr
@@ -534,6 +577,20 @@ func testCodexModelsValue(t *testing.T, current []byte, fetchErr error) *cache.V
 	registry.Register(modelsValue)
 	registry.Prime(context.Background())
 	return modelsValue
+}
+
+// pinnedCodexModels returns a Codex Models source whose current bytes hold one
+// complete synthetic entry per slug and never refresh.
+func pinnedCodexModels(t *testing.T, slugs ...string) *cache.Value[[]byte] {
+	t.Helper()
+	return cache.New(discardHandlerLogger(), cache.Cacheable[[]byte]{
+		Fallback:        codexModelsBytes(t, completeCodexEntries(slugs...)...),
+		FallbackVersion: "synthetic-pinned",
+		Fetch: func(context.Context) ([]byte, string, error) {
+			return nil, "", errors.New("pinned synthetic Codex models are never fetched")
+		},
+		Hash: hashModels,
+	})
 }
 
 func (s stubSource) Buffered(ctx context.Context, call upstream.Call) (int, []byte, context.Context, *upstream.Failure) {

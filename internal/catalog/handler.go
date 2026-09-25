@@ -2,6 +2,7 @@ package catalog
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -35,10 +36,10 @@ func RenderOne(ep endpoint.Catalog, rendering Rendering, r *http.Request, models
 		return representation, ShapeOpenAI, nil
 	}
 
-	currentBytes := embeddedCodexModels
-	if rendering.Codex.Models != nil {
-		currentBytes, _ = rendering.Codex.Models.Current()
+	if err := rendering.Codex.wiringError(); err != nil {
+		return nil, "", err
 	}
+	currentBytes, _ := rendering.Codex.Models.Current()
 	codexModels, err := parseCodexModels(currentBytes)
 	if err != nil {
 		return nil, "", err
@@ -70,11 +71,20 @@ type RenderDescriptors struct {
 
 // CodexDescriptor contains the opt-in gate and pure-render settings for the
 // OpenAI catalog's Codex client shape. A zero value preserves the provider-
-// shaped Phase 6a response.
+// shaped Phase 6a response. Enabled requires Models, the Codex models.json
+// cached value; there is no implicit vendored-snapshot source.
 type CodexDescriptor struct {
 	Enabled      bool
 	Models       *cache.Value[[]byte]
 	RenderConfig CodexRenderConfig
+}
+
+// wiringError reports an enabled Codex shape that has no models source.
+func (d CodexDescriptor) wiringError() error {
+	if d.Enabled && d.Models == nil {
+		return errors.New("Codex catalog is enabled without a Codex models source (CodexDescriptor.Models)")
+	}
+	return nil
 }
 
 // Source performs one upstream call for the current Copilot model Catalog and
@@ -86,8 +96,13 @@ type Source interface {
 var _ Source = (*upstream.Caller)(nil)
 
 // Handler obtains one current Copilot Catalog and renders it for a Surface.
-// Credential/transport details stay behind the narrow Source interface.
+// Credential/transport details stay behind the narrow Source interface. It
+// panics when the Codex shape is enabled without a models source: the
+// composition root always supplies one, so its absence is a wiring defect.
 func Handler(logger *slog.Logger, ep endpoint.Catalog, rendering Rendering, source Source) http.HandlerFunc {
+	if err := rendering.Codex.wiringError(); err != nil {
+		panic("catalog: " + err.Error())
+	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		status, body, responseCtx, failure := source.Buffered(r.Context(), upstream.Call{
 			Route:                  ep.Upstream(),

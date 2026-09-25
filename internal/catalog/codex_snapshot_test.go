@@ -2,51 +2,12 @@ package catalog
 
 import (
 	"encoding/json"
+	"maps"
 	"reflect"
 	"sort"
 	"strings"
 	"testing"
 )
-
-func TestEmbeddedCodexModelsLoadAtStartup(t *testing.T) {
-	wantSlugs := []string{
-		"codex-auto-review",
-		"gpt-5.4",
-		"gpt-5.5",
-		"gpt-5.6-luna",
-		"gpt-5.6-sol",
-		"gpt-5.6-terra",
-		"gpt-6-astra",
-		"gpt-6-luna",
-		"gpt-6-sol",
-		"gpt-daybreak-blue-latest",
-		"gpt-daybreak-red-latest",
-	}
-
-	gotSlugs := make([]string, 0, len(testCodexModels))
-	for slug, fields := range testCodexModels {
-		gotSlugs = append(gotSlugs, slug)
-
-		var embeddedSlug string
-		if err := json.Unmarshal(fields["slug"], &embeddedSlug); err != nil {
-			t.Errorf("decode slug field for %q: %v", slug, err)
-		} else if embeddedSlug != slug {
-			t.Errorf("entry keyed by %q carries slug %q", slug, embeddedSlug)
-		}
-		if len(fields) <= 1 {
-			t.Errorf("entry %q did not retain its non-slug fields", slug)
-		}
-		for field, raw := range fields {
-			if !json.Valid(raw) {
-				t.Errorf("entry %q field %q is not valid raw JSON", slug, field)
-			}
-		}
-	}
-	sort.Strings(gotSlugs)
-	if !reflect.DeepEqual(gotSlugs, wantSlugs) {
-		t.Errorf("embedded Codex slugs = %q, want %q", gotSlugs, wantSlugs)
-	}
-}
 
 func TestValidateCodexModelsRejectsMalformedModelsBytes(t *testing.T) {
 	tests := map[string]string{
@@ -652,28 +613,54 @@ func mutateCodexModelsBytes(t *testing.T, mutate func(map[string]any)) []byte {
 
 func validCodexModelsBytes(t *testing.T, slug, prompt string) []byte {
 	t.Helper()
-	encoded, err := json.Marshal(map[string]any{
-		"models": []any{map[string]any{
-			"slug":                         slug,
-			"display_name":                 "Fresh model",
-			"supported_reasoning_levels":   []any{map[string]any{"effort": "medium", "description": "Balanced"}},
-			"shell_type":                   "shell_command",
-			"visibility":                   "list",
-			"supported_in_api":             true,
-			"priority":                     1,
-			"base_instructions":            prompt,
-			"supports_reasoning_summaries": true,
-			"support_verbosity":            true,
-			"truncation_policy":            map[string]any{"mode": "tokens", "limit": 10000},
-			"supports_parallel_tool_calls": true,
-			"experimental_supported_tools": []string{},
-			"model_messages": map[string]any{
-				"instructions_template":  "{{ instructions }}",
-				"instructions_variables": map[string]string{"personality_default": ""},
-				"approvals":              nil,
-			},
-		}},
-	})
+	return codexModelsBytes(t, completeCodexEntry(slug, map[string]any{
+		"display_name":      "Fresh model",
+		"base_instructions": prompt,
+	}))
+}
+
+// completeCodexEntry returns a synthetic Codex ModelInfo entry that passes the
+// complete-entry accept contract the vendored snapshot must pass. fields replace
+// or add top-level members, so an entry carries only the properties its test
+// is about. Only its display name and legacy base_instructions vary by slug;
+// the canonical instructions_template, which takes precedence, is shared.
+func completeCodexEntry(slug string, fields map[string]any) map[string]any {
+	entry := map[string]any{
+		"slug":                         slug,
+		"display_name":                 "Synthetic " + slug,
+		"supported_reasoning_levels":   []any{map[string]any{"effort": "medium", "description": "Balanced"}},
+		"shell_type":                   "shell_command",
+		"visibility":                   "list",
+		"supported_in_api":             true,
+		"priority":                     1,
+		"base_instructions":            "Instructions for " + slug,
+		"supports_reasoning_summaries": true,
+		"support_verbosity":            true,
+		"truncation_policy":            map[string]any{"mode": "tokens", "limit": 10000},
+		"supports_parallel_tool_calls": true,
+		"experimental_supported_tools": []string{},
+		"model_messages": map[string]any{
+			"instructions_template":  "{{ instructions }}",
+			"instructions_variables": map[string]string{"personality_default": ""},
+			"approvals":              nil,
+		},
+	}
+	maps.Copy(entry, fields)
+	return entry
+}
+
+// completeCodexEntries returns one complete synthetic entry per slug.
+func completeCodexEntries(slugs ...string) []map[string]any {
+	entries := make([]map[string]any, len(slugs))
+	for i, slug := range slugs {
+		entries[i] = completeCodexEntry(slug, nil)
+	}
+	return entries
+}
+
+func codexModelsBytes(t *testing.T, entries ...map[string]any) []byte {
+	t.Helper()
+	encoded, err := json.Marshal(map[string]any{"models": entries})
 	if err != nil {
 		t.Fatalf("encode valid Codex models bytes: %v", err)
 	}
