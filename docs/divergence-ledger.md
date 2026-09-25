@@ -31,9 +31,9 @@ single place the divergence is defined, and this row is a pointer to it.
 
 ## Omission — dropping or coalescing Copilot-forwarded content
 
-None for Copilot-forwarded content. The shim seam permits it (`emit=false`,
-coalesce-via-state), but no shipped divergence drops or coalesces forwarded
-content. The Codex catalog's governed removal of an accepted official reviewer
-field is classified and accounted for above as an Alteration under ADR-0005.
-This section gains rows when an Omission of Copilot-forwarded content first
-ships.
+| Divergence | Source of truth | What it diverges |
+|---|---|---|
+| Unprovable WebSocket handshake-rejection body | [WebSocket forwarding design §4](design/2026-07-19-openai-responses-websocket-forwarding-design.md#4-error-and-close-code-handling) (amended by [#269](https://github.com/ningw42/copilotd/issues/269)) + `internal/wsforward` | When Copilot answers the upstream WebSocket handshake with a final non-101, copilotd relays its status and filtered headers but omits the body, sending `Content-Length: 0`, whenever the body is **not provably complete**: its declared length (`Response.ContentLength`) must equal the at most 1024 bytes coder/websocket retained. The omission covers bodies over 1024 bytes and truncated ones, and deliberately also complete bodies of unknown length (chunked or close-delimited) and bodies the dial transport decompressed. |
+
+The Codex catalog's governed removal of an accepted official reviewer field is
+classified and accounted for above as an Alteration under ADR-0005.

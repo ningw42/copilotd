@@ -5,6 +5,7 @@ package wsforward
 import (
 	"bufio"
 	"context"
+	"errors"
 	"log/slog"
 	"net"
 	"net/http"
@@ -197,6 +198,18 @@ func (p *Proxy) Handler(ep endpoint.WSForward) http.HandlerFunc {
 		dialDeadlineExceeded := dialCtx.Err() == context.DeadlineExceeded
 		cancelDial()
 		if err != nil {
+			// Copilot's final non-101 answer is relayed, not reclassified, unless a
+			// deadline or a cancellation is present: Classify alone decides between
+			// those, so this gate only rules both out. A 101 that failed handshake
+			// verification is a protocol failure and is classified too.
+			finalRejection := response != nil && response.StatusCode != http.StatusSwitchingProtocols
+			deadlineOrCancelled := dialDeadlineExceeded || errors.Is(err, context.DeadlineExceeded) || phaseCtx.Err() != nil
+			if finalRejection && !deadlineOrCancelled {
+				p.caller.Correlate(phaseCtx, response.Header)
+				relayHandshakeRejection(w, response)
+				p.metrics.observeAccept(AcceptDialFailed)
+				return
+			}
 			if response != nil && response.Body != nil {
 				_ = response.Body.Close()
 			}
