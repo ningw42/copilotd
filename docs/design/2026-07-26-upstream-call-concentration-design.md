@@ -215,7 +215,9 @@ caller needs for its own tail — `wsforward` books `AcceptDialFailed` only when
 current sites logs the cause, and `catalog`'s sentinel wrapping carries it only
 as far as `writeFetchError`, which drops it. `Caller` logs it once at
 classification, where it holds both the cause and a logger — a **new observable**,
-one `WarnContext` per classified upstream failure.
+one record per classified upstream failure: Warn, except that a `ClientGone`
+failure logs at Debug, because a client hanging up is not a contained abnormality
+([ADR-0015](../adr/0015-govern-log-record-structure-with-ordinary-slog.md)).
 
 ### `Caller`
 
@@ -311,7 +313,9 @@ One table replaces five message sites, five `catalog` sentinels, and
 
 | Condition | `Kind` | Message |
 |---|---|---|
-| `provider.Current` returns an error | `NotReady` | `no upstream credential available` |
+| `provider.Current` returns an error while the caller's context is live, whatever the error wraps | `NotReady` | `no upstream credential available` |
+| `provider.Current` returns an error after the caller's `ctx.Err()` or cancel cause became `context.DeadlineExceeded` | `GatewayTimeout` | `the upstream request timed out` |
+| `provider.Current` returns an error after the caller's `ctx.Err()` became `context.Canceled` | — | `ClientGone`; nothing written |
 | request build fails (including a bad base URL) | `BadGateway` | `could not build the upstream request` |
 | `ctx.Err()` is `context.Canceled` | — | `ClientGone`; nothing written |
 | `err` or `ctx.Err()` is `context.DeadlineExceeded`, or the cancel cause is the outbound timeout | `GatewayTimeout` | `the upstream request timed out` |
@@ -332,6 +336,16 @@ choice, and it preserves `wsforward`'s existing belt-and-braces check of both
 `err` and `dialCtx.Err()`. On the buffered path the discrimination is by cancel
 *cause*, not by `ctx.Err()`, since `Buffered`'s own timer and an inbound
 disconnect both surface as `context.Canceled` on the derived context.
+
+**Credential acquisition consults only the caller's context.** An On-demand mint
+runs on its own background context bounded by the Manager's exchange timeout, so
+the provider error can wrap `context.DeadlineExceeded` or `context.Canceled`
+while the caller is still connected. Routing that error through `Classify` would
+turn a Request-scoped mint failure into a `504`, so the provider error never
+decides. The caller's context does, with the same deadline-before-cancel
+precedence. A caller that leaves mid-mint, including a WebSocket handler whose
+phase context a forced shutdown cancels, is therefore `ClientGone`, as it would
+be mid-dial.
 
 ### The header policy
 

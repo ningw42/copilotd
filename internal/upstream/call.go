@@ -37,7 +37,10 @@ type Call struct {
 func (c *Caller) Prepare(ctx context.Context, call Call) (*http.Request, *Failure) {
 	credential, err := c.provider.Current(ctx)
 	if err != nil {
-		return nil, c.failure(ctx, apierror.NotReady, "no upstream credential available", false, err)
+		// Only the caller's context tells a departure or timeout apart from a
+		// Request-scoped mint failure. A mint runs on its own bounded context, so
+		// err may wrap a deadline or cancellation while the caller is connected.
+		return nil, c.classifyByContext(ctx, apierror.NotReady, "no upstream credential available", err)
 	}
 
 	body := call.Body
