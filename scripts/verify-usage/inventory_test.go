@@ -11,7 +11,6 @@ import (
 	"path"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -57,7 +56,13 @@ func TestTypeParameter[T any](t *testing.T) {}
 import check "testing"
 
 func TestAliasedImport(t *check.T) {}
-func TestUnaliasedSelector(t *testing.T) {}
+`)},
+		"internal/sample/dot_test.go": &fstest.MapFile{Data: []byte(`package sample
+
+import . "testing"
+
+func TestDotImport(t *T) {}
+func TestDotImportBenchmark(b *B) {}
 `)},
 		"internal/sample/nested/nested_test.go": source("func TestNested(t *testing.T) {}\n"),
 		"internal/production/production.go":     &fstest.MapFile{Data: []byte("package production\n")},
@@ -88,7 +93,8 @@ func TestUnaliasedSelector(t *testing.T) {}
 		{name: "two named parameters", entry: "internal/sample:TestTwoNamedParameters", reject: "not declared as a top-level test function"},
 		{name: "result", entry: "internal/sample:TestResult", reject: "not declared as a top-level test function"},
 		{name: "type parameter", entry: "internal/sample:TestTypeParameter", reject: "not declared as a top-level test function"},
-		{name: "selector not bound to testing import", entry: "internal/sample:TestUnaliasedSelector", reject: "not declared as a top-level test function"},
+		{name: "dot-imported testing", entry: "internal/sample:TestDotImport"},
+		{name: "dot-imported benchmark parameter", entry: "internal/sample:TestDotImportBenchmark", reject: "not declared as a top-level test function"},
 		{name: "nested package", entry: "internal/sample/nested:TestNested"},
 		{name: "test declared only in nested package", entry: "internal/sample:TestNested", reject: "not declared as a top-level test function"},
 		{name: "no separator", entry: "internal/sample.TestPresent", reject: "malformed entry"},
@@ -198,9 +204,8 @@ func declaredTests(fsys fs.FS, dir string) (map[string]bool, error) {
 		if err != nil {
 			return nil, fmt.Errorf("parse test source: %w", err)
 		}
-		testingName := testingImportName(file)
 		for _, declaration := range file.Decls {
-			if function, ok := declaration.(*ast.FuncDecl); ok && testFunction(function, testingName) {
+			if function, ok := declaration.(*ast.FuncDecl); ok && testFunction(function) {
 				declared[function.Name.Name] = true
 			}
 		}
@@ -230,9 +235,10 @@ func exactDirectory(fsys fs.FS, dir string) error {
 
 // testFunction reports whether function has the shape the go command runs as
 // a test: a Test-prefixed name not followed by a lowercase letter, no receiver,
-// results or type parameters, and one *T parameter from the file's testing
-// import, whose local name is testingName. TestMain is never a mandatory test.
-func testFunction(function *ast.FuncDecl, testingName string) bool {
+// results or type parameters, and one *T or *pkg.T parameter. Like the go
+// command this is syntactic; compiling the test binary rejects any other T.
+// TestMain is never a mandatory test.
+func testFunction(function *ast.FuncDecl) bool {
 	suffix, found := strings.CutPrefix(function.Name.Name, "Test")
 	if !found || function.Name.Name == "TestMain" || function.Recv != nil || function.Type.TypeParams.NumFields() != 0 || function.Type.Results.NumFields() != 0 {
 		return false
@@ -247,25 +253,11 @@ func testFunction(function *ast.FuncDecl, testingName string) bool {
 	if !ok {
 		return false
 	}
-	selector, ok := pointer.X.(*ast.SelectorExpr)
-	if !ok {
-		return false
+	switch named := pointer.X.(type) {
+	case *ast.Ident:
+		return named.Name == "T"
+	case *ast.SelectorExpr:
+		return named.Sel.Name == "T"
 	}
-	pkg, ok := selector.X.(*ast.Ident)
-	return ok && testingName != "" && pkg.Name == testingName && selector.Sel.Name == "T"
-}
-
-// testingImportName returns file's local name for the "testing" package, or ""
-// when the file does not import it by name.
-func testingImportName(file *ast.File) string {
-	for _, spec := range file.Imports {
-		if path, err := strconv.Unquote(spec.Path.Value); err != nil || path != "testing" {
-			continue
-		}
-		if spec.Name != nil {
-			return spec.Name.Name
-		}
-		return "testing"
-	}
-	return ""
+	return false
 }

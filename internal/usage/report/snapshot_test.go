@@ -247,17 +247,17 @@ func utf16CurrentSchema(t *testing.T) string {
 	if err = db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	check, err := sql.Open("sqlite", sqlitestore.LiteralFileURL(path).String())
+	reopened, err := sql.Open("sqlite", sqlitestore.LiteralFileURL(path).String())
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer check.Close()
+	defer reopened.Close()
 	var encoding string
 	var version int
-	if err = check.QueryRow("PRAGMA encoding").Scan(&encoding); err != nil {
+	if err = reopened.QueryRow("PRAGMA encoding").Scan(&encoding); err != nil {
 		t.Fatal(err)
 	}
-	if err = check.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+	if err = reopened.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		t.Fatal(err)
 	}
 	if encoding != "UTF-16le" || version != sqlitestore.SchemaVersion() {
