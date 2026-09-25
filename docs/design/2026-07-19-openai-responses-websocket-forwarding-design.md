@@ -172,14 +172,16 @@ a real status and full-request duration (§7):
    4. anything else — no response at all, or a `101` that fails handshake
       verification — → pre-upgrade `apierror` 502 (`BadGateway`).
 
-   Rules 1, 2 and 4 stay with `Caller.Classify`; the relay only has to rule out
-   a deadline and a cancellation first. The original "504 on deadline, else 502"
-   reported a reachable Copilot that rejected the handshake as unreachable and
-   dropped its `Retry-After`. **This happens before the downstream 101**
-   (research slice 11), so the client's handshake library sees a normal non-101
-   HTTP response. On success,
-   log the upstream `X-Request-Id` from the `101` handshake response for
-   correlation, mirroring the HTTP path
+   Rules 1, 2 and 4 stay with `Caller.Classify`, which keeps classification in
+   `internal/upstream` as ADR-0013 requires. Before it relays, the handler only
+   checks that neither a deadline nor a cancellation is present. It never
+   decides which of the two wins, and it never calls `Classify` for an
+   ordinary rejection, because `Classify` logs. The original "504 on deadline,
+   else 502" reported a reachable Copilot that rejected the handshake as
+   unreachable and dropped its `Retry-After`. **This happens before the
+   downstream 101** (research slice 11), so the client's handshake library sees
+   a normal non-101 HTTP response. On success, log the upstream `X-Request-Id`
+   from the `101` handshake response for correlation, mirroring the HTTP path
    ([logUpstreamRequestID](../../internal/forward/forward.go#L431-L442)).
 6. **Accept downstream.** Only now upgrade the client connection (send 101) via
    `websocket.Accept`, with `AcceptOptions{InsecureSkipVerify: true}` (§5) and the

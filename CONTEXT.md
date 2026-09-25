@@ -383,10 +383,11 @@ are additionally enumerated by the shim registry.
 
 **Omission**:
 A divergence that drops or coalesces **Copilot-forwarded content**, fabricating
-and rewriting nothing: the wire carries less than Copilot sent, never something
-Copilot did not send. The shim seam also permits it (`emit=false`,
-coalesce-via-state). The Codex catalog's governed reviewer-field removal is
-classified as an **Alteration** under ADR-0005 rather than an Omission.
+nothing: the wire carries less of Copilot's content than Copilot sent, never
+content Copilot did not send, and its framing describes only what is actually
+sent. The shim seam also permits it (`emit=false`, coalesce-via-state). The
+Codex catalog's governed reviewer-field removal is classified as an
+**Alteration** under ADR-0005 rather than an Omission.
 
 ### Caching
 
