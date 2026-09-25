@@ -290,11 +290,7 @@ func TestCallerReadBoundedClassifiesCallCancellationAcrossReaders(t *testing.T) 
 		for _, readerName := range []string{"direct", "tee"} {
 			t.Run(tc.name+"/"+readerName, func(t *testing.T) {
 				var logs bytes.Buffer
-				base, err := logging.NewWithWriter(&logs, config.ServeConfig{LogLevel: "debug", LogFormat: "json"})
-				if err != nil {
-					t.Fatalf("build logger: %v", err)
-				}
-				logger := logging.ForComponent(base, "internal/upstream")
+				logger := logging.ForComponent(debugJSONLogger(t, &logs), "internal/upstream")
 				upstreamBody := &executionCancelAwareBody{blockAfterChunks: true}
 				client := executionBodyClient(upstreamBody, http.Header{RequestIDHeader: {"upstream-read-canceled"}})
 				caller := New(readyExecutionProvider("https://upstream.invalid"), client, time.Hour, 1<<20, logger)
