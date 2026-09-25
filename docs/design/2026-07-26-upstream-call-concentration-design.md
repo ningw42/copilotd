@@ -3,6 +3,16 @@
 **Status:** proposed
 **Date:** 2026-07-26
 
+> **Superseded API detail.** Request-id correlation later became response-path
+> context
+> ([ADR-0015](../adr/0015-govern-log-record-structure-with-ordinary-slog.md)):
+> `Do` and `Buffered` (and the Catalog `Source`) also return the response-path
+> context, `Correlate` returns the correlated context, and `Caller.ReadBounded`
+> takes that context. The Go specimens and call sketches below predate that
+> plumbing. For current signatures, `internal/upstream` and
+> [ADR-0013](../adr/0013-govern-authenticated-upstream-calls-in-internal-upstream.md)
+> are authoritative.
+
 ## Summary
 
 copilotd's outbound half — acquire the credential, build the upstream URL and
@@ -147,8 +157,12 @@ tails on one shared trunk.
 
 ## The `internal/upstream` package
 
-A leaf package importing only `apierror`, `endpoint`, `identity`, `logging`, and
-the standard library. Nothing in the repository imports it in reverse.
+A leaf package importing only `apierror`, `endpoint`, `identity`, `logging`,
+`requestsummary`, and the standard library. Nothing in the repository imports it
+in reverse. The `requestsummary` edge lets `Correlate` publish a differing
+upstream request id; its accepted transitive `requestsummary → sse` edge
+introduces no cycle
+([ADR-0013](../adr/0013-govern-authenticated-upstream-calls-in-internal-upstream.md)).
 
 ### `Call`
 
@@ -215,7 +229,9 @@ caller needs for its own tail — `wsforward` books `AcceptDialFailed` only when
 current sites logs the cause, and `catalog`'s sentinel wrapping carries it only
 as far as `writeFetchError`, which drops it. `Caller` logs it once at
 classification, where it holds both the cause and a logger — a **new observable**,
-one `WarnContext` per classified upstream failure.
+one record per classified upstream failure: Warn, except that a `ClientGone`
+failure logs at Debug, because a client hanging up is not a contained abnormality
+([ADR-0015](../adr/0015-govern-log-record-structure-with-ordinary-slog.md)).
 
 ### `Caller`
 
@@ -311,7 +327,9 @@ One table replaces five message sites, five `catalog` sentinels, and
 
 | Condition | `Kind` | Message |
 |---|---|---|
-| `provider.Current` returns an error | `NotReady` | `no upstream credential available` |
+| `provider.Current` returns an error while the caller's context is live, whatever the error wraps | `NotReady` | `no upstream credential available` |
+| `provider.Current` returns an error after the caller's `ctx.Err()` or cancel cause became `context.DeadlineExceeded` | `GatewayTimeout` | `the upstream request timed out` |
+| `provider.Current` returns an error after the caller's `ctx.Err()` became `context.Canceled` | — | `ClientGone`; nothing written |
 | request build fails (including a bad base URL) | `BadGateway` | `could not build the upstream request` |
 | `ctx.Err()` is `context.Canceled` | — | `ClientGone`; nothing written |
 | `err` or `ctx.Err()` is `context.DeadlineExceeded`, or the cancel cause is the outbound timeout | `GatewayTimeout` | `the upstream request timed out` |
@@ -332,6 +350,16 @@ choice, and it preserves `wsforward`'s existing belt-and-braces check of both
 `err` and `dialCtx.Err()`. On the buffered path the discrimination is by cancel
 *cause*, not by `ctx.Err()`, since `Buffered`'s own timer and an inbound
 disconnect both surface as `context.Canceled` on the derived context.
+
+**Credential acquisition consults only the caller's context.** An On-demand mint
+runs on its own background context bounded by the Manager's exchange timeout, so
+the provider error can wrap `context.DeadlineExceeded` or `context.Canceled`
+while the caller is still connected. Routing that error through `Classify` would
+turn a Request-scoped mint failure into a `504`, so the provider error never
+decides. The caller's context does, with the same deadline-before-cancel
+precedence. A caller that leaves mid-mint, including a WebSocket handler whose
+phase context a forced shutdown cancels, is therefore `ClientGone`, as it would
+be mid-dial.
 
 ### The header policy
 
@@ -588,10 +616,14 @@ behaviour.
 `RequestIDHeader` set from the context and absent without one;
 `Accept-Encoding: identity` present only when asked; `cred.Headers` not mutated.
 
-**Classification.** All eight rows, plus the precedence rule: a context that is
-both cancelled and past its deadline classifies as a timeout, and both `err` and
-`ctx.Err()` are consulted. Plus: every classified failure logs its cause exactly
-once, and the cause never appears in the rendered body.
+**Classification.** Every row of the classification table, plus the precedence
+rule: a context that is both cancelled and past its deadline classifies as a
+timeout. An execution failure consults both `err` and `ctx.Err()`, so an `err`
+wrapping `context.DeadlineExceeded` is a timeout. A credential-acquisition
+failure consults only the caller's context, so a provider error wrapping a
+deadline or cancellation stays `NotReady` while the caller is live. Plus: every
+classified failure logs its cause exactly once, at Debug for `ClientGone` and at
+Warn otherwise, and the cause never appears in the rendered body.
 
 **`RespondTo`.** Three Surfaces × representative Kinds, asserting the dialect and
 status; `ClientGone` writes no bytes, sets no status, and returns `false`.
@@ -627,7 +659,10 @@ Migrations:
 dependency:
 
 1. **`internal/upstream`'s imports match an allowlist** — `apierror`, `endpoint`,
-   `identity`, `logging`, and the standard library, and nothing else. This is the
+   `identity`, `logging`, `requestsummary`, and the standard library, and nothing
+   else. The allowlist governs direct imports only, so the accepted transitive
+   `requestsummary → sse` edge passes
+   ([ADR-0013](../adr/0013-govern-authenticated-upstream-calls-in-internal-upstream.md)). This is the
    load-bearing invariant: every consumer decision in this design rests on
    `upstream` being a leaf, and it is the one an ordinary change breaks by
    accident. An allowlist rather than a denylist, so a *new* internal import fails

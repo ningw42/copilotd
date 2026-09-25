@@ -82,15 +82,23 @@ func (c *Caller) Buffered(ctx context.Context, call Call) (int, []byte, context.
 // Classify maps an execution error to one Failure, consulting both err and
 // ctx.Err(), and logging the cause once.
 func (c *Caller) Classify(ctx context.Context, err error) *Failure {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return c.failure(ctx, apierror.GatewayTimeout, "the upstream request timed out", false, err)
+	}
+	return c.classifyByContext(ctx, apierror.BadGateway, "could not reach the upstream", err)
+}
+
+// classifyByContext classifies err by the caller's context alone, deadline
+// before cancellation: an expired context is a timeout and a cancelled one a
+// departed client. A live context keeps the fallback kind and message.
+func (c *Caller) classifyByContext(ctx context.Context, fallback apierror.Kind, message string, err error) *Failure {
 	switch {
-	case errors.Is(err, context.DeadlineExceeded),
-		errors.Is(ctx.Err(), context.DeadlineExceeded),
-		errors.Is(context.Cause(ctx), context.DeadlineExceeded):
+	case errors.Is(ctx.Err(), context.DeadlineExceeded), errors.Is(context.Cause(ctx), context.DeadlineExceeded):
 		return c.failure(ctx, apierror.GatewayTimeout, "the upstream request timed out", false, err)
 	case errors.Is(ctx.Err(), context.Canceled):
 		return c.failure(ctx, 0, "", true, err)
 	default:
-		return c.failure(ctx, apierror.BadGateway, "could not reach the upstream", false, err)
+		return c.failure(ctx, fallback, message, false, err)
 	}
 }
 
@@ -112,7 +120,14 @@ func (c *Caller) Correlate(ctx context.Context, header http.Header) context.Cont
 }
 
 func (c *Caller) failure(ctx context.Context, kind apierror.Kind, message string, clientGone bool, err error) *Failure {
-	c.logger.WarnContext(ctx, "upstream call failed", slog.Any(logging.ErrorKey, err))
+	// A ClientGone caller stopped waiting, whether its client hung up or its
+	// handler was cancelled. That is not a contained abnormality, so it earns
+	// only a Debug record (ADR-0015); every other classified failure warns once.
+	level := slog.LevelWarn
+	if clientGone {
+		level = slog.LevelDebug
+	}
+	c.logger.Log(ctx, level, "upstream call failed", slog.Any(logging.ErrorKey, err))
 	return &Failure{
 		Kind:       kind,
 		Message:    message,

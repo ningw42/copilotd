@@ -3,7 +3,6 @@ package upstream
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -58,7 +57,8 @@ func TestCallerDoPropagatesCallerCancellation(t *testing.T) {
 		<-request.Context().Done()
 		return nil, request.Context().Err()
 	})}
-	caller := executionCaller(readyExecutionProvider("https://upstream.invalid"), client, time.Hour, 1<<20, slog.Default())
+	var logs bytes.Buffer
+	caller := executionCaller(readyExecutionProvider("https://upstream.invalid"), client, time.Hour, 1<<20, debugJSONLogger(t, &logs))
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	result := make(chan *Failure, 1)
@@ -77,6 +77,7 @@ func TestCallerDoPropagatesCallerCancellation(t *testing.T) {
 		if !errors.Is(failure.Err, context.Canceled) {
 			t.Errorf("failure.Err = %v, want context.Canceled", failure.Err)
 		}
+		assertCallerFailureLogged(t, logs.Bytes(), true, failure.Err)
 	case <-time.After(time.Second):
 		t.Fatal("Do() did not return after caller cancellation")
 	}
@@ -267,18 +268,21 @@ func TestCallerReadBoundedClassifiesCallCancellationAcrossReaders(t *testing.T) 
 		wantMessage    string
 		wantClientGone bool
 		wantStatus     int
+		wantLogLevel   slog.Level
 	}{
 		{
 			name:           "inbound cancellation is ClientGone",
 			cause:          context.Canceled,
 			wantClientGone: true,
+			wantLogLevel:   slog.LevelDebug,
 		},
 		{
-			name:        "caller-owned deadline cause is GatewayTimeout",
-			cause:       context.DeadlineExceeded,
-			wantKind:    apierror.GatewayTimeout,
-			wantMessage: "the upstream request timed out",
-			wantStatus:  http.StatusGatewayTimeout,
+			name:         "caller-owned deadline cause is GatewayTimeout",
+			cause:        context.DeadlineExceeded,
+			wantKind:     apierror.GatewayTimeout,
+			wantMessage:  "the upstream request timed out",
+			wantStatus:   http.StatusGatewayTimeout,
+			wantLogLevel: slog.LevelWarn,
 		},
 	}
 
@@ -286,11 +290,7 @@ func TestCallerReadBoundedClassifiesCallCancellationAcrossReaders(t *testing.T) 
 		for _, readerName := range []string{"direct", "tee"} {
 			t.Run(tc.name+"/"+readerName, func(t *testing.T) {
 				var logs bytes.Buffer
-				base, err := logging.NewWithWriter(&logs, config.ServeConfig{LogLevel: "info", LogFormat: "json"})
-				if err != nil {
-					t.Fatalf("build logger: %v", err)
-				}
-				logger := logging.ForComponent(base, "internal/upstream")
+				logger := logging.ForComponent(debugJSONLogger(t, &logs), "internal/upstream")
 				upstreamBody := &executionCancelAwareBody{blockAfterChunks: true}
 				client := executionBodyClient(upstreamBody, http.Header{RequestIDHeader: {"upstream-read-canceled"}})
 				caller := New(readyExecutionProvider("https://upstream.invalid"), client, time.Hour, 1<<20, logger)
@@ -321,7 +321,10 @@ func TestCallerReadBoundedClassifiesCallCancellationAcrossReaders(t *testing.T) 
 				if !errors.Is(failure.Err, context.Canceled) {
 					t.Errorf("failure.Err = %v, want interrupted-read context cancellation", failure.Err)
 				}
-				assertExecutionFailureWarning(t, logs.Bytes(), "copilotd-read-canceled", "upstream-read-canceled")
+				record := assertExecutionFailureRecord(t, logs.Bytes(), tc.wantLogLevel, "copilotd-read-canceled", "upstream-read-canceled")
+				if got := record[logging.ErrorKey]; got != failure.Err.Error() {
+					t.Errorf("failure record %s = %v, want %q", logging.ErrorKey, got, failure.Err.Error())
+				}
 
 				recorder := httptest.NewRecorder()
 				recorder.Code = 0
@@ -406,7 +409,7 @@ func TestCallerReadBoundedCorrelatesFailuresAcrossReaders(t *testing.T) {
 					body, failure := caller.ReadBounded(responseCtx, reader)
 
 					assertBoundedResult(t, "Caller.ReadBounded", body, failure, "", apierror.BadGateway, tc.wantMessage, tc.wantErr)
-					assertExecutionFailureWarning(t, logs.Bytes(), correlation.requestID, correlation.wantUpstreamRequestID)
+					assertExecutionFailureRecord(t, logs.Bytes(), slog.LevelWarn, correlation.requestID, correlation.wantUpstreamRequestID)
 					for _, payload := range []string{"partial", "123456789"} {
 						if strings.Contains(logs.String(), payload) {
 							t.Errorf("failure warning leaked response payload %q", payload)
@@ -690,7 +693,8 @@ func TestCallerBufferedClassifiesParentCancellationDuringReadAsClientGone(t *tes
 		firstRead:        firstRead,
 	}
 	client := executionBodyClient(upstreamBody, make(http.Header))
-	caller := executionCaller(readyExecutionProvider("https://upstream.invalid"), client, time.Hour, 1<<20, slog.Default())
+	var logs bytes.Buffer
+	caller := executionCaller(readyExecutionProvider("https://upstream.invalid"), client, time.Hour, 1<<20, debugJSONLogger(t, &logs))
 	parent, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() {
@@ -712,6 +716,7 @@ func TestCallerBufferedClassifiesParentCancellationDuringReadAsClientGone(t *tes
 	if !errors.Is(failure.Err, context.Canceled) {
 		t.Errorf("failure.Err = %v, want context.Canceled", failure.Err)
 	}
+	assertCallerFailureLogged(t, logs.Bytes(), true, failure.Err)
 	assertExecutionBodyCleanup(t, upstreamBody, true)
 }
 
@@ -749,7 +754,7 @@ func TestCallerBufferedClassifiesPlainReadFailureWithoutPartialBody(t *testing.T
 	if !upstreamBody.closed {
 		t.Error("upstream response body remains open")
 	}
-	assertExecutionFailureWarning(t, logs.Bytes(), "copilotd-read-failure", "upstream-read-failure")
+	assertExecutionFailureRecord(t, logs.Bytes(), slog.LevelWarn, "copilotd-read-failure", "upstream-read-failure")
 }
 
 func TestCallerBufferedRejectsOversizedResponseWithoutReturningTruncatedBody(t *testing.T) {
@@ -931,14 +936,10 @@ func TestCallerBufferedReturnsOnlyDifferentUpstreamRequestID(t *testing.T) {
 	}
 }
 
-func assertExecutionFailureWarning(t *testing.T, logs []byte, requestID, upstreamRequestID string) {
+func assertExecutionFailureRecord(t *testing.T, logs []byte, wantLevel slog.Level, requestID, upstreamRequestID string) map[string]any {
 	t.Helper()
-	var record map[string]any
-	if err := json.Unmarshal(logs, &record); err != nil {
-		t.Fatalf("decode single failure warning: %v: %s", err, logs)
-	}
+	record := callerFailureRecord(t, logs, wantLevel)
 	for key, want := range map[string]string{
-		"level":               "WARN",
 		"component":           "internal/upstream",
 		"request_id":          requestID,
 		"upstream_request_id": upstreamRequestID,
@@ -946,12 +947,13 @@ func assertExecutionFailureWarning(t *testing.T, logs []byte, requestID, upstrea
 		got, present := record[key]
 		if want == "" {
 			if present {
-				t.Errorf("failure warning %s = %v, want absent", key, got)
+				t.Errorf("failure record %s = %v, want absent", key, got)
 			}
 		} else if got != want {
-			t.Errorf("failure warning %s = %v, want %q", key, got, want)
+			t.Errorf("failure record %s = %v, want %q", key, got, want)
 		}
 	}
+	return record
 }
 
 func assertBoundedResult(t *testing.T, form string, body []byte, failure *Failure, wantBody string, wantKind apierror.Kind, wantMessage string, wantErr error) {

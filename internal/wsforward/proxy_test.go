@@ -56,7 +56,7 @@ func TestProxyClientCancelDuringUpstreamHandshakeWritesNothingAndBooksNoMetric(t
 		logger,
 		logger,
 		0,
-		WsMetrics{Accept: observed},
+		WsMetrics{Accept: observed, SessionTerminal: observed},
 	)
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -393,18 +393,48 @@ func testProxyShutdownForceClosesSessionThatOverrunsDeadline(t *testing.T, tlsUp
 	}
 }
 
+func TestProxyClientCancelDuringCredentialAcquisitionWritesNothingAndBooksNoMetric(t *testing.T) {
+	provider := &blockingProvider{entered: make(chan struct{})}
+	observed := &recordingWsMetrics{}
+	proxy := newAdmissionTestProxy(provider, &http.Client{Transport: http.DefaultTransport}, WsMetrics{Accept: observed, SessionTerminal: observed})
+	t.Cleanup(func() { shutdownPreupgradeTestProxy(t, proxy) })
+	requestCtx, cancelRequest := context.WithCancel(context.Background())
+	defer cancelRequest()
+	recorder := httptest.NewRecorder()
+	recorder.Code = 0 // distinguish untouched from an explicit WriteHeader(200)
+	handlerDone := make(chan struct{})
+	go func() {
+		defer close(handlerDone)
+		proxy.Handler(endpoint.OpenAIResponsesWS()).ServeHTTP(recorder, validUpgradeRequest().WithContext(requestCtx))
+	}()
+	select {
+	case <-provider.entered:
+	case <-time.After(time.Second):
+		t.Fatal("handler did not reach credential acquisition")
+	}
+
+	cancelRequest()
+
+	select {
+	case <-handlerDone:
+	case <-time.After(time.Second):
+		t.Fatal("handler did not stop after the client left mid-credential")
+	}
+	assertNoPreUpgradeResponse(t, recorder, observed)
+}
+
 func TestProxyShutdownForceCancelsHandlerStillResolvingCredential(t *testing.T) {
 	provider := &blockingProvider{
 		entered: make(chan struct{}),
 	}
-	proxy := newTestProxy(provider)
+	observed := &recordingWsMetrics{}
+	proxy := newAdmissionTestProxy(provider, &http.Client{Transport: http.DefaultTransport}, WsMetrics{Accept: observed, SessionTerminal: observed})
+	recorder := httptest.NewRecorder()
+	recorder.Code = 0 // distinguish untouched from an explicit WriteHeader(200)
 	handlerDone := make(chan struct{})
 	go func() {
 		defer close(handlerDone)
-		proxy.Handler(endpoint.OpenAIResponsesWS()).ServeHTTP(
-			httptest.NewRecorder(),
-			validUpgradeRequest(),
-		)
+		proxy.Handler(endpoint.OpenAIResponsesWS()).ServeHTTP(recorder, validUpgradeRequest())
 	}()
 	select {
 	case <-provider.entered:
@@ -422,8 +452,29 @@ func TestProxyShutdownForceCancelsHandlerStillResolvingCredential(t *testing.T) 
 	case <-time.After(time.Second):
 		t.Fatal("deadline force-cancel did not release the mid-accept handler")
 	}
+	// The forced shutdown cancels the phase context rather than setting a
+	// deadline on it, so the still-connected client is gone, not timed out.
+	assertNoPreUpgradeResponse(t, recorder, observed)
 }
 
+// assertNoPreUpgradeResponse checks that a handler whose phase context ended
+// before the upgrade wrote nothing and booked no accept or session outcome.
+func assertNoPreUpgradeResponse(t *testing.T, recorder *httptest.ResponseRecorder, observed *recordingWsMetrics) {
+	t.Helper()
+	if recorder.Code != 0 || recorder.Body.Len() != 0 || len(recorder.Header()) != 0 {
+		t.Errorf("response = status %d headers %v body %q, want no write", recorder.Code, recorder.Header(), recorder.Body.String())
+	}
+	accepts, terminals := observed.snapshot()
+	if len(accepts) != 0 {
+		t.Errorf("accept observations = %v, want none", accepts)
+	}
+	if len(terminals) != 0 {
+		t.Errorf("session terminal observations = %v, want none", terminals)
+	}
+}
+
+// blockingProvider holds credential acquisition until its caller's context
+// ends, then fails with an error that is not the context's own.
 type blockingProvider struct {
 	entered chan struct{}
 }

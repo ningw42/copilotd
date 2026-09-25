@@ -51,13 +51,5 @@ func (c *Caller) ReadBounded(ctx context.Context, body io.Reader) ([]byte, *Fail
 	if errors.Is(failure.Err, errResponseBodyTooLarge) {
 		return nil, c.failure(ctx, failure.Kind, failure.Message, false, failure.Err)
 	}
-	cause := context.Cause(ctx)
-	switch {
-	case errors.Is(cause, context.DeadlineExceeded), errors.Is(ctx.Err(), context.DeadlineExceeded):
-		return nil, c.failure(ctx, apierror.GatewayTimeout, "the upstream request timed out", false, failure.Err)
-	case errors.Is(cause, context.Canceled), errors.Is(ctx.Err(), context.Canceled):
-		return nil, c.failure(ctx, 0, "", true, failure.Err)
-	default:
-		return nil, c.failure(ctx, failure.Kind, failure.Message, failure.ClientGone, failure.Err)
-	}
+	return nil, c.classifyByContext(ctx, failure.Kind, failure.Message, failure.Err)
 }
