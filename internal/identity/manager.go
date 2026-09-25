@@ -239,13 +239,13 @@ func (m *Manager) StartupMint(ctx context.Context) {
 		}
 		_, err := m.mint(ctx, "startup")
 		if err == nil {
-			return // success; the closure cached and logged the token
+			return // success; the flight minted a Copilot token or found a fresh one cached
 		}
 		if ctx.Err() != nil {
 			return // caller cancelled; the background exchange (if any) runs on
 		}
 		if !isTransient(err) {
-			// Auth-class / permanent: retrying cannot help. The closure already
+			// Auth-class / permanent: retrying cannot help. The flight already
 			// logged failure_class=auth or non_transient at Error.
 			m.logger.Warn("startup mint short-circuited on a permanent failure; on-demand mint remains available")
 			return
@@ -257,13 +257,22 @@ func (m *Manager) StartupMint(ctx context.Context) {
 		slog.Int(logging.AttemptsKey, attempts))
 }
 
-// mint routes both triggers through the single singleflight key. The exchange
-// runs on a background-scoped context bounded by exchangeTimeout — deliberately
-// NOT the caller's ctx — so a disconnecting caller cannot cancel the shared
-// exchange other waiters depend on. The caller waits via DoChan and selects on
-// its own ctx, returning promptly on cancellation without poisoning the mint.
+// mint routes both triggers through the single singleflight key. A flight first
+// re-checks the cache after claiming the key: a flight that finished between
+// the caller's own cache check and DoChan may already have stored a fresh
+// Copilot token, which is returned without an exchange or a mint-outcome
+// record. The
+// exchange runs on a background-scoped context bounded by exchangeTimeout —
+// deliberately NOT the caller's ctx — so a disconnecting caller cannot cancel
+// the shared exchange other waiters depend on. The caller waits via DoChan and
+// selects on its own ctx, returning promptly on cancellation without poisoning
+// the mint.
 func (m *Manager) mint(ctx context.Context, trigger string) (Credential, error) {
 	ch := m.group.DoChan(mintKey, func() (any, error) {
+		if tok, ok := m.freshCached(); ok {
+			return tok, nil
+		}
+
 		exCtx, cancel := context.WithTimeout(context.Background(), m.exchangeTimeout)
 		defer cancel()
 
