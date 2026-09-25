@@ -1872,6 +1872,12 @@ func startServer(t *testing.T, srv *Server) string {
 			_, _ = io.Copy(io.Discard, resp.Body)
 			_ = resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {
+				// A 200 from a Serve that Run left behind is not a healthy server.
+				select {
+				case <-exited:
+					t.Fatalf("server Run = %v before the helper accepted /healthz", runErr)
+				default:
+				}
 				return base
 			}
 			last = resp.Status
