@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -92,6 +93,40 @@ func TestHandlerRecordsShapeOnlyAfterSuccessfulRender(t *testing.T) {
 	failedHandler(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/openai/v1/models", nil))
 	if failedGot != "" {
 		t.Errorf("render failure recorded catalog shape %q", failedGot)
+	}
+}
+
+func TestHandlerRejectsAnEnabledCodexCatalogWithoutAModelsSource(t *testing.T) {
+	defer func() {
+		got := recover()
+		if got == nil {
+			t.Fatal("Handler accepted an enabled Codex catalog without a models source, want construction panic")
+		}
+		if message := fmt.Sprint(got); !strings.Contains(message, "Codex models source") {
+			t.Errorf("panic = %q, want it to name the missing Codex models source", message)
+		}
+	}()
+
+	Handler(discardHandlerLogger(), endpoint.OpenAICatalog(), Rendering{
+		Render: RenderOpenAI,
+		Codex: CodexDescriptor{
+			Enabled:      true,
+			RenderConfig: CodexRenderConfig{AutoReviewModel: "gpt-5.4"},
+		},
+	}, stubSource{status: http.StatusOK, body: []byte(`{"data":[]}`)})
+}
+
+func TestHandlerAcceptsADisabledCodexCatalogWithoutAModelsSource(t *testing.T) {
+	handler := Handler(discardHandlerLogger(), endpoint.OpenAICatalog(), Rendering{
+		Render: RenderOpenAI,
+		Codex:  CodexDescriptor{RenderConfig: CodexRenderConfig{AutoReviewModel: "gpt-5.4"}},
+	}, stubSource{status: http.StatusOK, body: []byte(`{"data":[]}`)})
+	recorder := httptest.NewRecorder()
+
+	handler(recorder, httptest.NewRequest(http.MethodGet, "/openai/v1/models?client_version=fixture", nil))
+
+	if got, want := recorder.Body.String(), `{"object":"list","data":[]}`; recorder.Code != http.StatusOK || got != want {
+		t.Errorf("disabled Codex catalog = %d %s, want provider-shaped %s", recorder.Code, got, want)
 	}
 }
 

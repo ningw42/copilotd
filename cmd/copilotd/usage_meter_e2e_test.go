@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -111,6 +113,27 @@ func startUsageMeterServeHarnessWithSyntheticPricing(t *testing.T, upstreamURL s
 	return harness
 }
 
+// usageMeterCodexModel is the sole entry of the synthetic Codex catalog the
+// usage-meter harness serves when a test enables the Codex catalog.
+const usageMeterCodexModel = "gpt-5.4"
+
+// pinnedCodexModels returns a Codex Models source whose current bytes are body
+// and never refresh.
+func pinnedCodexModels(t *testing.T, body []byte) *cache.Value[[]byte] {
+	t.Helper()
+	return cache.New(discardLogger(t), cache.Cacheable[[]byte]{
+		Fallback:        body,
+		FallbackVersion: "synthetic",
+		Fetch: func(context.Context) ([]byte, string, error) {
+			return nil, "", errors.New("pinned synthetic Codex catalog is never fetched")
+		},
+		Hash: func(body []byte) string {
+			sum := sha256.Sum256(body)
+			return hex.EncodeToString(sum[:])
+		},
+	})
+}
+
 // startUsageMeterServeHarnessWithPricing replaces only the existing public
 // pricing source edge for deterministic executable acceptance. Runtime flags and
 // production composition remain unchanged.
@@ -154,6 +177,12 @@ func startUsageMeterServeHarnessWithPricing(t *testing.T, upstreamURL string, ba
 		t.Fatalf("build serve provider: %v", err)
 	}
 	usagePricing := configuredUsagePricing(cfg, remote, cacheRegistry, base)
+	// As in the composition root, an enabled Codex catalog always has a models
+	// source; the harness pins it to synthetic bytes instead of the vendored floor.
+	var codexModels *cache.Value[[]byte]
+	if cfg.CodexCatalogEnabled {
+		codexModels = pinnedCodexModels(t, completeCodexModelsBytes(t, usageMeterCodexModel, "usage meter prompt"))
+	}
 	registry := configuredShimRegistry(cfg, sink)
 	if decorate != nil {
 		registry = decorate(registry)
@@ -179,7 +208,7 @@ func startUsageMeterServeHarnessWithPricing(t *testing.T, upstreamURL string, ba
 	done := make(chan error, 1)
 	harness.done = done
 	go func() {
-		done <- runBoundServe(ctx, cfg, base, mgr, imp, nil, usagePricing, cacheRegistry, registry, ln, store)
+		done <- runBoundServe(ctx, cfg, base, mgr, imp, codexModels, usagePricing, cacheRegistry, registry, ln, store)
 	}()
 	t.Cleanup(func() { _ = harness.stop() })
 	assertHTTPStatusEventually(t, harness.baseURL+"/healthz", http.StatusOK)

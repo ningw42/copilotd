@@ -302,7 +302,11 @@ For current and future audits, the contract test reads the expected executable
 digest and stable release tag from `release.json`, derives the CLI version from
 that tag, and enforces both before exercising the client. It discovers the
 command-auth `printf` executable from `PATH` and skips with an explicit
-prerequisite message when unavailable. The downloaded Codex executable was
+prerequisite message when unavailable. Each check decides whether it is opted
+in before it reads vendored entries. The entries it drives come from the data:
+the unknown slug clones the audited bundled default. The replaced slug is the
+first vendored entry other than that default. Both take a priority one below
+every vendored priority. The downloaded Codex executable was
 temporary and is not stored in the repository.
 
 ## Manual release bump checklist
@@ -312,10 +316,16 @@ temporary and is not stored in the repository.
 2. Update `release.json` and `models.json` together. Confirm the recorded audited
    bundled default from upstream behavior. Compare `LICENSE` and `NOTICE`, and
    replace them only if their upstream bytes changed.
-3. Normally leave the runtime loader/cache, synthetic fixture versions,
-   independent Serde-required-field list, `CONFIGURATION.md`, `CONTEXT.md`, and
-   ADRs unchanged. Edit them only when the audit finds a real contract, config,
-   policy, or legal change.
+3. A routine bump is a data-only change: `models.json`, `release.json`, and this
+   file's identity and audit prose. Change code comments only when the audit
+   finds that upstream semantics changed. Expect no test edits. Logic tests run
+   on synthetic Codex catalogs. The vendored-snapshot tests compute every
+   expectation from these files; the guard
+   `TestOnlyVendoredSnapshotTestsReadTheEmbeddedCodexCatalog` allow-lists them.
+   Treat a failing test as an audit finding, not a literal to re-pin. Leave the
+   runtime loader/cache, synthetic fixtures, independent Serde-required-field
+   list, `CONFIGURATION.md`, `CONTEXT.md`, and ADRs unchanged unless the audit
+   finds a real contract, config, policy, or legal change.
 4. Run `nix fmt`, focused `nix develop -c go test ./internal/catalog -count=1`,
    and the opt-in executable audit with `CODEX_CATALOG_AUDIT_BINARY` pointing at
    the exact recorded executable. Run the repository's complete verification at
