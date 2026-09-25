@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -486,6 +487,122 @@ func TestManagerCacheReuseAndSingleAttempt(t *testing.T) {
 	if delta := s.hits.Load() - before; delta != 1 {
 		t.Fatalf("next on-demand mint made %d exchanges, want exactly 1", delta)
 	}
+}
+
+// --- a mint flight reuses a fresh cached token instead of exchanging ---------
+
+// freshlyMintedManager returns a Manager whose cache holds a fresh Copilot token
+// minted by one on-demand Current, and whose exchange stub fails every later
+// request with a 503, so any further exchange surfaces as an error and a hit.
+// Its startup mint retries transient failures three times with no backoff.
+func freshlyMintedManager(t *testing.T, logger *slog.Logger) (*Manager, *stub) {
+	t.Helper()
+	clk := &fakeClock{t: time.Unix(1_700_000_000, 0)}
+	s := newStub(t)
+	s.handler = func(w http.ResponseWriter, r *http.Request) {
+		if s.hits.Load() > 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		writeToken(w, "copilot-token", clk.now().Add(25*time.Minute), 1500, "https://api.githubcopilot.com")
+	}
+	m := NewManager(logger, ManagerConfig{
+		OAuthToken:         "gho",
+		GitHubBaseURL:      s.server.URL,
+		HTTPClient:         s.server.Client(),
+		Impersonation:      testImpersonation(),
+		StartupMintRetries: 3,
+		SafetyMargin:       2 * time.Minute,
+		Clock:              clk.now,
+		Backoff:            zeroBackoff,
+	})
+	if _, err := m.Current(context.Background()); err != nil {
+		t.Fatalf("initial Current() error = %v", err)
+	}
+	if got := s.hits.Load(); got != 1 {
+		t.Fatalf("exchange hits = %d after the initial mint, want 1", got)
+	}
+	return m, s
+}
+
+func TestManagerMintFlightReusesFreshCachedToken(t *testing.T) {
+	m, s := freshlyMintedManager(t, quietLogger())
+
+	// Stands in for a caller whose cache check missed just before another
+	// flight stored the fresh token now in the cache.
+	cred, err := m.mint(context.Background(), "on-demand")
+	if err != nil {
+		t.Fatalf("mint() error = %v, want the fresh cached credential", err)
+	}
+	if cred.Token != "copilot-token" || cred.BaseURL != "https://api.githubcopilot.com" {
+		t.Errorf("mint() credential = %+v, want the cached token's credential", cred)
+	}
+	if got := s.hits.Load(); got != 1 {
+		t.Errorf("exchange hits = %d, want 1 (a fresh cached token needs no exchange)", got)
+	}
+}
+
+func TestStartupMintAfterOnDemandMintSkipsExchange(t *testing.T) {
+	m, s := freshlyMintedManager(t, quietLogger())
+
+	m.StartupMint(context.Background())
+	if got := s.hits.Load(); got != 1 {
+		t.Errorf("exchange hits = %d, want 1 (startup mint reuses the fresh cached token)", got)
+	}
+}
+
+func TestManagerMintFlightServedFromCacheEmitsNoMintOutcome(t *testing.T) {
+	rec := &mintOutcomeRecorder{}
+	m, _ := freshlyMintedManager(t, slog.New(rec))
+
+	want := []mintOutcome{{level: slog.LevelInfo, trigger: "on-demand"}}
+	if got := rec.snapshot(); !slices.Equal(got, want) {
+		t.Fatalf("mint outcomes after the exchanging flight = %+v, want %+v", got, want)
+	}
+
+	if _, err := m.mint(context.Background(), "on-demand"); err != nil {
+		t.Errorf("mint() error = %v", err)
+	}
+	m.StartupMint(context.Background())
+	if got := rec.snapshot(); !slices.Equal(got, want) {
+		t.Errorf("mint outcomes after flights served from the cache = %+v, want only the exchanging flight's %+v", got, want)
+	}
+}
+
+type mintOutcome struct {
+	level   slog.Level
+	trigger string
+}
+
+// mintOutcomeRecorder captures every mint-outcome record, identified by its
+// trigger attribute, with the level it was emitted at.
+type mintOutcomeRecorder struct {
+	mu      sync.Mutex
+	records []mintOutcome
+}
+
+func (h *mintOutcomeRecorder) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h *mintOutcomeRecorder) Handle(_ context.Context, record slog.Record) error {
+	record.Attrs(func(attr slog.Attr) bool {
+		if attr.Key != logging.TriggerKey {
+			return true
+		}
+		h.mu.Lock()
+		h.records = append(h.records, mintOutcome{level: record.Level, trigger: attr.Value.String()})
+		h.mu.Unlock()
+		return false
+	})
+	return nil
+}
+
+func (h *mintOutcomeRecorder) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *mintOutcomeRecorder) WithGroup(string) slog.Handler      { return h }
+
+func (h *mintOutcomeRecorder) snapshot() []mintOutcome {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]mintOutcome(nil), h.records...)
 }
 
 func TestManagerExchangeIsOneWireAttempt(t *testing.T) {
