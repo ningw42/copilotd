@@ -56,7 +56,7 @@ func TestProxyClientCancelDuringUpstreamHandshakeWritesNothingAndBooksNoMetric(t
 		logger,
 		logger,
 		0,
-		WsMetrics{Accept: observed},
+		WsMetrics{Accept: observed, SessionTerminal: observed},
 	)
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -396,7 +396,7 @@ func testProxyShutdownForceClosesSessionThatOverrunsDeadline(t *testing.T, tlsUp
 func TestProxyClientCancelDuringCredentialAcquisitionWritesNothingAndBooksNoMetric(t *testing.T) {
 	provider := &blockingProvider{entered: make(chan struct{})}
 	observed := &recordingWsMetrics{}
-	proxy := newAdmissionTestProxy(provider, &http.Client{Transport: http.DefaultTransport}, WsMetrics{Accept: observed})
+	proxy := newAdmissionTestProxy(provider, &http.Client{Transport: http.DefaultTransport}, WsMetrics{Accept: observed, SessionTerminal: observed})
 	t.Cleanup(func() { shutdownPreupgradeTestProxy(t, proxy) })
 	requestCtx, cancelRequest := context.WithCancel(context.Background())
 	defer cancelRequest()
@@ -428,7 +428,7 @@ func TestProxyShutdownForceCancelsHandlerStillResolvingCredential(t *testing.T) 
 		entered: make(chan struct{}),
 	}
 	observed := &recordingWsMetrics{}
-	proxy := newAdmissionTestProxy(provider, &http.Client{Transport: http.DefaultTransport}, WsMetrics{Accept: observed})
+	proxy := newAdmissionTestProxy(provider, &http.Client{Transport: http.DefaultTransport}, WsMetrics{Accept: observed, SessionTerminal: observed})
 	recorder := httptest.NewRecorder()
 	recorder.Code = 0 // distinguish untouched from an explicit WriteHeader(200)
 	handlerDone := make(chan struct{})
