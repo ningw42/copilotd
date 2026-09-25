@@ -39,10 +39,10 @@ func testCodexDescriptor(cfg config.ServeConfig, models *cache.Value[[]byte]) ca
 	}
 }
 
-// testCodexModels returns a Codex Models source pinned to a small synthetic
+// pinnedCodexModels returns a Codex Models source pinned to a small synthetic
 // Codex catalog with one complete entry per slug. Codex expectations in these
 // tests come from this data, never from the vendored snapshot.
-func testCodexModels(t *testing.T, slugs ...string) *cache.Value[[]byte] {
+func pinnedCodexModels(t *testing.T, slugs ...string) *cache.Value[[]byte] {
 	t.Helper()
 	entries := make([]map[string]any, len(slugs))
 	for i, slug := range slugs {
@@ -68,7 +68,7 @@ func testCodexModels(t *testing.T, slugs ...string) *cache.Value[[]byte] {
 		Fallback:        body,
 		FallbackVersion: "synthetic",
 		Fetch: func(context.Context) ([]byte, string, error) {
-			return nil, "", errors.New("pinned synthetic Codex catalog is never fetched")
+			return nil, "", errors.New("pinned synthetic Codex models are never fetched")
 		},
 		Hash: func(body []byte) string {
 			sum := sha256.Sum256(body)
@@ -106,7 +106,7 @@ func TestCodexCatalogAliasOverRealListener(t *testing.T) {
 	cfg.CodexAutoReviewModelOverrides = map[string]string{alias: alias}
 	provider := identity.NewStatic(identity.Credential{BaseURL: upstream.URL, Token: "copilot-token"}, true)
 	forwarder := newTestForwarder(provider, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
-	base := startServer(t, newTestServerFromBase(cfg, discardLogger(t), provider, newTestReadyObservers(), forwarder, newTestCatalogSource(provider), newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.RenderDescriptors{Codex: testCodexDescriptor(cfg, testCodexModels(t, "gpt-5.4"))}))
+	base := startServer(t, newTestServerFromBase(cfg, discardLogger(t), provider, newTestReadyObservers(), forwarder, newTestCatalogSource(provider), newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.RenderDescriptors{Codex: testCodexDescriptor(cfg, pinnedCodexModels(t, "gpt-5.4"))}))
 	req, err := http.NewRequest(http.MethodGet, base+"/openai/v1/models?client_version=0.151.0", nil)
 	if err != nil {
 		t.Fatalf("build catalog request: %v", err)
@@ -200,7 +200,7 @@ func TestCodexCatalogAliasConfigIsScopedToNegotiatedOpenAICatalog(t *testing.T) 
 		cfg.CodexCatalogEnabled = enabled
 		cfg.CodexCatalogModelAliases = map[string]string{alias: "gpt-5.4"}
 		forwarder := newTestForwarder(provider, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
-		return startServer(t, newTestServerFromBase(cfg, discardLogger(t), provider, newTestReadyObservers(), forwarder, newTestCatalogSource(provider), newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.RenderDescriptors{Codex: testCodexDescriptor(cfg, testCodexModels(t, "gpt-5.4"))}))
+		return startServer(t, newTestServerFromBase(cfg, discardLogger(t), provider, newTestReadyObservers(), forwarder, newTestCatalogSource(provider), newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.RenderDescriptors{Codex: testCodexDescriptor(cfg, pinnedCodexModels(t, "gpt-5.4"))}))
 	}
 	request := func(base, target string) []byte {
 		t.Helper()
@@ -274,7 +274,7 @@ func TestCodexCatalogAliasWarningsOverRealListener(t *testing.T) {
 	}
 	provider := identity.NewStatic(identity.Credential{BaseURL: upstream.URL, Token: tokenSecret}, true)
 	forwarder := newTestForwarder(provider, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
-	base := startServer(t, newTestServerFromBase(cfg, logger, provider, newTestReadyObservers(), forwarder, newTestCatalogSourceWith(provider, forward.NewClient(time.Second), time.Second, 1<<20, logger), newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.RenderDescriptors{Codex: testCodexDescriptor(cfg, testCodexModels(t, shadowed, "gpt-5.5", "gpt-5.6-sol"))}))
+	base := startServer(t, newTestServerFromBase(cfg, logger, provider, newTestReadyObservers(), forwarder, newTestCatalogSourceWith(provider, forward.NewClient(time.Second), time.Second, 1<<20, logger), newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.RenderDescriptors{Codex: testCodexDescriptor(cfg, pinnedCodexModels(t, shadowed, "gpt-5.5", "gpt-5.6-sol"))}))
 
 	for requestNumber := 0; requestNumber < 2; requestNumber++ {
 		req, err := http.NewRequest(http.MethodGet, base+"/openai/v1/models?client_version="+querySecret, nil)
@@ -354,7 +354,7 @@ func TestCodexCatalogPerModelReviewerOverRealListener(t *testing.T) {
 	}
 	provider := identity.NewStatic(identity.Credential{BaseURL: upstream.URL, Token: "copilot-token"}, true)
 	forwarder := newTestForwarder(provider, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
-	base := startServer(t, newTestServerFromBase(cfg, discardLogger(t), provider, newTestReadyObservers(), forwarder, newTestCatalogSource(provider), newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.RenderDescriptors{Codex: testCodexDescriptor(cfg, testCodexModels(t, mainModel, reviewer))}))
+	base := startServer(t, newTestServerFromBase(cfg, discardLogger(t), provider, newTestReadyObservers(), forwarder, newTestCatalogSource(provider), newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.RenderDescriptors{Codex: testCodexDescriptor(cfg, pinnedCodexModels(t, mainModel, reviewer))}))
 	req, err := http.NewRequest(http.MethodGet, base+"/openai/v1/models?client_version=0.144.5", nil)
 	if err != nil {
 		t.Fatalf("build catalog request: %v", err)
@@ -456,7 +456,7 @@ func TestCodexCatalogOverRealListener(t *testing.T) {
 			Headers: http.Header{"Copilot-Integration-Id": {"vscode-chat"}},
 		}, ready)
 		forwarder := newTestForwarder(provider, forward.NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
-		return startServer(t, newTestServerFromBase(cfg, discardLogger(t), provider, newTestReadyObservers(), forwarder, newTestCatalogSource(provider), newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.RenderDescriptors{Codex: testCodexDescriptor(cfg, testCodexModels(t, reviewer, activeModel))})), provider
+		return startServer(t, newTestServerFromBase(cfg, discardLogger(t), provider, newTestReadyObservers(), forwarder, newTestCatalogSource(provider), newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.RenderDescriptors{Codex: testCodexDescriptor(cfg, pinnedCodexModels(t, reviewer, activeModel))})), provider
 	}
 
 	requestCatalog := func(base, method, target, keyHeader, key, requestID string) (*http.Response, []byte) {
@@ -629,7 +629,7 @@ func TestCodexCatalogConfigWiringWarningAndAccessLogConfidentiality(t *testing.T
 	}
 	provider := identity.NewStatic(identity.Credential{BaseURL: upstream.URL, Token: copilotToken}, true)
 	forwarder := newTestForwarder(provider, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
-	base := startServer(t, newTestServerFromBase(cfg, logger, provider, newTestReadyObservers(), forwarder, newTestCatalogSourceWith(provider, forward.NewClient(time.Second), time.Second, 1<<20, logger), newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.RenderDescriptors{Codex: testCodexDescriptor(cfg, testCodexModels(t, mainModel))}))
+	base := startServer(t, newTestServerFromBase(cfg, logger, provider, newTestReadyObservers(), forwarder, newTestCatalogSourceWith(provider, forward.NewClient(time.Second), time.Second, 1<<20, logger), newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.RenderDescriptors{Codex: testCodexDescriptor(cfg, pinnedCodexModels(t, mainModel))}))
 
 	requestCatalog := func(target string) (*http.Response, []byte) {
 		t.Helper()

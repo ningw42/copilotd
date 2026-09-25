@@ -2,6 +2,7 @@ package catalog
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -25,8 +26,7 @@ type Rendering struct {
 
 // RenderOne renders the OpenAI Catalog for ep and returns the response bytes along
 // with the Shape that was actually served. It owns the shape decision: whether the
-// Codex client shape or the OpenAI provider shape wins. An enabled Codex shape
-// requires rendering.Codex.Models; Handler enforces that at construction.
+// Codex client shape or the OpenAI provider shape wins.
 func RenderOne(ep endpoint.Catalog, rendering Rendering, r *http.Request, models []Model, responseCtx context.Context, logger *slog.Logger) ([]byte, Shape, error) {
 	if !rendering.Codex.servesCodexShape(ep, r) {
 		representation, err := rendering.Render(models)
@@ -36,6 +36,9 @@ func RenderOne(ep endpoint.Catalog, rendering Rendering, r *http.Request, models
 		return representation, ShapeOpenAI, nil
 	}
 
+	if err := rendering.Codex.wiringError(); err != nil {
+		return nil, "", err
+	}
 	currentBytes, _ := rendering.Codex.Models.Current()
 	codexModels, err := parseCodexModels(currentBytes)
 	if err != nil {
@@ -76,6 +79,14 @@ type CodexDescriptor struct {
 	RenderConfig CodexRenderConfig
 }
 
+// wiringError reports an enabled Codex shape that has no models source.
+func (d CodexDescriptor) wiringError() error {
+	if d.Enabled && d.Models == nil {
+		return errors.New("Codex catalog is enabled without a Codex models source (CodexDescriptor.Models)")
+	}
+	return nil
+}
+
 // Source performs one upstream call for the current Copilot model Catalog and
 // returns its bounded bytes with the response-path context.
 type Source interface {
@@ -89,8 +100,8 @@ var _ Source = (*upstream.Caller)(nil)
 // panics when the Codex shape is enabled without a models source: the
 // composition root always supplies one, so its absence is a wiring defect.
 func Handler(logger *slog.Logger, ep endpoint.Catalog, rendering Rendering, source Source) http.HandlerFunc {
-	if rendering.Codex.Enabled && rendering.Codex.Models == nil {
-		panic("catalog: Codex catalog is enabled without a Codex models source")
+	if err := rendering.Codex.wiringError(); err != nil {
+		panic("catalog: " + err.Error())
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		status, body, responseCtx, failure := source.Buffered(r.Context(), upstream.Call{

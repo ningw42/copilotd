@@ -648,6 +648,15 @@ func completeCodexEntry(slug string, fields map[string]any) map[string]any {
 	return entry
 }
 
+// completeCodexEntries returns one complete synthetic entry per slug.
+func completeCodexEntries(slugs ...string) []map[string]any {
+	entries := make([]map[string]any, len(slugs))
+	for i, slug := range slugs {
+		entries[i] = completeCodexEntry(slug, nil)
+	}
+	return entries
+}
+
 func codexModelsBytes(t *testing.T, entries ...map[string]any) []byte {
 	t.Helper()
 	encoded, err := json.Marshal(map[string]any{"models": entries})

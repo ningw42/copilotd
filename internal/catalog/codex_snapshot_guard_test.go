@@ -10,146 +10,129 @@ import (
 	"testing"
 )
 
-// vendoredCodexSnapshotTestFiles are the only catalog test files that may read
-// the embedded Codex snapshot or a value derived from it. Every other test runs
-// on synthetic Codex catalogs, so a routine vendored-floor bump edits no test.
-var vendoredCodexSnapshotTestFiles = map[string]string{
+// vendoredSnapshotTestFiles are the only catalog test files that may read the
+// vendored snapshot, its release record, or a value derived from either. Every
+// other test runs on synthetic Codex models, so a routine vendored-floor bump
+// edits no test.
+var vendoredSnapshotTestFiles = map[string]string{
 	"codex_compatibility_test.go":        "identity, startup load, and round-trip fidelity of the exact vendored bytes",
 	"codex_binary_compatibility_test.go": "opt-in executable audit of the pinned Codex client against vendored entries",
 	"codex_models_cache_test.go":         "the Codex Models cache's embedded floor, compared by identity only",
 }
 
-func TestOnlyVendoredSnapshotTestsReadTheEmbeddedCodexCatalog(t *testing.T) {
-	files := parseCatalogTestFiles(t)
-	derived := vendoredCodexDerivedNames(files)
+func TestOnlyAllowListedTestsReadTheVendoredSnapshot(t *testing.T) {
+	fset, files := parseCatalogPackageFiles(t)
+	derived := vendoredSnapshotDerivedNames(files)
 
-	referencing := make(map[string]bool, len(vendoredCodexSnapshotTestFiles))
+	referencing := make(map[string]bool, len(vendoredSnapshotTestFiles))
 	var violations []string
 	for name, file := range files {
-		declared := declaredNames(file.syntax)
-		ast.Inspect(file.syntax, func(node ast.Node) bool {
+		if !strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		declared := make(map[*ast.Ident]bool)
+		for _, declaration := range packageDeclarations(file) {
+			for _, ident := range declaration.names {
+				declared[ident] = true
+			}
+		}
+		ast.Inspect(file, func(node ast.Node) bool {
 			ident, ok := node.(*ast.Ident)
 			if !ok || !derived[ident.Name] || declared[ident] {
 				return true
 			}
 			referencing[name] = true
-			if _, allowed := vendoredCodexSnapshotTestFiles[name]; !allowed {
-				violations = append(violations, file.fset.Position(ident.Pos()).String()+" references "+ident.Name)
+			if _, allowed := vendoredSnapshotTestFiles[name]; !allowed {
+				violations = append(violations, fset.Position(ident.Pos()).String()+" references "+ident.Name)
 			}
 			return true
 		})
 	}
 	sort.Strings(violations)
 	for _, violation := range violations {
-		t.Errorf("%s; logic tests must run on synthetic Codex catalogs", violation)
+		t.Errorf("%s; logic tests must run on synthetic Codex models", violation)
 	}
-	for name := range vendoredCodexSnapshotTestFiles {
+	for name, reason := range vendoredSnapshotTestFiles {
 		if !referencing[name] {
-			t.Errorf("allow-listed %s no longer reads the vendored Codex snapshot; remove it from the allow-list", name)
+			t.Errorf("allow-listed %s (%s) no longer reads the vendored snapshot; remove it from the allow-list", name, reason)
 		}
 	}
 }
 
-type parsedTestFile struct {
-	fset   *token.FileSet
-	syntax *ast.File
-}
-
-func parseCatalogTestFiles(t *testing.T) map[string]parsedTestFile {
+// parseCatalogPackageFiles parses every Go file in the catalog package, so
+// derivation follows production declarations such as NewModelsCache.
+func parseCatalogPackageFiles(t *testing.T) (*token.FileSet, map[string]*ast.File) {
 	t.Helper()
 	entries, err := os.ReadDir(".")
 	if err != nil {
 		t.Fatalf("list catalog package: %v", err)
 	}
 	fset := token.NewFileSet()
-	files := make(map[string]parsedTestFile)
+	files := make(map[string]*ast.File)
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), "_test.go") {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".go") {
 			continue
 		}
-		syntax, err := parser.ParseFile(fset, entry.Name(), nil, parser.SkipObjectResolution)
+		file, err := parser.ParseFile(fset, entry.Name(), nil, parser.SkipObjectResolution)
 		if err != nil {
 			t.Fatalf("parse %s: %v", entry.Name(), err)
 		}
-		files[entry.Name()] = parsedTestFile{fset: fset, syntax: syntax}
+		files[entry.Name()] = file
 	}
 	if len(files) == 0 {
-		t.Fatal("found no catalog test files to guard")
+		t.Fatal("found no catalog files to guard")
 	}
-	return files
+	return fset, files
 }
 
-// vendoredCodexDerivedNames returns the embedded Codex bytes' identifier plus
-// every package-level test declaration that reads them, directly or through
-// another such declaration.
-func vendoredCodexDerivedNames(files map[string]parsedTestFile) map[string]bool {
-	type declaration struct {
-		names []string
-		body  ast.Node
-	}
-	var declarations []declaration
-	for _, file := range files {
-		for _, decl := range file.syntax.Decls {
-			switch decl := decl.(type) {
-			case *ast.FuncDecl:
-				if decl.Body != nil {
-					declarations = append(declarations, declaration{names: []string{decl.Name.Name}, body: decl.Body})
-				}
-			case *ast.GenDecl:
-				for _, spec := range decl.Specs {
-					value, ok := spec.(*ast.ValueSpec)
-					if !ok {
-						continue
-					}
-					var names []string
-					for _, name := range value.Names {
-						if name.Name != "_" {
-							names = append(names, name.Name)
-						}
-					}
-					if len(names) > 0 {
-						declarations = append(declarations, declaration{names: names, body: value})
-					}
-				}
-			}
-		}
-	}
-
-	derived := map[string]bool{"embeddedCodexModels": true}
-	for changed := true; changed; {
-		changed = false
-		for _, declaration := range declarations {
-			if derived[declaration.names[0]] || !referencesAny(declaration.body, derived) {
-				continue
-			}
-			for _, name := range declaration.names {
-				derived[name] = true
-			}
-			changed = true
-		}
-	}
-	return derived
+type packageDeclaration struct {
+	names []*ast.Ident
+	body  ast.Node
 }
 
-// declaredNames returns the identifiers that name package-level functions and
-// values, so the guard reports only references.
-func declaredNames(file *ast.File) map[*ast.Ident]bool {
-	declared := make(map[*ast.Ident]bool)
+// packageDeclarations returns the file's package-level functions and values,
+// each with the syntax that may read other package-level names.
+func packageDeclarations(file *ast.File) []packageDeclaration {
+	var declarations []packageDeclaration
 	for _, decl := range file.Decls {
 		switch decl := decl.(type) {
 		case *ast.FuncDecl:
-			declared[decl.Name] = true
+			declarations = append(declarations, packageDeclaration{names: []*ast.Ident{decl.Name}, body: decl.Body})
 		case *ast.GenDecl:
 			for _, spec := range decl.Specs {
 				if value, ok := spec.(*ast.ValueSpec); ok {
-					for _, name := range value.Names {
-						declared[name] = true
-					}
+					declarations = append(declarations, packageDeclaration{names: value.Names, body: value})
 				}
 			}
 		}
 	}
-	return declared
+	return declarations
+}
+
+// vendoredSnapshotDerivedNames returns the embedded vendored bytes and release
+// record plus every package-level declaration, production or test, that reads
+// them directly or through another such declaration.
+func vendoredSnapshotDerivedNames(files map[string]*ast.File) map[string]bool {
+	var declarations []packageDeclaration
+	for _, file := range files {
+		declarations = append(declarations, packageDeclarations(file)...)
+	}
+	derived := map[string]bool{"embeddedCodexModels": true, "embeddedCodexReleaseJSON": true}
+	for changed := true; changed; {
+		changed = false
+		for _, declaration := range declarations {
+			if declaration.body == nil || !referencesAny(declaration.body, derived) {
+				continue
+			}
+			for _, ident := range declaration.names {
+				if ident.Name != "_" && !derived[ident.Name] {
+					derived[ident.Name] = true
+					changed = true
+				}
+			}
+		}
+	}
+	return derived
 }
 
 func referencesAny(node ast.Node, names map[string]bool) bool {

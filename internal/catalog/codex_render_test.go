@@ -14,7 +14,7 @@ func TestRenderCodexIntersectsInLiveOrderAndEmitsCompleteEntries(t *testing.T) {
 	models := Filter(capturedModels(t), endpoint.RouteOpenAIResponses)
 	// The catalog omits most live models and adds a Codex-only entry, so only
 	// the intersection may be emitted, in Copilot's order.
-	codexModels := codexCatalogOf(t, "gpt-5.6-terra", "codex-auto-review", "gpt-5.4", "gpt-5.5")
+	codexModels := codexModelsWithSlugs(t, "gpt-5.6-terra", "codex-auto-review", "gpt-5.4", "gpt-5.5")
 	body, outcome, err := RenderCodex(codexModels, models, CodexRenderConfig{})
 	if err != nil {
 		t.Fatalf("RenderCodex: %v", err)
@@ -56,7 +56,7 @@ func TestRenderCodexIntersectsInLiveOrderAndEmitsCompleteEntries(t *testing.T) {
 
 func TestRenderCodexClonesOfficialMetadataForLiveAlias(t *testing.T) {
 	const alias = "gpt-example-alias"
-	codexModels := codexCatalog(t,
+	codexModels := syntheticCodexModels(t,
 		completeCodexEntry("gpt-5.4", map[string]any{"auto_review_model_override": "source-reviewer"}),
 		completeCodexEntry("gpt-5.5", nil),
 		completeCodexEntry("gpt-5.6-luna", nil),
@@ -115,7 +115,7 @@ func TestRenderCodexRejectsInvalidRawMetadataSourceField(t *testing.T) {
 
 func TestRenderCodexReportsAliasThatIsNotForwardable(t *testing.T) {
 	const alias = "gpt-missing-alias"
-	codexModels := codexCatalogOf(t, "gpt-5.4", "gpt-5.6-luna")
+	codexModels := codexModelsWithSlugs(t, "gpt-5.4", "gpt-5.6-luna")
 	body, outcome, err := RenderCodex(codexModels, []Model{{ID: "gpt-5.4"}}, CodexRenderConfig{
 		ModelAliases: map[string]string{alias: "gpt-5.6-luna"},
 	})
@@ -143,7 +143,7 @@ func TestRenderCodexOfficialEntryShadowsConfiguredAlias(t *testing.T) {
 			MaxContextWindowTokens: &contextLimit,
 		}},
 	}}
-	codexModels := codexCatalog(t,
+	codexModels := syntheticCodexModels(t,
 		completeCodexEntry(alias, map[string]any{
 			"auto_review_model_override": "codex-reviewer",
 			"context_window":             272000,
@@ -189,7 +189,7 @@ func TestRenderCodexReportsMissingMetadataSourceAndContinues(t *testing.T) {
 		validAlias   = "gpt-valid-alias"
 	)
 	models := []Model{{ID: missingAlias}, {ID: validAlias}, {ID: "gpt-5.5"}}
-	body, outcome, err := RenderCodex(codexCatalogOf(t, "gpt-5.4", "gpt-5.5"), models, CodexRenderConfig{
+	body, outcome, err := RenderCodex(codexModelsWithSlugs(t, "gpt-5.4", "gpt-5.5"), models, CodexRenderConfig{
 		ModelAliases: map[string]string{
 			missingAlias: "gpt-no-such-source",
 			validAlias:   "gpt-5.4",
@@ -212,7 +212,7 @@ func TestRenderCodexReportsMissingMetadataSourceAndContinues(t *testing.T) {
 
 func TestRenderCodexReportsEachConfiguredAliasAtMostOnce(t *testing.T) {
 	const alias = "gpt-duplicate-live-alias"
-	_, outcome, err := RenderCodex(codexCatalogOf(t, "gpt-5.4"), []Model{{ID: alias}, {ID: alias}}, CodexRenderConfig{
+	_, outcome, err := RenderCodex(codexModelsWithSlugs(t, "gpt-5.4"), []Model{{ID: alias}, {ID: alias}}, CodexRenderConfig{
 		ModelAliases: map[string]string{alias: "gpt-no-such-source"},
 	})
 	if err != nil {
@@ -231,7 +231,7 @@ func TestRenderCodexAliasResolutionIsSingleHop(t *testing.T) {
 		firstAlias  = "gpt-first-alias"
 		secondAlias = "gpt-second-alias"
 	)
-	body, outcome, err := RenderCodex(codexCatalogOf(t, "gpt-5.4"), []Model{{ID: firstAlias}, {ID: secondAlias}}, CodexRenderConfig{
+	body, outcome, err := RenderCodex(codexModelsWithSlugs(t, "gpt-5.4"), []Model{{ID: firstAlias}, {ID: secondAlias}}, CodexRenderConfig{
 		ModelAliases: map[string]string{
 			firstAlias:  secondAlias,
 			secondAlias: "gpt-5.4",
@@ -257,7 +257,7 @@ func TestRenderCodexUnappliedAliasReasonsAreExclusiveAndAliasSorted(t *testing.T
 		shadowed      = "gpt-5.5"
 		notForwarded  = "gpt-5.4"
 	)
-	codexModels := codexCatalogOf(t, "gpt-5.4", "gpt-5.5", "gpt-5.6-luna", "gpt-5.6-sol")
+	codexModels := codexModelsWithSlugs(t, "gpt-5.4", "gpt-5.5", "gpt-5.6-luna", "gpt-5.6-sol")
 	body, outcome, err := RenderCodex(codexModels, []Model{{ID: shadowed}, {ID: missingSource}}, CodexRenderConfig{
 		ModelAliases: map[string]string{
 			notForwarded:  "gpt-5.6-sol",
@@ -282,7 +282,7 @@ func TestRenderCodexUnappliedAliasReasonsAreExclusiveAndAliasSorted(t *testing.T
 }
 
 func TestRenderCodexUnconfiguredCopilotOnlyModelRemainsSilent(t *testing.T) {
-	body, outcome, err := RenderCodex(codexCatalogOf(t, "gpt-5.4"), []Model{{ID: "gpt-copilot-only"}}, CodexRenderConfig{})
+	body, outcome, err := RenderCodex(codexModelsWithSlugs(t, "gpt-5.4"), []Model{{ID: "gpt-copilot-only"}}, CodexRenderConfig{})
 	if err != nil {
 		t.Fatalf("RenderCodex: %v", err)
 	}
@@ -304,7 +304,7 @@ func TestRenderCodexAliasOrderFollowsLiveModelsAndIsMapOrderIndependent(t *testi
 		"gpt-a-alias": "gpt-5.6-luna",
 		"gpt-z-alias": "gpt-5.4",
 	}
-	codexModels := codexCatalogOf(t, "gpt-5.4", "gpt-5.5", "gpt-5.6-luna")
+	codexModels := codexModelsWithSlugs(t, "gpt-5.4", "gpt-5.5", "gpt-5.6-luna")
 	firstBody, firstOutcome, err := RenderCodex(codexModels, models, CodexRenderConfig{ModelAliases: firstAliases})
 	if err != nil {
 		t.Fatalf("RenderCodex first map: %v", err)
@@ -324,7 +324,7 @@ func TestRenderCodexAliasOrderFollowsLiveModelsAndIsMapOrderIndependent(t *testi
 
 func TestRenderCodexEmptyAliasMapPreservesExistingOutput(t *testing.T) {
 	models := []Model{{ID: "gpt-5.6-luna"}, {ID: "gpt-5.4"}}
-	codexModels := codexCatalogOf(t, "gpt-5.4", "gpt-5.6-luna")
+	codexModels := codexModelsWithSlugs(t, "gpt-5.4", "gpt-5.6-luna")
 	baselineBody, baselineOutcome, err := RenderCodex(codexModels, models, CodexRenderConfig{})
 	if err != nil {
 		t.Fatalf("RenderCodex baseline: %v", err)
@@ -345,7 +345,7 @@ func TestRenderCodexAliasOverrideBeatsGlobalAndOthersUseGlobal(t *testing.T) {
 		reviewer = "gpt-5.5"
 	)
 	models := []Model{{ID: alias}, {ID: source}, {ID: reviewer}}
-	body, outcome, err := RenderCodex(codexCatalogOf(t, source, reviewer), models, CodexRenderConfig{
+	body, outcome, err := RenderCodex(codexModelsWithSlugs(t, source, reviewer), models, CodexRenderConfig{
 		ModelAliases:    map[string]string{alias: source},
 		AutoReviewModel: reviewer,
 		AutoReviewModelOverrides: map[string]string{
@@ -373,7 +373,7 @@ func TestRenderCodexAliasesParticipateInCompleteReviewerMembership(t *testing.T)
 		secondAlias = "gpt-second-review-alias"
 	)
 	models := []Model{{ID: firstAlias}, {ID: secondAlias}, {ID: "gpt-5.5"}}
-	codexModels := codexCatalogOf(t, "gpt-5.4", "gpt-5.5", "gpt-5.6-luna")
+	codexModels := codexModelsWithSlugs(t, "gpt-5.4", "gpt-5.5", "gpt-5.6-luna")
 	body, outcome, err := RenderCodex(codexModels, models, CodexRenderConfig{
 		ModelAliases: map[string]string{
 			firstAlias:  "gpt-5.4",
@@ -402,7 +402,7 @@ func TestRenderCodexAliasesParticipateInCompleteReviewerMembership(t *testing.T)
 
 func TestRenderCodexDoesNotAdvertiseUnappliedAliasAsReviewer(t *testing.T) {
 	const alias = "gpt-unapplied-review-alias"
-	body, outcome, err := RenderCodex(codexCatalogOf(t, "gpt-5.4", "gpt-5.5"), []Model{{ID: "gpt-5.4"}}, CodexRenderConfig{
+	body, outcome, err := RenderCodex(codexModelsWithSlugs(t, "gpt-5.4", "gpt-5.5"), []Model{{ID: "gpt-5.4"}}, CodexRenderConfig{
 		ModelAliases: map[string]string{alias: "gpt-5.5"},
 		AutoReviewModelOverrides: map[string]string{
 			"gpt-5.4": alias,
@@ -426,7 +426,7 @@ func TestRenderCodexAliasRemovesSourceReviewerAndUsesAliasLiveLimits(t *testing.
 		alias  = "gpt-limit-alias"
 		source = "gpt-5.4"
 	)
-	codexModels := codexCatalog(t, completeCodexEntry(source, map[string]any{
+	codexModels := syntheticCodexModels(t, completeCodexEntry(source, map[string]any{
 		"auto_review_model_override": "source-reviewer",
 		"context_window":             272000,
 		"max_context_window":         1000000,
@@ -466,7 +466,7 @@ func TestRenderCodexAliasRemovesSourceReviewerAndUsesAliasLiveLimits(t *testing.
 
 func TestRenderCodexCopiesCurrentFieldsVerbatimAndDoesNotAliasThem(t *testing.T) {
 	models := Filter(capturedModels(t), endpoint.RouteOpenAIResponses)
-	codexModels := codexCatalog(t,
+	codexModels := syntheticCodexModels(t,
 		completeCodexEntry("gpt-5.4", map[string]any{"auto_review_model_override": "codex-reviewer"}),
 		completeCodexEntry("gpt-5.5", map[string]any{"auto_review_model_override": "codex-reviewer"}),
 		completeCodexEntry("gpt-5.6-luna", nil),
@@ -514,7 +514,7 @@ func TestRenderCodexCopiesCurrentFieldsVerbatimAndDoesNotAliasThem(t *testing.T)
 
 func TestRenderCodexInjectsOnlyAnEmittedReviewer(t *testing.T) {
 	models := Filter(capturedModels(t), endpoint.RouteOpenAIResponses)
-	codexModels := codexCatalog(t,
+	codexModels := syntheticCodexModels(t,
 		completeCodexEntry("gpt-5.4", map[string]any{"auto_review_model_override": "codex-auto-review"}),
 		completeCodexEntry("gpt-5.6-luna", nil),
 		completeCodexEntry("codex-auto-review", nil),
@@ -571,7 +571,7 @@ func TestRenderCodexInjectsOnlyAnEmittedReviewer(t *testing.T) {
 
 func TestRenderCodexResolvesPerModelReviewerBeforeGlobalFallback(t *testing.T) {
 	models := []Model{{ID: "gpt-5.6-luna"}, {ID: "gpt-5.4"}, {ID: "gpt-5.5"}}
-	body, outcome, err := RenderCodex(codexCatalogOf(t, "gpt-5.4", "gpt-5.5", "gpt-5.6-luna"), models, CodexRenderConfig{
+	body, outcome, err := RenderCodex(codexModelsWithSlugs(t, "gpt-5.4", "gpt-5.5", "gpt-5.6-luna"), models, CodexRenderConfig{
 		AutoReviewModel: "gpt-5.5",
 		AutoReviewModelOverrides: map[string]string{
 			"gpt-5.6-luna": "gpt-5.4",
@@ -597,7 +597,7 @@ func TestRenderCodexResolvesPerModelReviewerBeforeGlobalFallback(t *testing.T) {
 
 func TestRenderCodexResolvesReviewerOverridesSingleHop(t *testing.T) {
 	models := []Model{{ID: "gpt-5.6-luna"}, {ID: "gpt-5.4"}, {ID: "gpt-5.5"}}
-	body, _, err := RenderCodex(codexCatalogOf(t, "gpt-5.4", "gpt-5.5", "gpt-5.6-luna"), models, CodexRenderConfig{
+	body, _, err := RenderCodex(codexModelsWithSlugs(t, "gpt-5.4", "gpt-5.5", "gpt-5.6-luna"), models, CodexRenderConfig{
 		AutoReviewModelOverrides: map[string]string{
 			"gpt-5.6-luna": "gpt-5.4",
 			"gpt-5.4":      "gpt-5.5",
@@ -627,7 +627,7 @@ func TestRenderCodexSkipsBadExplicitReviewerWithoutGlobalFallback(t *testing.T) 
 		{ID: "gpt-5.4"},
 		{ID: "gpt-5.5"},
 	}
-	body, outcome, err := RenderCodex(codexCatalogOf(t, "gpt-5.4", "gpt-5.5", "gpt-5.6-luna"), models, CodexRenderConfig{
+	body, outcome, err := RenderCodex(codexModelsWithSlugs(t, "gpt-5.4", "gpt-5.5", "gpt-5.6-luna"), models, CodexRenderConfig{
 		AutoReviewModel: "gpt-5.5",
 		AutoReviewModelOverrides: map[string]string{
 			"gpt-5.6-luna": missingReviewer,
@@ -660,7 +660,7 @@ func TestRenderCodexSkipsBadExplicitReviewerWithoutGlobalFallback(t *testing.T) 
 func TestRenderCodexReportsBadGlobalPerAffectedModelInEmissionOrder(t *testing.T) {
 	const missingReviewer = "missing-global-reviewer"
 	models := []Model{{ID: "gpt-5.6-luna"}, {ID: "gpt-5.4"}, {ID: "gpt-5.5"}}
-	body, outcome, err := RenderCodex(codexCatalogOf(t, "gpt-5.4", "gpt-5.5", "gpt-5.6-luna"), models, CodexRenderConfig{
+	body, outcome, err := RenderCodex(codexModelsWithSlugs(t, "gpt-5.4", "gpt-5.5", "gpt-5.6-luna"), models, CodexRenderConfig{
 		AutoReviewModel: missingReviewer,
 		AutoReviewModelOverrides: map[string]string{
 			"gpt-5.4": "gpt-5.6-luna",
@@ -691,7 +691,7 @@ func TestRenderCodexReportsBadGlobalPerAffectedModelInEmissionOrder(t *testing.T
 
 func TestRenderCodexIgnoresNonAdvertisedAndMiscasedOverrideKeys(t *testing.T) {
 	models := []Model{{ID: "gpt-5.6-luna"}, {ID: "gpt-5.4"}}
-	body, outcome, err := RenderCodex(codexCatalogOf(t, "gpt-5.4", "gpt-5.5", "gpt-5.6-luna"), models, CodexRenderConfig{
+	body, outcome, err := RenderCodex(codexModelsWithSlugs(t, "gpt-5.4", "gpt-5.5", "gpt-5.6-luna"), models, CodexRenderConfig{
 		AutoReviewModelOverrides: map[string]string{
 			"gpt-5.5":      "missing-reviewer",
 			"GPT-5.6-LUNA": "missing-reviewer",
@@ -719,7 +719,7 @@ func TestRenderCodexDropsAReviewerCopilotStopsForwarding(t *testing.T) {
 		}
 	}
 
-	codexModels := codexCatalogOf(t, "gpt-5.4", "gpt-5.5", "gpt-5.6-luna")
+	codexModels := codexModelsWithSlugs(t, "gpt-5.4", "gpt-5.5", "gpt-5.6-luna")
 	body, outcome, err := RenderCodex(codexModels, withoutReviewer, CodexRenderConfig{AutoReviewModel: "gpt-5.4"})
 	if err != nil {
 		t.Fatalf("RenderCodex: %v", err)
@@ -749,7 +749,7 @@ func TestRenderCodexOverlaysLimitsWithIndependentVendoredFallbacks(t *testing.T)
 		{ID: "gpt-5.4", Capabilities: Capabilities{Limits: Limits{MaxContextWindowTokens: &contextOnly}}},
 		{ID: "gpt-5.5", Capabilities: Capabilities{Limits: Limits{MaxPromptTokens: &both, MaxContextWindowTokens: &both}}},
 	}
-	codexModels := codexCatalog(t,
+	codexModels := syntheticCodexModels(t,
 		completeCodexEntry("gpt-5.6-luna", map[string]any{"context_window": 100000, "max_context_window": 200000}),
 		completeCodexEntry("gpt-5.4", map[string]any{"context_window": 110000, "max_context_window": 210000}),
 		completeCodexEntry("gpt-5.5", map[string]any{"context_window": 120000, "max_context_window": 220000}),
@@ -786,7 +786,7 @@ func TestRenderCodexFallsBackWhenCapturedCopilotModelsOmitLimits(t *testing.T) {
 		}
 	}
 
-	codexModels := codexCatalog(t,
+	codexModels := syntheticCodexModels(t,
 		completeCodexEntry("gpt-5.4", map[string]any{"context_window": 110000, "max_context_window": 210000}),
 		completeCodexEntry("gpt-5.6-sol", map[string]any{"context_window": 130000, "max_context_window": 230000}),
 	)
@@ -815,30 +815,27 @@ func TestDecodePreservesOptionalMaxContextWindowTokens(t *testing.T) {
 	}
 }
 
-// codexCatalog decodes complete synthetic entries through the accept contract
+// syntheticCodexModels decodes complete synthetic entries through the accept contract
 // the vendored snapshot must pass. The bytes are indented like upstream's
 // models.json, so raw values carry interior whitespace the renderer must keep.
-func codexCatalog(t *testing.T, entries ...map[string]any) CodexModels {
+func syntheticCodexModels(t *testing.T, entries ...map[string]any) CodexModels {
 	t.Helper()
 	encoded, err := json.MarshalIndent(map[string]any{"models": entries}, "", "  ")
 	if err != nil {
-		t.Fatalf("encode synthetic Codex catalog: %v", err)
+		t.Fatalf("encode synthetic Codex models: %v", err)
 	}
 	codexModels, err := validateCodexModels(encoded)
 	if err != nil {
-		t.Fatalf("synthetic Codex catalog is not complete: %v", err)
+		t.Fatalf("synthetic Codex models are not complete: %v", err)
 	}
 	return codexModels
 }
 
-// codexCatalogOf is codexCatalog for tests that need only entry membership.
-func codexCatalogOf(t *testing.T, slugs ...string) CodexModels {
+// codexModelsWithSlugs is syntheticCodexModels for tests that need only entry
+// membership.
+func codexModelsWithSlugs(t *testing.T, slugs ...string) CodexModels {
 	t.Helper()
-	entries := make([]map[string]any, len(slugs))
-	for i, slug := range slugs {
-		entries[i] = completeCodexEntry(slug, nil)
-	}
-	return codexCatalog(t, entries...)
+	return syntheticCodexModels(t, completeCodexEntries(slugs...)...)
 }
 
 func assertCodexRequiredFieldValues(t *testing.T, index int, model codexRequiredFields) {
@@ -905,7 +902,7 @@ func decodeStringField(t *testing.T, entry map[string]json.RawMessage, field str
 func assertRawFieldEqual(t *testing.T, slug, field string, got, want json.RawMessage) {
 	t.Helper()
 	if !bytes.Equal(got, want) {
-		t.Errorf("%s.%s = %s, want Codex catalog value %s", slug, field, got, want)
+		t.Errorf("%s.%s = %s, want Codex entry value %s", slug, field, got, want)
 	}
 }
 

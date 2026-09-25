@@ -130,6 +130,20 @@ func TestHandlerAcceptsADisabledCodexCatalogWithoutAModelsSource(t *testing.T) {
 	}
 }
 
+func TestRenderOneRejectsAnEnabledCodexCatalogWithoutAModelsSource(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "/openai/v1/models?client_version=fixture", nil)
+	_, _, err := RenderOne(endpoint.OpenAICatalog(), Rendering{
+		Render: RenderOpenAI,
+		Codex: CodexDescriptor{
+			Enabled:      true,
+			RenderConfig: CodexRenderConfig{AutoReviewModel: "gpt-5.4"},
+		},
+	}, request, []Model{{ID: "gpt-5.4", Vendor: "OpenAI"}}, request.Context(), discardHandlerLogger())
+	if err == nil || !strings.Contains(err.Error(), "Codex models source") {
+		t.Fatalf("RenderOne error = %v, want the missing Codex models source named", err)
+	}
+}
+
 func TestRenderOneReturnsTheShapeThatMatchesItsRepresentation(t *testing.T) {
 	models := []Model{{ID: "gpt-5.4", Vendor: "OpenAI"}}
 	tests := []struct {
@@ -153,7 +167,7 @@ func TestRenderOneReturnsTheShapeThatMatchesItsRepresentation(t *testing.T) {
 				Render: RenderOpenAI,
 				Codex: CodexDescriptor{
 					Enabled:      true,
-					Models:       pinnedCodexCatalog(t, "gpt-5.4"),
+					Models:       pinnedCodexModels(t, "gpt-5.4"),
 					RenderConfig: CodexRenderConfig{AutoReviewModel: "gpt-5.4"},
 				},
 			},
@@ -213,7 +227,7 @@ func TestHandlerNegotiatesCodexShapeOnlyWhenEveryGateIsOpen(t *testing.T) {
 				Render: RenderOpenAI,
 				Codex: CodexDescriptor{
 					Enabled: tc.enabled,
-					Models:  pinnedCodexCatalog(t, "gpt-5.4"),
+					Models:  pinnedCodexModels(t, "gpt-5.4"),
 					RenderConfig: CodexRenderConfig{
 						ModelAliases:    tc.aliases,
 						AutoReviewModel: tc.reviewer,
@@ -256,7 +270,7 @@ func TestHandlerCodexHEADMatchesGETHeadersAndSuppressesBody(t *testing.T) {
 		Render: RenderOpenAI,
 		Codex: CodexDescriptor{
 			Enabled: true,
-			Models:  pinnedCodexCatalog(t, "gpt-5.4"),
+			Models:  pinnedCodexModels(t, "gpt-5.4"),
 			RenderConfig: CodexRenderConfig{
 				ModelAliases: map[string]string{alias: "gpt-5.4"},
 			},
@@ -303,7 +317,7 @@ func TestHandlerLogsEverySkippedCodexReviewer(t *testing.T) {
 		Render: RenderOpenAI,
 		Codex: CodexDescriptor{
 			Enabled: true,
-			Models:  pinnedCodexCatalog(t, "gpt-5.4"),
+			Models:  pinnedCodexModels(t, "gpt-5.4"),
 			RenderConfig: CodexRenderConfig{
 				AutoReviewModel: "missing-reviewer",
 			},
@@ -350,7 +364,7 @@ func TestHandlerLogsEveryUnappliedCodexAliasOnEveryRequest(t *testing.T) {
 		Render: RenderOpenAI,
 		Codex: CodexDescriptor{
 			Enabled: true,
-			Models:  pinnedCodexCatalog(t, shadowed, "gpt-5.5", "gpt-5.6-sol"),
+			Models:  pinnedCodexModels(t, shadowed, "gpt-5.5", "gpt-5.6-sol"),
 			RenderConfig: CodexRenderConfig{ModelAliases: map[string]string{
 				notForwarded:  "gpt-5.6-sol",
 				missingSource: "gpt-no-such-source",
@@ -514,7 +528,7 @@ func TestHandlerAliasFailuresRemainOpenAIBadGateway(t *testing.T) {
 		models       *cache.Value[[]byte]
 		wantMessage  string
 	}{
-		{name: "invalid live Copilot JSON", upstreamBody: []byte(`{"data":[`), models: pinnedCodexCatalog(t, "gpt-5.4"), wantMessage: "upstream models response was invalid"},
+		{name: "invalid live Copilot JSON", upstreamBody: []byte(`{"data":[`), models: pinnedCodexModels(t, "gpt-5.4"), wantMessage: "upstream models response was invalid"},
 		{name: "invalid current Codex bytes", upstreamBody: validUpstream, models: invalidCurrent, wantMessage: "could not render the models catalog"},
 	}
 	for _, tc := range tests {
@@ -565,19 +579,15 @@ func testCodexModelsValue(t *testing.T, fallback, current []byte, fetchErr error
 	return modelsValue
 }
 
-// pinnedCodexCatalog returns a Codex Models source whose current bytes are a
-// synthetic catalog of complete entries for slugs and never refresh.
-func pinnedCodexCatalog(t *testing.T, slugs ...string) *cache.Value[[]byte] {
+// pinnedCodexModels returns a Codex Models source whose current bytes hold one
+// complete synthetic entry per slug and never refresh.
+func pinnedCodexModels(t *testing.T, slugs ...string) *cache.Value[[]byte] {
 	t.Helper()
-	entries := make([]map[string]any, len(slugs))
-	for i, slug := range slugs {
-		entries[i] = completeCodexEntry(slug, nil)
-	}
 	return cache.New(discardHandlerLogger(), cache.Cacheable[[]byte]{
-		Fallback:        codexModelsBytes(t, entries...),
+		Fallback:        codexModelsBytes(t, completeCodexEntries(slugs...)...),
 		FallbackVersion: "synthetic-pinned",
 		Fetch: func(context.Context) ([]byte, string, error) {
-			return nil, "", errors.New("pinned synthetic Codex catalog is never fetched")
+			return nil, "", errors.New("pinned synthetic Codex models are never fetched")
 		},
 		Hash: hashModels,
 	})

@@ -26,22 +26,11 @@ import (
 // release.json, so a routine floor bump needs no test edit.
 
 func TestEmbeddedCodexModelsLoadAtStartup(t *testing.T) {
-	var envelope struct {
-		Models []map[string]json.RawMessage `json:"models"`
-	}
-	if err := json.Unmarshal(embeddedCodexModels, &envelope); err != nil {
-		t.Fatalf("decode vendored Codex envelope: %v", err)
-	}
-	wantSlugs := make([]string, len(envelope.Models))
-	for i, entry := range envelope.Models {
-		if err := json.Unmarshal(entry["slug"], &wantSlugs[i]); err != nil {
-			t.Fatalf("decode vendored models[%d] slug: %v", i, err)
-		}
+	var wantSlugs []string
+	for _, entry := range vendoredCodexModels(t) {
+		wantSlugs = append(wantSlugs, codexEntrySlug(t, entry))
 	}
 	sort.Strings(wantSlugs)
-	if len(wantSlugs) == 0 {
-		t.Fatal("vendored Codex snapshot has no entries")
-	}
 
 	loaded := mustDecodeCodexModels(embeddedCodexModels)
 	gotSlugs := make([]string, 0, len(loaded))
@@ -82,13 +71,40 @@ func TestVendoredCodexCatalogRoundTripFidelity(t *testing.T) {
 	if got := gitBlobObjectID(embeddedCodexModels); got != release.Models.GitBlob {
 		t.Fatalf("%s vendored snapshot Git blob = %s, want upstream %s", release.Release.Tag, got, release.Models.GitBlob)
 	}
-	if _, err := validateCodexModels(embeddedCodexModels); err != nil {
+	decodedModels, err := validateCodexModels(embeddedCodexModels)
+	if err != nil {
 		t.Fatalf("decode %s vendored snapshot at %s: %v", release.Release.Tag, release.Release.PeeledCommit, err)
 	}
-	vendoredModels := rawCodexModelsBySlug(t, embeddedCodexModels)
+	vendoredModels := make(map[string]map[string]json.RawMessage)
+	var vendoredSlugs []string
+	for _, entry := range vendoredCodexModels(t) {
+		slug := codexEntrySlug(t, entry)
+		vendoredModels[slug] = entry
+		vendoredSlugs = append(vendoredSlugs, slug)
+	}
 	defaultSlug := release.Models.AuditedBundledDefault
 	if _, present := vendoredModels[defaultSlug]; !present {
 		t.Fatalf("vendored catalog has no audited bundled default %q", defaultSlug)
+	}
+
+	// Every vendored entry, not only the live intersection below, reaches the
+	// wire with each raw field intact; the renderer always removes the reviewer.
+	everyEntry := make([]Model, len(vendoredSlugs))
+	for i, slug := range vendoredSlugs {
+		everyEntry[i] = Model{ID: slug}
+	}
+	everyBody, _, err := RenderCodex(decodedModels, everyEntry, CodexRenderConfig{})
+	if err != nil {
+		t.Fatalf("render every vendored entry: %v", err)
+	}
+	everyRendered := decodeRenderedCodex(t, everyBody)
+	if got := renderedSlugs(t, everyRendered); !reflect.DeepEqual(got, vendoredSlugs) {
+		t.Fatalf("rendered slugs = %q, want every vendored entry %q", got, vendoredSlugs)
+	}
+	for i, entry := range everyRendered {
+		assertVendoredFieldsPreserved(t, vendoredSlugs[i], entry, vendoredModels[vendoredSlugs[i]], map[string]struct{}{
+			"auto_review_model_override": {},
+		})
 	}
 
 	github := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -195,26 +211,7 @@ func TestVendoredCodexCatalogRoundTripFidelity(t *testing.T) {
 	for _, entry := range entries {
 		slug := decodeStringField(t, entry, "slug")
 		source := vendoredModels[slug]
-		for field, want := range source {
-			if _, mutated := mutatedFields[field]; mutated {
-				continue
-			}
-			got, present := entry[field]
-			if !present {
-				t.Errorf("%s lost upstream field %q", slug, field)
-				continue
-			}
-			if !bytes.Equal(got, want) {
-				t.Errorf("%s.%s changed:\n got: %s\nwant: %s", slug, field, got, want)
-			}
-		}
-		for field := range entry {
-			if _, sourceField := source[field]; !sourceField {
-				if _, governed := mutatedFields[field]; !governed {
-					t.Errorf("%s fabricated ungoverned field %q", slug, field)
-				}
-			}
-		}
+		assertVendoredFieldsPreserved(t, slug, entry, source, mutatedFields)
 		if got := decodeStringField(t, entry, "auto_review_model_override"); got != reviewer {
 			t.Errorf("%s reviewer = %q, want %q", slug, got, reviewer)
 		}
@@ -345,23 +342,54 @@ func withCompatibilityLimits(t *testing.T, body []byte, slug string, promptLimit
 	return encoded
 }
 
-func rawCodexModelsBySlug(t *testing.T, body []byte) map[string]map[string]json.RawMessage {
+// vendoredCodexModels returns the vendored snapshot's raw entries in file order.
+func vendoredCodexModels(t *testing.T) []map[string]json.RawMessage {
 	t.Helper()
 	var envelope struct {
 		Models []map[string]json.RawMessage `json:"models"`
 	}
-	if err := json.Unmarshal(body, &envelope); err != nil {
-		t.Fatalf("decode raw vendored Codex snapshot: %v", err)
+	if err := json.Unmarshal(embeddedCodexModels, &envelope); err != nil {
+		t.Fatalf("decode vendored Codex snapshot: %v", err)
 	}
-	models := make(map[string]map[string]json.RawMessage, len(envelope.Models))
-	for i, entry := range envelope.Models {
-		var slug string
-		if err := json.Unmarshal(entry["slug"], &slug); err != nil {
-			t.Fatalf("decode raw models[%d] slug: %v", i, err)
+	if len(envelope.Models) == 0 {
+		t.Fatal("vendored Codex snapshot has no entries")
+	}
+	return envelope.Models
+}
+
+func codexEntrySlug(t *testing.T, entry map[string]json.RawMessage) string {
+	t.Helper()
+	var slug string
+	if err := json.Unmarshal(entry["slug"], &slug); err != nil {
+		t.Fatalf("decode Codex entry slug: %v", err)
+	}
+	return slug
+}
+
+// assertVendoredFieldsPreserved requires entry to carry every raw source field
+// byte-for-byte, except governed mutations, and to add no ungoverned field.
+func assertVendoredFieldsPreserved(t *testing.T, slug string, entry, source map[string]json.RawMessage, governed map[string]struct{}) {
+	t.Helper()
+	for field, want := range source {
+		if _, mutated := governed[field]; mutated {
+			continue
 		}
-		models[slug] = entry
+		got, present := entry[field]
+		if !present {
+			t.Errorf("%s lost upstream field %q", slug, field)
+			continue
+		}
+		if !bytes.Equal(got, want) {
+			t.Errorf("%s.%s changed:\n got: %s\nwant: %s", slug, field, got, want)
+		}
 	}
-	return models
+	for field := range entry {
+		if _, sourceField := source[field]; !sourceField {
+			if _, mutated := governed[field]; !mutated {
+				t.Errorf("%s fabricated ungoverned field %q", slug, field)
+			}
+		}
+	}
 }
 
 func assertOptionalOverlay(t *testing.T, slug string, entry map[string]json.RawMessage, field string, limit *int, fallback json.RawMessage) {

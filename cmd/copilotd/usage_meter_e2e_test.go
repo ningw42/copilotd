@@ -125,7 +125,7 @@ func pinnedCodexModels(t *testing.T, body []byte) *cache.Value[[]byte] {
 		Fallback:        body,
 		FallbackVersion: "synthetic",
 		Fetch: func(context.Context) ([]byte, string, error) {
-			return nil, "", errors.New("pinned synthetic Codex catalog is never fetched")
+			return nil, "", errors.New("pinned synthetic Codex models are never fetched")
 		},
 		Hash: func(body []byte) string {
 			sum := sha256.Sum256(body)

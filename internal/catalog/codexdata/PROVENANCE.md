@@ -305,8 +305,8 @@ command-auth `printf` executable from `PATH` and skips with an explicit
 prerequisite message when unavailable. Each check decides whether it is opted
 in before it reads vendored entries. The entries it drives come from the data:
 the unknown slug clones the audited bundled default. The replaced slug is the
-first vendored entry other than that default. Both take a priority one below
-every vendored priority. The downloaded Codex executable was
+first vendored entry other than that default, preferring one hidden from the
+picker. Both take a priority one below every vendored priority. The downloaded Codex executable was
 temporary and is not stored in the repository.
 
 ## Manual release bump checklist
@@ -319,9 +319,9 @@ temporary and is not stored in the repository.
 3. A routine bump is a data-only change: `models.json`, `release.json`, and this
    file's identity and audit prose. Change code comments only when the audit
    finds that upstream semantics changed. Expect no test edits. Logic tests run
-   on synthetic Codex catalogs. The vendored-snapshot tests compute every
+   on synthetic Codex models. The vendored-snapshot tests compute every
    expectation from these files; the guard
-   `TestOnlyVendoredSnapshotTestsReadTheEmbeddedCodexCatalog` allow-lists them.
+   `TestOnlyAllowListedTestsReadTheVendoredSnapshot` allow-lists them.
    Treat a failing test as an audit finding, not a literal to re-pin. Leave the
    runtime loader/cache, synthetic fixtures, independent Serde-required-field
    list, `CONFIGURATION.md`, `CONTEXT.md`, and ADRs unchanged unless the audit
