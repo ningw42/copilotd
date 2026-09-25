@@ -13,12 +13,61 @@ import (
 	"net/http/httptest"
 	"os"
 	"reflect"
+	"sort"
 	"testing"
 	"time"
 
 	"github.com/ningw42/copilotd/internal/cache"
 	"github.com/ningw42/copilotd/internal/endpoint"
 )
+
+// Tests in this file read the exact vendored snapshot. Every expectation is
+// computed from its bytes, the captured Copilot /models fixture, or
+// release.json, so a routine floor bump needs no test edit.
+
+func TestEmbeddedCodexModelsLoadAtStartup(t *testing.T) {
+	var envelope struct {
+		Models []map[string]json.RawMessage `json:"models"`
+	}
+	if err := json.Unmarshal(embeddedCodexModels, &envelope); err != nil {
+		t.Fatalf("decode vendored Codex envelope: %v", err)
+	}
+	wantSlugs := make([]string, len(envelope.Models))
+	for i, entry := range envelope.Models {
+		if err := json.Unmarshal(entry["slug"], &wantSlugs[i]); err != nil {
+			t.Fatalf("decode vendored models[%d] slug: %v", i, err)
+		}
+	}
+	sort.Strings(wantSlugs)
+	if len(wantSlugs) == 0 {
+		t.Fatal("vendored Codex snapshot has no entries")
+	}
+
+	loaded := mustDecodeCodexModels(embeddedCodexModels)
+	gotSlugs := make([]string, 0, len(loaded))
+	for slug, fields := range loaded {
+		gotSlugs = append(gotSlugs, slug)
+
+		var embeddedSlug string
+		if err := json.Unmarshal(fields["slug"], &embeddedSlug); err != nil {
+			t.Errorf("decode slug field for %q: %v", slug, err)
+		} else if embeddedSlug != slug {
+			t.Errorf("entry keyed by %q carries slug %q", slug, embeddedSlug)
+		}
+		if len(fields) <= 1 {
+			t.Errorf("entry %q did not retain its non-slug fields", slug)
+		}
+		for field, raw := range fields {
+			if !json.Valid(raw) {
+				t.Errorf("entry %q field %q is not valid raw JSON", slug, field)
+			}
+		}
+	}
+	sort.Strings(gotSlugs)
+	if !reflect.DeepEqual(gotSlugs, wantSlugs) {
+		t.Errorf("embedded Codex slugs = %q, want every vendored entry %q", gotSlugs, wantSlugs)
+	}
+}
 
 func TestVendoredCodexCatalogRoundTripFidelity(t *testing.T) {
 	release := embeddedCodexRelease
@@ -40,32 +89,6 @@ func TestVendoredCodexCatalogRoundTripFidelity(t *testing.T) {
 	defaultSlug := release.Models.AuditedBundledDefault
 	if _, present := vendoredModels[defaultSlug]; !present {
 		t.Fatalf("vendored catalog has no audited bundled default %q", defaultSlug)
-	}
-
-	// gpt-6-astra is the rust-v0.153.4 (2026-09-05) witness for Codex's
-	// canonical-only instruction shape and raw transport-field preservation.
-	// rust-v0.154.0 adds the defaulted supports_experimental_context field.
-	// Keep these schema witnesses independent of the moving default.
-	const astraSlug = "gpt-6-astra"
-	astra, present := vendoredModels[astraSlug]
-	if !present {
-		t.Fatalf("vendored catalog has no historical shape witness %q", astraSlug)
-	}
-	if _, present := astra["base_instructions"]; present {
-		t.Errorf("%s unexpectedly has legacy base_instructions", astraSlug)
-	}
-	var astraMessages map[string]json.RawMessage
-	if err := json.Unmarshal(astra["model_messages"], &astraMessages); err != nil {
-		t.Fatalf("decode %s model_messages: %v", astraSlug, err)
-	}
-	if template := decodeStringField(t, astraMessages, "instructions_template"); template == "" {
-		t.Errorf("%s has empty canonical instructions_template", astraSlug)
-	}
-	if got := bytes.TrimSpace(astra["requires_sandboxed_review"]); !bytes.Equal(got, []byte("false")) {
-		t.Errorf("%s.requires_sandboxed_review = %s, want preserved false", astraSlug, got)
-	}
-	if got := bytes.TrimSpace(astra["supports_experimental_context"]); !bytes.Equal(got, []byte("true")) {
-		t.Errorf("%s.supports_experimental_context = %s, want preserved true", astraSlug, got)
 	}
 
 	github := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -119,13 +142,27 @@ func TestVendoredCodexCatalogRoundTripFidelity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read raw Copilot /models fixture: %v", err)
 	}
+	// The audited bundled default is always vendored, so it anchors the reviewer
+	// and the limits overlay however the rest of the catalog moves.
 	const (
-		overlayModel         = "gpt-5.6-luna"
 		overlayPromptLimit   = 123456
 		overlayContextWindow = 234567
 	)
+	overlayModel, reviewer := defaultSlug, defaultSlug
 	copilotBytes = withCompatibilityLimits(t, copilotBytes, overlayModel, overlayPromptLimit, overlayContextWindow)
-	const reviewer = "gpt-5.6-luna"
+	copilotModels, err := Decode(copilotBytes)
+	if err != nil {
+		t.Fatalf("decode raw Copilot /models fixture: %v", err)
+	}
+	forwardable := make(map[string]Model)
+	var wantSlugs []string
+	for _, model := range Filter(copilotModels, endpoint.RouteOpenAIResponses) {
+		forwardable[model.ID] = model
+		if _, vendored := vendoredModels[model.ID]; vendored {
+			wantSlugs = append(wantSlugs, model.ID)
+		}
+	}
+
 	handler := Handler(discardHandlerLogger(), endpoint.OpenAICatalog(), Rendering{
 		Render: RenderOpenAI,
 		Codex: CodexDescriptor{
@@ -144,22 +181,10 @@ func TestVendoredCodexCatalogRoundTripFidelity(t *testing.T) {
 		t.Fatalf("handler status = %d, want 200: %s", recorder.Code, recorder.Body.String())
 	}
 	entries := decodeRenderedCodex(t, recorder.Body.Bytes())
-	wantSlugs := []string{
-		"gpt-5.4", "gpt-5.5",
-		"gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra",
-	}
 	if got := renderedSlugs(t, entries); !reflect.DeepEqual(got, wantSlugs) {
 		t.Fatalf("rendered slugs = %q, want vendored/Copilot intersection %q", got, wantSlugs)
 	}
 
-	copilotModels, err := Decode(copilotBytes)
-	if err != nil {
-		t.Fatalf("decode raw Copilot /models fixture: %v", err)
-	}
-	forwardable := make(map[string]Model)
-	for _, model := range Filter(copilotModels, endpoint.RouteOpenAIResponses) {
-		forwardable[model.ID] = model
-	}
 	mutatedFields := map[string]struct{}{
 		"auto_review_model_override": {},
 		"context_window":             {},
@@ -282,6 +307,8 @@ func gitBlobObjectID(body []byte) string {
 	return hex.EncodeToString(hasher.Sum(nil))
 }
 
+// withCompatibilityLimits gives slug live Copilot limits, first adding it as a
+// Responses-forwardable model when the captured fixture lacks it.
 func withCompatibilityLimits(t *testing.T, body []byte, slug string, promptLimit, contextWindow int) []byte {
 	t.Helper()
 	var envelope struct {
@@ -290,22 +317,32 @@ func withCompatibilityLimits(t *testing.T, body []byte, slug string, promptLimit
 	if err := json.Unmarshal(body, &envelope); err != nil {
 		t.Fatalf("decode raw Copilot /models fixture: %v", err)
 	}
+	var target map[string]any
 	for _, model := range envelope.Data {
-		if model["id"] != slug {
-			continue
+		if model["id"] == slug {
+			target = model
+			break
 		}
-		model["capabilities"] = map[string]any{"limits": map[string]any{
-			"max_prompt_tokens":         promptLimit,
-			"max_context_window_tokens": contextWindow,
-		}}
-		encoded, err := json.Marshal(envelope)
-		if err != nil {
-			t.Fatalf("encode raw Copilot /models fixture with limits: %v", err)
-		}
-		return encoded
 	}
-	t.Fatalf("raw Copilot /models fixture has no %q", slug)
-	return nil
+	if target == nil {
+		target = map[string]any{
+			"id":                   slug,
+			"name":                 slug,
+			"vendor":               "OpenAI",
+			"model_picker_enabled": true,
+			"supported_endpoints":  []string{string(endpoint.RouteOpenAIResponses)},
+		}
+		envelope.Data = append(envelope.Data, target)
+	}
+	target["capabilities"] = map[string]any{"limits": map[string]any{
+		"max_prompt_tokens":         promptLimit,
+		"max_context_window_tokens": contextWindow,
+	}}
+	encoded, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatalf("encode raw Copilot /models fixture with limits: %v", err)
+	}
+	return encoded
 }
 
 func rawCodexModelsBySlug(t *testing.T, body []byte) map[string]map[string]json.RawMessage {

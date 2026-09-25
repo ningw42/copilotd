@@ -8,12 +8,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -22,9 +24,14 @@ import (
 
 // These tests are opt-in black-box checks for release audits.
 // CODEX_CATALOG_AUDIT_BINARY must name the exact pinned Codex executable;
-// ordinary repository tests remain network- and tool-independent.
+// ordinary repository tests remain network- and tool-independent. Each test
+// decides whether it is opted in before reading vendored entries, and drives
+// entries chosen from the vendored data rather than fixed slugs.
 func TestLatestCodexBinaryAcceptsUnknownRemoteCatalogModel(t *testing.T) {
-	observed := observeLatestCodexBinaryCatalog(t, singleRemoteDefaultModel(t))
+	audit := latestCodexBinaryAudit(t)
+	defaultSlug := embeddedCodexRelease.Models.AuditedBundledDefault
+	unknownSlug := defaultSlug + "-audit-unknown"
+	observed := audit.observe(t, singleRemoteWinningModel(t, defaultSlug, unknownSlug), "")
 	wantClientVersion := auditedCodexCLIVersion(t)
 
 	if observed.modelsCalls == 0 {
@@ -48,13 +55,15 @@ func TestLatestCodexBinaryAcceptsUnknownRemoteCatalogModel(t *testing.T) {
 	if observed.responsesMethod != http.MethodPost {
 		t.Errorf("Responses method = %q, want POST", observed.responsesMethod)
 	}
-	if observed.selectedModel != "gpt-5.4-audit-alias" {
-		t.Errorf("selected model = %q, want unknown remote priority/visibility winner gpt-5.4-audit-alias", observed.selectedModel)
+	if observed.selectedModel != unknownSlug {
+		t.Errorf("selected model = %q, want unknown remote priority/visibility winner %q", observed.selectedModel, unknownSlug)
 	}
 }
 
 func TestLatestCodexBinaryReplacesBundledRemoteCatalogModel(t *testing.T) {
-	observed := observeLatestCodexBinaryCatalog(t, replacedBundledDefaultModel(t))
+	audit := latestCodexBinaryAudit(t)
+	replacedSlug := nonDefaultVendoredCodexSlug(t)
+	observed := audit.observe(t, replacedBundledModel(t, replacedSlug), "")
 
 	if observed.modelsCalls == 0 {
 		t.Fatalf("Codex did not fetch the command-auth model catalog:\n%s", observed.output)
@@ -62,16 +71,17 @@ func TestLatestCodexBinaryReplacesBundledRemoteCatalogModel(t *testing.T) {
 	if observed.responsesCalls == 0 {
 		t.Fatalf("Codex did not make a Responses request after catalog merge:\n%s", observed.output)
 	}
-	if observed.selectedModel != "gpt-5.4" {
-		t.Errorf("selected model = %q, want remotely replaced bundled model gpt-5.4", observed.selectedModel)
+	if observed.selectedModel != replacedSlug {
+		t.Errorf("selected model = %q, want remotely replaced bundled model %q", observed.selectedModel, replacedSlug)
 	}
 }
 
 func TestLatestCodexBinaryKeepsBundledSourceAheadOfMatchingAlias(t *testing.T) {
+	audit := latestCodexBinaryAudit(t)
 	defaultSlug := embeddedCodexRelease.Models.AuditedBundledDefault
 	alias := defaultSlug + "-audit-alias"
 	modelsBody := matchingRemoteAliasAndSource(t, defaultSlug, alias)
-	observed := observeLatestCodexBinaryCatalog(t, modelsBody)
+	observed := audit.observe(t, modelsBody, "")
 
 	if observed.modelsCalls == 0 {
 		t.Fatalf("Codex did not fetch the command-auth model catalog:\n%s", observed.output)
@@ -83,7 +93,7 @@ func TestLatestCodexBinaryKeepsBundledSourceAheadOfMatchingAlias(t *testing.T) {
 		t.Errorf("selected model = %q, want untouched audited bundled default %q ahead of metadata-matching alias", observed.selectedModel, defaultSlug)
 	}
 
-	withoutAlias := observeLatestCodexBinaryCatalogWithModel(t, []byte(`{"models":[]}`), alias)
+	withoutAlias := audit.observe(t, []byte(`{"models":[]}`), alias)
 	if withoutAlias.responsesCalls == 0 || withoutAlias.selectedModel != alias {
 		t.Fatalf("negative control changed: Codex no longer forwards arbitrary explicit model %q without a catalog entry:\n%s", alias, withoutAlias.output)
 	}
@@ -91,7 +101,7 @@ func TestLatestCodexBinaryKeepsBundledSourceAheadOfMatchingAlias(t *testing.T) {
 		t.Fatalf("empty remote catalog unexpectedly listed alias %q", alias)
 	}
 
-	aliasObserved := observeLatestCodexBinaryCatalogWithModel(t, modelsBody, alias)
+	aliasObserved := audit.observe(t, modelsBody, alias)
 	if aliasObserved.responsesCalls == 0 {
 		t.Fatalf("Codex did not make a Responses request with the accepted alias:\n%s", aliasObserved.output)
 	}
@@ -117,12 +127,16 @@ type codexCatalogObservation struct {
 	output          string
 }
 
-func observeLatestCodexBinaryCatalog(t *testing.T, modelsBody []byte) codexCatalogObservation {
-	t.Helper()
-	return observeLatestCodexBinaryCatalogWithModel(t, modelsBody, "")
+// codexBinaryAudit is an opted-in, verified pinned Codex executable plus
+// the command-auth helper it runs.
+type codexBinaryAudit struct {
+	binary     string
+	printfPath string
 }
 
-func observeLatestCodexBinaryCatalogWithModel(t *testing.T, modelsBody []byte, model string) codexCatalogObservation {
+// latestCodexBinaryAudit skips unless the audit is opted in. Callers invoke it
+// before reading vendored entries, so an ordinary run skips after any bump.
+func latestCodexBinaryAudit(t *testing.T) codexBinaryAudit {
 	t.Helper()
 	binary := os.Getenv("CODEX_CATALOG_AUDIT_BINARY")
 	if binary == "" {
@@ -133,6 +147,14 @@ func observeLatestCodexBinaryCatalogWithModel(t *testing.T, modelsBody []byte, m
 	if err != nil {
 		t.Skipf("command-auth contract needs printf on PATH: %v", err)
 	}
+	return codexBinaryAudit{binary: binary, printfPath: printfPath}
+}
+
+// observe runs the pinned client against modelsBody, selecting model
+// explicitly when it is non-empty.
+func (a codexBinaryAudit) observe(t *testing.T, modelsBody []byte, model string) codexCatalogObservation {
+	t.Helper()
+	binary, printfPath := a.binary, a.printfPath
 
 	var mu sync.Mutex
 	var got codexCatalogObservation
@@ -334,10 +356,13 @@ func requireLatestCodexBinary(t *testing.T, binary string) {
 	}
 }
 
-func replacedBundledDefaultModel(t *testing.T) []byte {
+// replacedBundledModel returns a bundled non-default entry, made visible and
+// strictly first in priority, so Codex selects it only after replacing the
+// bundled entry wholesale.
+func replacedBundledModel(t *testing.T, slug string) []byte {
 	t.Helper()
-	model := vendoredCodexModel(t, "gpt-5.4")
-	model["priority"] = json.RawMessage("0")
+	model := vendoredCodexModel(t, slug)
+	model["priority"] = winningCodexPriority(t)
 	model["visibility"] = json.RawMessage(`"list"`)
 	return marshalRemoteModels(t, model)
 }
@@ -357,16 +382,55 @@ func matchingRemoteAliasAndSource(t *testing.T, sourceSlug, aliasSlug string) []
 	return marshalRemoteModels(t, alias)
 }
 
-func singleRemoteDefaultModel(t *testing.T) []byte {
+// singleRemoteWinningModel clones the complete vendored source entry as an
+// unknown slug that is visible and strictly first in priority.
+func singleRemoteWinningModel(t *testing.T, sourceSlug, unknownSlug string) []byte {
 	t.Helper()
-	model := vendoredCodexModel(t, "gpt-5.4")
-	model["slug"] = json.RawMessage(`"gpt-5.4-audit-alias"`)
-	model["priority"] = json.RawMessage("0")
+	model := vendoredCodexModel(t, sourceSlug)
+	encodedSlug, err := json.Marshal(unknownSlug)
+	if err != nil {
+		t.Fatalf("encode unknown remote slug: %v", err)
+	}
+	model["slug"] = encodedSlug
+	model["priority"] = winningCodexPriority(t)
 	model["visibility"] = json.RawMessage(`"list"`)
 	return marshalRemoteModels(t, model)
 }
 
-func vendoredCodexModel(t *testing.T, wantSlug string) map[string]json.RawMessage {
+// winningCodexPriority is one below every vendored priority, so a remote entry
+// carrying it sorts ahead of the whole bundled catalog.
+func winningCodexPriority(t *testing.T) json.RawMessage {
+	t.Helper()
+	lowest := int64(math.MaxInt32)
+	for _, model := range vendoredCodexModels(t) {
+		var priority int64
+		if err := json.Unmarshal(model["priority"], &priority); err != nil {
+			t.Fatalf("decode vendored priority: %v", err)
+		}
+		lowest = min(lowest, priority)
+	}
+	return json.RawMessage(strconv.FormatInt(lowest-1, 10))
+}
+
+// nonDefaultVendoredCodexSlug returns the first vendored entry that is not the
+// audited bundled default.
+func nonDefaultVendoredCodexSlug(t *testing.T) string {
+	t.Helper()
+	defaultSlug := embeddedCodexRelease.Models.AuditedBundledDefault
+	for _, model := range vendoredCodexModels(t) {
+		var slug string
+		if err := json.Unmarshal(model["slug"], &slug); err != nil {
+			t.Fatalf("decode vendored snapshot slug: %v", err)
+		}
+		if slug != defaultSlug {
+			return slug
+		}
+	}
+	t.Fatalf("vendored Codex snapshot has no entry besides the bundled default %q", defaultSlug)
+	return ""
+}
+
+func vendoredCodexModels(t *testing.T) []map[string]json.RawMessage {
 	t.Helper()
 	var envelope struct {
 		Models []map[string]json.RawMessage `json:"models"`
@@ -374,7 +438,12 @@ func vendoredCodexModel(t *testing.T, wantSlug string) map[string]json.RawMessag
 	if err := json.Unmarshal(embeddedCodexModels, &envelope); err != nil {
 		t.Fatalf("decode vendored Codex snapshot: %v", err)
 	}
-	for _, model := range envelope.Models {
+	return envelope.Models
+}
+
+func vendoredCodexModel(t *testing.T, wantSlug string) map[string]json.RawMessage {
+	t.Helper()
+	for _, model := range vendoredCodexModels(t) {
 		var slug string
 		if err := json.Unmarshal(model["slug"], &slug); err != nil {
 			t.Fatalf("decode vendored snapshot slug: %v", err)

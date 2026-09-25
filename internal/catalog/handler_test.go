@@ -118,6 +118,7 @@ func TestRenderOneReturnsTheShapeThatMatchesItsRepresentation(t *testing.T) {
 				Render: RenderOpenAI,
 				Codex: CodexDescriptor{
 					Enabled:      true,
+					Models:       pinnedCodexCatalog(t, "gpt-5.4"),
 					RenderConfig: CodexRenderConfig{AutoReviewModel: "gpt-5.4"},
 				},
 			},
@@ -177,6 +178,7 @@ func TestHandlerNegotiatesCodexShapeOnlyWhenEveryGateIsOpen(t *testing.T) {
 				Render: RenderOpenAI,
 				Codex: CodexDescriptor{
 					Enabled: tc.enabled,
+					Models:  pinnedCodexCatalog(t, "gpt-5.4"),
 					RenderConfig: CodexRenderConfig{
 						ModelAliases:    tc.aliases,
 						AutoReviewModel: tc.reviewer,
@@ -219,6 +221,7 @@ func TestHandlerCodexHEADMatchesGETHeadersAndSuppressesBody(t *testing.T) {
 		Render: RenderOpenAI,
 		Codex: CodexDescriptor{
 			Enabled: true,
+			Models:  pinnedCodexCatalog(t, "gpt-5.4"),
 			RenderConfig: CodexRenderConfig{
 				ModelAliases: map[string]string{alias: "gpt-5.4"},
 			},
@@ -265,6 +268,7 @@ func TestHandlerLogsEverySkippedCodexReviewer(t *testing.T) {
 		Render: RenderOpenAI,
 		Codex: CodexDescriptor{
 			Enabled: true,
+			Models:  pinnedCodexCatalog(t, "gpt-5.4"),
 			RenderConfig: CodexRenderConfig{
 				AutoReviewModel: "missing-reviewer",
 			},
@@ -311,6 +315,7 @@ func TestHandlerLogsEveryUnappliedCodexAliasOnEveryRequest(t *testing.T) {
 		Render: RenderOpenAI,
 		Codex: CodexDescriptor{
 			Enabled: true,
+			Models:  pinnedCodexCatalog(t, shadowed, "gpt-5.5", "gpt-5.6-sol"),
 			RenderConfig: CodexRenderConfig{ModelAliases: map[string]string{
 				notForwarded:  "gpt-5.6-sol",
 				missingSource: "gpt-no-such-source",
@@ -369,23 +374,9 @@ func discardHandlerLogger() *slog.Logger {
 }
 
 func TestHandlerRendersCodexFromCurrentCachedBytes(t *testing.T) {
+	fallback := validCodexModelsBytes(t, "gpt-fallback", "fallback prompt")
 	fresh := codexModelsBytesWithoutField(t, "base_instructions")
-	registry := cache.NewRegistry()
-	modelsValue := cache.New(discardHandlerLogger(), cache.Cacheable[[]byte]{
-		Fallback:        embeddedCodexModels,
-		FallbackVersion: embeddedCodexModelsVersion,
-		TTL:             time.Hour,
-		Fetch: func(context.Context) ([]byte, string, error) {
-			return fresh, "rust-v1.2.3", nil
-		},
-		Hash: hashModels,
-		Validate: func(currentBytes []byte) error {
-			_, err := validateCodexModels(currentBytes)
-			return err
-		},
-	})
-	registry.Register(modelsValue)
-	registry.Prime(context.Background())
+	modelsValue := testCodexModelsValue(t, fallback, fresh, nil)
 
 	upstreamBody := []byte(`{"data":[{"id":"gpt-test","model_picker_enabled":true,"supported_endpoints":["/responses"]}]}`)
 	handler := Handler(discardHandlerLogger(), endpoint.OpenAICatalog(), Rendering{
@@ -414,6 +405,7 @@ func TestHandlerRendersCodexFromCurrentCachedBytes(t *testing.T) {
 func TestHandlerRendersAliasFromCurrentAndFallbackCodexModels(t *testing.T) {
 	const alias = "gpt-alias"
 	upstreamBody := []byte(`{"data":[{"id":"` + alias + `","vendor":"OpenAI","model_picker_enabled":true,"supported_endpoints":["/responses"]}]}`)
+	fallback := codexModelsBytes(t, completeCodexEntry("gpt-fallback-source", map[string]any{"display_name": "Fallback model"}))
 
 	tests := []struct {
 		name        string
@@ -423,15 +415,15 @@ func TestHandlerRendersAliasFromCurrentAndFallbackCodexModels(t *testing.T) {
 	}{
 		{
 			name:        "accepted current bytes",
-			models:      testCodexModelsValue(t, validCodexModelsBytes(t, "gpt-source", "fresh prompt"), nil),
+			models:      testCodexModelsValue(t, fallback, validCodexModelsBytes(t, "gpt-source", "fresh prompt"), nil),
 			source:      "gpt-source",
 			displayName: "Fresh model",
 		},
 		{
-			name:        "embedded fallback after refresh failure",
-			models:      testCodexModelsValue(t, nil, errors.New("refresh failed")),
-			source:      "gpt-5.4",
-			displayName: "GPT-5.4",
+			name:        "fallback after refresh failure",
+			models:      testCodexModelsValue(t, fallback, nil, errors.New("refresh failed")),
+			source:      "gpt-fallback-source",
+			displayName: "Fallback model",
 		},
 	}
 	for _, tc := range tests {
@@ -487,7 +479,7 @@ func TestHandlerAliasFailuresRemainOpenAIBadGateway(t *testing.T) {
 		models       *cache.Value[[]byte]
 		wantMessage  string
 	}{
-		{name: "invalid live Copilot JSON", upstreamBody: []byte(`{"data":[`), wantMessage: "upstream models response was invalid"},
+		{name: "invalid live Copilot JSON", upstreamBody: []byte(`{"data":[`), models: pinnedCodexCatalog(t, "gpt-5.4"), wantMessage: "upstream models response was invalid"},
 		{name: "invalid current Codex bytes", upstreamBody: validUpstream, models: invalidCurrent, wantMessage: "could not render the models catalog"},
 	}
 	for _, tc := range tests {
@@ -515,11 +507,13 @@ func TestHandlerAliasFailuresRemainOpenAIBadGateway(t *testing.T) {
 	}
 }
 
-func testCodexModelsValue(t *testing.T, current []byte, fetchErr error) *cache.Value[[]byte] {
+// testCodexModelsValue returns a Codex Models source that starts from synthetic
+// fallback bytes and has already made one refresh attempt for current.
+func testCodexModelsValue(t *testing.T, fallback, current []byte, fetchErr error) *cache.Value[[]byte] {
 	t.Helper()
 	modelsValue := cache.New(discardHandlerLogger(), cache.Cacheable[[]byte]{
-		Fallback:        embeddedCodexModels,
-		FallbackVersion: embeddedCodexModelsVersion,
+		Fallback:        fallback,
+		FallbackVersion: "synthetic-fallback",
 		TTL:             time.Hour,
 		Fetch: func(context.Context) ([]byte, string, error) {
 			return current, "rust-v1.2.3", fetchErr
@@ -534,6 +528,24 @@ func testCodexModelsValue(t *testing.T, current []byte, fetchErr error) *cache.V
 	registry.Register(modelsValue)
 	registry.Prime(context.Background())
 	return modelsValue
+}
+
+// pinnedCodexCatalog returns a Codex Models source whose current bytes are a
+// synthetic catalog of complete entries for slugs and never refresh.
+func pinnedCodexCatalog(t *testing.T, slugs ...string) *cache.Value[[]byte] {
+	t.Helper()
+	entries := make([]map[string]any, len(slugs))
+	for i, slug := range slugs {
+		entries[i] = completeCodexEntry(slug, nil)
+	}
+	return cache.New(discardHandlerLogger(), cache.Cacheable[[]byte]{
+		Fallback:        codexModelsBytes(t, entries...),
+		FallbackVersion: "synthetic-pinned",
+		Fetch: func(context.Context) ([]byte, string, error) {
+			return nil, "", errors.New("pinned synthetic Codex catalog is never fetched")
+		},
+		Hash: hashModels,
+	})
 }
 
 func (s stubSource) Buffered(ctx context.Context, call upstream.Call) (int, []byte, context.Context, *upstream.Failure) {
