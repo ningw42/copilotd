@@ -68,7 +68,9 @@ func discardLogger(t *testing.T) *slog.Logger {
 }
 
 // startTestServer runs srv on an ephemeral loopback listener and returns its base
-// URL, tearing it down on cleanup. Mirrors server_integration_test's helper.
+// URL once /healthz answers 200. Cleanup cancels Run and fails the test unless
+// it drains cleanly (returns nil) within the watchdog. Mirrors
+// server_integration_test's helper.
 func startTestServer(t *testing.T, srv *server.Server) string {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -76,27 +78,70 @@ func startTestServer(t *testing.T, srv *server.Server) string {
 		t.Fatalf("listen: %v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- srv.Run(ctx, ln) }()
+	exited := make(chan struct{})
+	var runErr error
+	go func() {
+		defer close(exited)
+		runErr = srv.Run(ctx, ln)
+	}()
 	t.Cleanup(func() {
+		// A connection the default transport dialed but never used is not idle
+		// to http.Server.Shutdown until it is 5s old, so it would force a drain.
+		http.DefaultClient.CloseIdleConnections()
 		cancel()
 		select {
-		case <-done:
+		case <-exited:
+			if runErr != nil {
+				t.Errorf("server Run = %v, want a clean drain", runErr)
+			}
 		case <-time.After(5 * time.Second):
 			t.Error("server did not shut down within the grace period")
 		}
 	})
 
 	base := "http://" + ln.Addr().String()
-	for range 50 {
-		resp, err := http.Get(base + "/healthz") //nolint:noctx // test setup poll
-		if err == nil {
-			_ = resp.Body.Close()
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
+	// Wait until the listener serves a healthy response; the startup deadline
+	// also bounds each attempt.
+	startup, cancelStartup := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelStartup()
+	health := &http.Client{
+		Transport: &http.Transport{DisableKeepAlives: true},
+		// Judge /healthz's own response; a redirect to another 200 is not healthy.
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
-	return base
+	last := "no response"
+	for {
+		req, err := http.NewRequestWithContext(startup, http.MethodGet, base+"/healthz", nil)
+		if err != nil {
+			t.Fatalf("build health request: %v", err)
+		}
+		resp, err := health.Do(req)
+		switch {
+		case err == nil:
+			_, _ = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				// A 200 from a Serve that Run left behind is not a healthy server.
+				select {
+				case <-exited:
+					t.Fatalf("server Run = %v before the helper accepted /healthz", runErr)
+				default:
+				}
+				return base
+			}
+			last = resp.Status
+		case startup.Err() == nil: // keep the prior outcome over the deadline's own cancellation
+			last = err.Error()
+		}
+		select {
+		case <-exited:
+			t.Fatalf("server Run = %v before /healthz answered 200", runErr)
+		case <-time.After(10 * time.Millisecond):
+		}
+		if startup.Err() != nil {
+			t.Fatalf("/healthz did not answer 200 before the startup deadline; last outcome: %s", last)
+		}
+	}
 }
 
 // copilotStub is an httptest fake of the Copilot inference upstream capturing the

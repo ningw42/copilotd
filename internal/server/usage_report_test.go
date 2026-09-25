@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -76,8 +77,8 @@ func TestForcedServerCloseCancelsActiveReportWork(t *testing.T) {
 	cancel()
 	select {
 	case err := <-done:
-		if err == nil {
-			t.Error("forced drain reported graceful success")
+		if !errors.Is(err, ErrForcedDrain) {
+			t.Errorf("Run = %v, want ErrForcedDrain", err)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("server shutdown exceeded bound")

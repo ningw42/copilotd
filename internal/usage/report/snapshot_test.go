@@ -3,10 +3,12 @@ package report_test
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -199,33 +201,69 @@ func TestQueryReadsCommittedHistoryWithoutFlushingOrRetainingWriter(t *testing.T
 }
 
 func TestQueryRejectsUTF16SchemaWithoutMigration(t *testing.T) {
+	_, err := newReporter(t, utf16CurrentSchema(t)).Query(context.Background(), selection())
+	if err == nil {
+		t.Fatal("accepted incompatible text encoding")
+	}
+}
+
+// utf16CurrentSchema builds an empty UTF-16le database at the current writer
+// schema version, so the reader's encoding comparison is the only reason to
+// reject it. Migrations come from the writer's migration directory in order.
+func utf16CurrentSchema(t *testing.T) string {
+	t.Helper()
+	migrations, err := filepath.Glob(filepath.Join("..", "sqlitestore", "migrations", "*.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(migrations) != sqlitestore.SchemaVersion() {
+		t.Fatalf("found %d migrations, want schema version %d", len(migrations), sqlitestore.SchemaVersion())
+	}
 	path := filepath.Join(t.TempDir(), "utf16.db")
 	db, err := sql.Open("sqlite", sqlitestore.LiteralFileURL(path).String())
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer db.Close()
+	db.SetMaxOpenConns(1) // the encoding pragma must precede DDL on one connection
 	if _, err = db.Exec("PRAGMA encoding='UTF-16le'"); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"001_initial.sql", "002_requested_model.sql", "003_openai_service_tier.sql"} {
-		script, err := os.ReadFile(filepath.Join("..", "sqlitestore", "migrations", name))
+	for index, migration := range migrations {
+		if want := fmt.Sprintf("%03d_", index+1); !strings.HasPrefix(filepath.Base(migration), want) {
+			t.Fatalf("migration %s is out of order, want prefix %s", migration, want)
+		}
+		script, err := os.ReadFile(migration)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if _, err = db.Exec(string(script)); err != nil {
-			t.Fatal(err)
+			t.Fatalf("apply %s: %v", migration, err)
 		}
 	}
-	if _, err = db.Exec("PRAGMA user_version=3"); err != nil {
+	if _, err = db.Exec(fmt.Sprintf("PRAGMA user_version=%d", sqlitestore.SchemaVersion())); err != nil {
 		t.Fatal(err)
 	}
 	if err = db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	_, err = newReporter(t, path).Query(context.Background(), selection())
-	if err == nil {
-		t.Fatal("accepted incompatible text encoding")
+	reopened, err := sql.Open("sqlite", sqlitestore.LiteralFileURL(path).String())
+	if err != nil {
+		t.Fatal(err)
 	}
+	defer reopened.Close()
+	var encoding string
+	var version int
+	if err = reopened.QueryRow("PRAGMA encoding").Scan(&encoding); err != nil {
+		t.Fatal(err)
+	}
+	if err = reopened.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if encoding != "UTF-16le" || version != sqlitestore.SchemaVersion() {
+		t.Fatalf("fixture encoding=%s version=%d, want UTF-16le version %d", encoding, version, sqlitestore.SchemaVersion())
+	}
+	return path
 }
 
 func TestQueryEmptyFutureBucketMetadata(t *testing.T) {
