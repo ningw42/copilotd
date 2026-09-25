@@ -1855,7 +1855,11 @@ func startServer(t *testing.T, srv *Server) string {
 	// also bounds each attempt.
 	startup, cancelStartup := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancelStartup()
-	health := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
+	health := &http.Client{
+		Transport: &http.Transport{DisableKeepAlives: true},
+		// Judge /healthz's own response; a redirect to another 200 is not healthy.
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
 	last := "no response"
 	for {
 		req, err := http.NewRequestWithContext(startup, http.MethodGet, base+"/healthz", nil)
