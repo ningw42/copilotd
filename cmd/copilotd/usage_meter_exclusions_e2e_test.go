@@ -7,11 +7,21 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
+	"github.com/ningw42/copilotd/internal/catalog"
 	"github.com/ningw42/copilotd/internal/config"
 )
 
-func TestRunBoundServeUsageMeterExcludesCountTokensAndCatalogs(t *testing.T) {
+// The synthetic Codex release the Codex models edge serves; its sole entry is
+// the only OpenAI model Copilot lists, independent of the vendored floor.
+const (
+	usageMeterCodexTag    = "rust-v999.0.0"
+	usageMeterCodexCommit = "0123456789abcdef0123456789abcdef01234567"
+	usageMeterCodexModel  = "gpt-usage-meter-synthetic"
+)
+
+func TestServeLifecycleUsageMeterExcludesCountTokensAndCatalogs(t *testing.T) {
 	// Valid catalog data plus fields that would qualify as either native
 	// completion if the upstream body were mistakenly sent through a meter.
 	const models = `{"id":"not-an-inference","type":"message","model":"not-an-inference-model","status":"completed","stop_reason":"end_turn","usage":{"input_tokens":91,"output_tokens":17},"data":[
@@ -36,10 +46,15 @@ func TestRunBoundServeUsageMeterExcludesCountTokensAndCatalogs(t *testing.T) {
 		}
 	}))
 	t.Cleanup(upstream.Close)
-	harness := startUsageMeterServeHarness(t, upstream.URL, discardLogger(t), func(cfg *config.ServeConfig) {
+	codexEdge := newCodexReleaseEdge(t, usageMeterCodexTag, usageMeterCodexCommit, completeCodexModelsBytes(t, usageMeterCodexModel, "usage meter prompt"))
+	harness := startUsageMeterServeHarnessWithEdges(t, upstream.URL, discardLogger(t), func(cfg *config.ServeConfig) {
 		cfg.CodexCatalogEnabled = true
 		cfg.CodexOverrideLimits = true // opens the existing Codex shape gate
-	}, nil)
+		cfg.CodexCatalogRefreshInterval = time.Hour
+	}, nil, func(edges *serveEdges) {
+		edges.CodexModels = catalog.ModelsEdge{BaseURL: codexEdge.URL, Client: codexEdge.Client()}
+	})
+	awaitCachedValue(t, harness.baseURL, "codex_models", "fetched", usageMeterCodexTag)
 
 	// Positive controls keep an accidentally disabled meter from satisfying
 	// every exclusion. The only rows after all requests must be these two.

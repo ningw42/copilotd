@@ -58,10 +58,7 @@ func TestUsageStorageFailuresDoNotChangeInferenceReadinessOrWriterAdmission(t *t
 				}
 			}
 			assertHTTPStatusEventually(t, h.baseURL+"/readyz", 200)
-			if err := h.stop(); err != nil {
-				t.Fatal(err)
-			}
-			assertCleanUsageReport(t, h.closeStore())
+			assertCleanUsageReport(t, h.stopClean(t))
 			db := openReportWriter(t, h.cfg.UsageDBPath)
 			var n, input int
 			if err := db.QueryRow("SELECT count(*),sum(input_tokens) FROM openai_turn WHERE response_id='still-admitted'").Scan(&n, &input); err != nil || n != 1 || input != 8012 {
@@ -95,10 +92,7 @@ func TestUsageEncodedLimitRejectsWholeRealReportAndReleasesSlots(t *testing.T) {
 	}
 	requestReportStatus(t, h, "HEAD", largeReportQuery, 422, "report_too_large")
 	assertHTTPStatusEventually(t, h.baseURL+"/readyz", 200)
-	if err := h.stop(); err != nil {
-		t.Fatal(err)
-	}
-	assertCleanUsageReport(t, h.closeStore())
+	assertCleanUsageReport(t, h.stopClean(t))
 }
 
 func prepareUsageReportHistory(t *testing.T, path, encoding, alter string) {

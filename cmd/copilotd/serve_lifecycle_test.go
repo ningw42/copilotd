@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -24,6 +25,7 @@ import (
 	"github.com/ningw42/copilotd/internal/impersonation"
 	"github.com/ningw42/copilotd/internal/logging"
 	"github.com/ningw42/copilotd/internal/server"
+	"github.com/ningw42/copilotd/internal/usage"
 	"github.com/ningw42/copilotd/internal/usage/pricing"
 	"github.com/ningw42/copilotd/internal/usage/sqlitestore"
 )
@@ -234,6 +236,87 @@ func (r *lifecycleRun) await(t *testing.T, within time.Duration) serveResult {
 		t.Fatal("serve lifecycle did not return")
 		return serveResult{}
 	}
+}
+
+// awaitHealthy polls /healthz until it answers 200, failing with the
+// lifecycle's result if it returned before serving.
+func (r *lifecycleRun) awaitHealthy(t *testing.T, baseURL string) {
+	t.Helper()
+	client := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		select {
+		case <-r.done:
+			t.Fatalf("serve lifecycle returned before serving: %v (%v)", r.result.Outcome, r.result.Err)
+		default:
+		}
+		resp, err := client.Get(baseURL + "/healthz")
+		if err == nil {
+			_, _ = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				return
+			}
+			err = errors.New(resp.Status)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("GET %s/healthz did not answer 200: %v", baseURL, err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// awaitCachedValue polls /readyz until the named cached value reports exactly
+// source and version, the accepted-revision barrier for refresh fixtures.
+func awaitCachedValue(t *testing.T, baseURL, name, source, version string) {
+	t.Helper()
+	client := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
+	deadline := time.Now().Add(5 * time.Second)
+	last := "no response"
+	for {
+		resp, err := client.Get(baseURL + "/readyz")
+		if err == nil {
+			body, _ := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			last = string(body)
+			var readiness struct {
+				Caches map[string]struct {
+					Source  string `json:"source"`
+					Version string `json:"version"`
+				} `json:"caches"`
+			}
+			if json.Unmarshal(body, &readiness) == nil {
+				if got := readiness.Caches[name]; got.Source == source && got.Version == version {
+					return
+				}
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("cached value %s did not reach %s %s; last /readyz: %s", name, source, version, last)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// newCodexReleaseEdge serves one synthetic Codex release over the three GitHub
+// routes the Codex models cached value reads: the latest release tag, the tag's
+// commit, and models.json at that commit.
+func newCodexReleaseEdge(t *testing.T, tag, commit string, models []byte) *httptest.Server {
+	t.Helper()
+	edge := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/repos/openai/codex/releases/latest":
+			_, _ = io.WriteString(w, `{"tag_name":"`+tag+`"}`)
+		case r.URL.Path == "/repos/openai/codex/commits/"+tag:
+			_, _ = io.WriteString(w, commit)
+		case r.URL.Path == "/repos/openai/codex/contents/codex-rs/models-manager/models.json" && r.URL.Query().Get("ref") == commit:
+			_, _ = w.Write(models)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(edge.Close)
+	return edge
 }
 
 func TestServedOutcomeClassifiesServerRunResults(t *testing.T) {
@@ -735,5 +818,79 @@ func TestServeLifecycleCancelledAfterStoreOpenFinalizesWithoutServing(t *testing
 	}
 	if _, err := os.Stat(cfg.UsageDBPath); err != nil {
 		t.Errorf("usage database was not opened before cancellation: %v", err)
+	}
+}
+
+// TestFinalizeUsageStoreNeedsAFreshBudgetForAPendingObservation is the negative
+// control for the lifecycle's fresh finalization budget: the same pending
+// observation persists with a live budget, while an already expired budget
+// loses it or leaves cleanup unconfirmed.
+func TestFinalizeUsageStoreNeedsAFreshBudgetForAPendingObservation(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		budget time.Duration
+		fresh  bool
+	}{
+		{name: "fresh budget", budget: 2 * time.Second, fresh: true},
+		{name: "expired budget", budget: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "usage", "usage.db")
+			store, err := sqlitestore.Open(path, logging.ForComponent(discardLogger(t), "internal/usage/sqlitestore"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Contend for SQLite's write lock so no flush can persist the
+			// observation before finalization.
+			locker, err := sql.Open("sqlite", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = locker.Close() })
+			locker.SetMaxOpenConns(1)
+			if _, err := locker.Exec("BEGIN IMMEDIATE"); err != nil {
+				t.Fatal(err)
+			}
+			var unlockOnce sync.Once
+			unlock := func() {
+				unlockOnce.Do(func() {
+					if _, err := locker.Exec("ROLLBACK"); err != nil {
+						t.Errorf("release usage database lock: %v", err)
+					}
+				})
+			}
+			store.Record(usage.Turn{At: time.Now(), RequestID: "pending", ResponseID: "resp-pending", Model: "reported-pending", Transport: usage.TransportBuffered, Usage: usage.OpenAIUsage{InputTokens: 1, OutputTokens: 2}})
+			if tc.fresh {
+				// Release the contention inside the budget.
+				timer := time.AfterFunc(tc.budget/4, unlock)
+				defer timer.Stop()
+			}
+
+			report := finalizeUsageStore(store, tc.budget)
+			unlock()
+			// Join native cleanup so no writer outlives the test.
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			store.Close(ctx)
+
+			clean := sqlitestore.Report{DriverCleanupCompleted: true}
+			if !tc.fresh {
+				if report == clean {
+					t.Fatalf("expired-budget report = %+v, want a final-flush loss or unconfirmed cleanup", report)
+				}
+				return
+			}
+			if report != clean {
+				t.Fatalf("fresh-budget report = %+v, want the pending observation persisted and cleanup completed", report)
+			}
+			db, err := sql.Open("sqlite", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = db.Close() })
+			if rows := queryUsageCount(t, db, "openai_turn", "response_id = 'resp-pending'"); rows != 1 {
+				t.Errorf("pending observation persisted %d rows, want 1", rows)
+			}
+		})
 	}
 }

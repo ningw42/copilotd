@@ -382,11 +382,14 @@ func productionServeEdges() serveEdges {
 // serveInput is what runServeLifecycle serves besides its base logger.
 // Listener is optional: when nil the lifecycle binds Config.Addr itself. A
 // supplied listener belongs to the lifecycle from the call, which closes it on
-// every return that does not serve it.
+// every return that does not serve it. DecorateRegistry is test-only and
+// production leaves it nil: it receives the Shim registry built from Config and
+// returns the registry to serve.
 type serveInput struct {
-	Config   config.ServeConfig
-	Edges    serveEdges
-	Listener net.Listener
+	Config           config.ServeConfig
+	Edges            serveEdges
+	Listener         net.Listener
+	DecorateRegistry func(shim.Registry) shim.Registry
 }
 
 // serveOutcome classifies how one serve lifecycle ended. The kinds tell tests
@@ -459,7 +462,7 @@ func serveExitError(result serveResult) error {
 // minting Manager, registers the Codex models and pricing cached values when
 // their features are enabled, opens the Usage store when the meter is enabled,
 // builds the Shim registry, binds Config.Addr unless a listener was supplied,
-// and serves through runBoundServe until ctx is cancelled or serving fails.
+// launches startup, and serves until ctx is cancelled or serving fails.
 //
 // A missing local prerequisite fails before bind with one command-level
 // diagnostic. Cancellation is checked between setup steps: already cancelled
@@ -473,6 +476,10 @@ func runServeLifecycle(ctx context.Context, base *slog.Logger, input serveInput)
 	cfg := input.Config
 	edges := input.Edges
 	ln := input.Listener
+	// Startup runs under a child context that every return cancels. Startup is
+	// not joined: shared exchanges keep their own deadlines.
+	startupCtx, cancelStartup := context.WithCancel(ctx)
+	defer cancelStartup()
 	var usageStore *sqlitestore.Store
 	endUnserved := func(outcome serveOutcome, err error) serveResult {
 		if ln != nil {
@@ -504,6 +511,8 @@ func runServeLifecycle(ctx context.Context, base *slog.Logger, input serveInput)
 	}
 
 	var sink usage.Sink
+	// A nil query serves the disabled Usage report.
+	var reportQuery reporthttp.QueryFunc
 	if cfg.ShimUsageMeterEnabled {
 		var openErr error
 		// Resolve once; writer and reporter receive this same daemon-owned path.
@@ -518,11 +527,15 @@ func runServeLifecycle(ctx context.Context, base *slog.Logger, input serveInput)
 			return endUnserved(servePreBindFailure, openErr)
 		}
 		sink = usageStore
+		reportQuery = report.New(cfg.UsageDBPath, usagePricing).Query
 		if ctx.Err() != nil {
 			return endUnserved(serveClean, nil)
 		}
 	}
 	registry := configuredShimRegistry(cfg, sink)
+	if input.DecorateRegistry != nil {
+		registry = input.DecorateRegistry(registry)
+	}
 	logShimChain(logger, registry)
 	if ctx.Err() != nil {
 		return endUnserved(serveClean, nil)
@@ -540,7 +553,27 @@ func runServeLifecycle(ctx context.Context, base *slog.Logger, input serveInput)
 		return endUnserved(serveClean, nil)
 	}
 
-	serveErr := runBoundServe(ctx, cfg, base, mgr, imp, codexModels, usagePricing, cacheRegistry, registry, ln, usageStore)
+	// Startup launches only once the listener is bound, which keeps /healthz and
+	// the locally-ready /readyz available while bounded startup discovery is in
+	// progress. Neither discovery nor startup mint outcomes gate readiness or
+	// request admission.
+	go runServeStartup(startupCtx, cacheRegistry, mgr, logger)
+	serveErr := newServeServer(cfg, base, mgr, imp, codexModels, cacheRegistry, registry, reportQuery).Run(ctx, ln)
+	// Usage admission stays open through the drain and is cut off first, before
+	// startup ends and before the one command-level outcome record, which is
+	// synchronous: a producer racing that record is counted late, not admitted.
+	if usageStore != nil {
+		usageStore.StopAdmission()
+	}
+	cancelStartup()
+	switch {
+	case errors.Is(serveErr, server.ErrForcedDrain):
+		logger.Warn("forced drain",
+			slog.Any(logging.ErrorKey, serveErr),
+			slog.Duration(logging.TimeoutKey, cfg.ShutdownTimeout))
+	case serveErr != nil:
+		logger.Error("server error", slog.Any(logging.ErrorKey, serveErr))
+	}
 	return finalizeServe(serveResult{Outcome: servedOutcome(serveErr), Err: serveErr}, usageStore, cfg.ShutdownTimeout)
 }
 
@@ -553,22 +586,11 @@ func finalizeServe(result serveResult, usageStore *sqlitestore.Store, timeout ti
 	return result
 }
 
-// runBoundServe starts the background impersonation/mint lifecycle only after
-// its caller has supplied an already-bound listener and the configured Shim
-// registry. That ordering keeps
-// /healthz and the locally-ready /readyz available while bounded startup
-// discovery is in progress. Neither discovery nor startup mint outcomes gate
-// readiness or request admission. Startup runs under a child of ctx. When
-// Server.Run returns, usage admission (if usageStore is non-nil) is cut off
-// first, then the startup context is cancelled, and only then is the outcome
-// synchronously logged. A forced drain (server.ErrForcedDrain) is logged once
-// at Warn with the configured timeout; any other error at Error. Either way the
-// raw Server.Run result is returned unchanged, so callers and tests can still
-// tell a forced drain from a clean one.
-func runBoundServe(ctx context.Context, cfg config.ServeConfig, base *slog.Logger, mgr *identity.Manager, imp *impersonation.Set, codexModels *cache.Value[[]byte], usagePricing pricing.Source, cacheRegistry *cache.Registry, registry shim.Registry, ln net.Listener, usageStore *sqlitestore.Store) error {
-	startupCtx, cancelStartup := context.WithCancel(ctx)
-	defer cancelStartup()
-	go runServeStartup(startupCtx, cacheRegistry, mgr, logging.ForComponent(base, "cmd/copilotd"))
+// newServeServer assembles the serving graph over the lifecycle's resolved
+// dependencies: the Catalog descriptors, the upstream caller shared by the
+// HTTP and WebSocket forwarders and the Catalogs, both forwarders over the
+// served Shim registry, and the Usage report handler for reportQuery.
+func newServeServer(cfg config.ServeConfig, base *slog.Logger, mgr *identity.Manager, imp *impersonation.Set, codexModels *cache.Value[[]byte], cacheRegistry *cache.Registry, registry shim.Registry, reportQuery reporthttp.QueryFunc) *server.Server {
 	catalogs := catalog.RenderDescriptors{
 		Anthropic: catalog.AnthropicRenderConfig{
 			ModelIDNormalizationEnabled: cfg.AnthropicCatalogModelIDNormalizationEnabled,
@@ -599,29 +621,10 @@ func runBoundServe(ctx context.Context, cfg config.ServeConfig, base *slog.Logge
 		})
 	streamOutcomes := server.NewStreamOutcomeCounter()
 
-	var reportQuery reporthttp.QueryFunc
-	if usageStore != nil {
-		reportQuery = report.New(cfg.UsageDBPath, usagePricing).Query
-	}
-	reportHandler := reporthttp.Handler(reportQuery)
-	serveErr := server.New(cfg, logging.ForComponent(base, "internal/server"), logging.ForComponent(base, "internal/catalog"), logging.DependencyErrorLog(base, slog.LevelWarn), mgr, server.ReadyObservers{
+	return server.New(cfg, logging.ForComponent(base, "internal/server"), logging.ForComponent(base, "internal/catalog"), logging.DependencyErrorLog(base, slog.LevelWarn), mgr, server.ReadyObservers{
 		Impersonation: imp,
 		Caches:        cacheRegistry,
-	}, fwd, caller, wsProxy, streamOutcomes, catalogs, reportHandler).Run(ctx, ln)
-	if usageStore != nil {
-		usageStore.StopAdmission()
-	}
-	cancelStartup()
-	logger := logging.ForComponent(base, "cmd/copilotd")
-	switch {
-	case errors.Is(serveErr, server.ErrForcedDrain):
-		logger.Warn("forced drain",
-			slog.Any(logging.ErrorKey, serveErr),
-			slog.Duration(logging.TimeoutKey, cfg.ShutdownTimeout))
-	case serveErr != nil:
-		logger.Error("server error", slog.Any(logging.ErrorKey, serveErr))
-	}
-	return serveErr
+	}, fwd, caller, wsProxy, streamOutcomes, catalogs, reporthttp.Handler(reportQuery))
 }
 
 // runServeStartup performs the ordered background startup sequence. The cache
@@ -755,7 +758,7 @@ func configuredCodexModels(cfg config.ServeConfig, edge catalog.ModelsEdge, regi
 }
 
 // configuredUsagePricing keeps pricing refresh behind the Usage meter's opt-in
-// boundary. Registration completes before runBoundServe starts registry priming.
+// boundary. Registration completes before the lifecycle launches startup priming.
 func configuredUsagePricing(cfg config.ServeConfig, remote pricing.Remote, registry *cache.Registry, base *slog.Logger) pricing.Source {
 	if !cfg.ShimUsageMeterEnabled {
 		return nil

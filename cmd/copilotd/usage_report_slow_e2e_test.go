@@ -304,7 +304,7 @@ func TestUsageGracefulDrainFinishesReportAndInferenceBeforeWriterCutoff(t *testi
 	_ = first.conn.Close()
 	logs.await(t, "msg=access", "request_id=graceful-aborted-report")
 	requestReportStatus(t, h, "GET", "?timezone=UTC&since=invalid", 400, "invalid_query")
-	h.cancel()
+	h.run.cancel()
 	logs.await(t, `msg="shutting down"`)
 	// Shutdown closes its listener before waiting for active handlers. Observe
 	// that state rather than treating the pre-drain log as proof of admission.
@@ -335,10 +335,7 @@ func TestUsageGracefulDrainFinishesReportAndInferenceBeforeWriterCutoff(t *testi
 	if err != nil || !strings.Contains(string(streamBody), concurrentOpenAICompletion) {
 		t.Fatalf("draining inference: %s %v", streamBody, err)
 	}
-	if err := h.stop(); err != nil {
-		t.Fatal(err)
-	}
-	assertCleanUsageReport(t, h.closeStore())
+	assertCleanUsageReport(t, h.stopClean(t))
 	q := reportSelectionNow()
 	model := "live-openai"
 	q.Model = &model
@@ -408,8 +405,9 @@ func TestUsageForcedDrainCancelsRealSQLiteReadAndInference(t *testing.T) {
 		}
 	}
 	started := time.Now()
-	if err := h.stop(); !errors.Is(err, server.ErrForcedDrain) || !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("forced read drain = %v, want server.ErrForcedDrain wrapping deadline exceeded", err)
+	result := h.stop()
+	if result.Outcome != serveForcedDrain || !errors.Is(result.Err, server.ErrForcedDrain) || !errors.Is(result.Err, context.DeadlineExceeded) {
+		t.Fatalf("forced read drain = %v (%v), want server.ErrForcedDrain wrapping deadline exceeded", result.Outcome, result.Err)
 	}
 	elapsed := time.Since(started)
 	if elapsed < 15*time.Millisecond || elapsed > 500*time.Millisecond {
@@ -431,7 +429,7 @@ func TestUsageForcedDrainCancelsRealSQLiteReadAndInference(t *testing.T) {
 	if _, err := io.ReadAll(stream.Body); err == nil {
 		t.Fatal("forced inference connection remained complete")
 	}
-	assertCleanUsageReport(t, h.closeStore())
+	assertCleanUsageReport(t, result.Report)
 	t.Logf("250000-row native read pinned %d WAL pages; forced report/inference close returned in %s, then checkpoint=0/0/0", pinnedPages, elapsed)
 }
 
@@ -509,10 +507,7 @@ func TestUsageSlowTCPReportsHoldSlotsReleaseSQLiteAndDoNotDeadlineSSE(t *testing
 	if err != nil || !strings.Contains(string(rest), concurrentOpenAICompletion) || time.Since(streamStarted) < 5*time.Second {
 		t.Fatalf("SSE did not survive report deadline: duration=%s error=%v body=%s", time.Since(streamStarted), err, rest)
 	}
-	if err := h.stop(); err != nil {
-		t.Fatal(err)
-	}
-	assertCleanUsageReport(t, h.closeStore())
+	assertCleanUsageReport(t, h.stopClean(t))
 	for _, forbidden := range []string{h.cfg.UsageDBPath, "synthetic-do-not-log", "synthetic-private-row", "since=", "timezone=", "model=", "SELECT", "input_tokens", "\\u0001"} {
 		for _, line := range phase4LogLinesContaining(logs.String(), "msg=access", "inbound=/usage/v1/report") {
 			if strings.Contains(line, forbidden) || strings.Contains(line, "surface=") {

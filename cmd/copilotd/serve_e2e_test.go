@@ -232,7 +232,7 @@ func (*suppliedRegistryShim) TransformServerMessage(_ context.Context, message *
 	return true
 }
 
-func TestRunBoundServeUsesSuppliedShimRegistryForHTTPAndWebSocket(t *testing.T) {
+func TestServeLifecycleUsesSuppliedShimRegistryForHTTPAndWebSocket(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
 			conn, err := websocket.Accept(w, r, nil)
@@ -256,17 +256,9 @@ func TestRunBoundServeUsesSuppliedShimRegistryForHTTPAndWebSocket(t *testing.T) 
 	}))
 	t.Cleanup(upstream.Close)
 
-	cfg := e2eConfig("gho-supplied-registry")
-	cfg.ImpersonationRefreshInterval = 0
+	cfg := lifecycleConfig("gho-supplied-registry")
 	cfg.WebSocketHandshakeTimeout = 5 * time.Second
-	logger := discardLogger(t)
-	var exchangeAuth, exchangeUA string
-	github := newGitHubExchangeStub(t, "copilot-supplied-registry", upstream.URL, &exchangeAuth, &exchangeUA)
-	cacheRegistry := cache.NewRegistry()
-	mgr, imp, err := buildServeProvider(cfg, logger, github.URL, github.Client(), productionDiscoveryEdge(), cacheRegistry)
-	if err != nil {
-		t.Fatalf("buildServeProvider: %v", err)
-	}
+	github := lifecycleExchangeStub(t, upstream.URL, make(chan http.Header, 1))
 	registry := shim.Registry{{
 		Name:    "supplied-registry-probe",
 		Enabled: true,
@@ -282,23 +274,17 @@ func TestRunBoundServeUsesSuppliedShimRegistryForHTTPAndWebSocket(t *testing.T) 
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- runBoundServe(ctx, cfg, logger, mgr, imp, nil, nil, cacheRegistry, registry, ln, nil) }()
-	t.Cleanup(func() {
-		cancel()
-		select {
-		case err := <-done:
-			if err != nil {
-				t.Errorf("runBoundServe after cancellation: %v", err)
-			}
-		case <-time.After(5 * time.Second):
-			t.Error("bound serve did not stop within the grace period")
-		}
+	run := startServeLifecycle(t, discardLogger(t), serveInput{
+		Config:   cfg,
+		Edges:    exchangeServeEdges(github),
+		Listener: ln,
+		// This test's point is the supplied registry, so it replaces the
+		// configured one rather than decorating it.
+		DecorateRegistry: func(shim.Registry) shim.Registry { return registry },
 	})
 
 	base := "http://" + ln.Addr().String()
-	assertHTTPStatusEventually(t, base+"/healthz", http.StatusOK)
+	run.awaitHealthy(t, base)
 
 	resp, body := post(t, base+"/openai/v1/responses", `{"model":"gpt"}`)
 	_ = resp.Body.Close()
@@ -329,6 +315,11 @@ func TestRunBoundServeUsesSuppliedShimRegistryForHTTPAndWebSocket(t *testing.T) 
 		t.Errorf("WebSocket message = %q, want supplied registry transform", got)
 	}
 	_ = conn.Close(websocket.StatusNormalClosure, "done")
+	http.DefaultClient.CloseIdleConnections()
+	run.cancel()
+	if result := run.await(t, 5*time.Second); result.Outcome != serveClean || result.Err != nil {
+		t.Errorf("serve lifecycle after cancellation = %v (%v), want clean", result.Outcome, result.Err)
+	}
 }
 
 func startManagerBackedE2EServer(t *testing.T, cfg config.ServeConfig, logger *slog.Logger, github *httptest.Server, runStartupMint bool) string {
@@ -477,47 +468,28 @@ func TestServeDiscoveredVersionsEndToEnd(t *testing.T) {
 	cfg.VSCodeVersionFallback = "1.2.3"
 	cfg.PluginVersionFallback = "4.5.6"
 	cfg.ImpersonationRefreshInterval = time.Hour
-	logger := discardLogger(t)
-	cacheRegistry := cache.NewRegistry()
-	mgr, imp, err := buildServeProvider(cfg, logger, github.URL, github.Client(), impersonation.Edge{
+	edges := exchangeServeEdges(github)
+	edges.Discovery = impersonation.Edge{
 		VSCodeBaseURL:      discovery.URL,
 		MarketplaceBaseURL: discovery.URL,
 		Client:             discovery.Client(),
-	}, cacheRegistry)
-	if err != nil {
-		t.Fatalf("buildServeProvider: %v", err)
 	}
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() {
-		done <- runBoundServe(ctx, cfg, logger, mgr, imp, nil, nil, cacheRegistry, configuredShimRegistry(cfg, nil), ln, nil)
-	}()
-	t.Cleanup(func() {
-		cancel()
-		select {
-		case err := <-done:
-			if err != nil {
-				t.Errorf("runBoundServe after cancellation: %v", err)
-			}
-		case <-time.After(5 * time.Second):
-			t.Error("bound serve did not stop within the grace period")
-		}
-	})
-
+	run := startServeLifecycle(t, discardLogger(t), serveInput{Config: cfg, Edges: edges, Listener: ln})
 	base := "http://" + ln.Addr().String()
-	assertHTTPStatusEventually(t, base+"/readyz", http.StatusOK)
 
+	// The startup exchange runs after Prime, so its headers are the barrier for
+	// discovery having completed.
 	select {
 	case exchange := <-exchangeHeaders:
 		if got, want := exchange.Get("Editor-Version"), "vscode/7.8.9"; got != want {
 			t.Errorf("exchange Editor-Version = %q, want discovered %q", got, want)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("startup exchange did not run after discovery")
 	}
 
@@ -534,6 +506,11 @@ func TestServeDiscoveredVersionsEndToEnd(t *testing.T) {
 	}
 
 	assertReadyzImpersonation(t, base, discoveredVSCode, discoveredPlugin, "fetched", true)
+	http.DefaultClient.CloseIdleConnections()
+	run.cancel()
+	if result := run.await(t, 5*time.Second); result.Outcome != serveClean || result.Err != nil {
+		t.Errorf("serve lifecycle after cancellation = %v (%v), want clean", result.Outcome, result.Err)
+	}
 }
 
 func TestServeFreshCodexCatalogAndReadinessEndToEnd(t *testing.T) {
@@ -600,74 +577,38 @@ func TestServeFreshCodexCatalogAndReadinessEndToEnd(t *testing.T) {
 	cfg.CodexCatalogEnabled = true
 	cfg.CodexOverrideLimits = true
 	cfg.CodexCatalogRefreshInterval = time.Hour
-	logger := discardLogger(t)
-	registry := cache.NewRegistry()
-	mgr, imp, err := buildServeProvider(cfg, logger, github.URL, github.Client(), impersonation.Edge{
+	edges := exchangeServeEdges(github)
+	edges.Discovery = impersonation.Edge{
 		VSCodeBaseURL:      discovery.URL,
 		MarketplaceBaseURL: discovery.URL,
 		Client:             discovery.Client(),
-	}, registry)
-	if err != nil {
-		t.Fatalf("buildServeProvider: %v", err)
 	}
-	codexModels := configuredCodexModels(cfg, catalog.ModelsEdge{
-		BaseURL: github.URL,
-		Client:  github.Client(),
-	}, registry, logger)
+	edges.CodexModels = catalog.ModelsEdge{BaseURL: github.URL, Client: github.Client()}
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() {
-		done <- runBoundServe(ctx, cfg, logger, mgr, imp, codexModels, nil, registry, configuredShimRegistry(cfg, nil), ln, nil)
-	}()
-	t.Cleanup(func() {
-		cancel()
-		select {
-		case err := <-done:
-			if err != nil {
-				t.Errorf("runBoundServe after cancellation: %v", err)
-			}
-		case <-time.After(5 * time.Second):
-			t.Error("bound serve did not stop")
-		}
-	})
+	startServeLifecycle(t, discardLogger(t), serveInput{Config: cfg, Edges: edges, Listener: ln})
 	base := "http://" + ln.Addr().String()
 
+	awaitCachedValue(t, base, "codex_models", "fetched", tag)
+	resp, err := http.Get(base + "/readyz") //nolint:noctx // local e2e server
+	if err != nil {
+		t.Fatalf("GET /readyz: %v", err)
+	}
 	var readiness struct {
-		Caches map[string]struct {
-			Source  string `json:"source"`
-			Version string `json:"version"`
-		} `json:"caches"`
+		Caches map[string]json.RawMessage `json:"caches"`
 	}
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		resp, requestErr := http.Get(base + "/readyz") //nolint:noctx // local e2e server
-		if requestErr == nil {
-			body, _ := io.ReadAll(resp.Body)
-			_ = resp.Body.Close()
-			if json.Unmarshal(body, &readiness) == nil && readiness.Caches["codex_models"].Source == "fetched" {
-				break
-			}
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("codex_models did not become fetched; readiness=%#v", readiness)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if len(readiness.Caches) != 3 {
-		t.Fatalf("readiness caches = %#v, want vscode, copilot_chat, and codex_models", readiness.Caches)
-	}
-	if got := readiness.Caches["codex_models"].Version; got != tag {
-		t.Errorf("codex_models version = %q, want %q", got, tag)
+	err = json.NewDecoder(resp.Body).Decode(&readiness)
+	_ = resp.Body.Close()
+	if err != nil || len(readiness.Caches) != 3 {
+		t.Fatalf("readiness caches = %v (%v), want vscode, copilot_chat, and codex_models", readiness.Caches, err)
 	}
 
 	req, _ := http.NewRequest(http.MethodGet, base+"/openai/v1/models?client_version=fixture", nil)
 	req.Header.Set("Authorization", "Bearer "+testAPIKey)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err = http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("GET Codex catalog: %v", err)
 	}
