@@ -9,6 +9,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/ningw42/copilotd/internal/usage"
 	"github.com/ningw42/copilotd/internal/usage/modelmatch"
 	"github.com/ningw42/copilotd/internal/usage/pricing"
 )
@@ -145,16 +146,43 @@ type Report struct {
 	OpenAI    *Section           `json:"openai,omitempty"`
 }
 
-// OpenAIMetrics names the frozen native projection; subsets are never added to
-// their containing counts. The returned list is independent of internal state.
-func OpenAIMetrics() []string {
-	return []string{"input_tokens", "output_tokens", "cached_tokens", "cache_write_tokens", "reasoning_tokens", "total_tokens"}
+// NativeMetric is one count of a Surface's frozen native projection. Every
+// stored Turn reports a Required metric, so its sum is always known.
+type NativeMetric struct {
+	Name     string
+	Required bool
 }
 
-// AnthropicMetrics names the frozen native projection. Input is the uncached
-// remainder; TTL counts are cache-creation subsets and thinking is inside output.
-func AnthropicMetrics() []string {
-	return []string{"input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens", "thinking_tokens"}
+// OpenAINativeMetrics describes the frozen native projection; subsets are never
+// added to their containing counts. The returned list is independent of
+// internal state.
+func OpenAINativeMetrics() []NativeMetric { return nativeMetrics(usage.OpenAIProjection()) }
+
+// AnthropicNativeMetrics describes the frozen native projection. Input is the
+// uncached remainder; TTL counts are cache-creation subsets and thinking is
+// inside output. The returned list is independent of internal state.
+func AnthropicNativeMetrics() []NativeMetric { return nativeMetrics(usage.AnthropicProjection()) }
+
+// OpenAIMetrics names OpenAINativeMetrics in the same order.
+func OpenAIMetrics() []string { return metricNames(OpenAINativeMetrics()) }
+
+// AnthropicMetrics names AnthropicNativeMetrics in the same order.
+func AnthropicMetrics() []string { return metricNames(AnthropicNativeMetrics()) }
+
+func nativeMetrics[U usage.Usage](projection usage.Projection[U]) []NativeMetric {
+	metrics := make([]NativeMetric, 0, projection.Len())
+	for _, count := range projection.All() {
+		metrics = append(metrics, NativeMetric{Name: count.Name(), Required: count.Required()})
+	}
+	return metrics
+}
+
+func metricNames(metrics []NativeMetric) []string {
+	names := make([]string, 0, len(metrics))
+	for _, metric := range metrics {
+		names = append(names, metric.Name)
+	}
+	return names
 }
 
 // Reporter captures the daemon's absolute path and immutable read policy. New
@@ -326,15 +354,15 @@ func strictDate(value string) (time.Time, error) {
 	return date, nil
 }
 
-func emptyTotal(names []string) Total {
+func emptyTotal(metrics []NativeMetric) Total {
 	zeroAmount := pricing.Amount{}
 	total := Total{Usage: map[string]Metric{}, Cost: Cost{Amount: &zeroAmount}}
-	for _, name := range names {
-		total.Usage[name] = Metric{}
-	}
-	for _, name := range []string{"input_tokens", "output_tokens"} {
-		zero := int64(0)
-		total.Usage[name] = Metric{Sum: &zero}
+	for _, metric := range metrics {
+		total.Usage[metric.Name] = Metric{}
+		if metric.Required {
+			zero := int64(0)
+			total.Usage[metric.Name] = Metric{Sum: &zero}
+		}
 	}
 	return total
 }

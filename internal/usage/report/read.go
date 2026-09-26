@@ -99,9 +99,11 @@ func (r *Reporter) read(ctx context.Context, buckets []Bucket, surface string, m
 		return nil, errors.New("incompatible usage schema or encoding")
 	}
 	// Version alone is insufficient for a damaged or partially replaced schema.
+	// Both tables are probed whichever Surface is selected. Metadata columns
+	// stay literal; the count columns are each Surface's declared projection.
 	for _, statement := range []string{
-		`SELECT at_ms,model,requested_model,service_tier,input_tokens,output_tokens,cached_tokens,cache_write_tokens,reasoning_tokens,total_tokens FROM openai_turn LIMIT 0`,
-		`SELECT at_ms,model,requested_model,input_tokens,output_tokens,cache_creation_input_tokens,cache_read_input_tokens,ephemeral_5m_input_tokens,ephemeral_1h_input_tokens,thinking_tokens FROM anthropic_turn LIMIT 0`,
+		nativeTableFor("openai").probe("at_ms,model,requested_model,service_tier"),
+		nativeTableFor("anthropic").probe("at_ms,model,requested_model"),
 	} {
 		if err = capBusy(ctx, conn); err != nil {
 			return nil, err
@@ -148,14 +150,47 @@ func (b *readBudget) retainIdentityBytes(size int) error {
 	return nil
 }
 
+// nativeTable is one Surface's writer-owned table read through its declared
+// native count projection.
+type nativeTable struct {
+	name    string
+	metrics []NativeMetric
+	// typed converts one nullable value per metric, in metric order, to an
+	// owned typed usage value, failing if a required count is missing.
+	typed func([]*int64) (usage.Usage, error)
+}
+
+func nativeTableFor(surface string) nativeTable {
+	if surface == "anthropic" {
+		return declaredTable(sqlitestore.AnthropicTable, usage.AnthropicProjection())
+	}
+	return declaredTable(sqlitestore.OpenAITable, usage.OpenAIProjection())
+}
+
+func declaredTable[U usage.Usage](name string, projection usage.Projection[U]) nativeTable {
+	return nativeTable{
+		name:    name,
+		metrics: nativeMetrics(projection),
+		typed: func(values []*int64) (usage.Usage, error) {
+			native, err := projection.Usage(values)
+			if err != nil {
+				return nil, err
+			}
+			return native, nil
+		},
+	}
+}
+
+func (t nativeTable) probe(metadata string) string {
+	return `SELECT ` + metadata + `,` + strings.Join(metricNames(t.metrics), ",") + ` FROM ` + t.name + ` LIMIT 0`
+}
+
 func readSection(ctx context.Context, conn *sql.Conn, buckets []Bucket, surface string, model *string, budget *readBudget, valuation *capturedPricing) (_ *Section, err error) {
 	if err = capBusy(ctx, conn); err != nil {
 		return nil, err
 	}
-	names, table := OpenAIMetrics(), "openai_turn"
-	if surface == "anthropic" {
-		names, table = AnthropicMetrics(), "anthropic_turn"
-	}
+	table := nativeTableFor(surface)
+	names := metricNames(table.metrics)
 	// Table and numeric columns are exclusively the frozen native projection,
 	// never caller-provided SQL. OpenAI appends bounded service-tier lookup
 	// evidence separately. Preserve timestamp-only indexed ordering and the lazy
@@ -173,12 +208,12 @@ func readSection(ctx context.Context, conn *sql.Conn, buckets []Bucket, surface 
 		predicate = ` AND CASE WHEN octet_length(model)=? THEN model=? COLLATE BINARY ELSE 0 END`
 		args = append(args, len(*model), *model)
 	}
-	rows, err := conn.QueryContext(ctx, `SELECT at_ms,octet_length(model),CASE WHEN octet_length(model)<=? THEN model ELSE NULL END,`+strings.Join(names, ",")+tierProjection+` FROM `+table+` WHERE at_ms>=? AND at_ms<?`+predicate+` ORDER BY at_ms`, args...)
+	rows, err := conn.QueryContext(ctx, `SELECT at_ms,octet_length(model),CASE WHEN octet_length(model)<=? THEN model ELSE NULL END,`+strings.Join(names, ",")+tierProjection+` FROM `+table.name+` WHERE at_ms>=? AND at_ms<?`+predicate+` ORDER BY at_ms`, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { err = errors.Join(err, rows.Close()) }()
-	section := Section{Rows: []Row{}, Models: []ModelTotal{}, Total: emptyTotal(names)}
+	section := Section{Rows: []Row{}, Models: []ModelTotal{}, Total: emptyTotal(table.metrics)}
 	models := map[string]*Total{}
 	type groupKey struct{ bucket, model string }
 	groups := map[groupKey]*Total{}
@@ -187,6 +222,7 @@ func readSection(ctx context.Context, conn *sql.Conn, buckets []Bucket, surface 
 	var at, modelBytes int64
 	var safeModel, reportedTier sql.NullString
 	counts := make([]sql.NullInt64, len(names))
+	reported := make([]*int64, len(counts))
 	dest := []any{&at, &modelBytes, &safeModel}
 	for i := range counts {
 		dest = append(dest, &counts[i])
@@ -215,8 +251,17 @@ func readSection(ctx context.Context, conn *sql.Conn, buckets []Bucket, surface 
 		if !safeModel.Valid || !utf8.ValidString(safeModel.String) || modelBytes != int64(len(safeModel.String)) {
 			return nil, errors.New("invalid stored model")
 		}
-		if !counts[0].Valid || !counts[1].Valid {
-			return nil, errors.New("missing required count")
+		for i := range counts {
+			reported[i] = nil
+			if counts[i].Valid {
+				reported[i] = &counts[i].Int64
+			}
+		}
+		// Reject a missing required count before any pricing resolution; the
+		// typed usage owns copies, not pointers into the reused scan storage.
+		native, err := table.typed(reported)
+		if err != nil {
+			return nil, fmt.Errorf("stored native counts: %w", err)
 		}
 		for _, count := range counts {
 			if count.Valid && count.Int64 < 0 {
@@ -235,7 +280,7 @@ func readSection(ctx context.Context, conn *sql.Conn, buckets []Bucket, surface 
 		if err != nil {
 			return nil, err
 		}
-		contribution, err := valueTurn(surface, counts, nullableString(reportedTier), selectedPricing)
+		contribution, err := valueTurn(native, nullableString(reportedTier), selectedPricing)
 		if err != nil {
 			if errors.Is(err, pricing.ErrOverflow) {
 				return nil, overflow()
@@ -258,11 +303,11 @@ func readSection(ctx context.Context, conn *sql.Conn, buckets []Bucket, surface 
 			if budget.groups > budget.limits.maxGroups {
 				return nil, tooLarge()
 			}
-			total := emptyTotal(names)
+			total := emptyTotal(table.metrics)
 			groups[key] = &total
 		}
 		if models[model] == nil {
-			total := emptyTotal(names)
+			total := emptyTotal(table.metrics)
 			models[model] = &total
 		}
 		for _, total := range []*Total{groups[key], models[model], &section.Total} {
@@ -329,7 +374,7 @@ type turnContribution struct {
 	reason string
 }
 
-func valueTurn(surface string, counts []sql.NullInt64, reportedTier *string, selected modelPricing) (turnContribution, error) {
+func valueTurn(native usage.Usage, reportedTier *string, selected modelPricing) (turnContribution, error) {
 	switch selected.match.Status {
 	case PricingMatchUnknown:
 		return turnContribution{reason: "unknown_model"}, nil
@@ -342,38 +387,18 @@ func valueTurn(surface string, counts []sql.NullInt64, reportedTier *string, sel
 
 	var contribution pricing.Contribution
 	var err error
-	if surface == "anthropic" {
-		contribution, err = selected.tariff.CalculateAnthropic(usage.AnthropicUsage{
-			InputTokens:              counts[0].Int64,
-			OutputTokens:             counts[1].Int64,
-			CacheCreationInputTokens: nullableCount(counts[2]),
-			CacheReadInputTokens:     nullableCount(counts[3]),
-			Ephemeral5mInputTokens:   nullableCount(counts[4]),
-			Ephemeral1hInputTokens:   nullableCount(counts[5]),
-			ThinkingTokens:           nullableCount(counts[6]),
-		})
-	} else {
-		contribution, err = selected.tariff.CalculateOpenAI(usage.OpenAIUsage{
-			InputTokens:      counts[0].Int64,
-			OutputTokens:     counts[1].Int64,
-			CachedTokens:     nullableCount(counts[2]),
-			CacheWriteTokens: nullableCount(counts[3]),
-			ReasoningTokens:  nullableCount(counts[4]),
-			TotalTokens:      nullableCount(counts[5]),
-		}, reportedTier)
+	switch native := native.(type) {
+	case usage.AnthropicUsage:
+		contribution, err = selected.tariff.CalculateAnthropic(native)
+	case usage.OpenAIUsage:
+		contribution, err = selected.tariff.CalculateOpenAI(native, reportedTier)
+	default:
+		return turnContribution{}, errors.New("unsupported native usage")
 	}
 	if err != nil {
 		return turnContribution{}, err
 	}
 	return turnContribution{amount: contribution.Amount, reason: string(contribution.Reason)}, nil
-}
-
-func nullableCount(count sql.NullInt64) *int64 {
-	if !count.Valid {
-		return nil
-	}
-	value := count.Int64
-	return &value
 }
 
 func nullableString(value sql.NullString) *string {

@@ -2,9 +2,11 @@ package reportcli
 
 import (
 	"io"
+	"slices"
 	"testing"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/ningw42/copilotd/internal/usage/report"
 )
 
 func TestSurfaceTitleStylesUseTerminalBaseAndDistinctBrandBackgrounds(t *testing.T) {
@@ -42,5 +44,31 @@ func TestTerminalBackgroundColorFallsBackToDefaultOutsideTTY(t *testing.T) {
 	renderer := lipgloss.NewRenderer(io.Discard)
 	if got := terminalBackgroundColor(renderer); got != (lipgloss.NoColor{}) {
 		t.Errorf("non-TTY background = %v, want default color", got)
+	}
+}
+
+func TestSurfaceColumnsCoverEachReportMetricExactlyOnce(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		columns surfaceColumns
+		metrics []string
+	}{
+		{"Anthropic", anthropicColumns, report.AnthropicMetrics()},
+		{"OpenAI", openAIColumns, report.OpenAIMetrics()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var shown []string
+			for _, column := range slices.Concat(tc.columns.primary, tc.columns.secondary) {
+				if column.label == "" {
+					t.Errorf("column %s has no label", column.name)
+				}
+				shown = append(shown, column.name)
+			}
+			slices.Sort(shown)
+			want := slices.Sorted(slices.Values(tc.metrics))
+			if !slices.Equal(shown, want) {
+				t.Errorf("primary and secondary columns = %v, want each report metric exactly once %v", shown, want)
+			}
+		})
 	}
 }

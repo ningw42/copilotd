@@ -82,6 +82,21 @@ var (
 	openAISurfaceColor    = lipgloss.Color("#3C6AC8")
 )
 
+// surfaceColumns labels and places each report metric of one Surface: primary
+// columns are always shown, secondary ones only with details.
+type surfaceColumns struct{ primary, secondary []metricColumn }
+
+var (
+	anthropicColumns = surfaceColumns{
+		primary:   []metricColumn{{"input_tokens", "Uncached input"}, {"output_tokens", "Output"}, {"cache_creation_input_tokens", "Cache create"}, {"cache_read_input_tokens", "Cache read"}},
+		secondary: []metricColumn{{"thinking_tokens", "Thinking"}, {"ephemeral_5m_input_tokens", "Cache create 5m"}, {"ephemeral_1h_input_tokens", "Cache create 1h"}},
+	}
+	openAIColumns = surfaceColumns{
+		primary:   []metricColumn{{"input_tokens", "Input"}, {"output_tokens", "Output"}, {"cache_write_tokens", "Cache write"}, {"cached_tokens", "Cache read"}},
+		secondary: []metricColumn{{"reasoning_tokens", "Reasoning"}, {"total_tokens", "Reported total"}},
+	}
+)
+
 func render(renderer *lipgloss.Renderer, endpoint string, r report.Report, details bool) (string, error) {
 	var out strings.Builder
 	surfaceTextColor := terminalBackgroundColor(renderer)
@@ -97,17 +112,13 @@ func render(renderer *lipgloss.Renderer, endpoint string, r report.Report, detai
 	}
 	fmt.Fprintln(&out)
 	for _, native := range []struct {
-		title              string
-		background         lipgloss.TerminalColor
-		section            *report.Section
-		primary, secondary []metricColumn
+		title      string
+		background lipgloss.TerminalColor
+		section    *report.Section
+		surfaceColumns
 	}{
-		{"Anthropic", anthropicSurfaceColor, r.Anthropic,
-			[]metricColumn{{"input_tokens", "Uncached input"}, {"output_tokens", "Output"}, {"cache_creation_input_tokens", "Cache create"}, {"cache_read_input_tokens", "Cache read"}},
-			[]metricColumn{{"thinking_tokens", "Thinking"}, {"ephemeral_5m_input_tokens", "Cache create 5m"}, {"ephemeral_1h_input_tokens", "Cache create 1h"}}},
-		{"OpenAI", openAISurfaceColor, r.OpenAI,
-			[]metricColumn{{"input_tokens", "Input"}, {"output_tokens", "Output"}, {"cache_write_tokens", "Cache write"}, {"cached_tokens", "Cache read"}},
-			[]metricColumn{{"reasoning_tokens", "Reasoning"}, {"total_tokens", "Reported total"}}},
+		{"Anthropic", anthropicSurfaceColor, r.Anthropic, anthropicColumns},
+		{"OpenAI", openAISurfaceColor, r.OpenAI, openAIColumns},
 	} {
 		if native.section == nil {
 			continue
