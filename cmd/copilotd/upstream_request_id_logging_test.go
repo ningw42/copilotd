@@ -1,15 +1,12 @@
 package main
 
 import (
-	"bytes"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
-
-	"github.com/ningw42/copilotd/internal/identity"
 )
 
 func TestForwardedResponsesLogDifferentUpstreamRequestID(t *testing.T) {
@@ -45,15 +42,10 @@ func TestForwardedResponsesLogDifferentUpstreamRequestID(t *testing.T) {
 	}))
 	t.Cleanup(upstream.Close)
 
-	provider := identity.NewStatic(identity.Credential{
-		BaseURL: upstream.URL,
-		Token:   phase4CopilotToken,
-	}, true)
-	cfg := e2eConfig("unused-oauth-token")
+	cfg := e2eConfig(phase4GitHubOAuthToken)
 	cfg.APIKey = phase4APIKey
-	var logs bytes.Buffer
-	logger := newPhase4Logger(t, &logs)
-	base := startPhase4Server(t, cfg, provider, logger)
+	logs := newUsageReportLogs()
+	base := startPhase4Lifecycle(t, cfg, newPhase4ExchangeStub(t, upstream.URL), newPhase4Logger(t, logs))
 
 	tests := []struct {
 		name       string
@@ -171,15 +163,10 @@ func TestForwardedResponsesDoNotLogAbsentOrIdenticalUpstreamRequestID(t *testing
 	}))
 	t.Cleanup(upstream.Close)
 
-	provider := identity.NewStatic(identity.Credential{
-		BaseURL: upstream.URL,
-		Token:   phase4CopilotToken,
-	}, true)
-	cfg := e2eConfig("unused-oauth-token")
+	cfg := e2eConfig(phase4GitHubOAuthToken)
 	cfg.APIKey = phase4APIKey
-	var logs bytes.Buffer
-	logger := newPhase4Logger(t, &logs)
-	base := startPhase4Server(t, cfg, provider, logger)
+	logs := newUsageReportLogs()
+	base := startPhase4Lifecycle(t, cfg, newPhase4ExchangeStub(t, upstream.URL), newPhase4Logger(t, logs))
 
 	paths := []struct {
 		name   string
@@ -232,15 +219,10 @@ func TestStreamingResponseCarriesUpstreamRequestIDOnTerminalAccess(t *testing.T)
 	}))
 	t.Cleanup(upstream.Close)
 
-	provider := identity.NewStatic(identity.Credential{
-		BaseURL: upstream.URL,
-		Token:   phase4CopilotToken,
-	}, true)
-	cfg := e2eConfig("unused-oauth-token")
+	cfg := e2eConfig(phase4GitHubOAuthToken)
 	cfg.APIKey = phase4APIKey
-	var logs bytes.Buffer
-	logger := newPhase4Logger(t, &logs)
-	base := startPhase4Server(t, cfg, provider, logger)
+	logs := newUsageReportLogs()
+	base := startPhase4Lifecycle(t, cfg, newPhase4ExchangeStub(t, upstream.URL), newPhase4Logger(t, logs))
 
 	req, err := http.NewRequest(http.MethodPost, base+"/openai/v1/responses", strings.NewReader(`{"stream":true}`))
 	if err != nil {

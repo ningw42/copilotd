@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -27,11 +28,13 @@ import (
 	"github.com/ningw42/copilotd/internal/identity"
 	"github.com/ningw42/copilotd/internal/logging"
 	"github.com/ningw42/copilotd/internal/server"
+	"github.com/ningw42/copilotd/internal/upstream"
 	"github.com/ningw42/copilotd/internal/usage"
 	"github.com/ningw42/copilotd/internal/usage/pricing"
 	"github.com/ningw42/copilotd/internal/usage/report"
 	"github.com/ningw42/copilotd/internal/usage/reporthttp"
 	"github.com/ningw42/copilotd/internal/usage/sqlitestore"
+	"github.com/ningw42/copilotd/internal/wsforward"
 )
 
 // This is an OS-process acceptance test, not a call to run or a renderer. The
@@ -793,47 +796,59 @@ func waitForUsageReport(t *testing.T, endpoint string, query report.Query, ready
 	}
 }
 
-func TestUsageExecutableReadsGenericRecovery(t *testing.T) {
-	binary := usageAcceptanceBinary(t)
+// startGenericRecoveryServer is TestUsageExecutableReadsGenericRecovery's
+// dedicated fixture and the package's only hand-wired server: the report route
+// passes through no Shim, and production's query returns structured errors
+// rather than panicking, so the serve lifecycle cannot serve this panicking
+// query. No inference runs; the static provider and minimal forwarding only
+// satisfy server.New, and no readiness observer is needed because /readyz is
+// never requested.
+func startGenericRecoveryServer(t *testing.T, reportHandler http.Handler) string {
+	t.Helper()
 	cfg := e2eConfig("unused-recovery-oauth-token")
 	logger := discardLogger(t)
 	provider := identity.NewStatic(identity.Credential{BaseURL: "http://127.0.0.1:1", Token: "unused-recovery-copilot-token"}, true)
-	forwarder := newTestForwarderWithLogger(
-		provider,
-		forward.NewClient(cfg.ResponseHeaderTimeout),
-		cfg.OutboundTimeout,
-		cfg.WriteTimeout,
-		cfg.StreamIdleTimeout,
-		cfg.StreamKeepaliveInterval,
-		cfg.MaxRequestBytes,
-		cfg.MaxBufferedResponseBytes,
-		logger,
-		configuredShimRegistry(cfg, nil),
-	)
+	caller := upstream.New(provider, forward.NewClient(time.Second), time.Second, 1<<20, logging.ForComponent(logger, "internal/upstream"))
+	forwarder := forward.New(caller, time.Second, time.Second, time.Second, time.Second, 1<<20, nil,
+		logging.ForComponent(logger, "internal/sse"), logging.ForComponent(logger, "internal/shim"), 0)
+	wsProxy := wsforward.New(caller, http.DefaultClient, time.Second, time.Second, 1<<20, nil,
+		logging.ForComponent(logger, "internal/wsforward"), logging.ForComponent(logger, "internal/shim"), 0, wsforward.WsMetrics{})
+	srv := server.New(cfg, logging.ForComponent(logger, "internal/server"), logging.ForComponent(logger, "internal/catalog"), log.New(io.Discard, "", 0),
+		provider, server.ReadyObservers{}, forwarder, caller, wsProxy, server.NewStreamOutcomeCounter(), catalog.RenderDescriptors{}, reportHandler)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- srv.Run(ctx, ln) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("server Run = %v, want a clean drain", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Error("server did not shut down within the grace period")
+		}
+	})
+	return "http://" + ln.Addr().String()
+}
+
+func TestUsageExecutableReadsGenericRecovery(t *testing.T) {
+	binary := usageAcceptanceBinary(t)
 	const panicSentinel = "private-usage-recovery-panic-sentinel"
 	observed := make(chan string, 3)
-	reportHandler := reporthttp.Handler(func(ctx context.Context, _ report.Query) (report.Report, error) {
+	base := startGenericRecoveryServer(t, reporthttp.Handler(func(ctx context.Context, _ report.Query) (report.Report, error) {
 		id, ok := logging.RequestIDFrom(ctx)
 		if !ok {
 			id = "missing-request-id"
 		}
 		observed <- id
 		panic(panicSentinel)
-	})
-	base := startTestServer(t, server.New(
-		cfg,
-		logging.ForComponent(logger, "internal/server"),
-		logging.ForComponent(logger, "internal/catalog"),
-		newTestDependencyErrorLog(),
-		provider,
-		newTestReadyObservers(),
-		forwarder,
-		newTestCatalogSource(provider),
-		newTestWSProxy(provider),
-		server.NewStreamOutcomeCounter(),
-		catalog.RenderDescriptors{},
-		reportHandler,
-	))
+	}))
 
 	for _, tc := range []struct {
 		name string

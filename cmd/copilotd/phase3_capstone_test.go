@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"io"
 	"log/slog"
@@ -13,17 +12,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ningw42/copilotd/internal/catalog"
 	"github.com/ningw42/copilotd/internal/config"
 	"github.com/ningw42/copilotd/internal/endpoint"
-	"github.com/ningw42/copilotd/internal/forward"
-	"github.com/ningw42/copilotd/internal/identity"
-	"github.com/ningw42/copilotd/internal/logging"
-	"github.com/ningw42/copilotd/internal/server"
 	"github.com/ningw42/copilotd/internal/shim"
 	"github.com/ningw42/copilotd/internal/sse"
-	"github.com/ningw42/copilotd/internal/upstream"
-	"github.com/ningw42/copilotd/internal/usage/reporthttp"
 )
 
 const (
@@ -33,53 +25,24 @@ const (
 	phase3Terminal     = "event: message_stop\ndata: {\"type\":\"message_stop\",\"opaque\":\"terminal\"}\n\n"
 )
 
-func startPhase3CapstoneServer(t *testing.T, cfg config.ServeConfig, upstreamURL string, registry shim.Registry) string {
+// phase3CopilotToken is the Copilot token lifecycleExchangeStub mints.
+const phase3CopilotToken = "copilot-lifecycle-token"
+
+// startPhase3Lifecycle serves cfg through the production lifecycle against
+// upstreamURL, with discovery disabled. decorate, when non-nil, adds the test's
+// Shim registrations to the configured ones through the registry hook.
+func startPhase3Lifecycle(t *testing.T, cfg config.ServeConfig, upstreamURL string, logger *slog.Logger, decorate func(shim.Registry) shim.Registry) string {
 	t.Helper()
-	base, _ := startPhase3CapstoneServerWithObservers(
-		t, cfg, upstreamURL, registry, discardLogger(t), server.NewStreamOutcomeCounter(),
-	)
-	return base
+	cfg.ImpersonationRefreshInterval = 0
+	github := lifecycleExchangeStub(t, upstreamURL, make(chan http.Header, 1))
+	return startServedLifecycle(t, logger, serveInput{Config: cfg, Edges: exchangeServeEdges(github), DecorateRegistry: decorate})
 }
 
-func startPhase3CapstoneServerWithObservers(
-	t *testing.T,
-	cfg config.ServeConfig,
-	upstreamURL string,
-	registry shim.Registry,
-	logger *slog.Logger,
-	outcomes *server.StreamOutcomeCounter,
-) (string, *forward.Forwarder) {
-	t.Helper()
-	provider := identity.NewStatic(identity.Credential{
-		BaseURL: upstreamURL,
-		Token:   "stub-copilot-token",
-		Headers: http.Header{
-			"Copilot-Integration-Id": {"vscode-chat"},
-			"Editor-Version":         {"vscode/1.104.1"},
-		},
-	}, true)
-	caller := upstream.New(
-		provider,
-		forward.NewClient(cfg.ResponseHeaderTimeout),
-		cfg.OutboundTimeout,
-		cfg.MaxBufferedResponseBytes,
-		logging.ForComponent(logger, "internal/upstream"),
-	)
-	forwarder := forward.New(
-		caller,
-		cfg.OutboundTimeout,
-		cfg.WriteTimeout,
-		cfg.StreamIdleTimeout,
-		cfg.StreamKeepaliveInterval,
-		cfg.MaxRequestBytes,
-		registry,
-		logging.ForComponent(logger, "internal/sse"),
-		logging.ForComponent(logger, "internal/shim"),
-		0,
-	)
-	serverLogger := logging.ForComponent(logger, "internal/server")
-	catalogLogger := logging.ForComponent(logger, "internal/catalog")
-	return startTestServer(t, server.New(cfg, serverLogger, catalogLogger, newTestDependencyErrorLog(), provider, newTestReadyObservers(), forwarder, newTestCatalogSource(provider), newTestWSProxy(provider), outcomes, catalog.RenderDescriptors{}, reporthttp.Handler(nil))), forwarder
+// withOuterShim places registration outside every configured registration.
+func withOuterShim(registration shim.Registration) func(shim.Registry) shim.Registry {
+	return func(registry shim.Registry) shim.Registry {
+		return append(shim.Registry{registration}, registry...)
+	}
 }
 
 type phase3BufferedTranscript struct {
@@ -90,7 +53,7 @@ type phase3BufferedTranscript struct {
 	responseBody string
 }
 
-func runPhase3Buffered(t *testing.T, registry shim.Registry) phase3BufferedTranscript {
+func runPhase3Buffered(t *testing.T, cfg config.ServeConfig, decorate func(shim.Registry) shim.Registry) phase3BufferedTranscript {
 	t.Helper()
 	requestBodies := make(chan string, 1)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -103,8 +66,7 @@ func runPhase3Buffered(t *testing.T, registry shim.Registry) phase3BufferedTrans
 	}))
 	t.Cleanup(upstream.Close)
 
-	cfg := e2eConfig("unused-static-provider-token")
-	base := startPhase3CapstoneServer(t, cfg, upstream.URL, registry)
+	base := startPhase3Lifecycle(t, cfg, upstream.URL, discardLogger(t), decorate)
 	req, err := http.NewRequest(http.MethodPost, base+"/anthropic/v1/messages?beta=verbatim", http.NoBody)
 	if err != nil {
 		t.Fatalf("build buffered request: %v", err)
@@ -141,7 +103,7 @@ type phase3StreamTranscript struct {
 	responseBody string
 }
 
-func runPhase3Stream(t *testing.T, registry shim.Registry) phase3StreamTranscript {
+func runPhase3Stream(t *testing.T, cfg config.ServeConfig, decorate func(shim.Registry) shim.Registry) phase3StreamTranscript {
 	t.Helper()
 	requestBodies := make(chan string, 1)
 	releaseTerminal := make(chan struct{})
@@ -166,8 +128,7 @@ func runPhase3Stream(t *testing.T, registry shim.Registry) phase3StreamTranscrip
 	}))
 	t.Cleanup(upstream.Close)
 
-	cfg := e2eConfig("unused-static-provider-token")
-	base := startPhase3CapstoneServer(t, cfg, upstream.URL, registry)
+	base := startPhase3Lifecycle(t, cfg, upstream.URL, discardLogger(t), decorate)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/anthropic/v1/messages", strings.NewReader(`{"stream":true,"opaque":"request-bytes"}`))
@@ -203,13 +164,13 @@ func runPhase3Stream(t *testing.T, registry shim.Registry) phase3StreamTranscrip
 }
 
 func TestPhase3EnabledNopMatchesEmptyChainBufferedEndToEnd(t *testing.T) {
-	emptyCfg := e2eConfig("unused")
+	emptyCfg := e2eConfig("gho-phase3")
 	emptyCfg.ShimNopEnabled = false
 	enabledCfg := emptyCfg
 	enabledCfg.ShimNopEnabled = true
 
-	empty := runPhase3Buffered(t, configuredShimRegistry(emptyCfg, nil))
-	enabledNop := runPhase3Buffered(t, configuredShimRegistry(enabledCfg, nil))
+	empty := runPhase3Buffered(t, emptyCfg, nil)
+	enabledNop := runPhase3Buffered(t, enabledCfg, nil)
 	if enabledNop != empty {
 		t.Fatalf("enabled canonical NopShim transcript = %#v, want empty-chain transcript %#v", enabledNop, empty)
 	}
@@ -226,13 +187,13 @@ func TestPhase3EnabledNopMatchesEmptyChainBufferedEndToEnd(t *testing.T) {
 }
 
 func TestPhase3EnabledNopMatchesEmptyChainStreamingEndToEnd(t *testing.T) {
-	emptyCfg := e2eConfig("unused")
+	emptyCfg := e2eConfig("gho-phase3")
 	emptyCfg.ShimNopEnabled = false
 	enabledCfg := emptyCfg
 	enabledCfg.ShimNopEnabled = true
 
-	empty := runPhase3Stream(t, configuredShimRegistry(emptyCfg, nil))
-	enabledNop := runPhase3Stream(t, configuredShimRegistry(enabledCfg, nil))
+	empty := runPhase3Stream(t, emptyCfg, nil)
+	enabledNop := runPhase3Stream(t, enabledCfg, nil)
 	if enabledNop != empty {
 		t.Fatalf("enabled canonical NopShim transcript = %#v, want empty-chain transcript %#v", enabledNop, empty)
 	}
@@ -292,20 +253,20 @@ func (s *phase3IdentityShim) Finalize(context.Context) []sse.Frame {
 	return nil
 }
 
-func phase3IdentityRegistry(calls *phase3HookCalls) shim.Registry {
-	return shim.Registry{{
+func phase3IdentityRegistration(calls *phase3HookCalls) shim.Registration {
+	return shim.Registration{
 		Name:    "phase3-identity-double",
 		Enabled: true,
 		New: func(context.Context, endpoint.Surface, endpoint.Route) any {
 			calls.constructed.Add(1)
 			return &phase3IdentityShim{calls: calls}
 		},
-	}}
+	}
 }
 
 func TestPhase3IdentityDoublePreservesBufferedRequestAndResponseEndToEnd(t *testing.T) {
 	calls := &phase3HookCalls{}
-	got := runPhase3Buffered(t, phase3IdentityRegistry(calls))
+	got := runPhase3Buffered(t, e2eConfig("gho-phase3"), withOuterShim(phase3IdentityRegistration(calls)))
 	want := phase3BufferedTranscript{
 		requestBody:  phase3RequestBody,
 		status:       http.StatusCreated,
@@ -325,7 +286,7 @@ func TestPhase3IdentityDoublePreservesBufferedRequestAndResponseEndToEnd(t *test
 
 func TestPhase3IdentityDoublePreservesStreamFramesAndFlushEndToEnd(t *testing.T) {
 	calls := &phase3HookCalls{}
-	got := runPhase3Stream(t, phase3IdentityRegistry(calls))
+	got := runPhase3Stream(t, e2eConfig("gho-phase3"), withOuterShim(phase3IdentityRegistration(calls)))
 	want := phase3StreamTranscript{
 		requestBody:  `{"stream":true,"opaque":"request-bytes"}`,
 		status:       http.StatusOK,
@@ -362,7 +323,7 @@ func (*phase3PostTerminalPanickingShim) TransformEvent(_ context.Context, frame 
 	panic("phase3-private-suppressed-panic")
 }
 
-func TestPhase3PostCommitShimPanicStaysOnStreamAndIsWarnedCountedAndRedacted(t *testing.T) {
+func TestPhase3PostCommitShimPanicStaysOnStreamAndIsWarnedAndRedacted(t *testing.T) {
 	const (
 		requestSecret = "phase3-private-panic-request"
 		frameSecret   = "phase3-private-panic-frame"
@@ -375,21 +336,14 @@ func TestPhase3PostCommitShimPanicStaysOnStreamAndIsWarnedCountedAndRedacted(t *
 	}))
 	t.Cleanup(upstream.Close)
 
-	registry := shim.Registry{{
+	logOutput := newUsageReportLogs()
+	base := startPhase3Lifecycle(t, e2eConfig("gho-phase3"), upstream.URL, newPhase4Logger(t, logOutput), withOuterShim(shim.Registration{
 		Name:    "phase3-panicking-event",
 		Enabled: true,
 		New: func(context.Context, endpoint.Surface, endpoint.Route) any {
 			return &phase3PanickingEventShim{}
 		},
-	}}
-	var logOutput bytes.Buffer
-	logger, err := logging.NewWithWriter(&logOutput, config.ServeConfig{LogLevel: "info", LogFormat: "text"})
-	if err != nil {
-		t.Fatalf("build capstone logger: %v", err)
-	}
-	outcomes := server.NewStreamOutcomeCounter()
-	cfg := e2eConfig("unused-static-provider-token")
-	base, _ := startPhase3CapstoneServerWithObservers(t, cfg, upstream.URL, registry, logger, outcomes)
+	}))
 
 	req, err := http.NewRequest(http.MethodPost, base+"/anthropic/v1/messages", strings.NewReader(requestSecret))
 	if err != nil {
@@ -412,21 +366,18 @@ func TestPhase3PostCommitShimPanicStaysOnStreamAndIsWarnedCountedAndRedacted(t *
 	if resp.StatusCode != http.StatusOK || string(body) != wantBody {
 		t.Errorf("post-commit response = status %d body %q, want committed 200 and only native shim terminal %q", resp.StatusCode, body, wantBody)
 	}
-	if got := outcomes.Count("anthropic", sse.OutcomeShimError); got != 1 {
-		t.Errorf("shim_error outcome count = %d, want 1", got)
-	}
 	logs := logOutput.String()
 	if !strings.Contains(logs, "level=WARN") || !strings.Contains(logs, "msg=access") || !strings.Contains(logs, "outcome=shim_error") {
 		t.Errorf("post-commit access log missing warn shim_error metadata:\n%s", logs)
 	}
-	for _, secret := range []string{requestSecret, frameSecret, panicSecret, testAPIKey, "stub-copilot-token"} {
+	for _, secret := range []string{requestSecret, frameSecret, panicSecret, testAPIKey, phase3CopilotToken} {
 		if strings.Contains(logs, secret) {
 			t.Errorf("post-commit logs leaked %q:\n%s", secret, logs)
 		}
 	}
 }
 
-func TestPhase3PostTerminalShimPanicIsSuppressedCountedAndRedacted(t *testing.T) {
+func TestPhase3PostTerminalShimPanicIsSuppressedAndRedacted(t *testing.T) {
 	const (
 		requestSecret  = "phase3-private-suppressed-request"
 		trailingSecret = "phase3-private-trailing-frame"
@@ -440,21 +391,14 @@ func TestPhase3PostTerminalShimPanicIsSuppressedCountedAndRedacted(t *testing.T)
 	}))
 	t.Cleanup(upstream.Close)
 
-	registry := shim.Registry{{
+	logOutput := newUsageReportLogs()
+	base := startPhase3Lifecycle(t, e2eConfig("gho-phase3"), upstream.URL, newPhase4Logger(t, logOutput), withOuterShim(shim.Registration{
 		Name:    "phase3-post-terminal-panic",
 		Enabled: true,
 		New: func(context.Context, endpoint.Surface, endpoint.Route) any {
 			return &phase3PostTerminalPanickingShim{}
 		},
-	}}
-	var logOutput bytes.Buffer
-	logger, err := logging.NewWithWriter(&logOutput, config.ServeConfig{LogLevel: "info", LogFormat: "text"})
-	if err != nil {
-		t.Fatalf("build capstone logger: %v", err)
-	}
-	outcomes := server.NewStreamOutcomeCounter()
-	cfg := e2eConfig("unused-static-provider-token")
-	base, forwarder := startPhase3CapstoneServerWithObservers(t, cfg, upstream.URL, registry, logger, outcomes)
+	}))
 
 	req, err := http.NewRequest(http.MethodPost, base+"/anthropic/v1/messages", strings.NewReader(requestSecret))
 	if err != nil {
@@ -476,12 +420,6 @@ func TestPhase3PostTerminalShimPanicIsSuppressedCountedAndRedacted(t *testing.T)
 	if resp.StatusCode != http.StatusOK || string(body) != terminal {
 		t.Errorf("suppressed panic response = status %d body %q, want only upstream terminal %q", resp.StatusCode, body, terminal)
 	}
-	if got := outcomes.Count("anthropic", sse.OutcomeClean); got != 1 {
-		t.Errorf("clean outcome count after suppression = %d, want 1", got)
-	}
-	if got := forwarder.SuppressedShimErrorCount(); got != 1 {
-		t.Errorf("suppressed shim panic count = %d, want 1", got)
-	}
 	logs := logOutput.String()
 	warningLines := phase4LogLinesContaining(logs, "level=WARN", "suppressed post-terminal shim error", "stage=transform", "component=internal/sse")
 	if len(warningLines) != 1 {
@@ -491,7 +429,7 @@ func TestPhase3PostTerminalShimPanicIsSuppressedCountedAndRedacted(t *testing.T)
 	if len(accessLines) != 1 {
 		t.Errorf("server-owned clean access records = %d, want one:\n%s", len(accessLines), logs)
 	}
-	for _, secret := range []string{requestSecret, trailingSecret, panicSecret, testAPIKey, "stub-copilot-token"} {
+	for _, secret := range []string{requestSecret, trailingSecret, panicSecret, testAPIKey, phase3CopilotToken} {
 		if strings.Contains(logs, secret) {
 			t.Errorf("suppression logs leaked %q:\n%s", secret, logs)
 		}

@@ -11,28 +11,25 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/coder/websocket"
-	"github.com/ningw42/copilotd/internal/cache"
 	"github.com/ningw42/copilotd/internal/catalog"
 	"github.com/ningw42/copilotd/internal/config"
 	"github.com/ningw42/copilotd/internal/endpoint"
-	"github.com/ningw42/copilotd/internal/forward"
 	"github.com/ningw42/copilotd/internal/impersonation"
 	"github.com/ningw42/copilotd/internal/logging"
-	"github.com/ningw42/copilotd/internal/server"
 	"github.com/ningw42/copilotd/internal/shim"
-	"github.com/ningw42/copilotd/internal/usage/reporthttp"
 )
 
 const testAPIKey = "test-api-key"
 
 // e2eConfig is a resolved ServeConfig with stable synthetic impersonation
 // fixtures, a set API key, and the given inline OAuth token — the shape runServe
-// would hand buildServeProvider, minus the flag/env/file plumbing.
+// would hand the serve lifecycle, minus the flag/env/file plumbing.
 func e2eConfig(oauthToken string) config.ServeConfig {
 	return config.ServeConfig{
 		Addr:                         "127.0.0.1:0",
@@ -67,83 +64,6 @@ func discardLogger(t *testing.T) *slog.Logger {
 	return l
 }
 
-// startTestServer runs srv on an ephemeral loopback listener and returns its base
-// URL once /healthz answers 200. Cleanup cancels Run and fails the test unless
-// it drains cleanly (returns nil) within the watchdog. Mirrors
-// server_integration_test's helper.
-func startTestServer(t *testing.T, srv *server.Server) string {
-	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	exited := make(chan struct{})
-	var runErr error
-	go func() {
-		defer close(exited)
-		runErr = srv.Run(ctx, ln)
-	}()
-	t.Cleanup(func() {
-		// A connection the default transport dialed but never used is not idle
-		// to http.Server.Shutdown until it is 5s old, so it would force a drain.
-		http.DefaultClient.CloseIdleConnections()
-		cancel()
-		select {
-		case <-exited:
-			if runErr != nil {
-				t.Errorf("server Run = %v, want a clean drain", runErr)
-			}
-		case <-time.After(5 * time.Second):
-			t.Error("server did not shut down within the grace period")
-		}
-	})
-
-	base := "http://" + ln.Addr().String()
-	// Wait until the listener serves a healthy response; the startup deadline
-	// also bounds each attempt.
-	startup, cancelStartup := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancelStartup()
-	health := &http.Client{
-		Transport: &http.Transport{DisableKeepAlives: true},
-		// Judge /healthz's own response; a redirect to another 200 is not healthy.
-		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-	}
-	last := "no response"
-	for {
-		req, err := http.NewRequestWithContext(startup, http.MethodGet, base+"/healthz", nil)
-		if err != nil {
-			t.Fatalf("build health request: %v", err)
-		}
-		resp, err := health.Do(req)
-		switch {
-		case err == nil:
-			_, _ = io.Copy(io.Discard, resp.Body)
-			_ = resp.Body.Close()
-			if resp.StatusCode == http.StatusOK {
-				// A 200 from a Serve that Run left behind is not a healthy server.
-				select {
-				case <-exited:
-					t.Fatalf("server Run = %v before the helper accepted /healthz", runErr)
-				default:
-				}
-				return base
-			}
-			last = resp.Status
-		case startup.Err() == nil: // keep the prior outcome over the deadline's own cancellation
-			last = err.Error()
-		}
-		select {
-		case <-exited:
-			t.Fatalf("server Run = %v before /healthz answered 200", runErr)
-		case <-time.After(10 * time.Millisecond):
-		}
-		if startup.Err() != nil {
-			t.Fatalf("/healthz did not answer 200 before the startup deadline; last outcome: %s", last)
-		}
-	}
-}
-
 // copilotStub is an httptest fake of the Copilot inference upstream capturing the
 // forwarder's outbound request.
 type copilotStub struct {
@@ -169,12 +89,20 @@ func newCopilotStub(t *testing.T, respBody string) *copilotStub {
 	return s
 }
 
-// newGitHubExchangeStub fakes GitHub's token endpoint, minting copilotToken with
-// endpoints.api pointing at apiURL. It captures the exchange request headers.
-func newGitHubExchangeStub(t *testing.T, copilotToken, apiURL string, gotAuth, gotUA *string) *httptest.Server {
-	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		*gotAuth = r.Header.Get("Authorization")
-		*gotUA = r.Header.Get("User-Agent")
+// gitHubExchangeStub fakes GitHub's token endpoint, minting one Copilot token
+// whose endpoints.api is apiURL. It keeps the latest exchange request headers.
+type gitHubExchangeStub struct {
+	server *httptest.Server
+	mu     sync.Mutex
+	header http.Header
+}
+
+func newGitHubExchangeStub(t *testing.T, copilotToken, apiURL string) *gitHubExchangeStub {
+	stub := &gitHubExchangeStub{}
+	stub.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		stub.mu.Lock()
+		stub.header = r.Header.Clone()
+		stub.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"token":      copilotToken,
@@ -183,8 +111,14 @@ func newGitHubExchangeStub(t *testing.T, copilotToken, apiURL string, gotAuth, g
 			"endpoints":  map[string]any{"api": apiURL},
 		})
 	}))
-	t.Cleanup(s.Close)
-	return s
+	t.Cleanup(stub.server.Close)
+	return stub
+}
+
+func (s *gitHubExchangeStub) lastHeader() http.Header {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.header.Clone()
 }
 
 // newSequencedGitHubExchangeStub returns the supplied statuses in order, then
@@ -322,21 +256,35 @@ func TestServeLifecycleUsesSuppliedShimRegistryForHTTPAndWebSocket(t *testing.T)
 	}
 }
 
-func startManagerBackedE2EServer(t *testing.T, cfg config.ServeConfig, logger *slog.Logger, github *httptest.Server, runStartupMint bool) string {
+// startRecoveryLifecycle serves through the production lifecycle with the
+// GitHub exchange at github. With holdStartup, startup is held in the discovery
+// edge, before its startup mint, so a request can mint on demand first;
+// otherwise discovery is disabled and startup mints right away.
+func startRecoveryLifecycle(t *testing.T, github *httptest.Server, holdStartup bool) (string, *usageReportLogs) {
 	t.Helper()
-	cacheRegistry := cache.NewRegistry()
-	mgr, imp, err := buildServeProvider(cfg, logger, github.URL, github.Client(), productionDiscoveryEdge(), cacheRegistry)
-	if err != nil {
-		t.Fatalf("buildServeProvider: %v", err)
+	cfg := lifecycleConfig("gho-secret")
+	edges := exchangeServeEdges(github)
+	if holdStartup {
+		held := make(chan struct{})
+		discovery := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.Copy(io.Discard, r.Body)
+			select {
+			case <-r.Context().Done():
+			case <-held:
+			}
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}))
+		t.Cleanup(discovery.Close)
+		t.Cleanup(func() { close(held) })
+		cfg.ImpersonationRefreshInterval = time.Hour
+		edges.Discovery = impersonation.Edge{
+			VSCodeBaseURL:      discovery.URL,
+			MarketplaceBaseURL: discovery.URL,
+			Client:             discovery.Client(),
+		}
 	}
-	if runStartupMint {
-		mgr.StartupMint(context.Background())
-	}
-	fwd := newTestForwarderWithLogger(mgr, forward.NewClient(cfg.ResponseHeaderTimeout), cfg.OutboundTimeout, cfg.WriteTimeout, cfg.StreamIdleTimeout, cfg.StreamKeepaliveInterval, cfg.MaxRequestBytes, cfg.MaxBufferedResponseBytes, logger, nil)
-	return startTestServer(t, server.New(cfg, logging.ForComponent(logger, "internal/server"), logging.ForComponent(logger, "internal/catalog"), newTestDependencyErrorLog(), mgr, server.ReadyObservers{
-		Impersonation: imp,
-		Caches:        cacheRegistry,
-	}, fwd, newTestCatalogSource(mgr), newTestWSProxy(mgr), server.NewStreamOutcomeCounter(), catalog.RenderDescriptors{}, reporthttp.Handler(nil)))
+	logs := newUsageReportLogs()
+	return startServedLifecycle(t, newPhase4Logger(t, logs), serveInput{Config: cfg, Edges: edges}), logs
 }
 
 // TestServeFirstRealCallEndToEnd is Phase 1.5's outcome: the REAL identity.Manager
@@ -351,26 +299,14 @@ func TestServeFirstRealCallEndToEnd(t *testing.T) {
 	)
 	copilot := newCopilotStub(t, `{"id":"msg_1","role":"assistant"}`)
 
-	var exchangeAuth, exchangeUA string
-	github := newGitHubExchangeStub(t, copilotToken, copilot.server.URL, &exchangeAuth, &exchangeUA)
+	exchange := newGitHubExchangeStub(t, copilotToken, copilot.server.URL)
 
-	cfg := e2eConfig(oauth)
-	logger := discardLogger(t)
-
-	cacheRegistry := cache.NewRegistry()
-	mgr, imp, err := buildServeProvider(cfg, logger, github.URL, github.Client(), productionDiscoveryEdge(), cacheRegistry)
-	if err != nil {
-		t.Fatalf("buildServeProvider: %v", err)
-	}
-	// Mint synchronously so the credential cache is warm before the first request
-	// (production does this in a goroutine; here we want determinism).
-	mgr.StartupMint(context.Background())
-
-	fwd := newTestForwarderWithLogger(mgr, forward.NewClient(cfg.ResponseHeaderTimeout), cfg.OutboundTimeout, cfg.WriteTimeout, cfg.StreamIdleTimeout, cfg.StreamKeepaliveInterval, cfg.MaxRequestBytes, cfg.MaxBufferedResponseBytes, logger, nil)
-	base := startTestServer(t, server.New(cfg, logging.ForComponent(logger, "internal/server"), logging.ForComponent(logger, "internal/catalog"), newTestDependencyErrorLog(), mgr, server.ReadyObservers{
-		Impersonation: imp,
-		Caches:        cacheRegistry,
-	}, fwd, newTestCatalogSource(mgr), newTestWSProxy(mgr), server.NewStreamOutcomeCounter(), catalog.RenderDescriptors{}, reporthttp.Handler(nil)))
+	cfg := lifecycleConfig(oauth)
+	logs := newUsageReportLogs()
+	base := startServedLifecycle(t, newPhase4Logger(t, logs), serveInput{Config: cfg, Edges: exchangeServeEdges(exchange.server)})
+	// Wait for the background startup mint so the credential cache is warm
+	// before the first request.
+	logs.await(t, `msg="minted copilot token"`, "trigger=startup")
 
 	assertImpersonation := func(t *testing.T) {
 		t.Helper()
@@ -429,11 +365,12 @@ func TestServeFirstRealCallEndToEnd(t *testing.T) {
 
 	// The exchange itself carried the OAuth token (token scheme) and the
 	// impersonation UA the token endpoint's allowlist checks.
-	if exchangeAuth != "token "+oauth {
-		t.Errorf("exchange Authorization = %q, want %q", exchangeAuth, "token "+oauth)
+	exchangeHeader := exchange.lastHeader()
+	if got := exchangeHeader.Get("Authorization"); got != "token "+oauth {
+		t.Errorf("exchange Authorization = %q, want %q", got, "token "+oauth)
 	}
-	if exchangeUA != "GitHubCopilotChat/4.5.6" {
-		t.Errorf("exchange User-Agent = %q, want %q", exchangeUA, "GitHubCopilotChat/4.5.6")
+	if got := exchangeHeader.Get("User-Agent"); got != "GitHubCopilotChat/4.5.6" {
+		t.Errorf("exchange User-Agent = %q, want %q", got, "GitHubCopilotChat/4.5.6")
 	}
 }
 
@@ -641,11 +578,9 @@ func TestServeRequestDrivenMintRecoveryEndToEnd(t *testing.T) {
 		copilot := newCopilotStub(t, `{"ok":true}`)
 		github, exchanges := newSequencedGitHubExchangeStub(t, copilot.server.URL)
 
-		cfg := e2eConfig("gho-secret")
-		logger := discardLogger(t)
-		// Deliberately do not run StartupMint. The first authenticated request is
+		// Startup is held before its mint. The first authenticated request is
 		// allowed to perform the on-demand mint itself.
-		base := startManagerBackedE2EServer(t, cfg, logger, github, false)
+		base, _ := startRecoveryLifecycle(t, github, true)
 
 		assertReadyzImpersonation(t, base, "1.2.3", "4.5.6", "fallback", false)
 		resp, _ := post(t, base+"/anthropic/v1/messages", `{"model":"x"}`)
@@ -661,9 +596,8 @@ func TestServeRequestDrivenMintRecoveryEndToEnd(t *testing.T) {
 	t.Run("failed startup warm-up does not block a request mint", func(t *testing.T) {
 		copilot := newCopilotStub(t, `{"ok":true}`)
 		github, exchanges := newSequencedGitHubExchangeStub(t, copilot.server.URL, http.StatusUnauthorized, http.StatusOK)
-		cfg := e2eConfig("gho-secret")
-		logger := discardLogger(t)
-		base := startManagerBackedE2EServer(t, cfg, logger, github, true)
+		base, logs := startRecoveryLifecycle(t, github, false)
+		logs.await(t, "startup mint short-circuited")
 
 		assertReadyzImpersonation(t, base, "1.2.3", "4.5.6", "fallback", false)
 		resp, _ := post(t, base+"/anthropic/v1/messages", `{"model":"x"}`)
@@ -686,9 +620,9 @@ func TestServeRequestDrivenMintRecoveryEndToEnd(t *testing.T) {
 		t.Run(firstFailure.name+" on-demand failure is request-scoped", func(t *testing.T) {
 			copilot := newCopilotStub(t, `{"ok":true}`)
 			github, exchanges := newSequencedGitHubExchangeStub(t, copilot.server.URL, firstFailure.status, http.StatusOK)
-			cfg := e2eConfig("gho-secret")
-			logger := discardLogger(t)
-			base := startManagerBackedE2EServer(t, cfg, logger, github, false)
+			// Startup is held before its mint, so the first failure status
+			// belongs to the first authenticated request.
+			base, _ := startRecoveryLifecycle(t, github, true)
 
 			unauthenticated, err := http.Post(base+"/anthropic/v1/messages", "application/json", strings.NewReader(`{"model":"x"}`)) //nolint:noctx // local test server
 			if err != nil {

@@ -238,6 +238,35 @@ func (r *lifecycleRun) await(t *testing.T, within time.Duration) serveResult {
 	}
 }
 
+// startServedLifecycle serves input through the production lifecycle on a
+// loopback listener and returns its base URL once /healthz answers. Cleanup
+// requires a clean drain. It first closes the default client's idle
+// connections: one dialed but never used would otherwise force the drain.
+func startServedLifecycle(t *testing.T, base *slog.Logger, input serveInput) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	input.Listener = ln
+	run := startServeLifecycle(t, base, input)
+	t.Cleanup(func() {
+		http.DefaultClient.CloseIdleConnections()
+		run.cancel()
+		select {
+		case <-run.done:
+			if run.result.Outcome != serveClean || run.result.Err != nil {
+				t.Errorf("serve lifecycle stop = %v (%v), want a clean drain", run.result.Outcome, run.result.Err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Error("serve lifecycle did not stop within the grace period")
+		}
+	})
+	baseURL := "http://" + ln.Addr().String()
+	run.awaitHealthy(t, baseURL)
+	return baseURL
+}
+
 // awaitHealthy polls /healthz until it answers 200, failing with the
 // lifecycle's result if it returned before serving.
 func (r *lifecycleRun) awaitHealthy(t *testing.T, baseURL string) {

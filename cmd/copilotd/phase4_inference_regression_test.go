@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -9,8 +8,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-
-	"github.com/ningw42/copilotd/internal/identity"
 )
 
 func TestPhase4InferenceCorrelationAndRedirectRegressionsEndToEnd(t *testing.T) {
@@ -38,15 +35,10 @@ func TestPhase4InferenceCorrelationAndRedirectRegressionsEndToEnd(t *testing.T) 
 	}))
 	t.Cleanup(upstream.Close)
 
-	provider := identity.NewStatic(identity.Credential{
-		BaseURL: upstream.URL,
-		Token:   phase4CopilotToken,
-	}, true)
-	cfg := e2eConfig("unused-oauth-token")
+	cfg := e2eConfig(phase4GitHubOAuthToken)
 	cfg.APIKey = phase4APIKey
-	var logs bytes.Buffer
-	logger := newPhase4Logger(t, &logs)
-	base := startPhase4Server(t, cfg, provider, logger)
+	logs := newUsageReportLogs()
+	base := startPhase4Lifecycle(t, cfg, newPhase4ExchangeStub(t, upstream.URL), newPhase4Logger(t, logs))
 	client := &http.Client{
 		CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse

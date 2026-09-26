@@ -1,16 +1,16 @@
 package main
 
 import (
-	"bytes"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
-
-	"github.com/ningw42/copilotd/internal/identity"
 )
 
+// TestPhase4ModelsGatesAndRouterEndToEnd covers the gates reachable on a
+// production server, which is always locally ready. Not-ready gate cases live
+// in internal/server's gate tests.
 func TestPhase4ModelsGatesAndRouterEndToEnd(t *testing.T) {
 	var upstreamCalls atomic.Int64
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -19,14 +19,9 @@ func TestPhase4ModelsGatesAndRouterEndToEnd(t *testing.T) {
 	}))
 	t.Cleanup(upstream.Close)
 
-	provider := identity.NewStatic(identity.Credential{
-		BaseURL: upstream.URL,
-		Token:   "phase4-copilot-token",
-	}, false)
-	cfg := e2eConfig("unused-oauth-token")
+	cfg := e2eConfig(phase4GitHubOAuthToken)
 	cfg.APIKey = phase4APIKey
-	var logs bytes.Buffer
-	base := startPhase4Server(t, cfg, provider, newPhase4Logger(t, &logs))
+	base := startPhase4Lifecycle(t, cfg, newPhase4ExchangeStub(t, upstream.URL), newPhase4Logger(t, newUsageReportLogs()))
 
 	for _, public := range []struct {
 		path       string
@@ -34,7 +29,7 @@ func TestPhase4ModelsGatesAndRouterEndToEnd(t *testing.T) {
 		wantBody   string
 	}{
 		{path: "/healthz", wantStatus: http.StatusOK, wantBody: `{"status":"ok"}`},
-		{path: "/readyz", wantStatus: http.StatusServiceUnavailable, wantBody: `{"status":"not ready",` + testReadyImpersonationJSON + `}`},
+		{path: "/readyz", wantStatus: http.StatusOK, wantBody: phase4ReadyzBody(cfg)},
 	} {
 		resp, body := doPhase4Request(t, nil, http.MethodGet, base+public.path, nil, nil)
 		if resp.StatusCode != public.wantStatus || string(body) != public.wantBody {
@@ -51,7 +46,7 @@ func TestPhase4ModelsGatesAndRouterEndToEnd(t *testing.T) {
 			{name: "wrong Bearer", configure: func(req *http.Request) { req.Header.Set("Authorization", "Bearer wrong-phase4-key") }},
 			{name: "wrong x-api-key", configure: func(req *http.Request) { req.Header.Set("X-Api-Key", "wrong-phase4-key") }},
 		} {
-			t.Run(method+" rejects "+auth.name+" auth before readiness", func(t *testing.T) {
+			t.Run(method+" rejects "+auth.name+" auth", func(t *testing.T) {
 				resp, body := doPhase4Request(t, nil, method, base+"/models", nil, auth.configure)
 				if resp.StatusCode != http.StatusUnauthorized {
 					t.Errorf("status = %d, want 401", resp.StatusCode)
@@ -64,21 +59,6 @@ func TestPhase4ModelsGatesAndRouterEndToEnd(t *testing.T) {
 				}
 			})
 		}
-
-		t.Run(method+" exposes readiness only after valid auth", func(t *testing.T) {
-			resp, body := doPhase4Request(t, nil, method, base+"/models", nil, func(req *http.Request) {
-				req.Header.Set("Authorization", "Bearer "+phase4APIKey)
-			})
-			if resp.StatusCode != http.StatusServiceUnavailable {
-				t.Errorf("status = %d, want 503", resp.StatusCode)
-			}
-			if method == http.MethodGet && !strings.Contains(string(body), `"message":"service not ready"`) {
-				t.Errorf("GET body = %q, want readiness error", body)
-			}
-			if method == http.MethodHead && len(body) != 0 {
-				t.Errorf("HEAD wire body = %q, want empty", body)
-			}
-		})
 	}
 
 	resp, _ := doPhase4Request(t, nil, http.MethodPost, base+"/models", nil, func(req *http.Request) {

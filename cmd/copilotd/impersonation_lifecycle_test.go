@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -15,13 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ningw42/copilotd/internal/cache"
-	"github.com/ningw42/copilotd/internal/catalog"
-	"github.com/ningw42/copilotd/internal/forward"
 	"github.com/ningw42/copilotd/internal/impersonation"
-	"github.com/ningw42/copilotd/internal/logging"
-	"github.com/ningw42/copilotd/internal/server"
-	"github.com/ningw42/copilotd/internal/usage/reporthttp"
 )
 
 func TestProductionDiscoveryEdgeUsesMicrosoftOriginsAndPlainDedicatedClient(t *testing.T) {
@@ -188,35 +181,26 @@ func TestServeLifecycleCarriesFallbackAndDiscoveredVersionsOnWire(t *testing.T) 
 			cfg.VSCodeVersionFallback = "9.8.7"
 			cfg.PluginVersionFallback = "6.5.4"
 			cfg.ImpersonationRefreshInterval = tc.interval
-			var logs bytes.Buffer
-			logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
-			cacheRegistry := cache.NewRegistry()
-			mgr, imp, err := buildServeProvider(cfg, logger, github.URL, github.Client(), impersonation.Edge{
+			logs := newUsageReportLogs()
+			logger := slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+			edges := exchangeServeEdges(github)
+			edges.Discovery = impersonation.Edge{
 				VSCodeBaseURL:      discovery.URL,
 				MarketplaceBaseURL: discovery.URL,
 				Client:             discovery.Client(),
-			}, cacheRegistry)
-			if err != nil {
-				t.Fatalf("buildServeProvider: %v", err)
 			}
+			base := startServedLifecycle(t, logger, serveInput{Config: cfg, Edges: edges})
 
-			ctx, cancel := context.WithCancel(context.Background())
-			t.Cleanup(cancel)
-			runServeStartup(ctx, cacheRegistry, mgr, logger)
-
+			// Startup mints only after Prime and its outcome records, so the
+			// startup exchange is the barrier for both.
 			var exchange http.Header
 			select {
 			case exchange = <-exchangeHeaders:
-			case <-time.After(time.Second):
+			case <-time.After(5 * time.Second):
 				t.Fatal("startup exchange did not run")
 			}
 			assertVersionHeaders(t, exchange, tc.wantVSCode, tc.wantPlugin)
 
-			fwd := newTestForwarderWithLogger(mgr, forward.NewClient(cfg.ResponseHeaderTimeout), cfg.OutboundTimeout, cfg.WriteTimeout, cfg.StreamIdleTimeout, cfg.StreamKeepaliveInterval, cfg.MaxRequestBytes, cfg.MaxBufferedResponseBytes, logger, nil)
-			base := startTestServer(t, server.New(cfg, logging.ForComponent(logger, "internal/server"), logging.ForComponent(logger, "internal/catalog"), newTestDependencyErrorLog(), mgr, server.ReadyObservers{
-				Impersonation: imp,
-				Caches:        cacheRegistry,
-			}, fwd, newTestCatalogSource(mgr), newTestWSProxy(mgr), server.NewStreamOutcomeCounter(), catalog.RenderDescriptors{}, reporthttp.Handler(nil)))
 			assertReadyzImpersonation(t, base, tc.wantVSCode, tc.wantPlugin, tc.wantSource, tc.wantLastSuccess)
 			resp, _ := post(t, base+"/anthropic/v1/messages", `{"model":"test"}`)
 			_ = resp.Body.Close()
