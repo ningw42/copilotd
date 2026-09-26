@@ -1,14 +1,14 @@
 {
   "artifact": {
     "url": "https://models.dev/api.json",
-    "observed_at": "2026-09-23T16:24:15Z",
-    "size": 4891852,
-    "sha256": "9ae55393e3711189a9fe8b32bd22d218319de11c5c25fb27768ba8273f915eb7"
+    "observed_at": "2026-09-26T02:38:02Z",
+    "size": 4930396,
+    "sha256": "102b4fa61597ef184650cd59d4631fe477fee529f195f7e29894e8f06d0f863c"
   },
   "source_audit": {
     "repository": "https://github.com/anomalyco/models.dev",
-    "audited_at": "2026-09-23T16:24:39Z",
-    "commit": "59f2e562921d6d8c7c398890f544aeaafc14207f",
+    "audited_at": "2026-09-26T02:38:03Z",
+    "commit": "633c5c2a46b869e6357898bec2b4f2d354263b04",
     "schema_path": "packages/core/src/schema.ts",
     "license_path": "LICENSE",
     "license_sha256": "dc2dc41c9fea2fd3c41c21c6f484844cab367800b88ff24781f980ad3a9d160a"
