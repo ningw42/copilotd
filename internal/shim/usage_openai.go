@@ -108,55 +108,19 @@ func parseOpenAIResponse(raw []byte) (usage.Turn, bool) {
 	if !ok {
 		return usage.Turn{}, false
 	}
-	inputTokens, ok := requiredNonnegativeInt64(usageObject, "input_tokens")
+	counts, ok := decodeNativeCounts(usage.OpenAIProjection(), usageObject)
 	if !ok {
 		return usage.Turn{}, false
 	}
-	outputTokens, ok := requiredNonnegativeInt64(usageObject, "output_tokens")
-	if !ok {
+	native, err := usage.OpenAIProjection().Usage(counts)
+	if err != nil {
 		return usage.Turn{}, false
 	}
-	totalTokens, ok := optionalNonnegativeInt64(usageObject, "total_tokens")
-	if !ok {
-		return usage.Turn{}, false
-	}
-
-	var cachedTokens, cacheWriteTokens *int64
-	if details, present, valid := optionalJSONObject(usageObject, "input_tokens_details"); !valid {
-		return usage.Turn{}, false
-	} else if present {
-		cachedTokens, ok = optionalNonnegativeInt64(details, "cached_tokens")
-		if !ok {
-			return usage.Turn{}, false
-		}
-		cacheWriteTokens, ok = optionalNonnegativeInt64(details, "cache_write_tokens")
-		if !ok {
-			return usage.Turn{}, false
-		}
-	}
-
-	var reasoningTokens *int64
-	if details, present, valid := optionalJSONObject(usageObject, "output_tokens_details"); !valid {
-		return usage.Turn{}, false
-	} else if present {
-		reasoningTokens, ok = optionalNonnegativeInt64(details, "reasoning_tokens")
-		if !ok {
-			return usage.Turn{}, false
-		}
-	}
-
 	return usage.Turn{
 		ResponseID:        responseID,
 		Model:             model,
 		OpenAIServiceTier: serviceTier,
-		Usage: usage.OpenAIUsage{
-			InputTokens:      inputTokens,
-			OutputTokens:     outputTokens,
-			CachedTokens:     cachedTokens,
-			CacheWriteTokens: cacheWriteTokens,
-			ReasoningTokens:  reasoningTokens,
-			TotalTokens:      totalTokens,
-		},
+		Usage:             native,
 	}, true
 }
 
@@ -241,15 +205,6 @@ func requiredNonemptyString(object map[string]json.RawMessage, key string) (stri
 		return "", false
 	}
 	return value, true
-}
-
-func requiredNonnegativeInt64(object map[string]json.RawMessage, key string) (int64, bool) {
-	raw, exists := object[key]
-	if !exists || isJSONNull(raw) {
-		return 0, false
-	}
-	value, ok := parseNonnegativeInt64(raw)
-	return value, ok
 }
 
 func optionalNonnegativeInt64(object map[string]json.RawMessage, key string) (*int64, bool) {
