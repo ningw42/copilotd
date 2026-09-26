@@ -19,10 +19,7 @@ import (
 // whose absence is the contract. Check again after the server lifecycle ends.
 func assertDisabledUsageStore(t *testing.T, harness *usageMeterServeHarness) {
 	t.Helper()
-	if err := harness.stop(); err != nil {
-		t.Fatalf("runBoundServe after cancellation: %v", err)
-	}
-	if report := harness.closeStore(); report != (sqlitestore.Report{}) {
+	if report := harness.stopClean(t); report != (sqlitestore.Report{}) {
 		t.Errorf("disabled meter unexpectedly finalized a store: %+v", report)
 	}
 	assertUsageFilesAbsent(t, harness.cfg.UsageDBPath)
@@ -37,7 +34,7 @@ func assertUsageFilesAbsent(t *testing.T, path string) {
 	}
 }
 
-func TestRunBoundServeDisabledUsageMeterCreatesNothing(t *testing.T) {
+func TestServeLifecycleDisabledUsageMeterCreatesNothing(t *testing.T) {
 	for _, surface := range bufferedUsageSurfaceCases {
 		t.Run(surface.name, func(t *testing.T) {
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

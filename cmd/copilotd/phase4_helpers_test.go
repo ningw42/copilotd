@@ -5,16 +5,12 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
-	"github.com/ningw42/copilotd/internal/catalog"
 	"github.com/ningw42/copilotd/internal/config"
-	"github.com/ningw42/copilotd/internal/forward"
-	"github.com/ningw42/copilotd/internal/identity"
 	"github.com/ningw42/copilotd/internal/logging"
-	"github.com/ningw42/copilotd/internal/server"
-	"github.com/ningw42/copilotd/internal/usage/reporthttp"
 )
 
 const (
@@ -48,21 +44,33 @@ func phase4LogLinesContaining(logOutput string, fragments ...string) []string {
 	return matches
 }
 
-func startPhase4Server(t *testing.T, cfg config.ServeConfig, provider identity.Provider, logger *slog.Logger) string {
+// newPhase4ExchangeStub mints phase4CopilotToken with its API base at upstreamURL.
+func newPhase4ExchangeStub(t *testing.T, upstreamURL string) *httptest.Server {
 	t.Helper()
-	forwarder := newTestForwarderWithLogger(
-		provider,
-		forward.NewClient(cfg.ResponseHeaderTimeout),
-		cfg.OutboundTimeout,
-		cfg.WriteTimeout,
-		cfg.StreamIdleTimeout,
-		cfg.StreamKeepaliveInterval,
-		cfg.MaxRequestBytes,
-		cfg.MaxBufferedResponseBytes,
-		logger,
-		configuredShimRegistry(cfg, nil))
+	return newGitHubExchangeStub(t, phase4CopilotToken, upstreamURL).server
+}
 
-	return startTestServer(t, server.New(cfg, logging.ForComponent(logger, "internal/server"), logging.ForComponent(logger, "internal/catalog"), newTestDependencyErrorLog(), provider, newTestReadyObservers(), forwarder, newTestCatalogSource(provider), newTestWSProxy(provider), server.NewStreamOutcomeCounter(), catalog.RenderDescriptors{}, reporthttp.Handler(nil)))
+// startPhase4Lifecycle serves cfg through the production lifecycle with the
+// GitHub exchange at exchange and discovery disabled.
+func startPhase4Lifecycle(t *testing.T, cfg config.ServeConfig, exchange *httptest.Server, logger *slog.Logger) string {
+	t.Helper()
+	cfg.ImpersonationRefreshInterval = 0
+	return startServedLifecycle(t, logger, serveInput{Config: cfg, Edges: exchangeServeEdges(exchange)})
+}
+
+// phase4ReadyzBody is /readyz's exact ready body for cfg with discovery
+// disabled: the configured impersonation facts, and both registered
+// impersonation cached values still on their configured fallbacks.
+func phase4ReadyzBody(cfg config.ServeConfig) string {
+	cached := func(version string) string {
+		return `{"source":"fallback","version":"` + version + `","last_success":null,"last_attempt":null,"last_attempt_result":null}`
+	}
+	return `{"status":"ready","caches":{"copilot_chat":` + cached(cfg.PluginVersionFallback) + `,"vscode":` + cached(cfg.VSCodeVersionFallback) + `},` +
+		`"impersonation":{"effective_headers":{"Editor-Version":"vscode/` + cfg.VSCodeVersionFallback +
+		`","Editor-Plugin-Version":"copilot-chat/` + cfg.PluginVersionFallback +
+		`","User-Agent":"GitHubCopilotChat/` + cfg.PluginVersionFallback +
+		`","Copilot-Integration-Id":"` + cfg.CopilotIntegrationID +
+		`","X-GitHub-Api-Version":"` + cfg.GithubAPIVersion + `"}}}`
 }
 
 func performPhase4Request(

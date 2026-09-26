@@ -618,9 +618,9 @@ func mandatoryTests(goos string) []string {
 			"TestUsageNativeRuntime", "TestUsageExecutableAcceptance", "TestUsageExecutableAcceptance/process_timezone", "TestUsageExecutableAcceptance/system_timezone", "TestUsageExecutableAcceptance/observed_inference_to_executable",
 			"TestUsageReportsOverlapNativeInferenceAndAnotherCommittedWriter", "TestUsageSlowTCPReportsHoldSlotsReleaseSQLiteAndDoNotDeadlineSSE", "TestUsageForcedDrainCancelsRealSQLiteReadAndInference",
 			"TestUsageGracefulDrainFinishesReportAndInferenceBeforeWriterCutoff", "TestUsageStorageFailuresDoNotChangeInferenceReadinessOrWriterAdmission", "TestUsageEncodedLimitRejectsWholeRealReportAndReleasesSlots",
-			"TestRunBoundServeMetersBufferedOpenAIResponseWithoutChangingPayload", "TestRunBoundServeMetersOpenAISSECompletionWithoutChangingFrames", "TestRunBoundServeMetersOpenAIWebSocketCompletionsWithoutChangingMessages",
+			"TestServeLifecycleMetersBufferedOpenAIResponseWithoutChangingPayload", "TestServeLifecycleMetersOpenAISSECompletionWithoutChangingFrames", "TestServeLifecycleMetersOpenAIWebSocketCompletionsWithoutChangingMessages",
 			"TestUsageReportClientTeardownClosesAnUnusedDialBeforeGracefulStop", "TestDailyOpenAIUsageCommandThroughProductionListener",
-			"TestRunBoundServeForcedWebSocketDrainAndFreshUsageFinalizationAreBounded", "TestRunBoundServeStopsUsageAdmissionBeforeWarningForcedDrain",
+			"TestServeLifecycleFinalizesPendingUsageWithAFreshBudgetAfterForcedDrain", "TestServeLifecycleStopsUsageAdmissionBeforeWarningForcedDrain",
 		},
 	}
 	if goos == "linux" {

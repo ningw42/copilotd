@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -15,13 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ningw42/copilotd/internal/cache"
-	"github.com/ningw42/copilotd/internal/catalog"
-	"github.com/ningw42/copilotd/internal/forward"
 	"github.com/ningw42/copilotd/internal/impersonation"
-	"github.com/ningw42/copilotd/internal/logging"
-	"github.com/ningw42/copilotd/internal/server"
-	"github.com/ningw42/copilotd/internal/usage/reporthttp"
 )
 
 func TestProductionDiscoveryEdgeUsesMicrosoftOriginsAndPlainDedicatedClient(t *testing.T) {
@@ -40,7 +33,7 @@ func TestProductionDiscoveryEdgeUsesMicrosoftOriginsAndPlainDedicatedClient(t *t
 	}
 }
 
-func TestRunBoundServeIsReadyWhilePrimeWaits(t *testing.T) {
+func TestServeLifecycleIsReadyWhilePrimeWaits(t *testing.T) {
 	started := make(chan string, 2)
 	cancelled := make(chan string, 2)
 	// Never let a failed cancellation assertion strand the blocking stub.
@@ -64,26 +57,17 @@ func TestRunBoundServeIsReadyWhilePrimeWaits(t *testing.T) {
 	github := lifecycleExchangeStub(t, upstream.server.URL, make(chan http.Header, 1))
 	cfg := e2eConfig("gho-startup-window")
 	cfg.ImpersonationRefreshInterval = time.Hour
-	logger := discardLogger(t)
-	cacheRegistry := cache.NewRegistry()
-	mgr, imp, err := buildServeProvider(cfg, logger, github.URL, github.Client(), impersonation.Edge{
+	edges := exchangeServeEdges(github)
+	edges.Discovery = impersonation.Edge{
 		VSCodeBaseURL:      discovery.URL,
 		MarketplaceBaseURL: discovery.URL,
 		Client:             discovery.Client(),
-	}, cacheRegistry)
-	if err != nil {
-		t.Fatalf("buildServeProvider: %v", err)
 	}
-
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() {
-		done <- runBoundServe(ctx, cfg, logger, mgr, imp, nil, nil, cacheRegistry, configuredShimRegistry(cfg, nil), ln, nil)
-	}()
+	run := startServeLifecycle(t, discardLogger(t), serveInput{Config: cfg, Edges: edges, Listener: ln})
 
 	startedPaths := make(map[string]bool, 2)
 	for range 2 {
@@ -99,7 +83,7 @@ func TestRunBoundServeIsReadyWhilePrimeWaits(t *testing.T) {
 	assertHTTPStatusEventually(t, base+"/healthz", http.StatusOK)
 	assertHTTPStatusEventually(t, base+"/readyz", http.StatusOK)
 
-	cancel()
+	run.cancel()
 	cancelledPaths := make(map[string]bool, 2)
 	for range 2 {
 		select {
@@ -109,13 +93,8 @@ func TestRunBoundServeIsReadyWhilePrimeWaits(t *testing.T) {
 			t.Fatalf("serve context cancellation stopped %v of startup discovery %v", cancelledPaths, startedPaths)
 		}
 	}
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("runBoundServe after cancellation: %v", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("bound serve did not stop after cancellation")
+	if result := run.await(t, 5*time.Second); result.Outcome != serveClean || result.Err != nil {
+		t.Fatalf("serve lifecycle after cancellation = %v (%v), want clean", result.Outcome, result.Err)
 	}
 }
 
@@ -202,35 +181,26 @@ func TestServeLifecycleCarriesFallbackAndDiscoveredVersionsOnWire(t *testing.T) 
 			cfg.VSCodeVersionFallback = "9.8.7"
 			cfg.PluginVersionFallback = "6.5.4"
 			cfg.ImpersonationRefreshInterval = tc.interval
-			var logs bytes.Buffer
-			logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
-			cacheRegistry := cache.NewRegistry()
-			mgr, imp, err := buildServeProvider(cfg, logger, github.URL, github.Client(), impersonation.Edge{
+			logs := newUsageReportLogs()
+			logger := slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+			edges := exchangeServeEdges(github)
+			edges.Discovery = impersonation.Edge{
 				VSCodeBaseURL:      discovery.URL,
 				MarketplaceBaseURL: discovery.URL,
 				Client:             discovery.Client(),
-			}, cacheRegistry)
-			if err != nil {
-				t.Fatalf("buildServeProvider: %v", err)
 			}
+			base := startServedLifecycle(t, logger, serveInput{Config: cfg, Edges: edges})
 
-			ctx, cancel := context.WithCancel(context.Background())
-			t.Cleanup(cancel)
-			runServeStartup(ctx, cacheRegistry, mgr, logger)
-
+			// Startup mints only after Prime and its outcome records, so the
+			// startup exchange is the barrier for both.
 			var exchange http.Header
 			select {
 			case exchange = <-exchangeHeaders:
-			case <-time.After(time.Second):
+			case <-time.After(5 * time.Second):
 				t.Fatal("startup exchange did not run")
 			}
 			assertVersionHeaders(t, exchange, tc.wantVSCode, tc.wantPlugin)
 
-			fwd := newTestForwarderWithLogger(mgr, forward.NewClient(cfg.ResponseHeaderTimeout), cfg.OutboundTimeout, cfg.WriteTimeout, cfg.StreamIdleTimeout, cfg.StreamKeepaliveInterval, cfg.MaxRequestBytes, cfg.MaxBufferedResponseBytes, logger, nil)
-			base := startTestServer(t, server.New(cfg, logging.ForComponent(logger, "internal/server"), logging.ForComponent(logger, "internal/catalog"), newTestDependencyErrorLog(), mgr, server.ReadyObservers{
-				Impersonation: imp,
-				Caches:        cacheRegistry,
-			}, fwd, newTestCatalogSource(mgr), newTestWSProxy(mgr), server.NewStreamOutcomeCounter(), catalog.RenderDescriptors{}, reporthttp.Handler(nil)))
 			assertReadyzImpersonation(t, base, tc.wantVSCode, tc.wantPlugin, tc.wantSource, tc.wantLastSuccess)
 			resp, _ := post(t, base+"/anthropic/v1/messages", `{"model":"test"}`)
 			_ = resp.Body.Close()
@@ -321,9 +291,24 @@ func assertReadyzImpersonation(t *testing.T, base, vscode, plugin, source string
 }
 
 func TestServeLifecycleCancellationStopsPeriodicDiscovery(t *testing.T) {
+	const interval = 10 * time.Millisecond
 	var discoveryCalls atomic.Int32
+	held := make(chan string, 8)
+	cancelled := make(chan string, 8)
+	release := make(chan struct{})
 	discovery := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		discoveryCalls.Add(1)
+		_, _ = io.Copy(io.Discard, r.Body)
+		// Prime's two requests are answered. After that, each value's sequential
+		// refresh loop is held at the edge in its first periodic request.
+		if discoveryCalls.Add(1) > 2 {
+			held <- r.URL.Path
+			select {
+			case <-r.Context().Done():
+				cancelled <- r.URL.Path
+			case <-release:
+			}
+			return
+		}
 		switch r.URL.Path {
 		case "/api/releases/stable":
 			_, _ = io.WriteString(w, `["1.140.2"]`)
@@ -334,36 +319,58 @@ func TestServeLifecycleCancellationStopsPeriodicDiscovery(t *testing.T) {
 		}
 	}))
 	t.Cleanup(discovery.Close)
+	t.Cleanup(func() { close(release) })
 	upstream := newCopilotStub(t, `{"ok":true}`)
 	github := lifecycleExchangeStub(t, upstream.server.URL, make(chan http.Header, 1))
 	cfg := e2eConfig("gho-run-cancel")
-	cfg.ImpersonationRefreshInterval = 10 * time.Millisecond
-	logger := discardLogger(t)
-	cacheRegistry := cache.NewRegistry()
-	mgr, _, err := buildServeProvider(cfg, logger, github.URL, github.Client(), impersonation.Edge{
+	cfg.ImpersonationRefreshInterval = interval
+	edges := exchangeServeEdges(github)
+	edges.Discovery = impersonation.Edge{
 		VSCodeBaseURL:      discovery.URL,
 		MarketplaceBaseURL: discovery.URL,
 		Client:             discovery.Client(),
-	}, cacheRegistry)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		t.Fatalf("buildServeProvider: %v", err)
+		t.Fatalf("listen: %v", err)
+	}
+	run := startServeLifecycle(t, discardLogger(t), serveInput{Config: cfg, Edges: edges, Listener: ln})
+
+	heldPaths := make(map[string]bool, 2)
+	for len(heldPaths) < 2 {
+		select {
+		case path := <-held:
+			heldPaths[path] = true
+		case <-time.After(5 * time.Second):
+			t.Fatalf("periodic discovery after Prime reached %v, want both refresh loops", heldPaths)
+		}
+	}
+	run.cancel()
+	for range 2 {
+		select {
+		case <-cancelled:
+		case <-time.After(5 * time.Second):
+			t.Fatal("serve lifecycle cancellation did not reach the held periodic discovery")
+		}
+	}
+	if result := run.await(t, 5*time.Second); result.Outcome != serveClean || result.Err != nil {
+		t.Fatalf("serve lifecycle after cancellation = %v (%v), want clean", result.Outcome, result.Err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	runServeStartup(ctx, cacheRegistry, mgr, logger)
-	deadline := time.Now().Add(time.Second)
-	for discoveryCalls.Load() < 4 && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
-	if discoveryCalls.Load() < 4 {
-		t.Fatalf("periodic Run did not discover after Prime; calls = %d", discoveryCalls.Load())
-	}
-	cancel()
-	time.Sleep(30 * time.Millisecond)
+	// Each loop's only request was cancelled, so a stopped loop issues no other.
+	// Watch many refresh intervals for one that did not stop.
 	afterCancel := discoveryCalls.Load()
-	time.Sleep(40 * time.Millisecond)
-	if got := discoveryCalls.Load(); got != afterCancel {
-		t.Errorf("discovery calls after cancellation = %d -> %d, want Run stopped", afterCancel, got)
+	watch := time.NewTimer(20 * interval)
+	defer watch.Stop()
+	for {
+		select {
+		case <-watch.C:
+			return
+		case <-time.After(interval):
+			if got := discoveryCalls.Load(); got != afterCancel {
+				t.Fatalf("discovery calls after cancellation = %d -> %d, want the refresh loops stopped", afterCancel, got)
+			}
+		}
 	}
 }
 

@@ -832,6 +832,9 @@ func TestModelsTracerGateFailuresAndRouterBehavior(t *testing.T) {
 	wrong := httptest.NewRequest(http.MethodGet, "/models", nil)
 	wrong.Header.Set("Authorization", "Bearer wrong")
 	assertError(t, wrong, http.StatusUnauthorized, unauthorized)
+	wrongKey := httptest.NewRequest(http.MethodGet, "/models", nil)
+	wrongKey.Header.Set("X-Api-Key", "wrong")
+	assertError(t, wrongKey, http.StatusUnauthorized, unauthorized)
 
 	const notReady = `{"type":"error","error":{"type":"api_error","message":"service not ready"}}`
 	authenticated := httptest.NewRequest(http.MethodGet, "/models", nil)
@@ -874,6 +877,7 @@ func TestModelsHEADLocalFailuresHaveNoWireBody(t *testing.T) {
 		ready         bool
 		providerError error
 		authorize     bool
+		presented     http.Header
 		roundTrip     serverRoundTripFunc
 		wantStatus    int
 		wantBody      string
@@ -881,6 +885,18 @@ func TestModelsHEADLocalFailuresHaveNoWireBody(t *testing.T) {
 	}{
 		{
 			name:       "auth before readiness",
+			wantStatus: http.StatusUnauthorized,
+			wantBody:   `{"type":"error","error":{"type":"authentication_error","message":"missing or invalid API key"}}`,
+		},
+		{
+			name:       "wrong Bearer before readiness",
+			presented:  http.Header{"Authorization": {"Bearer wrong"}},
+			wantStatus: http.StatusUnauthorized,
+			wantBody:   `{"type":"error","error":{"type":"authentication_error","message":"missing or invalid API key"}}`,
+		},
+		{
+			name:       "wrong x-api-key before readiness",
+			presented:  http.Header{"X-Api-Key": {"wrong"}},
 			wantStatus: http.StatusUnauthorized,
 			wantBody:   `{"type":"error","error":{"type":"authentication_error","message":"missing or invalid API key"}}`,
 		},
@@ -960,6 +976,9 @@ func TestModelsHEADLocalFailuresHaveNoWireBody(t *testing.T) {
 			}
 			if tc.authorize {
 				req.Header.Set("Authorization", "Bearer "+testAPIKey)
+			}
+			for name, values := range tc.presented {
+				req.Header[name] = values
 			}
 			resp, err := http.DefaultClient.Do(req)
 			if err != nil {

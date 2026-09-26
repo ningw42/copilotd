@@ -188,10 +188,7 @@ func TestDailyOpenAIUsageCommandThroughProductionListener(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	if err := h.stopAfterClient(client); err != nil {
-		t.Fatal(err)
-	}
-	h.closeStore()
+	assertCleanUsageReport(t, h.stopAfterClient(t, client))
 	access := phase4LogLinesContaining(logs.String(), "msg=access", "request_id=report-access")
 	if len(access) != 3 {
 		t.Fatalf("report access count=%d", len(access))

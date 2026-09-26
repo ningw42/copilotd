@@ -59,15 +59,13 @@ func (l *usageReportLogs) await(t *testing.T, fragments ...string) string {
 	}
 }
 
-func seedLargeUsageReport(t *testing.T, h *usageMeterServeHarness) {
+func seedLargeUsageReport(t *testing.T, path string) {
 	t.Helper()
-	writer := openReportWriter(t, h.cfg.UsageDBPath)
 	// A legal 512 KiB model occurs in one row and one model total. JSON control
 	// escaping makes a little over 6 MiB: below 8 MiB, beyond this fixture's
 	// explicitly bounded TCP buffers (not arbitrary platform defaults).
-	if _, err := writer.Exec(`INSERT INTO openai_turn(at_ms,request_id,response_id,turn_index,model,transport,input_tokens,output_tokens) VALUES(1788220800000,'synthetic-private-row','',0,?,'buffered',1,2)`, strings.Repeat("\x01", 524288)); err != nil {
-		t.Fatal(err)
-	}
+	prepareUsageReportHistory(t, path, "UTF-8",
+		`INSERT INTO openai_turn(at_ms,request_id,response_id,turn_index,model,transport,input_tokens,output_tokens) VALUES(1788220800000,'synthetic-private-row','',0,?,'buffered',1,2)`, strings.Repeat("\x01", 524288))
 }
 
 const largeReportQuery = "?timezone=UTC&since=2026-09-01&until=2026-09-02&surface=openai"
@@ -286,8 +284,9 @@ func TestUsageGracefulDrainFinishesReportAndInferenceBeforeWriterCutoff(t *testi
 	t.Cleanup(upstream.Close)
 	logs := newUsageReportLogs()
 	listener := usageBackpressureListener(t)
-	h := startUsageMeterServeHarness(t, upstream.URL, newPhase4Logger(t, logs), nil, nil, listener)
-	seedLargeUsageReport(t, h)
+	h := startUsageMeterServeHarness(t, upstream.URL, newPhase4Logger(t, logs), func(cfg *config.ServeConfig) {
+		seedLargeUsageReport(t, cfg.UsageDBPath)
+	}, nil, listener)
 	req, _ := http.NewRequest("POST", h.baseURL+"/openai/v1/responses", strings.NewReader(`{"stream":true}`))
 	req.Header.Set("Authorization", "Bearer "+testAPIKey)
 	stream, err := http.DefaultClient.Do(req)
@@ -304,7 +303,7 @@ func TestUsageGracefulDrainFinishesReportAndInferenceBeforeWriterCutoff(t *testi
 	_ = first.conn.Close()
 	logs.await(t, "msg=access", "request_id=graceful-aborted-report")
 	requestReportStatus(t, h, "GET", "?timezone=UTC&since=invalid", 400, "invalid_query")
-	h.cancel()
+	h.run.cancel()
 	logs.await(t, `msg="shutting down"`)
 	// Shutdown closes its listener before waiting for active handlers. Observe
 	// that state rather than treating the pre-drain log as proof of admission.
@@ -335,10 +334,7 @@ func TestUsageGracefulDrainFinishesReportAndInferenceBeforeWriterCutoff(t *testi
 	if err != nil || !strings.Contains(string(streamBody), concurrentOpenAICompletion) {
 		t.Fatalf("draining inference: %s %v", streamBody, err)
 	}
-	if err := h.stop(); err != nil {
-		t.Fatal(err)
-	}
-	assertCleanUsageReport(t, h.closeStore())
+	assertCleanUsageReport(t, h.stopClean(t))
 	q := reportSelectionNow()
 	model := "live-openai"
 	q.Model = &model
@@ -357,13 +353,13 @@ func TestUsageForcedDrainCancelsRealSQLiteReadAndInference(t *testing.T) {
 	}))
 	t.Cleanup(upstream.Close)
 	logs := newUsageReportLogs()
-	h := startUsageMeterServeHarness(t, upstream.URL, newPhase4Logger(t, logs), func(cfg *config.ServeConfig) { cfg.ShutdownTimeout = 20 * time.Millisecond }, nil)
+	h := startUsageMeterServeHarness(t, upstream.URL, newPhase4Logger(t, logs), func(cfg *config.ServeConfig) {
+		cfg.ShutdownTimeout = 20 * time.Millisecond
+		prepareUsageReportHistory(t, cfg.UsageDBPath, "UTF-8", `WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<250000)
+			INSERT INTO openai_turn(at_ms,request_id,response_id,turn_index,model,transport,input_tokens,output_tokens)
+			SELECT 1788220800000,'','',0,'scan-in-flight','buffered',1,2 FROM n`)
+	}, nil)
 	writer := openReportWriter(t, h.cfg.UsageDBPath)
-	if _, err := writer.Exec(`WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<250000)
-		INSERT INTO openai_turn(at_ms,request_id,response_id,turn_index,model,transport,input_tokens,output_tokens)
-		SELECT 1788220800000,'','',0,'scan-in-flight','buffered',1,2 FROM n`); err != nil {
-		t.Fatal(err)
-	}
 	req, _ := http.NewRequest("POST", h.baseURL+"/openai/v1/responses", strings.NewReader(`{"stream":true}`))
 	req.Header.Set("Authorization", "Bearer "+testAPIKey)
 	stream, err := http.DefaultClient.Do(req)
@@ -408,8 +404,9 @@ func TestUsageForcedDrainCancelsRealSQLiteReadAndInference(t *testing.T) {
 		}
 	}
 	started := time.Now()
-	if err := h.stop(); !errors.Is(err, server.ErrForcedDrain) || !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("forced read drain = %v, want server.ErrForcedDrain wrapping deadline exceeded", err)
+	result := h.stop()
+	if result.Outcome != serveForcedDrain || !errors.Is(result.Err, server.ErrForcedDrain) || !errors.Is(result.Err, context.DeadlineExceeded) {
+		t.Fatalf("forced read drain = %v (%v), want server.ErrForcedDrain wrapping deadline exceeded", result.Outcome, result.Err)
 	}
 	elapsed := time.Since(started)
 	if elapsed < 15*time.Millisecond || elapsed > 500*time.Millisecond {
@@ -431,7 +428,7 @@ func TestUsageForcedDrainCancelsRealSQLiteReadAndInference(t *testing.T) {
 	if _, err := io.ReadAll(stream.Body); err == nil {
 		t.Fatal("forced inference connection remained complete")
 	}
-	assertCleanUsageReport(t, h.closeStore())
+	assertCleanUsageReport(t, result.Report)
 	t.Logf("250000-row native read pinned %d WAL pages; forced report/inference close returned in %s, then checkpoint=0/0/0", pinnedPages, elapsed)
 }
 
@@ -453,8 +450,10 @@ func TestUsageSlowTCPReportsHoldSlotsReleaseSQLiteAndDoNotDeadlineSSE(t *testing
 	}))
 	t.Cleanup(upstream.Close)
 	logs := newUsageReportLogs()
-	h := startUsageMeterServeHarness(t, upstream.URL, newPhase4Logger(t, logs), func(cfg *config.ServeConfig) { cfg.StreamIdleTimeout = 15 * time.Second }, nil, usageBackpressureListener(t))
-	seedLargeUsageReport(t, h)
+	h := startUsageMeterServeHarness(t, upstream.URL, newPhase4Logger(t, logs), func(cfg *config.ServeConfig) {
+		cfg.StreamIdleTimeout = 15 * time.Second
+		seedLargeUsageReport(t, cfg.UsageDBPath)
+	}, nil, usageBackpressureListener(t))
 	req, _ := http.NewRequest("POST", h.baseURL+"/openai/v1/responses", strings.NewReader(`{"stream":true}`))
 	req.Header.Set("Authorization", "Bearer "+testAPIKey)
 	streamStarted := time.Now()
@@ -509,10 +508,7 @@ func TestUsageSlowTCPReportsHoldSlotsReleaseSQLiteAndDoNotDeadlineSSE(t *testing
 	if err != nil || !strings.Contains(string(rest), concurrentOpenAICompletion) || time.Since(streamStarted) < 5*time.Second {
 		t.Fatalf("SSE did not survive report deadline: duration=%s error=%v body=%s", time.Since(streamStarted), err, rest)
 	}
-	if err := h.stop(); err != nil {
-		t.Fatal(err)
-	}
-	assertCleanUsageReport(t, h.closeStore())
+	assertCleanUsageReport(t, h.stopClean(t))
 	for _, forbidden := range []string{h.cfg.UsageDBPath, "synthetic-do-not-log", "synthetic-private-row", "since=", "timezone=", "model=", "SELECT", "input_tokens", "\\u0001"} {
 		for _, line := range phase4LogLinesContaining(logs.String(), "msg=access", "inbound=/usage/v1/report") {
 			if strings.Contains(line, forbidden) || strings.Contains(line, "surface=") {

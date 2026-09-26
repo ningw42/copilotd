@@ -58,10 +58,7 @@ func TestUsageStorageFailuresDoNotChangeInferenceReadinessOrWriterAdmission(t *t
 				}
 			}
 			assertHTTPStatusEventually(t, h.baseURL+"/readyz", 200)
-			if err := h.stop(); err != nil {
-				t.Fatal(err)
-			}
-			assertCleanUsageReport(t, h.closeStore())
+			assertCleanUsageReport(t, h.stopClean(t))
 			db := openReportWriter(t, h.cfg.UsageDBPath)
 			var n, input int
 			if err := db.QueryRow("SELECT count(*),sum(input_tokens) FROM openai_turn WHERE response_id='still-admitted'").Scan(&n, &input); err != nil || n != 1 || input != 8012 {
@@ -83,25 +80,21 @@ func TestUsageStorageFailuresDoNotChangeInferenceReadinessOrWriterAdmission(t *t
 }
 
 func TestUsageEncodedLimitRejectsWholeRealReportAndReleasesSlots(t *testing.T) {
-	h := startUsageMeterServeHarness(t, "http://127.0.0.1:1", discardLogger(t), nil, nil)
-	writer := openReportWriter(t, h.cfg.UsageDBPath)
-	// One legal 1 MiB identity fits the native reader's model/group budgets,
-	// but its escaped occurrence in both row and model total exceeds 8 MiB.
-	if _, err := writer.Exec(`INSERT INTO openai_turn(at_ms,request_id,response_id,turn_index,model,transport,input_tokens,output_tokens) VALUES(1788220800000,'','',0,?,'buffered',1,2)`, strings.Repeat("\x01", 1<<20)); err != nil {
-		t.Fatal(err)
-	}
+	h := startUsageMeterServeHarness(t, "http://127.0.0.1:1", discardLogger(t), func(cfg *config.ServeConfig) {
+		// One legal 1 MiB identity fits the native reader's model/group budgets,
+		// but its escaped occurrence in both row and model total exceeds 8 MiB.
+		prepareUsageReportHistory(t, cfg.UsageDBPath, "UTF-8",
+			`INSERT INTO openai_turn(at_ms,request_id,response_id,turn_index,model,transport,input_tokens,output_tokens) VALUES(1788220800000,'','',0,?,'buffered',1,2)`, strings.Repeat("\x01", 1<<20))
+	}, nil)
 	for range 3 {
 		requestReportStatus(t, h, "GET", largeReportQuery, 422, "report_too_large")
 	}
 	requestReportStatus(t, h, "HEAD", largeReportQuery, 422, "report_too_large")
 	assertHTTPStatusEventually(t, h.baseURL+"/readyz", 200)
-	if err := h.stop(); err != nil {
-		t.Fatal(err)
-	}
-	assertCleanUsageReport(t, h.closeStore())
+	assertCleanUsageReport(t, h.stopClean(t))
 }
 
-func prepareUsageReportHistory(t *testing.T, path, encoding, alter string) {
+func prepareUsageReportHistory(t *testing.T, path, encoding, alter string, args ...any) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		t.Fatal(err)
@@ -131,7 +124,7 @@ func prepareUsageReportHistory(t *testing.T, path, encoding, alter string) {
 		t.Fatal(err)
 	}
 	if alter != "" {
-		if _, err := conn.ExecContext(context.Background(), alter); err != nil {
+		if _, err := conn.ExecContext(context.Background(), alter, args...); err != nil {
 			t.Fatal(err)
 		}
 	}

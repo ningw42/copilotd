@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ningw42/copilotd/internal/config"
 	"github.com/ningw42/copilotd/internal/usage"
 	"github.com/ningw42/copilotd/internal/usage/report"
 )
@@ -127,18 +128,21 @@ func (w *usageLimitedWriter) Write(p []byte) (int, error) {
 }
 
 func TestUsageExactModelConfigurationThroughProductionListener(t *testing.T) {
-	h := startUsageMeterServeHarness(t, "http://127.0.0.1:1", discardLogger(t), nil, nil)
 	number := func(n int64) *int64 { return &n }
+	var history []usage.Turn
 	for _, model := range []string{"Model", "model", " model ", "é", "e\u0301", "模型", " ", "model\x00suffix"} {
 		requested := "requested-only"
 		for _, counts := range []usage.Usage{usage.OpenAIUsage{InputTokens: 8012, OutputTokens: 9, ReasoningTokens: number(4), TotalTokens: number(8021)}, usage.AnthropicUsage{InputTokens: 12, OutputTokens: 9, ThinkingTokens: number(4), CacheCreationInputTokens: number(2000), Ephemeral5mInputTokens: number(750), Ephemeral1hInputTokens: number(1250)}} {
-			h.store.Record(usage.Turn{At: time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC), Model: model, RequestedModel: &requested, Transport: usage.TransportBuffered, Usage: counts})
+			history = append(history, usage.Turn{At: time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC), Model: model, RequestedModel: &requested, Transport: usage.TransportBuffered, Usage: counts})
 		}
 	}
 	for _, counts := range []usage.Usage{usage.OpenAIUsage{InputTokens: 1}, usage.AnthropicUsage{InputTokens: 1}} {
-		h.store.Record(usage.Turn{At: time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC), Model: strings.Repeat("x", report.MaxModelBytes+1), Transport: usage.TransportBuffered, Usage: counts})
+		history = append(history, usage.Turn{At: time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC), Model: strings.Repeat("x", report.MaxModelBytes+1), Transport: usage.TransportBuffered, Usage: counts})
 	}
-	h.closeStore() // Complete fixture persistence; the reporter itself never flushes.
+	// Persist the static history before start; the reporter itself never flushes.
+	historyPath := filepath.Join(t.TempDir(), "usage", "usage.db")
+	seedUsageHistory(t, historyPath, history...)
+	h := startUsageMeterServeHarness(t, "http://127.0.0.1:1", discardLogger(t), func(cfg *config.ServeConfig) { cfg.UsageDBPath = historyPath }, nil)
 	response, err := http.Get(h.baseURL + "/usage/v1/report?timezone=UTC&since=2026-09-01&until=2026-09-02")
 	if err != nil {
 		t.Fatal(err)

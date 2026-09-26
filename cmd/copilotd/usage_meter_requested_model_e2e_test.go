@@ -25,7 +25,7 @@ func (requestedModelRewrite) TransformRequest(_ context.Context, request *shim.R
 	return nil
 }
 
-func TestRunBoundServeRequestedModelFourHTTPPathsAndRequestIsolation(t *testing.T) {
+func TestServeLifecycleRequestedModelFourHTTPPathsAndRequestIsolation(t *testing.T) {
 	for _, fixture := range []struct {
 		name                   string
 		path, table, idColumn  string

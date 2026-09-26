@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -27,11 +28,13 @@ import (
 	"github.com/ningw42/copilotd/internal/identity"
 	"github.com/ningw42/copilotd/internal/logging"
 	"github.com/ningw42/copilotd/internal/server"
+	"github.com/ningw42/copilotd/internal/upstream"
 	"github.com/ningw42/copilotd/internal/usage"
 	"github.com/ningw42/copilotd/internal/usage/pricing"
 	"github.com/ningw42/copilotd/internal/usage/report"
 	"github.com/ningw42/copilotd/internal/usage/reporthttp"
 	"github.com/ningw42/copilotd/internal/usage/sqlitestore"
+	"github.com/ningw42/copilotd/internal/wsforward"
 )
 
 // This is an OS-process acceptance test, not a call to run or a renderer. The
@@ -179,9 +182,7 @@ func TestUsageExecutableAcceptance(t *testing.T) {
 			}
 			time.Sleep(25 * time.Millisecond)
 		}
-		if err := h.stopAfterClient(client); err != nil {
-			t.Fatal(err)
-		}
+		assertCleanUsageReport(t, h.stopAfterClient(t, client))
 		t.Log("recorded September OpenAI fixture and synthetic Anthropic inference -> in-process production daemon/meter/writer with fixed synthetic pricing -> actual usage executable; gpt-5.6-sol short context uses synthetic base rates and preserves every native aggregate")
 	})
 	t.Run("details", func(t *testing.T) {
@@ -540,55 +541,70 @@ const usageCostArtifactSecond = `{
 
 func TestUsageCostExecutableAcceptance(t *testing.T) {
 	binary := usageAcceptanceBinary(t)
-	var artifact atomic.Value
-	artifact.Store(usageCostArtifactFirst)
-	var priceCalls atomic.Int32
+	const refreshInterval = 50 * time.Millisecond
+	var (
+		priceMu    sync.Mutex
+		artifact   = usageCostArtifactFirst
+		holdNext   bool
+		priceCalls atomic.Int32
+	)
 	refreshEntered := make(chan struct{})
 	releaseRefresh := make(chan struct{})
 	var releaseOnce sync.Once
 	prices := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		call := priceCalls.Add(1)
+		priceCalls.Add(1)
 		if r.Method != http.MethodGet || r.Header.Get("Authorization") != "" || r.Header.Get("Cookie") != "" || r.Header.Get("Editor-Version") != "" || r.Header.Get("Editor-Plugin-Version") != "" || r.Header.Get("Copilot-Integration-Id") != "" {
 			t.Errorf("pricing source request carried method/credentials/impersonation: %s %#v", r.Method, r.Header)
 		}
-		if call == 2 {
+		priceMu.Lock()
+		hold := holdNext
+		holdNext = false
+		priceMu.Unlock()
+		if hold {
+			// The sequential refresh loop now waits inside this replacement fetch,
+			// which answers with the second revision once released.
 			close(refreshEntered)
 			<-releaseRefresh
+			priceMu.Lock()
+			artifact = usageCostArtifactSecond
+			priceMu.Unlock()
 		}
+		priceMu.Lock()
+		body := artifact
+		priceMu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, artifact.Load().(string))
+		_, _ = io.WriteString(w, body)
 	}))
 	t.Cleanup(prices.Close)
-
-	h := startUsageMeterServeHarnessWithPricing(t, "http://127.0.0.1:1", discardLogger(t), func(cfg *config.ServeConfig) {
-		cfg.UsagePricingRefreshInterval = time.Hour
-	}, nil, pricing.NewRemote(prices.URL, prices.Client().Transport))
-	// Registered after the harness so a fatal assertion releases a blocked
-	// refresh before server/cache cleanup waits for its goroutines.
-	t.Cleanup(func() { releaseOnce.Do(func() { close(releaseRefresh) }) })
-	waitForUsagePriceSource(t, h, "fetched")
-	if priceCalls.Load() != 1 {
-		t.Fatalf("startup pricing fetch calls = %d, want 1", priceCalls.Load())
-	}
 
 	million, zero := int64(1_000_000), int64(0)
 	at := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
 	priority := "priority"
-	for _, turn := range []usage.Turn{
-		{At: at, Model: "gpt-tiered", Transport: usage.TransportBuffered, OpenAIServiceTier: &priority, Usage: usage.OpenAIUsage{InputTokens: 3 * million, OutputTokens: million, CachedTokens: &million, CacheWriteTokens: &million}},
+	path := filepath.Join(t.TempDir(), "usage", "usage.db")
+	seedUsageHistory(t, path,
+		usage.Turn{At: at, Model: "gpt-tiered", Transport: usage.TransportBuffered, OpenAIServiceTier: &priority, Usage: usage.OpenAIUsage{InputTokens: 3 * million, OutputTokens: million, CachedTokens: &million, CacheWriteTokens: &million}},
 		// This short-context Turn resolves to the same Pricing model but must use
 		// its base vector rather than either structured context tier.
-		{At: at, Model: "gpt-tiered-fast", Transport: usage.TransportBuffered, Usage: usage.OpenAIUsage{InputTokens: 100, CachedTokens: &zero, CacheWriteTokens: &zero}},
-		{At: at, Model: "rematch", Transport: usage.TransportBuffered, Usage: usage.OpenAIUsage{InputTokens: million, OutputTokens: million, CachedTokens: &zero, CacheWriteTokens: &zero}},
-		{At: at, Model: "shared", Transport: usage.TransportBuffered, Usage: usage.OpenAIUsage{InputTokens: million, OutputTokens: million, CachedTokens: &zero, CacheWriteTokens: &zero}},
-		{At: at, Model: "unknown", Transport: usage.TransportBuffered, Usage: usage.OpenAIUsage{InputTokens: million, OutputTokens: million, CachedTokens: &zero, CacheWriteTokens: &zero}},
-		{At: at, Model: "claude-tiered", Transport: usage.TransportBuffered, Usage: usage.AnthropicUsage{InputTokens: million, OutputTokens: million, CacheCreationInputTokens: &million, CacheReadInputTokens: &million, Ephemeral5mInputTokens: usageInt64(400_000), Ephemeral1hInputTokens: usageInt64(600_000)}},
+		usage.Turn{At: at, Model: "gpt-tiered-fast", Transport: usage.TransportBuffered, Usage: usage.OpenAIUsage{InputTokens: 100, CachedTokens: &zero, CacheWriteTokens: &zero}},
+		usage.Turn{At: at, Model: "rematch", Transport: usage.TransportBuffered, Usage: usage.OpenAIUsage{InputTokens: million, OutputTokens: million, CachedTokens: &zero, CacheWriteTokens: &zero}},
+		usage.Turn{At: at, Model: "shared", Transport: usage.TransportBuffered, Usage: usage.OpenAIUsage{InputTokens: million, OutputTokens: million, CachedTokens: &zero, CacheWriteTokens: &zero}},
+		usage.Turn{At: at, Model: "unknown", Transport: usage.TransportBuffered, Usage: usage.OpenAIUsage{InputTokens: million, OutputTokens: million, CachedTokens: &zero, CacheWriteTokens: &zero}},
+		usage.Turn{At: at, Model: "claude-tiered", Transport: usage.TransportBuffered, Usage: usage.AnthropicUsage{InputTokens: million, OutputTokens: million, CacheCreationInputTokens: &million, CacheReadInputTokens: &million, Ephemeral5mInputTokens: usageInt64(400_000), Ephemeral1hInputTokens: usageInt64(600_000)}},
 		// Surface does not select the benchmark provider: this Anthropic-native Turn
 		// intentionally resolves the OpenAI original-provider identity.
-		{At: at, Model: "gpt-tiered", Transport: usage.TransportBuffered, Usage: usage.AnthropicUsage{InputTokens: million, OutputTokens: million, CacheCreationInputTokens: &million, CacheReadInputTokens: &million}},
-	} {
-		h.store.Record(turn)
-	}
+		usage.Turn{At: at, Model: "gpt-tiered", Transport: usage.TransportBuffered, Usage: usage.AnthropicUsage{InputTokens: million, OutputTokens: million, CacheCreationInputTokens: &million, CacheReadInputTokens: &million}},
+	)
+
+	h := startUsageMeterServeHarnessWithEdges(t, "http://127.0.0.1:1", discardLogger(t), func(cfg *config.ServeConfig) {
+		cfg.UsageDBPath = path
+		cfg.UsagePricingRefreshInterval = refreshInterval
+	}, nil, func(edges *serveEdges) {
+		edges.Pricing = pricing.NewRemote(prices.URL, prices.Client().Transport)
+	})
+	// Registered after the harness so a fatal assertion releases a blocked
+	// refresh before server/cache cleanup waits for its goroutines.
+	t.Cleanup(func() { releaseOnce.Do(func() { close(releaseRefresh) }) })
+	awaitCachedValue(t, h.baseURL, "usage_prices", "fetched", usagePricingVersion(usageCostArtifactFirst))
 
 	query := report.Query{Timezone: "UTC", Since: "2026-09-01", Until: "2026-09-02", Surface: "all"}
 	waitForUsageTurns(t, h.baseURL, query, 2, 5)
@@ -597,6 +613,9 @@ func TestUsageCostExecutableAcceptance(t *testing.T) {
 	}
 	args := argsFor("all")
 	first := decodeUsageCostExecutable(t, usageExec(t, binary, nil, 0, args...))
+	if first.Pricing.Version != usagePricingVersion(usageCostArtifactFirst) {
+		t.Fatalf("first pricing revision = %q, want the accepted first artifact", first.Pricing.Version)
+	}
 	assertUsageCostRevision(t, first, "34", "3", "17", "rematch", "exact", "37.0001", "34")
 	openAIOnly := decodeUsageCostExecutable(t, usageExec(t, binary, nil, 0, argsFor("openai")...))
 	if len(openAIOnly.OpenAI.Rows) != 5 || len(openAIOnly.Anthropic.Rows) != 0 || openAIOnly.OpenAI.Total.Cost.Amount == nil || *openAIOnly.OpenAI.Total.Cost.Amount != "37.0001" {
@@ -625,40 +644,32 @@ func TestUsageCostExecutableAcceptance(t *testing.T) {
 		t.Errorf("actual executable text missing the whole-range Total/All row: %s", text)
 	}
 
-	artifact.Store(usageCostArtifactSecond)
-	primeDone := make(chan struct{})
-	go func() {
-		h.caches.Prime(context.Background())
-		close(primeDone)
-	}()
+	// Hold the refresh loop's next fetch at the edge. The loop is sequential, so
+	// no other pricing request can occur while it waits there.
+	priceMu.Lock()
+	holdNext = true
+	priceMu.Unlock()
 	select {
 	case <-refreshEntered:
 	case <-time.After(5 * time.Second):
-		t.Fatal("replacement pricing refresh did not reach local source")
+		t.Fatal("replacement pricing refresh did not reach the pricing edge")
 	}
-	// A report never joins the blocked fetch and stays entirely on the previously
-	// captured revision. The source call count also proves report-time no-network.
+	heldCalls := priceCalls.Load()
+	// A report never joins the held fetch and stays entirely on the previously
+	// captured revision; it adds no pricing-edge request.
 	during := decodeUsageCostExecutable(t, usageExec(t, binary, nil, 0, args...))
 	assertUsageCostRevision(t, during, "34", "3", "17", "rematch", "exact", "37.0001", "34")
-	if priceCalls.Load() != 2 {
-		t.Fatalf("report triggered pricing network calls: %d", priceCalls.Load())
+	if got := priceCalls.Load(); got != heldCalls {
+		t.Fatalf("reports during the held refresh made %d pricing-edge requests, want 0", got-heldCalls)
 	}
 	releaseOnce.Do(func() { close(releaseRefresh) })
-	select {
-	case <-primeDone:
-	case <-time.After(5 * time.Second):
-		t.Fatal("replacement pricing refresh did not finish")
-	}
-	waitForUsagePriceSource(t, h, "fetched")
-	if priceCalls.Load() != 2 {
-		t.Fatalf("replacement pricing fetch calls = %d, want 2", priceCalls.Load())
-	}
+	awaitCachedValue(t, h.baseURL, "usage_prices", "fetched", usagePricingVersion(usageCostArtifactSecond))
 	second := decodeUsageCostExecutable(t, usageExec(t, binary, nil, 0, args...))
 	assertUsageCostRevision(t, second, "102", "10", "34", "rematch-20260901", "dated", "112.0001", "68")
 	if first.Pricing.Version == second.Pricing.Version || first.OpenAI.Total.Turns != second.OpenAI.Total.Turns || first.Anthropic.Total.Turns != second.Anthropic.Total.Turns {
 		t.Fatalf("repricing did not change only the captured tariff/match revision: first=%+v second=%+v", first, second)
 	}
-	t.Log("local synthetic models.dev source -> shared cache lifecycle -> production reporter/HTTP -> actual CLI; per-Turn context tiers, aggregate cache-write, original-provider, unknown/ambiguous, report-time no-network and price/identity repricing verified without new database writes")
+	t.Log("local synthetic models.dev edge -> periodic refresh held at the edge -> production reporter/HTTP -> actual CLI; per-Turn context tiers, aggregate cache-write, original-provider, unknown/ambiguous, report-time no-network and price/identity repricing verified without new database writes")
 }
 
 type usageCostExecutableWire struct {
@@ -785,64 +796,59 @@ func waitForUsageReport(t *testing.T, endpoint string, query report.Query, ready
 	}
 }
 
-func waitForUsagePriceSource(t *testing.T, h *usageMeterServeHarness, source string) {
+// startGenericRecoveryServer is TestUsageExecutableReadsGenericRecovery's
+// dedicated fixture and the package's only hand-wired server: the report route
+// passes through no Shim, and production's query returns structured errors
+// rather than panicking, so the serve lifecycle cannot serve this panicking
+// query. No inference runs; the static provider and minimal forwarding only
+// satisfy server.New, and no readiness observer is needed because /readyz is
+// never requested.
+func startGenericRecoveryServer(t *testing.T, reportHandler http.Handler) string {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		statuses := h.caches.Observe()
-		for _, status := range statuses {
-			if status.Name == "usage_prices" && status.Source == source && status.LastSuccess != nil && status.LastAttemptResult != nil {
-				return
-			}
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("pricing source did not reach %s: %+v", source, statuses)
-		}
-		time.Sleep(10 * time.Millisecond)
+	cfg := e2eConfig("unused-recovery-oauth-token")
+	logger := discardLogger(t)
+	provider := identity.NewStatic(identity.Credential{BaseURL: "http://127.0.0.1:1", Token: "unused-recovery-copilot-token"}, true)
+	caller := upstream.New(provider, forward.NewClient(time.Second), time.Second, 1<<20, logging.ForComponent(logger, "internal/upstream"))
+	forwarder := forward.New(caller, time.Second, time.Second, time.Second, time.Second, 1<<20, nil,
+		logging.ForComponent(logger, "internal/sse"), logging.ForComponent(logger, "internal/shim"), 0)
+	wsProxy := wsforward.New(caller, http.DefaultClient, time.Second, time.Second, 1<<20, nil,
+		logging.ForComponent(logger, "internal/wsforward"), logging.ForComponent(logger, "internal/shim"), 0, wsforward.WsMetrics{})
+	srv := server.New(cfg, logging.ForComponent(logger, "internal/server"), logging.ForComponent(logger, "internal/catalog"), log.New(io.Discard, "", 0),
+		provider, server.ReadyObservers{}, forwarder, caller, wsProxy, server.NewStreamOutcomeCounter(), catalog.RenderDescriptors{}, reportHandler)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
 	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- srv.Run(ctx, ln) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("server Run = %v, want a clean drain", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Error("server did not shut down within the grace period")
+		}
+	})
+	return "http://" + ln.Addr().String()
 }
 
 func TestUsageExecutableReadsGenericRecovery(t *testing.T) {
 	binary := usageAcceptanceBinary(t)
-	cfg := e2eConfig("unused-recovery-oauth-token")
-	logger := discardLogger(t)
-	provider := identity.NewStatic(identity.Credential{BaseURL: "http://127.0.0.1:1", Token: "unused-recovery-copilot-token"}, true)
-	forwarder := newTestForwarderWithLogger(
-		provider,
-		forward.NewClient(cfg.ResponseHeaderTimeout),
-		cfg.OutboundTimeout,
-		cfg.WriteTimeout,
-		cfg.StreamIdleTimeout,
-		cfg.StreamKeepaliveInterval,
-		cfg.MaxRequestBytes,
-		cfg.MaxBufferedResponseBytes,
-		logger,
-		configuredShimRegistry(cfg, nil),
-	)
 	const panicSentinel = "private-usage-recovery-panic-sentinel"
 	observed := make(chan string, 3)
-	reportHandler := reporthttp.Handler(func(ctx context.Context, _ report.Query) (report.Report, error) {
+	base := startGenericRecoveryServer(t, reporthttp.Handler(func(ctx context.Context, _ report.Query) (report.Report, error) {
 		id, ok := logging.RequestIDFrom(ctx)
 		if !ok {
 			id = "missing-request-id"
 		}
 		observed <- id
 		panic(panicSentinel)
-	})
-	base := startTestServer(t, server.New(
-		cfg,
-		logging.ForComponent(logger, "internal/server"),
-		logging.ForComponent(logger, "internal/catalog"),
-		newTestDependencyErrorLog(),
-		provider,
-		newTestReadyObservers(),
-		forwarder,
-		newTestCatalogSource(provider),
-		newTestWSProxy(provider),
-		server.NewStreamOutcomeCounter(),
-		catalog.RenderDescriptors{},
-		reportHandler,
-	))
+	}))
 
 	for _, tc := range []struct {
 		name string

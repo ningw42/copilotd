@@ -151,6 +151,7 @@ func TestValueRunWaitsForTickerAndStopsOnCancellation(t *testing.T) {
 		return ticker
 	}))
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	done := make(chan struct{})
 	go func() {
 		value.Run(ctx)
@@ -170,11 +171,19 @@ func TestValueRunWaitsForTickerAndStopsOnCancellation(t *testing.T) {
 		t.Fatal("Run fetched before its first tick")
 	default:
 	}
-	ticker.ticks <- time.Time{}
-	select {
-	case <-fetches:
-	case <-time.After(time.Second):
-		t.Fatal("Run did not fetch after a tick")
+	for tick := 1; tick <= 2; tick++ {
+		select {
+		case ticker.ticks <- time.Time{}:
+		case <-done:
+			t.Fatalf("Run stopped before tick %d without cancellation", tick)
+		case <-time.After(time.Second):
+			t.Fatalf("Run did not receive tick %d", tick)
+		}
+		select {
+		case <-fetches:
+		case <-time.After(time.Second):
+			t.Fatalf("Run did not fetch after tick %d", tick)
+		}
 	}
 
 	cancel()

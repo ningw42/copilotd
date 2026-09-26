@@ -229,10 +229,7 @@ func TestUsageReportsOverlapNativeInferenceAndAnotherCommittedWriter(t *testing.
 	if journal != "wal" || busy != 1000 || synchronous != 1 || queryOnly != 0 {
 		t.Fatalf("writer settings changed: %s %d %d %d", journal, busy, synchronous, queryOnly)
 	}
-	if err := h.stop(); err != nil {
-		t.Fatal(err)
-	}
-	assertCleanUsageReport(t, h.closeStore())
+	assertCleanUsageReport(t, h.stopClean(t))
 	t.Logf("128 native SSE completions, one WebSocket Turn, %d other-writer commits; real writes and inference completed during HTTP reports", commits.Load())
 }
 

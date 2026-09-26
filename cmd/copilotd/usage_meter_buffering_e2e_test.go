@@ -79,10 +79,7 @@ func externalUsageDB(t *testing.T, harness *usageMeterServeHarness) (*sql.DB, sq
 	if !harness.cfg.ShimUsageMeterEnabled {
 		t.Fatal("externalUsageDB requires an enabled meter; assert file absence without opening SQLite when disabled")
 	}
-	if err := harness.stop(); err != nil {
-		t.Fatalf("runBoundServe after cancellation: %v", err)
-	}
-	report := harness.closeStore()
+	report := harness.stopClean(t)
 	db, err := sql.Open("sqlite", harness.cfg.UsageDBPath)
 	if err != nil {
 		t.Fatalf("open usage database for external query: %v", err)
@@ -114,7 +111,7 @@ func queryUsageCount(t *testing.T, db *sql.DB, table, predicate string, args ...
 	return count
 }
 
-func TestRunBoundServeUsageEligibilityDependsOnPayloadNotStatusOrContentType(t *testing.T) {
+func TestServeLifecycleUsageEligibilityDependsOnPayloadNotStatusOrContentType(t *testing.T) {
 	for _, surface := range bufferedUsageSurfaceCases {
 		t.Run(surface.name, func(t *testing.T) {
 			responses := map[string]struct {
@@ -161,7 +158,7 @@ func TestRunBoundServeUsageEligibilityDependsOnPayloadNotStatusOrContentType(t *
 	}
 }
 
-func TestRunBoundServeUsageMeterIdentityEncodingPredicateAndOpaqueBypass(t *testing.T) {
+func TestServeLifecycleUsageMeterIdentityEncodingPredicateAndOpaqueBypass(t *testing.T) {
 	encodingCases := []struct {
 		name       string
 		values     []string
@@ -216,7 +213,7 @@ func TestRunBoundServeUsageMeterIdentityEncodingPredicateAndOpaqueBypass(t *test
 	}
 }
 
-func TestRunBoundServeUsageMeterAloneActivatesBoundedRead(t *testing.T) {
+func TestServeLifecycleUsageMeterAloneActivatesBoundedRead(t *testing.T) {
 	for _, surface := range bufferedUsageSurfaceCases {
 		for _, enabled := range []bool{false, true} {
 			name := "meter-off"
@@ -259,7 +256,7 @@ func TestRunBoundServeUsageMeterAloneActivatesBoundedRead(t *testing.T) {
 	}
 }
 
-func TestRunBoundServeUsageMeterClassifiesBufferedReadFailures(t *testing.T) {
+func TestServeLifecycleUsageMeterClassifiesBufferedReadFailures(t *testing.T) {
 	for _, surface := range bufferedUsageSurfaceCases {
 		t.Run(surface.name+"/read-failure", func(t *testing.T) {
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -368,7 +365,7 @@ func TestRunBoundServeUsageMeterClassifiesBufferedReadFailures(t *testing.T) {
 	}
 }
 
-func TestRunBoundServeUsageMeterDelaysCommitAndRecomputesChunkedLength(t *testing.T) {
+func TestServeLifecycleUsageMeterDelaysCommitAndRecomputesChunkedLength(t *testing.T) {
 	for _, surface := range bufferedUsageSurfaceCases {
 		for _, meterEnabled := range []bool{false, true} {
 			mode := "meter-off-control"
@@ -549,7 +546,7 @@ func composedOuterBufferedRegistration(name string, transformer shim.BufferedTra
 	}
 }
 
-func TestRunBoundServeRetainsBufferedUsageAfterDownstreamOrOuterFailure(t *testing.T) {
+func TestServeLifecycleRetainsBufferedUsageAfterDownstreamOrOuterFailure(t *testing.T) {
 	for _, surface := range bufferedUsageSurfaceCases {
 		t.Run(surface.name+"/outer-rejection", func(t *testing.T) {
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -589,7 +586,7 @@ func TestRunBoundServeRetainsBufferedUsageAfterDownstreamOrOuterFailure(t *testi
 			harness := startUsageMeterServeHarness(t, upstream.URL, newPhase4Logger(t, &logs), nil,
 				composedOuterBufferedRegistration("hold-buffered-after-usage", held))
 			// Acquire the unblocker after the harness so fatal assertions release the
-			// held request before runBoundServe and its upstream are joined.
+			// held request before the serve lifecycle and its upstream are joined.
 			t.Cleanup(held.Release)
 
 			conn, err := net.Dial("tcp", strings.TrimPrefix(harness.baseURL, "http://"))
@@ -672,7 +669,7 @@ func TestRunBoundServeRetainsBufferedUsageAfterDownstreamOrOuterFailure(t *testi
 	}
 }
 
-func TestRunBoundServeSelectsUsageTransportFromEndpointAndUpstreamContentType(t *testing.T) {
+func TestServeLifecycleSelectsUsageTransportFromEndpointAndUpstreamContentType(t *testing.T) {
 	const (
 		completedEvent = "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-selected-sse\",\"model\":\"reported-sse\",\"status\":\"completed\",\"usage\":{\"input_tokens\":4,\"output_tokens\":7}}}\n\n"
 		bufferedBody   = `{"id":"resp-selected-buffered","model":"reported-buffered","status":"completed","usage":{"input_tokens":8,"output_tokens":9}}`
@@ -716,7 +713,7 @@ func TestRunBoundServeSelectsUsageTransportFromEndpointAndUpstreamContentType(t 
 	}
 }
 
-func TestRunBoundServeRejectsUnsupportedSSEEncodingBeforeUsageHooks(t *testing.T) {
+func TestServeLifecycleRejectsUnsupportedSSEEncodingBeforeUsageHooks(t *testing.T) {
 	streams := []struct {
 		name  string
 		path  string

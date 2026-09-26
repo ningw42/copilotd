@@ -1,8 +1,6 @@
 package main
 
 import (
-	"bytes"
-	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -14,8 +12,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/ningw42/copilotd/internal/cache"
 )
 
 const (
@@ -124,14 +120,10 @@ func TestPhase4ModelsOutcomeEndToEnd(t *testing.T) {
 
 	cfg := e2eConfig(phase4GitHubOAuthToken)
 	cfg.APIKey = phase4APIKey
-	var logs bytes.Buffer
-	logger := newPhase4Logger(t, &logs)
-	provider, _, err := buildServeProvider(cfg, logger, exchange.URL, exchange.Client(), productionDiscoveryEdge(), cache.NewRegistry())
-	if err != nil {
-		t.Fatalf("build Phase 4 provider: %v", err)
-	}
-	provider.StartupMint(context.Background())
-	base := startPhase4Server(t, cfg, provider, logger)
+	logs := newUsageReportLogs()
+	base := startPhase4Lifecycle(t, cfg, exchange, newPhase4Logger(t, logs))
+	// Every request below uses the Copilot token the startup mint warmed.
+	logs.await(t, `msg="minted copilot token"`, "trigger=startup")
 
 	for _, public := range []struct {
 		path       string
@@ -139,7 +131,7 @@ func TestPhase4ModelsOutcomeEndToEnd(t *testing.T) {
 		wantBody   string
 	}{
 		{path: "/healthz", wantStatus: http.StatusOK, wantBody: `{"status":"ok"}`},
-		{path: "/readyz", wantStatus: http.StatusOK, wantBody: `{"status":"ready",` + testReadyImpersonationJSON + `}`},
+		{path: "/readyz", wantStatus: http.StatusOK, wantBody: phase4ReadyzBody(cfg)},
 	} {
 		resp, body := doPhase4Request(t, nil, http.MethodGet, base+public.path, nil, nil)
 		if resp.StatusCode != public.wantStatus || string(body) != public.wantBody {

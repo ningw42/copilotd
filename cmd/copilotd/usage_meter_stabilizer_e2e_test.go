@@ -13,7 +13,7 @@ import (
 	"github.com/ningw42/copilotd/internal/sse"
 )
 
-func TestRunBoundServeUsageMeterComposesWithConfiguredItemIDStabilizer(t *testing.T) {
+func TestServeLifecycleUsageMeterComposesWithConfiguredItemIDStabilizer(t *testing.T) {
 	const stream = "event: response.output_item.added\ndata: " + `{"type":"response.output_item.added","output_index":0,"item":{"id":"item-first"}}` + "\n\n" +
 		"event: response.output_text.delta\ndata: " + `{"type":"response.output_text.delta","output_index":0,"item_id":"item-delta","delta":"hello"}` + "\n\n" +
 		"event: response.completed\ndata: " + `{"type":"response.completed","response":{"id":"response-native","model":"model-native","status":"completed","output":[{"id":"item-final"}],"usage":{"input_tokens":8012,"input_tokens_details":{"cached_tokens":6000,"cache_write_tokens":2000},"output_tokens":9,"output_tokens_details":{"reasoning_tokens":4},"total_tokens":8021}}}` + "\n\n"

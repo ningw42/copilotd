@@ -128,11 +128,9 @@ func TestUsageReportClientTeardownClosesAnUnusedDialBeforeGracefulStop(t *testin
 	// original two-second prompt-stop bound independently of the wider SQLite
 	// fixture-finalization watchdog.
 	stopStarted := time.Now()
-	if err := h.stopAfterClient(client); err != nil {
-		t.Fatal(err)
-	}
+	report := h.stopAfterClient(t, client)
 	if elapsed := time.Since(stopStarted); elapsed >= 2*time.Second {
 		t.Fatalf("client teardown delayed graceful stop for %s, want less than two seconds", elapsed)
 	}
-	assertCleanUsageReport(t, h.closeStore())
+	assertCleanUsageReport(t, report)
 }
