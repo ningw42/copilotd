@@ -1,5 +1,6 @@
-// Package usage defines Surface-native token usage observations and the prompt,
-// non-blocking sink contract consumed by the Usage meter Shim.
+// Package usage defines Surface-native token usage observations, the prompt,
+// non-blocking sink contract consumed by the Usage meter Shim, and the single
+// declaration of each Surface's native count projection.
 package usage
 
 import "time"
