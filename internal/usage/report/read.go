@@ -155,9 +155,9 @@ func (b *readBudget) retainIdentityBytes(size int) error {
 type nativeTable struct {
 	name    string
 	metrics []NativeMetric
-	// typed converts one nullable value per metric, in metric order, to an
-	// owned typed usage value, failing if a required count is missing.
-	typed func([]*int64) (usage.Usage, error)
+	// nativeUsage converts one nullable value per metric, in metric order, to
+	// an owned typed usage value, failing if a required count is missing.
+	nativeUsage func([]*int64) (usage.Usage, error)
 }
 
 func nativeTableFor(surface string) nativeTable {
@@ -171,7 +171,7 @@ func declaredTable[U usage.Usage](name string, projection usage.Projection[U]) n
 	return nativeTable{
 		name:    name,
 		metrics: nativeMetrics(projection),
-		typed: func(values []*int64) (usage.Usage, error) {
+		nativeUsage: func(values []*int64) (usage.Usage, error) {
 			native, err := projection.Usage(values)
 			if err != nil {
 				return nil, err
@@ -259,7 +259,7 @@ func readSection(ctx context.Context, conn *sql.Conn, buckets []Bucket, surface 
 		}
 		// Reject a missing required count before any pricing resolution; the
 		// typed usage owns copies, not pointers into the reused scan storage.
-		native, err := table.typed(reported)
+		native, err := table.nativeUsage(reported)
 		if err != nil {
 			return nil, fmt.Errorf("stored native counts: %w", err)
 		}

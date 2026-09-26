@@ -154,6 +154,32 @@ func TestCreateCurrentSchemaRollsBackAFailedMigration(t *testing.T) {
 	assertNoOpenTransaction(t, conn)
 }
 
+func TestCreateCurrentSchemaLeavesACallersOpenTransactionUntouched(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "caller.db")
+	db := openExternal(t, path)
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, "BEGIN"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.ExecContext(ctx, "CREATE TABLE caller_owned (value INTEGER)"); err != nil {
+		t.Fatal(err)
+	}
+	if err := sqlitestore.CreateCurrentSchema(ctx, conn); err == nil {
+		t.Fatal("CreateCurrentSchema inside a caller transaction succeeded, want BEGIN failure")
+	}
+	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
+		t.Fatalf("caller transaction was ended by CreateCurrentSchema: %v", err)
+	}
+	if got := externalRows(t, db, `SELECT name FROM sqlite_schema WHERE type='table' ORDER BY name`); !reflect.DeepEqual(got, [][]any{{"caller_owned"}}) {
+		t.Errorf("tables = %v, want only the caller's committed table", got)
+	}
+}
+
 func assertNoOpenTransaction(t *testing.T, conn *sql.Conn) {
 	t.Helper()
 	if _, err := conn.ExecContext(context.Background(), "BEGIN"); err != nil {

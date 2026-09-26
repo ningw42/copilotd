@@ -23,17 +23,34 @@ func declaredCounts[U usage.Usage](projection usage.Projection[U]) []declaredCou
 	return counts
 }
 
+// declaredByName deliberately ignores declaration order, which no consumer may
+// depend on.
+func declaredByName[U usage.Usage](projection usage.Projection[U]) map[string]declaredCount {
+	counts := map[string]declaredCount{}
+	for _, count := range declaredCounts(projection) {
+		counts[count.name] = count
+	}
+	return counts
+}
+
+// vectorFromNames builds a vector through the declaration, pointing each
+// reported count at the matching element of storage.
+func vectorFromNames[U usage.Usage](projection usage.Projection[U], storage []int64, values map[string]int64) []*int64 {
+	vector := make([]*int64, projection.Len())
+	for index, count := range projection.All() {
+		if value, ok := values[count.Name()]; ok {
+			storage[index] = value
+			vector[index] = &storage[index]
+		}
+	}
+	return vector
+}
+
 // usageFromNames builds a vector through the declaration from values keyed by
 // name; a name missing from values is unreported.
 func usageFromNames[U usage.Usage](t *testing.T, projection usage.Projection[U], values map[string]int64) U {
 	t.Helper()
-	vector := make([]*int64, projection.Len())
-	for index, count := range projection.All() {
-		if value, ok := values[count.Name()]; ok {
-			vector[index] = &value
-		}
-	}
-	native, err := projection.Usage(vector)
+	native, err := projection.Usage(vectorFromNames(projection, make([]int64, projection.Len()), values))
 	if err != nil {
 		t.Fatalf("Usage(%v) error = %v", values, err)
 	}
@@ -43,16 +60,16 @@ func usageFromNames[U usage.Usage](t *testing.T, projection usage.Projection[U],
 // The expectations below are written independently of the declaration, so a
 // row that binds a name or path to the wrong field of the same type fails.
 func TestAnthropicProjectionBindsEachNameAndPathToItsDocumentedField(t *testing.T) {
-	want := []declaredCount{
-		{name: "input_tokens", path: "input_tokens", required: true},
-		{name: "output_tokens", path: "output_tokens", required: true},
-		{name: "cache_creation_input_tokens", path: "cache_creation_input_tokens"},
-		{name: "cache_read_input_tokens", path: "cache_read_input_tokens"},
-		{name: "ephemeral_5m_input_tokens", path: "cache_creation.ephemeral_5m_input_tokens"},
-		{name: "ephemeral_1h_input_tokens", path: "cache_creation.ephemeral_1h_input_tokens"},
-		{name: "thinking_tokens", path: "output_tokens_details.thinking_tokens"},
+	want := map[string]declaredCount{
+		"input_tokens":                {name: "input_tokens", path: "input_tokens", required: true},
+		"output_tokens":               {name: "output_tokens", path: "output_tokens", required: true},
+		"cache_creation_input_tokens": {name: "cache_creation_input_tokens", path: "cache_creation_input_tokens"},
+		"cache_read_input_tokens":     {name: "cache_read_input_tokens", path: "cache_read_input_tokens"},
+		"ephemeral_5m_input_tokens":   {name: "ephemeral_5m_input_tokens", path: "cache_creation.ephemeral_5m_input_tokens"},
+		"ephemeral_1h_input_tokens":   {name: "ephemeral_1h_input_tokens", path: "cache_creation.ephemeral_1h_input_tokens"},
+		"thinking_tokens":             {name: "thinking_tokens", path: "output_tokens_details.thinking_tokens"},
 	}
-	if got := declaredCounts(usage.AnthropicProjection()); !reflect.DeepEqual(got, want) {
+	if got := declaredByName(usage.AnthropicProjection()); !reflect.DeepEqual(got, want) {
 		t.Errorf("Anthropic declaration = %+v, want %+v", got, want)
 	}
 	got := usageFromNames(t, usage.AnthropicProjection(), map[string]int64{
@@ -69,15 +86,15 @@ func TestAnthropicProjectionBindsEachNameAndPathToItsDocumentedField(t *testing.
 }
 
 func TestOpenAIProjectionBindsEachNameAndPathToItsDocumentedField(t *testing.T) {
-	want := []declaredCount{
-		{name: "input_tokens", path: "input_tokens", required: true},
-		{name: "output_tokens", path: "output_tokens", required: true},
-		{name: "cached_tokens", path: "input_tokens_details.cached_tokens"},
-		{name: "cache_write_tokens", path: "input_tokens_details.cache_write_tokens"},
-		{name: "reasoning_tokens", path: "output_tokens_details.reasoning_tokens"},
-		{name: "total_tokens", path: "total_tokens"},
+	want := map[string]declaredCount{
+		"input_tokens":       {name: "input_tokens", path: "input_tokens", required: true},
+		"output_tokens":      {name: "output_tokens", path: "output_tokens", required: true},
+		"cached_tokens":      {name: "cached_tokens", path: "input_tokens_details.cached_tokens"},
+		"cache_write_tokens": {name: "cache_write_tokens", path: "input_tokens_details.cache_write_tokens"},
+		"reasoning_tokens":   {name: "reasoning_tokens", path: "output_tokens_details.reasoning_tokens"},
+		"total_tokens":       {name: "total_tokens", path: "total_tokens"},
 	}
-	if got := declaredCounts(usage.OpenAIProjection()); !reflect.DeepEqual(got, want) {
+	if got := declaredByName(usage.OpenAIProjection()); !reflect.DeepEqual(got, want) {
 		t.Errorf("OpenAI declaration = %+v, want %+v", got, want)
 	}
 	got := usageFromNames(t, usage.OpenAIProjection(), map[string]int64{
@@ -118,12 +135,12 @@ func TestProjectionNamesAndPathsAreUniqueWellFormedAndReadable(t *testing.T) {
 	t.Run("Anthropic", func(t *testing.T) {
 		projection := usage.AnthropicProjection()
 		native := distinctUsage(t, projection)
-		check(t, declaredCounts(projection), func(index int) (int64, bool) { return countAt(projection, index).Value(native) })
+		check(t, declaredCounts(projection), func(index int) (int64, bool) { return countAt(t, projection, index).Value(native) })
 	})
 	t.Run("OpenAI", func(t *testing.T) {
 		projection := usage.OpenAIProjection()
 		native := distinctUsage(t, projection)
-		check(t, declaredCounts(projection), func(index int) (int64, bool) { return countAt(projection, index).Value(native) })
+		check(t, declaredCounts(projection), func(index int) (int64, bool) { return countAt(t, projection, index).Value(native) })
 	})
 }
 
@@ -141,13 +158,15 @@ func distinctUsage[U usage.Usage](t *testing.T, projection usage.Projection[U]) 
 	return native
 }
 
-func countAt[U usage.Usage](projection usage.Projection[U], want int) usage.NativeCount[U] {
+func countAt[U usage.Usage](t *testing.T, projection usage.Projection[U], want int) usage.NativeCount[U] {
+	t.Helper()
 	for index, count := range projection.All() {
 		if index == want {
 			return count
 		}
 	}
-	panic("count index out of range")
+	t.Fatalf("no declared count at position %d", want)
+	return usage.NativeCount[U]{}
 }
 
 func TestProjectionUsageRejectsMissingRequiredCounts(t *testing.T) {
@@ -205,13 +224,13 @@ func TestProjectionUsageRejectsWrongVectorLength(t *testing.T) {
 }
 
 func TestProjectionUsageOwnsItsSnapshotAfterTheCallerReusesItsVector(t *testing.T) {
-	storage := []int64{1, 2, 3, 4, 5, 6, 7}
-	vector := make([]*int64, len(storage))
-	for index := range vector {
-		vector[index] = &storage[index]
-	}
-	vector[4] = nil
-	native, err := usage.AnthropicProjection().Usage(vector)
+	projection := usage.AnthropicProjection()
+	storage := make([]int64, projection.Len())
+	vector := vectorFromNames(projection, storage, map[string]int64{
+		"input_tokens": 1, "output_tokens": 2, "cache_creation_input_tokens": 3, "cache_read_input_tokens": 4,
+		"ephemeral_1h_input_tokens": 6, "thinking_tokens": 7,
+	})
+	native, err := projection.Usage(vector)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -235,15 +254,19 @@ func TestProjectionUsageOwnsItsSnapshotAfterTheCallerReusesItsVector(t *testing.
 		storage[index] = 0
 	}
 	extra := int64(99)
-	vector[4] = &extra
+	for index := range vector {
+		vector[index] = &extra
+	}
 	if !reflect.DeepEqual(native, want) || native.Ephemeral5mInputTokens != nil {
 		t.Errorf("Usage snapshot changed after caller reuse: %+v, want %+v", native, want)
 	}
 }
 
 func TestProjectionUsageKeepsUnreportedOptionalNilAndReportedZero(t *testing.T) {
-	zero := int64(0)
-	native, err := usage.OpenAIProjection().Usage([]*int64{&zero, &zero, &zero, nil, &zero, nil})
+	projection := usage.OpenAIProjection()
+	storage := make([]int64, projection.Len())
+	vector := vectorFromNames(projection, storage, map[string]int64{"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0, "reasoning_tokens": 0})
+	native, err := projection.Usage(vector)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -251,7 +274,12 @@ func TestProjectionUsageKeepsUnreportedOptionalNilAndReportedZero(t *testing.T) 
 	if !reflect.DeepEqual(native, want) || native.CacheWriteTokens != nil || native.TotalTokens != nil {
 		t.Errorf("Usage = %+v, want %+v", native, want)
 	}
-	if native.CachedTokens == native.ReasoningTokens || native.CachedTokens == &zero {
+	if native.CachedTokens == native.ReasoningTokens {
 		t.Error("reported zeros share storage")
+	}
+	for index := range storage {
+		if native.CachedTokens == &storage[index] || native.ReasoningTokens == &storage[index] {
+			t.Errorf("reported zero aliases caller storage index %d", index)
+		}
 	}
 }

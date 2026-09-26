@@ -20,8 +20,14 @@ type NativeCount[U Usage] struct {
 	set      func(*U, int64)
 }
 
-func (c NativeCount[U]) Name() string   { return c.name }
-func (c NativeCount[U]) Path() string   { return c.path }
+// Name is the count's column, report metric and wire key.
+func (c NativeCount[U]) Name() string { return c.name }
+
+// Path locates the count in the provider's usage object, for example
+// "cache_creation.ephemeral_5m_input_tokens".
+func (c NativeCount[U]) Path() string { return c.path }
+
+// Required reports whether every qualifying completion must report the count.
 func (c NativeCount[U]) Required() bool { return c.required }
 
 // Value returns the count carried by native. False means an optional count was

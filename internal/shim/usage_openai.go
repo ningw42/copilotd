@@ -108,12 +108,8 @@ func parseOpenAIResponse(raw []byte) (usage.Turn, bool) {
 	if !ok {
 		return usage.Turn{}, false
 	}
-	counts, ok := decodeNativeCounts(usage.OpenAIProjection(), usageObject)
+	native, ok := decodeNativeUsage(usage.OpenAIProjection(), usageObject)
 	if !ok {
-		return usage.Turn{}, false
-	}
-	native, err := usage.OpenAIProjection().Usage(counts)
-	if err != nil {
 		return usage.Turn{}, false
 	}
 	return usage.Turn{

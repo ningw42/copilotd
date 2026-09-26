@@ -25,6 +25,18 @@ func decodeNativeCounts[U usage.Usage](projection usage.Projection[U], object ma
 	return counts, true
 }
 
+// decodeNativeUsage decodes a completed candidate's usage object into typed
+// usage; it fails when any count is invalid or a required count is unreported.
+func decodeNativeUsage[U usage.Usage](projection usage.Projection[U], object map[string]json.RawMessage) (U, bool) {
+	counts, ok := decodeNativeCounts(projection, object)
+	if !ok {
+		var zero U
+		return zero, false
+	}
+	native, err := projection.Usage(counts)
+	return native, err == nil
+}
+
 func decodeNativeCount(object map[string]json.RawMessage, path string) (*int64, bool) {
 	for {
 		container, rest, nested := strings.Cut(path, ".")

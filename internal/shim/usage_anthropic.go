@@ -195,12 +195,8 @@ func parseAnthropicMessage(raw []byte) (string, string, usage.AnthropicUsage, bo
 	if !ok {
 		return "", "", usage.AnthropicUsage{}, false
 	}
-	counts, ok := decodeNativeCounts(usage.AnthropicProjection(), usageObject)
+	native, ok := decodeNativeUsage(usage.AnthropicProjection(), usageObject)
 	if !ok {
-		return "", "", usage.AnthropicUsage{}, false
-	}
-	native, err := usage.AnthropicProjection().Usage(counts)
-	if err != nil {
 		return "", "", usage.AnthropicUsage{}, false
 	}
 	return messageID, model, native, true

@@ -233,8 +233,8 @@ func (d *wireDecoder) total(o object, section bool, metrics []report.NativeMetri
 		d.err = errProtocol
 	}
 	usage := d.object(d.member(o, "usage"))
-	for _, native := range metrics {
-		m := d.object(d.member(usage, native.Name))
+	for _, declared := range metrics {
+		m := d.object(d.member(usage, declared.Name))
 		metric := report.Metric{ReportedTurns: d.count(m, "reported_turns")}
 		sum := d.member(m, "sum")
 		if !bytes.Equal(sum, []byte("null")) {
@@ -244,14 +244,14 @@ func (d *wireDecoder) total(o object, section bool, metrics []report.NativeMetri
 		if metric.ReportedTurns > total.Turns {
 			d.err = errProtocol
 		}
-		if native.Required {
+		if declared.Required {
 			if metric.Sum == nil || metric.ReportedTurns != total.Turns || total.Turns == 0 && *metric.Sum != 0 {
 				d.err = errProtocol
 			}
 		} else if (metric.Sum == nil) != (metric.ReportedTurns == 0) {
 			d.err = errProtocol
 		}
-		total.Usage[native.Name] = metric
+		total.Usage[declared.Name] = metric
 	}
 	if pricingPresent {
 		total.Cost = d.cost(d.object(d.member(o, "cost")), total.Turns)

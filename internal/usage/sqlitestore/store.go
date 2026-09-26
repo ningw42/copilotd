@@ -666,7 +666,10 @@ func attemptAdmission(path string, deadline time.Time, openDB func(string, strin
 func CreateCurrentSchema(ctx context.Context, conn *sql.Conn) error {
 	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
 		// BEGIN may have acquired the transaction before surfacing ctx.Err.
-		_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
+		// Any other failure leaves a caller's own open transaction untouched.
+		if ctx.Err() != nil {
+			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
+		}
 		return fmt.Errorf("begin usage schema creation: %w", err)
 	}
 	return migrateAcquired(conn)
