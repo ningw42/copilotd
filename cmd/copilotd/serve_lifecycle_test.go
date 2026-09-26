@@ -39,8 +39,8 @@ type capturedRecord struct {
 }
 
 // recordSink collects every record a lifecycle emits. An optional hold blocks
-// the first record with its message until released, so a test can act at an
-// exact point of the lifecycle's synchronous record sequence.
+// matching record until released, so a test can act at an exact point of the
+// lifecycle's synchronous record sequence.
 type recordSink struct {
 	mu      sync.Mutex
 	records []capturedRecord
@@ -72,6 +72,7 @@ func (s *recordSink) await(t *testing.T, message string) capturedRecord {
 
 type recordHold struct {
 	message     string
+	matches     func(capturedRecord) bool
 	reached     chan struct{}
 	release     chan struct{}
 	reachOnce   sync.Once
@@ -120,7 +121,7 @@ func (h capturingHandler) Handle(ctx context.Context, record slog.Record) error 
 	h.sink.records = append(h.sink.records, captured)
 	hold := h.sink.hold
 	h.sink.mu.Unlock()
-	if hold != nil && record.Message == hold.message {
+	if hold != nil && record.Message == hold.message && (hold.matches == nil || hold.matches(captured)) {
 		hold.reachOnce.Do(func() { close(hold.reached) })
 		<-hold.release
 	}

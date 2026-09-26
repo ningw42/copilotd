@@ -522,12 +522,7 @@ func TestServeFreshCodexCatalogAndReadinessEndToEnd(t *testing.T) {
 	}
 	edges.CodexModels = catalog.ModelsEdge{BaseURL: github.URL, Client: github.Client()}
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	startServeLifecycle(t, discardLogger(t), serveInput{Config: cfg, Edges: edges, Listener: ln})
-	base := "http://" + ln.Addr().String()
+	base := startServedLifecycle(t, discardLogger(t), serveInput{Config: cfg, Edges: edges})
 
 	awaitCachedValue(t, base, "codex_models", "fetched", tag)
 	resp, err := http.Get(base + "/readyz") //nolint:noctx // local e2e server

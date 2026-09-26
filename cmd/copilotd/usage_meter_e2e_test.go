@@ -914,6 +914,42 @@ func TestServeLifecycleRetainsOpenAIWebSocketUsageObservedBeforeDownstreamWriteF
 	}
 }
 
+// holdUsageRuntimeFailure preserves queued observations by blocking the writer's
+// first real failure record, not an earlier queue-pressure-only record. Callers
+// defer Release so a failed assertion cannot leave lifecycle cleanup log-blocked.
+func holdUsageRuntimeFailure(t *testing.T) *recordSink {
+	t.Helper()
+	hold := newRecordHold(t, "usage observations lost")
+	hold.matches = func(record capturedRecord) bool {
+		return record.attrs[logging.ComponentKey].String() == "internal/usage/sqlitestore" &&
+			record.attrs[logging.RuntimeWriteLossesKey].Uint64() > 0 &&
+			record.attrs[logging.FailureClassKey].String() == "transient"
+	}
+	return &recordSink{hold: hold}
+}
+
+// recoverUsageAfterContention runs only once the initial producers are quiescent.
+// A recovery record proves a new nonempty batch was dequeued after the held
+// failure, leaving room for the recovery observation; it need not drain the queue.
+func recoverUsageAfterContention(t *testing.T, sink *recordSink, locker *sql.DB) {
+	t.Helper()
+	select {
+	case <-sink.hold.reached:
+	case <-time.After(10 * time.Second):
+		t.Fatal("usage writer did not report a real runtime failure under contention")
+	}
+	if _, err := locker.Exec("ROLLBACK"); err != nil {
+		t.Fatalf("release usage database lock: %v", err)
+	}
+	sink.hold.Release()
+	recovered := sink.await(t, "usage storage recovered")
+	if recovered.attrs[logging.ComponentKey].String() != "internal/usage/sqlitestore" ||
+		recovered.attrs[logging.FailureClassKey].String() != "recovered" ||
+		recovered.attrs[logging.RuntimeWriteLossesKey].Uint64() == 0 {
+		t.Fatalf("unexpected storage recovery record: %+v", recovered)
+	}
+}
+
 func TestServeLifecycleOpenAIWebSocketStaysResponsiveWhileRealStoreIsFullAndFailing(t *testing.T) {
 	const submissions = 1153
 	completion := []byte(`{"type":"response.completed","response":{"id":"resp-duplicate-under-lock","model":"reported-under-lock","status":"completed","usage":{"input_tokens":1,"output_tokens":2}}}`)
@@ -945,7 +981,9 @@ func TestServeLifecycleOpenAIWebSocketStaysResponsiveWhileRealStoreIsFullAndFail
 	t.Cleanup(upstream.Close)
 	t.Cleanup(releaseRecovery)
 
-	base := discardLogger(t)
+	sink := holdUsageRuntimeFailure(t)
+	defer sink.hold.Release()
+	base := slog.New(capturingHandler{sink: sink})
 	harness := startUsageMeterServeHarness(t, upstream.URL, base, nil, nil)
 	locker, err := sql.Open("sqlite", harness.cfg.UsageDBPath)
 	if err != nil {
@@ -987,14 +1025,10 @@ func TestServeLifecycleOpenAIWebSocketStaysResponsiveWhileRealStoreIsFullAndFail
 		t.Fatalf("WebSocket pump took %s while SQLite writer was blocked, want prompt nonblocking forwarding", elapsed)
 	}
 
-	// Keep the real external write lock beyond the store's native runtime budget:
-	// the in-flight batch fails while the WebSocket session itself remains live.
-	time.Sleep(5500 * time.Millisecond)
-	if _, err := locker.Exec("ROLLBACK"); err != nil {
-		t.Fatalf("release usage database lock: %v", err)
-	}
+	// Observe the native write failure, then actual writer progress after unlock
+	// before releasing the sole remaining producer at the WebSocket edge.
+	recoverUsageAfterContention(t, sink, locker)
 	locked = false
-	time.Sleep(100 * time.Millisecond)
 	releaseRecovery()
 	recoveryCtx, recoveryCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	kind, data, err := conn.Read(recoveryCtx)
@@ -1064,8 +1098,8 @@ func TestServeLifecycleFinalizesPendingUsageWithAFreshBudgetAfterForcedDrain(t *
 	})
 	harness := startUsageMeterServeHarness(t, upstream.URL, base, func(cfg *config.ServeConfig) {
 		cfg.ShutdownTimeout = shutdownTimeout
+		seedLargeUsageReport(t, cfg.UsageDBPath)
 	}, withHeldServerMessageShim(held), usageBackpressureListener(t))
-	seedLargeUsageReport(t, harness)
 	slowReport := startSlowUsageResponse(t, harness, "report-during-forced-ws-drain")
 
 	// Hold SQLite's write lock from before the observation until inside the fresh
@@ -1302,8 +1336,8 @@ func TestServeLifecycleStopsUsageAdmissionBeforeWarningForcedDrain(t *testing.T)
 	})
 	harness := startUsageMeterServeHarness(t, upstream.URL, base, func(cfg *config.ServeConfig) {
 		cfg.ShutdownTimeout = 75 * time.Millisecond
+		seedLargeUsageReport(t, cfg.UsageDBPath)
 	}, holdBeforeUsageMeter(hold), usageBackpressureListener(t))
-	seedLargeUsageReport(t, harness)
 	slowReport := startSlowUsageResponse(t, harness, "report-before-forced-drain-log")
 	conn := dialUsageMeterWebSocket(t, harness.baseURL, "forced-drain-error-log-order")
 	t.Cleanup(func() { _ = conn.CloseNow() })
@@ -1854,7 +1888,9 @@ func TestServeLifecycleAnthropicSSEStaysResponsiveThroughFullFailingStoreAndReco
 	}))
 	t.Cleanup(upstream.Close)
 
-	base := discardLogger(t)
+	sink := holdUsageRuntimeFailure(t)
+	defer sink.hold.Release()
+	base := slog.New(capturingHandler{sink: sink})
 	harness := startUsageMeterServeHarness(t, upstream.URL, base, nil, nil)
 	locker, err := sql.Open("sqlite", harness.cfg.UsageDBPath)
 	if err != nil {
@@ -1920,16 +1956,10 @@ func TestServeLifecycleAnthropicSSEStaysResponsiveThroughFullFailingStoreAndReco
 		t.Fatalf("%d Anthropic SSE requests took %s while SQLite writer was blocked", submissions, elapsed)
 	}
 
-	// Keep the real external lock beyond the runtime busy budget. An admitted
-	// batch must fail, while the request wave above already completed unchanged.
-	if remaining := 5500*time.Millisecond - elapsed; remaining > 0 {
-		time.Sleep(remaining)
-	}
-	if _, err := locker.Exec("ROLLBACK"); err != nil {
-		t.Fatalf("release usage database lock: %v", err)
-	}
+	// The initial wave is quiescent. Observe failure and subsequent writer
+	// recovery before submitting the one remaining observation.
+	recoverUsageAfterContention(t, sink, locker)
 	locked = false
-	time.Sleep(100 * time.Millisecond)
 
 	req, err := http.NewRequest(http.MethodPost, harness.baseURL+"/anthropic/v1/messages", strings.NewReader(`{"stream":true}`))
 	if err != nil {

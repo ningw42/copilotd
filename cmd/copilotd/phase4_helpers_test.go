@@ -6,10 +6,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/ningw42/copilotd/internal/config"
 	"github.com/ningw42/copilotd/internal/logging"
@@ -49,12 +47,7 @@ func phase4LogLinesContaining(logOutput string, fragments ...string) []string {
 // newPhase4ExchangeStub mints phase4CopilotToken with its API base at upstreamURL.
 func newPhase4ExchangeStub(t *testing.T, upstreamURL string) *httptest.Server {
 	t.Helper()
-	exchange := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"token":"`+phase4CopilotToken+`","expires_at":`+strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10)+`,"refresh_in":3600,"endpoints":{"api":"`+upstreamURL+`"}}`)
-	}))
-	t.Cleanup(exchange.Close)
-	return exchange
+	return newGitHubExchangeStub(t, phase4CopilotToken, upstreamURL).server
 }
 
 // startPhase4Lifecycle serves cfg through the production lifecycle with the

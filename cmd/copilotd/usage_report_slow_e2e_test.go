@@ -59,15 +59,13 @@ func (l *usageReportLogs) await(t *testing.T, fragments ...string) string {
 	}
 }
 
-func seedLargeUsageReport(t *testing.T, h *usageMeterServeHarness) {
+func seedLargeUsageReport(t *testing.T, path string) {
 	t.Helper()
-	writer := openReportWriter(t, h.cfg.UsageDBPath)
 	// A legal 512 KiB model occurs in one row and one model total. JSON control
 	// escaping makes a little over 6 MiB: below 8 MiB, beyond this fixture's
 	// explicitly bounded TCP buffers (not arbitrary platform defaults).
-	if _, err := writer.Exec(`INSERT INTO openai_turn(at_ms,request_id,response_id,turn_index,model,transport,input_tokens,output_tokens) VALUES(1788220800000,'synthetic-private-row','',0,?,'buffered',1,2)`, strings.Repeat("\x01", 524288)); err != nil {
-		t.Fatal(err)
-	}
+	prepareUsageReportHistory(t, path, "UTF-8",
+		`INSERT INTO openai_turn(at_ms,request_id,response_id,turn_index,model,transport,input_tokens,output_tokens) VALUES(1788220800000,'synthetic-private-row','',0,?,'buffered',1,2)`, strings.Repeat("\x01", 524288))
 }
 
 const largeReportQuery = "?timezone=UTC&since=2026-09-01&until=2026-09-02&surface=openai"
@@ -286,8 +284,9 @@ func TestUsageGracefulDrainFinishesReportAndInferenceBeforeWriterCutoff(t *testi
 	t.Cleanup(upstream.Close)
 	logs := newUsageReportLogs()
 	listener := usageBackpressureListener(t)
-	h := startUsageMeterServeHarness(t, upstream.URL, newPhase4Logger(t, logs), nil, nil, listener)
-	seedLargeUsageReport(t, h)
+	h := startUsageMeterServeHarness(t, upstream.URL, newPhase4Logger(t, logs), func(cfg *config.ServeConfig) {
+		seedLargeUsageReport(t, cfg.UsageDBPath)
+	}, nil, listener)
 	req, _ := http.NewRequest("POST", h.baseURL+"/openai/v1/responses", strings.NewReader(`{"stream":true}`))
 	req.Header.Set("Authorization", "Bearer "+testAPIKey)
 	stream, err := http.DefaultClient.Do(req)
@@ -354,13 +353,13 @@ func TestUsageForcedDrainCancelsRealSQLiteReadAndInference(t *testing.T) {
 	}))
 	t.Cleanup(upstream.Close)
 	logs := newUsageReportLogs()
-	h := startUsageMeterServeHarness(t, upstream.URL, newPhase4Logger(t, logs), func(cfg *config.ServeConfig) { cfg.ShutdownTimeout = 20 * time.Millisecond }, nil)
+	h := startUsageMeterServeHarness(t, upstream.URL, newPhase4Logger(t, logs), func(cfg *config.ServeConfig) {
+		cfg.ShutdownTimeout = 20 * time.Millisecond
+		prepareUsageReportHistory(t, cfg.UsageDBPath, "UTF-8", `WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<250000)
+			INSERT INTO openai_turn(at_ms,request_id,response_id,turn_index,model,transport,input_tokens,output_tokens)
+			SELECT 1788220800000,'','',0,'scan-in-flight','buffered',1,2 FROM n`)
+	}, nil)
 	writer := openReportWriter(t, h.cfg.UsageDBPath)
-	if _, err := writer.Exec(`WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<250000)
-		INSERT INTO openai_turn(at_ms,request_id,response_id,turn_index,model,transport,input_tokens,output_tokens)
-		SELECT 1788220800000,'','',0,'scan-in-flight','buffered',1,2 FROM n`); err != nil {
-		t.Fatal(err)
-	}
 	req, _ := http.NewRequest("POST", h.baseURL+"/openai/v1/responses", strings.NewReader(`{"stream":true}`))
 	req.Header.Set("Authorization", "Bearer "+testAPIKey)
 	stream, err := http.DefaultClient.Do(req)
@@ -451,8 +450,10 @@ func TestUsageSlowTCPReportsHoldSlotsReleaseSQLiteAndDoNotDeadlineSSE(t *testing
 	}))
 	t.Cleanup(upstream.Close)
 	logs := newUsageReportLogs()
-	h := startUsageMeterServeHarness(t, upstream.URL, newPhase4Logger(t, logs), func(cfg *config.ServeConfig) { cfg.StreamIdleTimeout = 15 * time.Second }, nil, usageBackpressureListener(t))
-	seedLargeUsageReport(t, h)
+	h := startUsageMeterServeHarness(t, upstream.URL, newPhase4Logger(t, logs), func(cfg *config.ServeConfig) {
+		cfg.StreamIdleTimeout = 15 * time.Second
+		seedLargeUsageReport(t, cfg.UsageDBPath)
+	}, nil, usageBackpressureListener(t))
 	req, _ := http.NewRequest("POST", h.baseURL+"/openai/v1/responses", strings.NewReader(`{"stream":true}`))
 	req.Header.Set("Authorization", "Bearer "+testAPIKey)
 	streamStarted := time.Now()

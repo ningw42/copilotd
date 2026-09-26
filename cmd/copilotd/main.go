@@ -504,6 +504,9 @@ func runServeLifecycle(ctx context.Context, base *slog.Logger, input serveInput)
 		logger.Error("cannot start: resolving the GitHub OAuth token failed", slog.Any(logging.ErrorKey, err))
 		return endUnserved(servePreBindFailure, err)
 	}
+	if ctx.Err() != nil {
+		return endUnserved(serveClean, nil)
+	}
 	codexModels := configuredCodexModels(cfg, edges.CodexModels, cacheRegistry, base)
 	usagePricing := configuredUsagePricing(cfg, edges.Pricing, cacheRegistry, base)
 	if ctx.Err() != nil {
@@ -518,6 +521,9 @@ func runServeLifecycle(ctx context.Context, base *slog.Logger, input serveInput)
 		// Resolve once; writer and reporter receive this same daemon-owned path.
 		cfg.UsageDBPath, openErr = filepath.Abs(cfg.UsageDBPath)
 		if openErr == nil {
+			if ctx.Err() != nil {
+				return endUnserved(serveClean, nil)
+			}
 			usageStore, openErr = sqlitestore.Open(cfg.UsageDBPath, logging.ForComponent(base, "internal/usage/sqlitestore"))
 		}
 		if openErr != nil {
@@ -558,7 +564,14 @@ func runServeLifecycle(ctx context.Context, base *slog.Logger, input serveInput)
 	// progress. Neither discovery nor startup mint outcomes gate readiness or
 	// request admission.
 	go runServeStartup(startupCtx, cacheRegistry, mgr, logger)
-	serveErr := newServeServer(cfg, base, mgr, imp, codexModels, cacheRegistry, registry, reportQuery).Run(ctx, ln)
+	if ctx.Err() != nil {
+		return endUnserved(serveClean, nil)
+	}
+	srv := newServeServer(cfg, base, mgr, imp, codexModels, cacheRegistry, registry, reportQuery)
+	if ctx.Err() != nil {
+		return endUnserved(serveClean, nil)
+	}
+	serveErr := srv.Run(ctx, ln)
 	// Usage admission stays open through the drain and is cut off first, before
 	// startup ends and before the one command-level outcome record, which is
 	// synchronous: a producer racing that record is counted late, not admitted.
