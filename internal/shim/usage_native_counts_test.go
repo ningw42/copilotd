@@ -331,10 +331,12 @@ func TestOpenAIUsageMeterCountParsingCharacterization(t *testing.T) {
 func TestUsageMeterBindsEveryNativeCountToItsOwnField(t *testing.T) {
 	t.Run("Anthropic buffered", func(t *testing.T) {
 		turns := observeAnthropicBufferedUsage(t, `{"id":"msg-distinct","type":"message","model":"reported","stop_reason":"end_turn","usage":{"input_tokens":1001,"output_tokens":1002,"cache_creation_input_tokens":1003,"cache_read_input_tokens":1004,"cache_creation":{"ephemeral_5m_input_tokens":1005,"ephemeral_1h_input_tokens":1006},"output_tokens_details":{"thinking_tokens":1007}}}`)
-		assertAnthropicCountTurns(t, turns, usage.TransportBuffered, &usage.AnthropicUsage{
+		want := usage.AnthropicUsage{
 			InputTokens: 1001, OutputTokens: 1002, CacheCreationInputTokens: int64Pointer(1003), CacheReadInputTokens: int64Pointer(1004),
 			Ephemeral5mInputTokens: int64Pointer(1005), Ephemeral1hInputTokens: int64Pointer(1006), ThinkingTokens: int64Pointer(1007),
-		})
+		}
+		assertAllNativeCountsReported(t, usage.AnthropicProjection(), want)
+		assertAnthropicCountTurns(t, turns, usage.TransportBuffered, &want)
 	})
 
 	start := func(object string) sse.Frame {
@@ -402,6 +404,7 @@ func TestUsageMeterBindsEveryNativeCountToItsOwnField(t *testing.T) {
 	}
 	for _, tc := range sseTests {
 		t.Run("Anthropic SSE "+tc.name, func(t *testing.T) {
+			assertAllNativeCountsReported(t, usage.AnthropicProjection(), tc.want)
 			assertAnthropicCountTurns(t, observeAnthropicSSEUsage(t, tc.frames...), usage.TransportSSE, &tc.want)
 		})
 	}
@@ -413,6 +416,7 @@ func TestUsageMeterBindsEveryNativeCountToItsOwnField(t *testing.T) {
 	}
 	for _, transport := range syntheticOpenAITransportCases() {
 		t.Run("OpenAI "+transport.name, func(t *testing.T) {
+			assertAllNativeCountsReported(t, usage.OpenAIProjection(), want)
 			turns := observeOpenAIUsage(t, transport, response)
 			if len(turns) != 1 || turns[0].Transport != transport.transport {
 				t.Fatalf("Turns = %+v, want one %s Turn", turns, transport.transport)
@@ -421,6 +425,17 @@ func TestUsageMeterBindsEveryNativeCountToItsOwnField(t *testing.T) {
 				t.Errorf("native usage = %s, want %s", formatOpenAIUsage(got), formatOpenAIUsage(want))
 			}
 		})
+	}
+}
+
+// assertAllNativeCountsReported uses the declaration only to check coverage;
+// payloads and expected values remain independently written literals.
+func assertAllNativeCountsReported[U usage.Usage](t *testing.T, projection usage.Projection[U], want U) {
+	t.Helper()
+	for _, count := range projection.All() {
+		if _, reported := count.Value(want); !reported {
+			t.Errorf("expected usage leaves declared count %q unreported", count.Name())
+		}
 	}
 }
 
