@@ -93,8 +93,8 @@ func TestStoreCreatesCurrentSchemaAndRoundTripsBothNativeTables(t *testing.T) {
 	}
 	db := openExternal(t, path)
 	var version int
-	if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 3 {
-		t.Fatalf("user_version = %d, %v; want 3", version, err)
+	if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != sqlitestore.SchemaVersion() {
+		t.Fatalf("user_version = %d, %v; want %d", version, err, sqlitestore.SchemaVersion())
 	}
 	var journal string
 	if err := db.QueryRow("PRAGMA journal_mode").Scan(&journal); err != nil || !strings.EqualFold(journal, "wal") {
@@ -283,8 +283,8 @@ func TestStoreConcurrentFreshOpenersShareOneMigratedDatabase(t *testing.T) {
 	var version, count int
 	_ = db.QueryRow("PRAGMA user_version").Scan(&version)
 	_ = db.QueryRow("SELECT count(*) FROM openai_turn").Scan(&count)
-	if version != 3 || count != 2 {
-		t.Errorf("shared database version/count = %d/%d, want 3/2", version, count)
+	if version != sqlitestore.SchemaVersion() || count != 2 {
+		t.Errorf("shared database version/count = %d/%d, want %d/2", version, count, sqlitestore.SchemaVersion())
 	}
 }
 
@@ -400,13 +400,14 @@ func TestStoreReopenIsNoOpAndFutureSchemaFailsClosed(t *testing.T) {
 	if err := db.QueryRow(`SELECT count(*) FROM openai_turn WHERE response_id='preserved'`).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("preserved rows = %d, %v; want 1", count, err)
 	}
-	if _, err := db.Exec("PRAGMA user_version=4"); err != nil {
+	future := sqlitestore.SchemaVersion() + 1
+	if _, err := db.Exec(fmt.Sprintf("PRAGMA user_version=%d", future)); err != nil {
 		t.Fatal(err)
 	}
 	_ = db.Close()
 
 	_, err = sqlitestore.Open(path, testStoreLogger(io.Discard))
-	if err == nil || !strings.Contains(err.Error(), "schema version 4") || !strings.Contains(err.Error(), "supported version 3") {
+	if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("schema version %d", future)) || !strings.Contains(err.Error(), fmt.Sprintf("supported version %d", sqlitestore.SchemaVersion())) {
 		t.Fatalf("future-version Open error = %v, want both versions", err)
 	}
 }

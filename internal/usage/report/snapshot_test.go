@@ -3,12 +3,9 @@ package report_test
 import (
 	"context"
 	"database/sql"
-	"fmt"
 	"io"
 	"log/slog"
-	"os"
 	"path/filepath"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -209,39 +206,27 @@ func TestQueryRejectsUTF16SchemaWithoutMigration(t *testing.T) {
 
 // utf16CurrentSchema builds an empty UTF-16le database at the current writer
 // schema version, so the reader's encoding comparison is the only reason to
-// reject it. Migrations come from the writer's migration directory in order.
+// reject it. The writer's own migrations create the schema.
 func utf16CurrentSchema(t *testing.T) string {
 	t.Helper()
-	migrations, err := filepath.Glob(filepath.Join("..", "sqlitestore", "migrations", "*.sql"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(migrations) != sqlitestore.SchemaVersion() {
-		t.Fatalf("found %d migrations, want schema version %d", len(migrations), sqlitestore.SchemaVersion())
-	}
 	path := filepath.Join(t.TempDir(), "utf16.db")
 	db, err := sql.Open("sqlite", sqlitestore.LiteralFileURL(path).String())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	db.SetMaxOpenConns(1) // the encoding pragma must precede DDL on one connection
-	if _, err = db.Exec("PRAGMA encoding='UTF-16le'"); err != nil {
+	// The encoding pragma must precede DDL on the same connection.
+	conn, err := db.Conn(context.Background())
+	if err != nil {
 		t.Fatal(err)
 	}
-	for index, migration := range migrations {
-		if want := fmt.Sprintf("%03d_", index+1); !strings.HasPrefix(filepath.Base(migration), want) {
-			t.Fatalf("migration %s is out of order, want prefix %s", migration, want)
-		}
-		script, err := os.ReadFile(migration)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err = db.Exec(string(script)); err != nil {
-			t.Fatalf("apply %s: %v", migration, err)
-		}
+	if _, err = conn.ExecContext(context.Background(), "PRAGMA encoding='UTF-16le'"); err != nil {
+		t.Fatal(err)
 	}
-	if _, err = db.Exec(fmt.Sprintf("PRAGMA user_version=%d", sqlitestore.SchemaVersion())); err != nil {
+	if err = sqlitestore.CreateCurrentSchema(context.Background(), conn); err != nil {
+		t.Fatal(err)
+	}
+	if err = conn.Close(); err != nil {
 		t.Fatal(err)
 	}
 	if err = db.Close(); err != nil {

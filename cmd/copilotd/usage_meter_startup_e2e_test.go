@@ -2,12 +2,15 @@ package main
 
 import (
 	"database/sql"
+	"fmt"
 	"io"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/ningw42/copilotd/internal/usage/sqlitestore"
 )
 
 func TestRunServeUsageSchemaFailurePrecedesBind(t *testing.T) {
@@ -22,7 +25,7 @@ func TestRunServeUsageSchemaFailurePrecedesBind(t *testing.T) {
 		pragma  string
 		wantErr []string
 	}{
-		{name: "future version", version: 4, pragma: "PRAGMA user_version=4", wantErr: []string{"schema version 4", "supported version 3"}},
+		{name: "future version", version: sqlitestore.SchemaVersion() + 1, pragma: fmt.Sprintf("PRAGMA user_version=%d", sqlitestore.SchemaVersion()+1), wantErr: []string{fmt.Sprintf("schema version %d", sqlitestore.SchemaVersion()+1), fmt.Sprintf("supported version %d", sqlitestore.SchemaVersion())}},
 		{name: "conflicting migration", version: 0, pragma: "PRAGMA user_version=0", wantErr: []string{"migration 1", "openai_turn"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

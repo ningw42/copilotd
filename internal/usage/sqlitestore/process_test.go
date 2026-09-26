@@ -73,8 +73,8 @@ func TestStoreConcurrentProcessesOpenRecordAndClose(t *testing.T) {
 
 	db := openExternal(t, path)
 	var version int
-	if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 3 {
-		t.Fatalf("shared user_version = %d, %v; want 3", version, err)
+	if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != sqlitestore.SchemaVersion() {
+		t.Fatalf("shared user_version = %d, %v; want %d", version, err, sqlitestore.SchemaVersion())
 	}
 	rows, err := db.Query("SELECT response_id, input_tokens, output_tokens FROM openai_turn ORDER BY response_id")
 	if err != nil {

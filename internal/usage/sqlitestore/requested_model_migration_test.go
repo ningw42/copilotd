@@ -129,8 +129,8 @@ func TestStoreV1UpgradePreservesHistoryAndMatchesFreshV3Schema(t *testing.T) {
 			t.Errorf("upgraded/fresh %s differ: %#v / %#v", query, got, want)
 		}
 	}
-	if got := externalRows(t, db, "PRAGMA user_version"); !reflect.DeepEqual(got, [][]any{{int64(3)}}) {
-		t.Fatalf("upgraded version = %v, want 3", got)
+	if got := externalRows(t, db, "PRAGMA user_version"); !reflect.DeepEqual(got, [][]any{{int64(sqlitestore.SchemaVersion())}}) {
+		t.Fatalf("upgraded version = %v, want %d", got, sqlitestore.SchemaVersion())
 	}
 	before := externalRows(t, db, usageSchemaQuery)
 	_ = db.Close()
@@ -184,8 +184,8 @@ func TestStoreV2UpgradeAddsOnlyNullableOpenAIServiceTier(t *testing.T) {
 	if got := externalRows(t, db, `SELECT sql FROM sqlite_schema WHERE type='table' AND name='anthropic_turn'`); !reflect.DeepEqual(got, anthropicSchema) {
 		t.Errorf("migration 3 changed Anthropic schema: %#v, want %#v", got, anthropicSchema)
 	}
-	if got := externalRows(t, db, "PRAGMA user_version"); !reflect.DeepEqual(got, [][]any{{int64(3)}}) {
-		t.Fatalf("upgraded v2 version = %v, want 3", got)
+	if got := externalRows(t, db, "PRAGMA user_version"); !reflect.DeepEqual(got, [][]any{{int64(sqlitestore.SchemaVersion())}}) {
+		t.Fatalf("upgraded v2 version = %v, want %d", got, sqlitestore.SchemaVersion())
 	}
 	freshPath, fresh := openStore(t, io.Discard)
 	if report := closeStore(t, fresh); !report.DriverCleanupCompleted {
