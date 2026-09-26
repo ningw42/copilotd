@@ -63,10 +63,10 @@ const (
 // exit code. Args, env, and the output streams are injected so dispatch and the
 // version/validation paths can be tested without touching process globals.
 //
-// Exit codes: version -> 0; bare/help -> 0; clean serve shutdown -> 0;
-// signal-driven drain forced only by --shutdown-timeout expiring (logged at
-// Warn) -> 0; config error -> 1; bind or genuine serve/shutdown error -> 1;
-// unknown subcommand -> 1.
+// Exit codes: version -> 0; bare/help -> 0; clean serve shutdown, including a
+// signal received before bind -> 0; signal-driven drain forced only by
+// --shutdown-timeout expiring (logged at Warn) -> 0; config error -> 1;
+// startup, bind, or genuine serve/shutdown error -> 1; unknown subcommand -> 1.
 func run(args []string, lookupEnv func(string) (string, bool), stdout, stderr io.Writer) int {
 	root := buildCommand(lookupEnv, stdout, stderr)
 	err := root.Parse(args)
@@ -312,18 +312,15 @@ func rejectSurplusOperands(command string, args []string, allowed int) error {
 	return nil
 }
 
-// runServe is the serve lifecycle: resolve config, build the logger and set it as
-// the slog default, resolve the GitHub OAuth token and construct the real minting
-// Manager (failing fast, before any bind, when no token source is present), bind
-// the listener, then run bounded discovery followed by the cache-warming startup
-// mint in the background while serving. A signal-aware context whose
-// re-armed handler lets a second signal hard-kill a wedged shutdown owns every
-// background task. Errors after the logger is up are reported through it and
-// returned as errServeFailed so the caller does not double-report them; a
-// pre-logger config error is returned raw for the top-level translator to print.
-// A drain whose only failure was the shutdown grace period expiring
-// (server.ErrForcedDrain, already logged at Warn by runBoundServe) is operator
-// policy success and returns nil; see serveOutcome.
+// runServe is the serve command: resolve config, build the logger and set it as
+// the slog default, install signal handling, then hand the production edges to
+// runServeLifecycle and map its outcome to the exit code. The signal-aware
+// context covers the whole lifecycle, so a first signal before bind is a
+// graceful stop too, and its re-armed handler lets a second signal hard-kill a
+// wedged startup or shutdown. Errors after the logger is up were already
+// reported through it and return errServeFailed so the caller does not
+// double-report them; a pre-logger config error is returned raw for the
+// top-level translator to print.
 func runServe(ctx context.Context, flags *config.ServeFlags, lookupEnv func(string) (string, bool)) error {
 	cfg, err := flags.Resolve(lookupEnv)
 	if err != nil {
@@ -334,6 +331,8 @@ func runServe(ctx context.Context, flags *config.ServeFlags, lookupEnv func(stri
 	if err != nil {
 		return err
 	}
+	// The lifecycle finalizes the Usage store before returning, so logging stays
+	// alive through the final flush, cleanup status, and aggregate publication.
 	defer func() { _ = closer.Close() }()
 
 	// Route stray global slog calls and dependency logs through the component-free
@@ -345,25 +344,165 @@ func runServe(ctx context.Context, flags *config.ServeFlags, lookupEnv func(stri
 		slog.String(logging.BuildKey, build.String()),
 		slog.Any(logging.ConfigKey, cfg),
 	)
+
+	serveCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	// After the first signal, restore default signal handling so a second signal
+	// hard-kills the process if graceful startup or shutdown wedges.
+	go func() {
+		<-serveCtx.Done()
+		stop()
+	}()
+
+	return serveExitError(runServeLifecycle(serveCtx, base, serveInput{Config: cfg, Edges: productionServeEdges()}))
+}
+
+// serveEdges holds the network edges the serve lifecycle reaches besides
+// Copilot itself, whose base URL each exchange supplies: the GitHub token
+// exchange (an empty base URL means api.github.com), impersonation discovery,
+// the Codex models release source, and the public pricing source. Production
+// uses productionServeEdges; tests point each edge at a local stub.
+type serveEdges struct {
+	GitHubBaseURL string
+	GitHubClient  *http.Client
+	Discovery     impersonation.Edge
+	CodexModels   catalog.ModelsEdge
+	Pricing       pricing.Remote
+}
+
+func productionServeEdges() serveEdges {
+	return serveEdges{
+		GitHubClient: newExchangeClient(),
+		Discovery:    productionDiscoveryEdge(),
+		CodexModels:  productionCodexModelsEdge(),
+		Pricing:      pricing.NewRemote(pricing.ModelsDevURL, nil),
+	}
+}
+
+// serveInput is what runServeLifecycle serves besides its base logger.
+// Listener is optional: when nil the lifecycle binds Config.Addr itself. A
+// supplied listener belongs to the lifecycle from the call, which closes it on
+// every return that does not serve it.
+type serveInput struct {
+	Config   config.ServeConfig
+	Edges    serveEdges
+	Listener net.Listener
+}
+
+// serveOutcome classifies how one serve lifecycle ended. The kinds tell tests
+// and logs apart; runServe collapses them to exit 0 (clean or forced drain)
+// or 1 (every failure).
+type serveOutcome int
+
+const (
+	servePreBindFailure serveOutcome = iota + 1
+	serveBindFailure
+	serveServeFailure
+	serveForcedDrain
+	serveClean
+)
+
+func (o serveOutcome) String() string {
+	switch o {
+	case servePreBindFailure:
+		return "pre-bind failure"
+	case serveBindFailure:
+		return "bind failure"
+	case serveServeFailure:
+		return "serve failure"
+	case serveForcedDrain:
+		return "forced drain"
+	case serveClean:
+		return "clean"
+	default:
+		return fmt.Sprintf("serveOutcome(%d)", int(o))
+	}
+}
+
+// serveResult is runServeLifecycle's result. Err is the failure behind a
+// failure outcome, or Server.Run's forced-drain error. Report is the Usage
+// store's finalization report: zero when the meter is disabled, though a zero
+// Report alone does not prove the store never opened. It never changes Outcome.
+type serveResult struct {
+	Outcome serveOutcome
+	Err     error
+	Report  sqlitestore.Report
+}
+
+// servedOutcome classifies Server.Run's raw result. A clean drain and a
+// timeout-only forced drain (recognized solely by server.ErrForcedDrain, never
+// a bare context.DeadlineExceeded) are distinct outcomes; every other error is
+// a serve failure.
+func servedOutcome(err error) serveOutcome {
+	switch {
+	case err == nil:
+		return serveClean
+	case errors.Is(err, server.ErrForcedDrain):
+		return serveForcedDrain
+	default:
+		return serveServeFailure
+	}
+}
+
+// serveExitError maps a lifecycle result to runServe's error. A clean stop and
+// a forced drain are operator policy success whatever the Report says; every
+// failure was already logged once and becomes errServeFailed (exit 1).
+func serveExitError(result serveResult) error {
+	if result.Outcome == serveClean || result.Outcome == serveForcedDrain {
+		return nil
+	}
+	return errServeFailed
+}
+
+// runServeLifecycle is the single owner of production serve assembly and
+// resource lifetime. In order, it resolves the GitHub OAuth token and builds the
+// minting Manager, registers the Codex models and pricing cached values when
+// their features are enabled, opens the Usage store when the meter is enabled,
+// builds the Shim registry, binds Config.Addr unless a listener was supplied,
+// and serves through runBoundServe until ctx is cancelled or serving fails.
+//
+// A missing local prerequisite fails before bind with one command-level
+// diagnostic. Cancellation is checked between setup steps: already cancelled
+// on entry, nothing is set up; noticed later but before serving, the lifecycle
+// stops cleanly without serving. A step that already failed keeps its failure
+// outcome. Once serving starts, cancellation takes Server.Run's drain path.
+// Every return that opened the Usage store finalizes it with a fresh
+// ShutdownTimeout after serving has stopped, and every return that did not
+// serve closes the listener, supplied or acquired.
+func runServeLifecycle(ctx context.Context, base *slog.Logger, input serveInput) serveResult {
+	cfg := input.Config
+	edges := input.Edges
+	ln := input.Listener
+	var usageStore *sqlitestore.Store
+	endUnserved := func(outcome serveOutcome, err error) serveResult {
+		if ln != nil {
+			_ = ln.Close()
+		}
+		return finalizeServe(serveResult{Outcome: outcome, Err: err}, usageStore, cfg.ShutdownTimeout)
+	}
+	if ctx.Err() != nil {
+		return endUnserved(serveClean, nil)
+	}
+	logger := logging.ForComponent(base, "cmd/copilotd")
 	logCodexCatalogStaging(logger, cfg)
 
 	// Credential-presence check + real credential Provider, assembled BEFORE the
 	// listener binds so a missing OAuth token fails fast (non-zero exit) without
-	// ever serving. Production points the exchange at the real GitHub host ("" ⇒
-	// api.github.com) with a dedicated client; the e2e test injects stubs via the
-	// same buildServeProvider seam.
+	// ever serving.
 	cacheRegistry := cache.NewRegistry()
-	mgr, imp, err := buildServeProvider(cfg, base, "", newExchangeClient(), productionDiscoveryEdge(), cacheRegistry)
+	mgr, imp, err := buildServeProvider(cfg, base, edges.GitHubBaseURL, edges.GitHubClient, edges.Discovery, cacheRegistry)
 	if err != nil {
 		// Already carries the "run copilotd login" guidance when no source yields a
 		// token; reported through the logger, then a silent non-zero exit.
 		logger.Error("cannot start: resolving the GitHub OAuth token failed", slog.Any(logging.ErrorKey, err))
-		return errServeFailed
+		return endUnserved(servePreBindFailure, err)
 	}
-	codexModels := configuredCodexModels(cfg, productionCodexModelsEdge(), cacheRegistry, base)
-	usagePricing := configuredUsagePricing(cfg, pricing.NewRemote(pricing.ModelsDevURL, nil), cacheRegistry, base)
+	codexModels := configuredCodexModels(cfg, edges.CodexModels, cacheRegistry, base)
+	usagePricing := configuredUsagePricing(cfg, edges.Pricing, cacheRegistry, base)
+	if ctx.Err() != nil {
+		return endUnserved(serveClean, nil)
+	}
 
-	var usageStore *sqlitestore.Store
 	var sink usage.Sink
 	if cfg.ShimUsageMeterEnabled {
 		var openErr error
@@ -376,48 +515,42 @@ func runServe(ctx context.Context, flags *config.ServeFlags, lookupEnv func(stri
 			logger.Error("cannot start: opening usage database failed",
 				slog.String(logging.PathKey, cfg.UsageDBPath),
 				slog.Any(logging.ErrorKey, openErr))
-			return errServeFailed
+			return endUnserved(servePreBindFailure, openErr)
 		}
 		sink = usageStore
-		// Registered after the logger closer so LIFO shutdown keeps logging alive
-		// through the final flush, cleanup status, and aggregate publication.
-		defer finalizeUsageStore(usageStore, cfg.ShutdownTimeout)
+		if ctx.Err() != nil {
+			return endUnserved(serveClean, nil)
+		}
 	}
 	registry := configuredShimRegistry(cfg, sink)
-	if cfg.ShimUsageMeterEnabled && sink == nil {
-		logger.Error("cannot start: usage metering requested without a sink")
-		return errServeFailed
-	}
 	logShimChain(logger, registry)
-
-	ln, err := net.Listen("tcp", cfg.Addr)
-	if err != nil {
-		// Distinct from a serve error: the process never began serving.
-		logger.Error("bind failed", slog.String(logging.AddrKey, cfg.Addr), slog.Any(logging.ErrorKey, err))
-		return errServeFailed
+	if ctx.Err() != nil {
+		return endUnserved(serveClean, nil)
 	}
 
-	serveCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	// After the first signal, restore default signal handling so a second signal
-	// hard-kills the process if graceful shutdown wedges.
-	go func() {
-		<-serveCtx.Done()
-		stop()
-	}()
+	if ln == nil {
+		ln, err = net.Listen("tcp", cfg.Addr)
+		if err != nil {
+			// Distinct from a serve error: the process never began serving.
+			logger.Error("bind failed", slog.String(logging.AddrKey, cfg.Addr), slog.Any(logging.ErrorKey, err))
+			return endUnserved(serveBindFailure, err)
+		}
+	}
+	if ctx.Err() != nil {
+		return endUnserved(serveClean, nil)
+	}
 
-	return serveOutcome(runBoundServe(serveCtx, cfg, base, mgr, imp, codexModels, usagePricing, cacheRegistry, registry, ln, usageStore))
+	serveErr := runBoundServe(ctx, cfg, base, mgr, imp, codexModels, usagePricing, cacheRegistry, registry, ln, usageStore)
+	return finalizeServe(serveResult{Outcome: servedOutcome(serveErr), Err: serveErr}, usageStore, cfg.ShutdownTimeout)
 }
 
-// serveOutcome maps runBoundServe's raw Server.Run result to runServe's
-// outcome. A clean drain and a timeout-only forced drain (recognized solely by
-// server.ErrForcedDrain, never a bare context.DeadlineExceeded) exit 0; every
-// other failure was already logged and becomes errServeFailed (exit 1).
-func serveOutcome(err error) error {
-	if err == nil || errors.Is(err, server.ErrForcedDrain) {
-		return nil
+// finalizeServe attaches the Usage store's finalization report to result when
+// the lifecycle opened a store.
+func finalizeServe(result serveResult, usageStore *sqlitestore.Store, timeout time.Duration) serveResult {
+	if usageStore != nil {
+		result.Report = finalizeUsageStore(usageStore, timeout)
 	}
-	return errServeFailed
+	return result
 }
 
 // runBoundServe starts the background impersonation/mint lifecycle only after
@@ -425,14 +558,17 @@ func serveOutcome(err error) error {
 // registry. That ordering keeps
 // /healthz and the locally-ready /readyz available while bounded startup
 // discovery is in progress. Neither discovery nor startup mint outcomes gate
-// readiness or request admission. When usageStore is non-nil, admission remains
-// open through Server.Run and is cut off immediately on return, before the
-// outcome is synchronously logged. A forced drain (server.ErrForcedDrain) is
-// logged once at Warn with the configured timeout; any other error at Error.
-// Either way the raw Server.Run result is returned unchanged, so callers and
-// tests can still tell a forced drain from a clean one.
+// readiness or request admission. Startup runs under a child of ctx. When
+// Server.Run returns, usage admission (if usageStore is non-nil) is cut off
+// first, then the startup context is cancelled, and only then is the outcome
+// synchronously logged. A forced drain (server.ErrForcedDrain) is logged once
+// at Warn with the configured timeout; any other error at Error. Either way the
+// raw Server.Run result is returned unchanged, so callers and tests can still
+// tell a forced drain from a clean one.
 func runBoundServe(ctx context.Context, cfg config.ServeConfig, base *slog.Logger, mgr *identity.Manager, imp *impersonation.Set, codexModels *cache.Value[[]byte], usagePricing pricing.Source, cacheRegistry *cache.Registry, registry shim.Registry, ln net.Listener, usageStore *sqlitestore.Store) error {
-	go runServeStartup(ctx, cacheRegistry, mgr, logging.ForComponent(base, "cmd/copilotd"))
+	startupCtx, cancelStartup := context.WithCancel(ctx)
+	defer cancelStartup()
+	go runServeStartup(startupCtx, cacheRegistry, mgr, logging.ForComponent(base, "cmd/copilotd"))
 	catalogs := catalog.RenderDescriptors{
 		Anthropic: catalog.AnthropicRenderConfig{
 			ModelIDNormalizationEnabled: cfg.AnthropicCatalogModelIDNormalizationEnabled,
@@ -475,6 +611,7 @@ func runBoundServe(ctx context.Context, cfg config.ServeConfig, base *slog.Logge
 	if usageStore != nil {
 		usageStore.StopAdmission()
 	}
+	cancelStartup()
 	logger := logging.ForComponent(base, "cmd/copilotd")
 	switch {
 	case errors.Is(serveErr, server.ErrForcedDrain):
@@ -553,9 +690,9 @@ func logShimChain(logger *slog.Logger, registry shim.Registry) {
 // seeds the Set with configured fallbacks and static identifiers, binds the
 // injected discovery edge, and constructs the minting identity.Manager. It
 // returns the resolve error unchanged (e.g. identity.ErrNoOAuthToken) so
-// runServe can fail fast before binding a listener.
+// runServeLifecycle can fail fast before binding a listener.
 //
-// githubBaseURL/httpClient and discoveryEdge are the injected network edges:
+// githubBaseURL/httpClient and discoveryEdge are the lifecycle's serveEdges:
 // production uses GitHub plus the two public Microsoft origins with separate
 // plain clients, while tests point them at stubs. Every other Manager
 // timing/clock knob is left to NewManager's production defaults.

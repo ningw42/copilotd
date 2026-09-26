@@ -103,7 +103,8 @@ var expectedLogKeys = map[string]string{
 
 var expectedComponentSinks = map[componentSink]struct{}{
 	{function: "runServe", consumer: "local", component: "cmd/copilotd"}:                                   {},
-	{function: "runServe", consumer: "sqlitestore.Open", component: "internal/usage/sqlitestore"}:          {},
+	{function: "runServeLifecycle", consumer: "local", component: "cmd/copilotd"}:                          {},
+	{function: "runServeLifecycle", consumer: "sqlitestore.Open", component: "internal/usage/sqlitestore"}: {},
 	{function: "runBoundServe", consumer: "local", component: "cmd/copilotd"}:                              {},
 	{function: "runBoundServe", consumer: "runServeStartup", component: "cmd/copilotd"}:                    {},
 	{function: "runBoundServe", consumer: "upstream.New", component: "internal/upstream"}:                  {},
@@ -122,6 +123,7 @@ var expectedComponentSinks = map[componentSink]struct{}{
 }
 
 var expectedBaseParameters = map[string]baseParameter{
+	"runServeLifecycle":      {name: "base", index: 1},
 	"runBoundServe":          {name: "base", index: 2},
 	"buildServeProvider":     {name: "base", index: 1},
 	"configuredCodexModels":  {name: "base", index: 3},
