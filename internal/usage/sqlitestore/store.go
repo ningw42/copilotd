@@ -659,17 +659,29 @@ func attemptAdmission(path string, deadline time.Time, openDB func(string, strin
 
 // CreateCurrentSchema brings the database on conn to the current writer schema
 // by applying the writer's own pending migrations. It begins its own immediate
-// transaction, commits it, and rolls it back after a failure. It changes no
-// other connection state, so a caller may configure the connection first; for
-// example, PRAGMA encoding must precede any DDL. It exists for fixtures:
-// production reporting never creates or migrates a schema.
+// transaction, commits it, and rolls it back after a failure. It never ends a
+// transaction it did not begin: a canceled ctx or a connection already inside
+// a transaction is rejected untouched. It changes no other connection state,
+// so a caller may configure the connection first; for example, PRAGMA encoding
+// must precede any DDL. It exists for fixtures: production reporting never
+// creates or migrates a schema.
 func CreateCurrentSchema(ctx context.Context, conn *sql.Conn) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("begin usage schema creation: %w", err)
+	}
+	// A deferred BEGIN takes no lock, and without a cancelable context its
+	// result is exact: it fails only when the caller already has a transaction.
+	if _, err := conn.ExecContext(context.Background(), "BEGIN"); err != nil {
+		return fmt.Errorf("usage schema creation needs a connection outside any transaction: %w", err)
+	}
+	if _, err := conn.ExecContext(context.Background(), "ROLLBACK"); err != nil {
+		return fmt.Errorf("end usage schema creation probe: %w", err)
+	}
 	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
-		// BEGIN may have acquired the transaction before surfacing ctx.Err.
-		// Any other failure leaves a caller's own open transaction untouched.
-		if ctx.Err() != nil {
-			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
-		}
+		// The driver may report ctx.Err after BEGIN acquired the transaction.
+		// No caller transaction existed, so any open transaction is ours; with
+		// none, ROLLBACK harmlessly reports that no transaction is active.
+		_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
 		return fmt.Errorf("begin usage schema creation: %w", err)
 	}
 	return migrateAcquired(conn)

@@ -3,6 +3,7 @@ package sqlitestore_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ningw42/copilotd/internal/usage"
 	"github.com/ningw42/copilotd/internal/usage/sqlitestore"
@@ -155,28 +157,119 @@ func TestCreateCurrentSchemaRollsBackAFailedMigration(t *testing.T) {
 }
 
 func TestCreateCurrentSchemaLeavesACallersOpenTransactionUntouched(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "caller.db")
-	db := openExternal(t, path)
-	ctx := context.Background()
-	conn, err := db.Conn(ctx)
-	if err != nil {
-		t.Fatal(err)
+	for _, tc := range []struct {
+		name     string
+		canceled bool
+	}{
+		{name: "live context"},
+		{name: "canceled context", canceled: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "caller.db")
+			db := openExternal(t, path)
+			ctx := context.Background()
+			conn, err := db.Conn(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer conn.Close()
+			for _, statement := range []string{"BEGIN", "CREATE TABLE caller_owned (value INTEGER)", "INSERT INTO caller_owned VALUES (17)"} {
+				if _, err := conn.ExecContext(ctx, statement); err != nil {
+					t.Fatal(err)
+				}
+			}
+			callCtx := ctx
+			if tc.canceled {
+				canceled, cancel := context.WithCancel(ctx)
+				cancel()
+				callCtx = canceled
+			}
+			err = sqlitestore.CreateCurrentSchema(callCtx, conn)
+			if err == nil {
+				t.Fatal("CreateCurrentSchema inside a caller transaction succeeded, want failure")
+			}
+			if tc.canceled && !errors.Is(err, context.Canceled) {
+				t.Errorf("CreateCurrentSchema error = %v, want cancellation", err)
+			}
+			if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
+				t.Fatalf("caller transaction was ended by CreateCurrentSchema: %v", err)
+			}
+			if got := externalRows(t, db, `SELECT name FROM sqlite_schema WHERE type='table' ORDER BY name`); !reflect.DeepEqual(got, [][]any{{"caller_owned"}}) {
+				t.Errorf("tables = %v, want only the caller's committed table", got)
+			}
+			if got := externalRows(t, db, "SELECT value FROM caller_owned"); !reflect.DeepEqual(got, [][]any{{int64(17)}}) {
+				t.Errorf("caller rows = %v, want the committed value 17", got)
+			}
+		})
 	}
-	defer conn.Close()
-	if _, err := conn.ExecContext(ctx, "BEGIN"); err != nil {
-		t.Fatal(err)
+}
+
+func TestCreateCurrentSchemaCancellationLeavesNoTransactionOrSchema(t *testing.T) {
+	t.Run("canceled before the call", func(t *testing.T) {
+		db := openExternal(t, filepath.Join(t.TempDir(), "canceled.db"))
+		conn, err := db.Conn(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.Close()
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if err := sqlitestore.CreateCurrentSchema(ctx, conn); !errors.Is(err, context.Canceled) {
+			t.Fatalf("CreateCurrentSchema error = %v, want cancellation", err)
+		}
+		assertNoOpenTransaction(t, conn)
+		assertNoUsageSchema(t, db)
+	})
+
+	t.Run("deadline while waiting for the write lock", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "contended.db")
+		db := openExternal(t, path)
+		conn, err := db.Conn(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.Close()
+		if _, err := conn.ExecContext(context.Background(), "PRAGMA busy_timeout=500"); err != nil {
+			t.Fatal(err)
+		}
+		// Another connection holds the write lock that BEGIN IMMEDIATE needs.
+		blocker, err := openExternal(t, path).Conn(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer blocker.Close()
+		for _, statement := range []string{"BEGIN IMMEDIATE", "CREATE TABLE blocker_owned (value INTEGER)"} {
+			if _, err := blocker.ExecContext(context.Background(), statement); err != nil {
+				t.Fatal(err)
+			}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		defer cancel()
+		// The driver may report the deadline or the busy timeout, whichever it
+		// observes first; either way acquisition failed.
+		if err := sqlitestore.CreateCurrentSchema(ctx, conn); err == nil {
+			t.Fatal("CreateCurrentSchema acquired a lock held by another connection")
+		}
+		assertNoOpenTransaction(t, conn)
+		if _, err := blocker.ExecContext(context.Background(), "COMMIT"); err != nil {
+			t.Fatalf("other connection's transaction was disturbed: %v", err)
+		}
+		if got := externalRows(t, db, `SELECT name FROM sqlite_schema WHERE type='table' ORDER BY name`); !reflect.DeepEqual(got, [][]any{{"blocker_owned"}}) {
+			t.Errorf("tables = %v, want only the other connection's table", got)
+		}
+		if got := externalRows(t, db, "PRAGMA user_version"); !reflect.DeepEqual(got, [][]any{{int64(0)}}) {
+			t.Errorf("user_version = %v, want 0", got)
+		}
+	})
+}
+
+func assertNoUsageSchema(t *testing.T, db *sql.DB) {
+	t.Helper()
+	if got := externalRows(t, db, "SELECT count(*) FROM sqlite_schema"); !reflect.DeepEqual(got, [][]any{{int64(0)}}) {
+		t.Errorf("schema objects = %v, want none", got)
 	}
-	if _, err := conn.ExecContext(ctx, "CREATE TABLE caller_owned (value INTEGER)"); err != nil {
-		t.Fatal(err)
-	}
-	if err := sqlitestore.CreateCurrentSchema(ctx, conn); err == nil {
-		t.Fatal("CreateCurrentSchema inside a caller transaction succeeded, want BEGIN failure")
-	}
-	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
-		t.Fatalf("caller transaction was ended by CreateCurrentSchema: %v", err)
-	}
-	if got := externalRows(t, db, `SELECT name FROM sqlite_schema WHERE type='table' ORDER BY name`); !reflect.DeepEqual(got, [][]any{{"caller_owned"}}) {
-		t.Errorf("tables = %v, want only the caller's committed table", got)
+	if got := externalRows(t, db, "PRAGMA user_version"); !reflect.DeepEqual(got, [][]any{{int64(0)}}) {
+		t.Errorf("user_version = %v, want 0", got)
 	}
 }
 

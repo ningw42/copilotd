@@ -15,20 +15,12 @@ type declaredCount struct {
 	required   bool
 }
 
-func declaredCounts[U usage.Usage](projection usage.Projection[U]) []declaredCount {
-	var counts []declaredCount
-	for _, count := range projection.All() {
-		counts = append(counts, declaredCount{name: count.Name(), path: count.Path(), required: count.Required()})
-	}
-	return counts
-}
-
 // declaredByName deliberately ignores declaration order, which no consumer may
 // depend on.
 func declaredByName[U usage.Usage](projection usage.Projection[U]) map[string]declaredCount {
 	counts := map[string]declaredCount{}
-	for _, count := range declaredCounts(projection) {
-		counts[count.name] = count
+	for _, count := range projection.All() {
+		counts[count.Name()] = declaredCount{name: count.Name(), path: count.Path(), required: count.Required()}
 	}
 	return counts
 }
@@ -111,37 +103,34 @@ func TestOpenAIProjectionBindsEachNameAndPathToItsDocumentedField(t *testing.T) 
 }
 
 func TestProjectionNamesAndPathsAreUniqueWellFormedAndReadable(t *testing.T) {
-	check := func(t *testing.T, counts []declaredCount, value func(int) (int64, bool)) {
-		t.Helper()
-		names, paths := map[string]bool{}, map[string]bool{}
-		for index, count := range counts {
-			if count.name == "" || names[count.name] {
-				t.Errorf("count %d name %q is empty or duplicated", index, count.name)
-			}
-			if paths[count.path] {
-				t.Errorf("count %d path %q is duplicated", index, count.path)
-			}
-			for segment := range strings.SplitSeq(count.path, ".") {
-				if segment == "" {
-					t.Errorf("count %d path %q has an empty segment", index, count.path)
-				}
-			}
-			names[count.name], paths[count.path] = true, true
-			if got, ok := value(index); !ok || got != int64(100+index) {
-				t.Errorf("count %s Value = %d, %t; want %d, true", count.name, got, ok, 100+index)
+	t.Run("Anthropic", func(t *testing.T) { assertWellFormedProjection(t, usage.AnthropicProjection()) })
+	t.Run("OpenAI", func(t *testing.T) { assertWellFormedProjection(t, usage.OpenAIProjection()) })
+}
+
+// assertWellFormedProjection requires unique non-empty names, unique paths
+// without empty segments, and a Value accessor that reads what Usage stored.
+func assertWellFormedProjection[U usage.Usage](t *testing.T, projection usage.Projection[U]) {
+	t.Helper()
+	native := distinctUsage(t, projection)
+	names, paths := map[string]bool{}, map[string]bool{}
+	for index, count := range projection.All() {
+		name, path := count.Name(), count.Path()
+		if name == "" || names[name] {
+			t.Errorf("count %d name %q is empty or duplicated", index, name)
+		}
+		if paths[path] {
+			t.Errorf("count %d path %q is duplicated", index, path)
+		}
+		for segment := range strings.SplitSeq(path, ".") {
+			if segment == "" {
+				t.Errorf("count %d path %q has an empty segment", index, path)
 			}
 		}
+		names[name], paths[path] = true, true
+		if got, ok := count.Value(native); !ok || got != int64(100+index) {
+			t.Errorf("count %s Value = %d, %t; want %d, true", name, got, ok, 100+index)
+		}
 	}
-	t.Run("Anthropic", func(t *testing.T) {
-		projection := usage.AnthropicProjection()
-		native := distinctUsage(t, projection)
-		check(t, declaredCounts(projection), func(index int) (int64, bool) { return countAt(t, projection, index).Value(native) })
-	})
-	t.Run("OpenAI", func(t *testing.T) {
-		projection := usage.OpenAIProjection()
-		native := distinctUsage(t, projection)
-		check(t, declaredCounts(projection), func(index int) (int64, bool) { return countAt(t, projection, index).Value(native) })
-	})
 }
 
 // distinctUsage reports 100 plus each count's declaration position.
@@ -156,17 +145,6 @@ func distinctUsage[U usage.Usage](t *testing.T, projection usage.Projection[U]) 
 		t.Fatal(err)
 	}
 	return native
-}
-
-func countAt[U usage.Usage](t *testing.T, projection usage.Projection[U], want int) usage.NativeCount[U] {
-	t.Helper()
-	for index, count := range projection.All() {
-		if index == want {
-			return count
-		}
-	}
-	t.Fatalf("no declared count at position %d", want)
-	return usage.NativeCount[U]{}
 }
 
 func TestProjectionUsageRejectsMissingRequiredCounts(t *testing.T) {

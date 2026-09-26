@@ -4,6 +4,7 @@ import (
 	"context"
 	"reflect"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/ningw42/copilotd/internal/endpoint"
@@ -497,9 +498,10 @@ func formatAnthropicUsage(value usage.Usage) string {
 		return reflect.TypeOf(value).String()
 	}
 	return formatCounts(
-		"input", &native.InputTokens, "output", &native.OutputTokens,
-		"cache_creation", native.CacheCreationInputTokens, "cache_read", native.CacheReadInputTokens,
-		"5m", native.Ephemeral5mInputTokens, "1h", native.Ephemeral1hInputTokens, "thinking", native.ThinkingTokens,
+		labeledCount{"input", &native.InputTokens}, labeledCount{"output", &native.OutputTokens},
+		labeledCount{"cache_creation", native.CacheCreationInputTokens}, labeledCount{"cache_read", native.CacheReadInputTokens},
+		labeledCount{"5m", native.Ephemeral5mInputTokens}, labeledCount{"1h", native.Ephemeral1hInputTokens},
+		labeledCount{"thinking", native.ThinkingTokens},
 	)
 }
 
@@ -509,25 +511,33 @@ func formatOpenAIUsage(value usage.Usage) string {
 		return reflect.TypeOf(value).String()
 	}
 	return formatCounts(
-		"input", &native.InputTokens, "output", &native.OutputTokens, "cached", native.CachedTokens,
-		"cache_write", native.CacheWriteTokens, "reasoning", native.ReasoningTokens, "total", native.TotalTokens,
+		labeledCount{"input", &native.InputTokens}, labeledCount{"output", &native.OutputTokens},
+		labeledCount{"cached", native.CachedTokens}, labeledCount{"cache_write", native.CacheWriteTokens},
+		labeledCount{"reasoning", native.ReasoningTokens}, labeledCount{"total", native.TotalTokens},
 	)
 }
 
-// formatCounts renders alternating label and count pointers, showing nil as
-// unreported rather than as a pointer address.
-func formatCounts(pairs ...any) string {
-	text := "{"
-	for index := 0; index < len(pairs); index += 2 {
+// labeledCount names one count in a failure message; nil means unreported.
+type labeledCount struct {
+	label string
+	value *int64
+}
+
+// formatCounts shows nil as unreported rather than as a pointer address.
+func formatCounts(counts ...labeledCount) string {
+	var text strings.Builder
+	text.WriteString("{")
+	for index, count := range counts {
 		if index > 0 {
-			text += " "
+			text.WriteString(" ")
 		}
-		text += pairs[index].(string) + ":"
-		if value := pairs[index+1].(*int64); value == nil {
-			text += "nil"
+		text.WriteString(count.label + ":")
+		if count.value == nil {
+			text.WriteString("nil")
 		} else {
-			text += strconv.FormatInt(*value, 10)
+			text.WriteString(strconv.FormatInt(*count.value, 10))
 		}
 	}
-	return text + "}"
+	text.WriteString("}")
+	return text.String()
 }
