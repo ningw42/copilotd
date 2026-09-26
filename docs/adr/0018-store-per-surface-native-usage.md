@@ -86,6 +86,43 @@ Surface-native meaning
 even when providers choose asymmetric nesting, and interpretation stays adjacent
 to the Go types rather than being hidden in query-time normalization.
 
+Since issue #276, each Surface declares its native count projection exactly once
+in `internal/usage`. Each declaration row pairs a count's name, which is also its
+column, report metric and wire key, with its JSON path in the provider's usage
+object, its required flag, and a typed accessor for its Go field. A new native
+count therefore needs at minimum a forward migration, one declaration entry, and
+the Go field with its semantic documentation. That list is not exhaustive: the
+count also needs CLI labels and placement, independent test payloads and
+expectations, an updated literal schema contract test, and a wire-compatibility
+review. That review is needed because every recognized metric object is
+mandatory in report JSON, so a new metric affects mixed old/new client and daemon
+pairs.
+
+The declaration drives the Usage meter's count decoding and Anthropic SSE merge.
+It also drives the writer's count columns and arguments, and the reader's
+SELECT, damaged-schema probe count columns, empty totals and typed per-Turn
+valuation. It also drives the report metric list and the HTTP report
+validation's required rule. Table names, metadata columns, SQL expressions,
+pricing formulas, message lifecycle checks and cross-count validation stay with
+their owning packages, not in the declaration.
+
+A `sqlitestore` conformance test checks the declaration against the migrated
+schema. Each Surface table must contain exactly the declared counts plus the
+writer-owned non-count columns, and each count must be `INTEGER` and `NOT NULL`
+exactly when it is required. The compiler checks only that a required count binds
+an `int64` field and an optional count binds an `*int64` field. It cannot catch a
+row that binds a name or path to the wrong field of the same type. Independent
+distinct-value tests with literal payloads and expectations, on every transport
+of each Surface, catch that instead.
+
+The declaration lives in `internal/usage` beside the native types and their
+semantics. From there the meter, writer and reader can reach it without new
+import edges, while reporting clients still learn metric names only through
+`internal/usage/report`. This deliberately refines the
+[Usage meter design](../design/2026-07-26-token-usage-meter-design.md)'s
+description of `internal/usage` as types and sink contract only. SQL, table
+facts and message lifecycle do not move there.
+
 Estimated-cost reporting consumes this frozen native evidence without changing
 it. It selects a Pricing model's context tariff separately for each Turn:
 OpenAI uses complete `input_tokens`, while Anthropic uses a checked sum of
