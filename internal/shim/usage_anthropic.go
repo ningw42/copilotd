@@ -18,22 +18,9 @@ type anthropicUsageAccumulator struct {
 	poisoned  bool
 	messageID string
 	model     string
-	usage     anthropicUsageReport
-}
-
-type anthropicUsageReport struct {
-	inputTokens              anthropicReportedCount
-	outputTokens             anthropicReportedCount
-	cacheCreationInputTokens anthropicReportedCount
-	cacheReadInputTokens     anthropicReportedCount
-	ephemeral5mInputTokens   anthropicReportedCount
-	ephemeral1hInputTokens   anthropicReportedCount
-	thinkingTokens           anthropicReportedCount
-}
-
-type anthropicReportedCount struct {
-	value    int64
-	reported bool
+	// counts holds one nullable value per declared Anthropic count while a
+	// candidate is active. Required counts are checked only at message_stop.
+	counts []*int64
 }
 
 var (
@@ -132,7 +119,7 @@ func (m *anthropicUsageMeter) observeStart(event map[string]json.RawMessage) {
 		m.accumulator.poisoned = true
 		return
 	}
-	report, ok := decodeOptionalAnthropicUsage(message, "usage")
+	counts, ok := decodeOptionalAnthropicCounts(message, "usage")
 	if !ok {
 		m.accumulator.poisoned = true
 		return
@@ -140,28 +127,31 @@ func (m *anthropicUsageMeter) observeStart(event map[string]json.RawMessage) {
 	m.accumulator.active = true
 	m.accumulator.messageID = messageID
 	m.accumulator.model = model
-	m.accumulator.usage.apply(report)
+	m.accumulator.counts = make([]*int64, usage.AnthropicProjection().Len())
+	m.accumulator.apply(counts)
 }
 
 func (m *anthropicUsageMeter) observeDelta(event map[string]json.RawMessage) {
-	report, ok := decodeOptionalAnthropicUsage(event, "usage")
+	counts, ok := decodeOptionalAnthropicCounts(event, "usage")
 	if !ok {
 		m.accumulator.poisoned = true
 		return
 	}
 	if m.accumulator.active {
-		m.accumulator.usage.apply(report)
+		m.accumulator.apply(counts)
 	}
 }
 
 func (m *anthropicUsageMeter) observeStop() {
-	if m.accumulator.active && m.accumulator.usage.inputTokens.reported && m.accumulator.usage.outputTokens.reported {
-		m.recorder.record(usage.Turn{
-			ResponseID: m.accumulator.messageID,
-			Model:      m.accumulator.model,
-			Transport:  usage.TransportSSE,
-			Usage:      m.accumulator.usage.native(),
-		})
+	if m.accumulator.active {
+		if native, err := usage.AnthropicProjection().Usage(m.accumulator.counts); err == nil {
+			m.recorder.record(usage.Turn{
+				ResponseID: m.accumulator.messageID,
+				Model:      m.accumulator.model,
+				Transport:  usage.TransportSSE,
+				Usage:      native,
+			})
+		}
 	}
 	m.accumulator.clearCandidate()
 }
@@ -171,40 +161,14 @@ func (a *anthropicUsageAccumulator) clearCandidate() {
 	*a = anthropicUsageAccumulator{poisoned: poisoned}
 }
 
-func (r *anthropicUsageReport) apply(update anthropicUsageReport) {
-	applyAnthropicCount(&r.inputTokens, update.inputTokens)
-	applyAnthropicCount(&r.outputTokens, update.outputTokens)
-	applyAnthropicCount(&r.cacheCreationInputTokens, update.cacheCreationInputTokens)
-	applyAnthropicCount(&r.cacheReadInputTokens, update.cacheReadInputTokens)
-	applyAnthropicCount(&r.ephemeral5mInputTokens, update.ephemeral5mInputTokens)
-	applyAnthropicCount(&r.ephemeral1hInputTokens, update.ephemeral1hInputTokens)
-	applyAnthropicCount(&r.thinkingTokens, update.thinkingTokens)
-}
-
-func applyAnthropicCount(current *anthropicReportedCount, update anthropicReportedCount) {
-	if update.reported {
-		*current = update
+// apply replaces each accumulated count with a later reported value, even a
+// smaller or zero one. An unreported count keeps the earlier value.
+func (a *anthropicUsageAccumulator) apply(update []*int64) {
+	for index, value := range update {
+		if value != nil {
+			a.counts[index] = value
+		}
 	}
-}
-
-func (r anthropicUsageReport) native() usage.AnthropicUsage {
-	return usage.AnthropicUsage{
-		InputTokens:              r.inputTokens.value,
-		OutputTokens:             r.outputTokens.value,
-		CacheCreationInputTokens: r.cacheCreationInputTokens.pointer(),
-		CacheReadInputTokens:     r.cacheReadInputTokens.pointer(),
-		Ephemeral5mInputTokens:   r.ephemeral5mInputTokens.pointer(),
-		Ephemeral1hInputTokens:   r.ephemeral1hInputTokens.pointer(),
-		ThinkingTokens:           r.thinkingTokens.pointer(),
-	}
-}
-
-func (c anthropicReportedCount) pointer() *int64 {
-	if !c.reported {
-		return nil
-	}
-	value := c.value
-	return &value
 }
 
 func parseAnthropicMessage(raw []byte) (string, string, usage.AnthropicUsage, bool) {
@@ -231,67 +195,22 @@ func parseAnthropicMessage(raw []byte) (string, string, usage.AnthropicUsage, bo
 	if !ok {
 		return "", "", usage.AnthropicUsage{}, false
 	}
-	report, ok := decodeAnthropicUsage(usageObject)
-	if !ok || !report.inputTokens.reported || !report.outputTokens.reported {
+	native, ok := decodeNativeUsage(usage.AnthropicProjection(), usageObject)
+	if !ok {
 		return "", "", usage.AnthropicUsage{}, false
 	}
-	return messageID, model, report.native(), true
+	return messageID, model, native, true
 }
 
-func decodeOptionalAnthropicUsage(object map[string]json.RawMessage, key string) (anthropicUsageReport, bool) {
+// decodeOptionalAnthropicCounts treats a missing or null usage object as an
+// update that reports nothing; a present non-object usage is invalid.
+func decodeOptionalAnthropicCounts(object map[string]json.RawMessage, key string) ([]*int64, bool) {
 	usageObject, present, valid := optionalJSONObject(object, key)
 	if !valid {
-		return anthropicUsageReport{}, false
+		return nil, false
 	}
 	if !present {
-		return anthropicUsageReport{}, true
+		return nil, true
 	}
-	return decodeAnthropicUsage(usageObject)
-}
-
-func decodeAnthropicUsage(object map[string]json.RawMessage) (anthropicUsageReport, bool) {
-	var report anthropicUsageReport
-	var ok bool
-	if report.inputTokens, ok = reportedAnthropicCount(object, "input_tokens"); !ok {
-		return anthropicUsageReport{}, false
-	}
-	if report.outputTokens, ok = reportedAnthropicCount(object, "output_tokens"); !ok {
-		return anthropicUsageReport{}, false
-	}
-	if report.cacheCreationInputTokens, ok = reportedAnthropicCount(object, "cache_creation_input_tokens"); !ok {
-		return anthropicUsageReport{}, false
-	}
-	if report.cacheReadInputTokens, ok = reportedAnthropicCount(object, "cache_read_input_tokens"); !ok {
-		return anthropicUsageReport{}, false
-	}
-	if details, present, valid := optionalJSONObject(object, "cache_creation"); !valid {
-		return anthropicUsageReport{}, false
-	} else if present {
-		if report.ephemeral5mInputTokens, ok = reportedAnthropicCount(details, "ephemeral_5m_input_tokens"); !ok {
-			return anthropicUsageReport{}, false
-		}
-		if report.ephemeral1hInputTokens, ok = reportedAnthropicCount(details, "ephemeral_1h_input_tokens"); !ok {
-			return anthropicUsageReport{}, false
-		}
-	}
-	if details, present, valid := optionalJSONObject(object, "output_tokens_details"); !valid {
-		return anthropicUsageReport{}, false
-	} else if present {
-		if report.thinkingTokens, ok = reportedAnthropicCount(details, "thinking_tokens"); !ok {
-			return anthropicUsageReport{}, false
-		}
-	}
-	return report, true
-}
-
-func reportedAnthropicCount(object map[string]json.RawMessage, key string) (anthropicReportedCount, bool) {
-	raw, exists := object[key]
-	if !exists || isJSONNull(raw) {
-		return anthropicReportedCount{}, true
-	}
-	value, ok := parseNonnegativeInt64(raw)
-	if !ok {
-		return anthropicReportedCount{}, false
-	}
-	return anthropicReportedCount{value: value, reported: true}, true
+	return decodeNativeCounts(usage.AnthropicProjection(), usageObject)
 }

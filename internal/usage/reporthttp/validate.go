@@ -82,9 +82,9 @@ func decodeReport(ctx context.Context, body []byte, q report.Query) (report.Repo
 	}
 	for _, native := range []struct {
 		name    string
-		metrics []string
+		metrics []report.NativeMetric
 		dest    **report.Section
-	}{{"anthropic", report.AnthropicMetrics(), &r.Anthropic}, {"openai", report.OpenAIMetrics(), &r.OpenAI}} {
+	}{{"anthropic", report.AnthropicNativeMetrics(), &r.Anthropic}, {"openai", report.OpenAINativeMetrics(), &r.OpenAI}} {
 		if r.Surface != "all" && r.Surface != native.name {
 			if _, present := root[native.name]; present {
 				d.err = errProtocol
@@ -223,7 +223,7 @@ func (d *wireDecoder) array(o object, key string) []json.RawMessage {
 	}
 	return values
 }
-func (d *wireDecoder) total(o object, section bool, names []string, pricingPresent bool) report.Total {
+func (d *wireDecoder) total(o object, section bool, metrics []report.NativeMetric, pricingPresent bool) report.Total {
 	total := report.Total{Turns: d.count(o, "turns"), Usage: map[string]report.Metric{}}
 	if section {
 		if _, present := o["pricing_match"]; present {
@@ -232,27 +232,26 @@ func (d *wireDecoder) total(o object, section bool, names []string, pricingPrese
 	} else if total.Turns == 0 {
 		d.err = errProtocol
 	}
-	metrics := d.object(d.member(o, "usage"))
-	for _, name := range names {
-		m := d.object(d.member(metrics, name))
+	usage := d.object(d.member(o, "usage"))
+	for _, declared := range metrics {
+		m := d.object(d.member(usage, declared.Name))
 		metric := report.Metric{ReportedTurns: d.count(m, "reported_turns")}
 		sum := d.member(m, "sum")
 		if !bytes.Equal(sum, []byte("null")) {
 			n := d.count(m, "sum")
 			metric.Sum = &n
 		}
-		required := name == "input_tokens" || name == "output_tokens"
 		if metric.ReportedTurns > total.Turns {
 			d.err = errProtocol
 		}
-		if required {
+		if declared.Required {
 			if metric.Sum == nil || metric.ReportedTurns != total.Turns || total.Turns == 0 && *metric.Sum != 0 {
 				d.err = errProtocol
 			}
 		} else if (metric.Sum == nil) != (metric.ReportedTurns == 0) {
 			d.err = errProtocol
 		}
-		total.Usage[name] = metric
+		total.Usage[declared.Name] = metric
 	}
 	if pricingPresent {
 		total.Cost = d.cost(d.object(d.member(o, "cost")), total.Turns)

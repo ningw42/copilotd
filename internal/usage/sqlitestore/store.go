@@ -9,8 +9,11 @@ import (
 	"embed"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
+	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -31,10 +34,25 @@ const (
 	setupRetryBackoff   = 10 * time.Millisecond
 )
 
+// AnthropicTable and OpenAITable are the writer-owned tables that store each
+// Surface's Turns.
+const (
+	AnthropicTable = "anthropic_turn"
+	OpenAITable    = "openai_turn"
+)
+
 var (
 	//go:embed migrations/*.sql
 	migrationFiles embed.FS
-	migrationNames = []string{"migrations/001_initial.sql", "migrations/002_requested_model.sql", "migrations/003_openai_service_tier.sql"}
+	migrationNames = mustDiscoverMigrations(migrationFiles)
+)
+
+// Metadata columns stay literal storage facts. Each INSERT appends its
+// Surface's declared count columns, and appendCounts supplies their arguments
+// from the same declaration, so the two cannot fall out of order.
+var (
+	anthropicInsert = insertStatement(AnthropicTable, []string{"at_ms", "request_id", "message_id", "turn_index", "model", "requested_model", "transport"}, usage.AnthropicProjection())
+	openAIInsert    = insertStatement(OpenAITable, []string{"at_ms", "request_id", "response_id", "turn_index", "model", "requested_model", "transport", "service_tier"}, usage.OpenAIProjection())
 )
 
 // Report is the bounded loss and cleanup result observed through Close's final
@@ -305,31 +323,13 @@ func insertTurn(ctx context.Context, conn *sql.Conn, turn usage.Turn) error {
 	atMS := turn.At.UnixMilli()
 	switch native := turn.Usage.(type) {
 	case usage.AnthropicUsage:
-		_, err := conn.ExecContext(ctx, `INSERT INTO anthropic_turn (
-			at_ms, request_id, message_id, turn_index, model, requested_model, transport,
-			input_tokens, output_tokens, cache_creation_input_tokens,
-			cache_read_input_tokens, ephemeral_5m_input_tokens,
-			ephemeral_1h_input_tokens, thinking_tokens
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			atMS, turn.RequestID, turn.ResponseID, turn.TurnIndex, turn.Model, turn.RequestedModel, string(turn.Transport),
-			native.InputTokens, native.OutputTokens, nullable(native.CacheCreationInputTokens),
-			nullable(native.CacheReadInputTokens), nullable(native.Ephemeral5mInputTokens),
-			nullable(native.Ephemeral1hInputTokens), nullable(native.ThinkingTokens),
-		)
-		if err != nil {
+		args := []any{atMS, turn.RequestID, turn.ResponseID, turn.TurnIndex, turn.Model, turn.RequestedModel, string(turn.Transport)}
+		if _, err := conn.ExecContext(ctx, anthropicInsert, appendCounts(args, usage.AnthropicProjection(), native)...); err != nil {
 			return fmt.Errorf("insert Anthropic Turn: %w", err)
 		}
 	case usage.OpenAIUsage:
-		_, err := conn.ExecContext(ctx, `INSERT INTO openai_turn (
-			at_ms, request_id, response_id, turn_index, model, requested_model, transport,
-			input_tokens, cached_tokens, cache_write_tokens, output_tokens,
-			reasoning_tokens, total_tokens, service_tier
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			atMS, turn.RequestID, turn.ResponseID, turn.TurnIndex, turn.Model, turn.RequestedModel, string(turn.Transport),
-			native.InputTokens, nullable(native.CachedTokens), nullable(native.CacheWriteTokens),
-			native.OutputTokens, nullable(native.ReasoningTokens), nullable(native.TotalTokens), turn.OpenAIServiceTier,
-		)
-		if err != nil {
+		args := []any{atMS, turn.RequestID, turn.ResponseID, turn.TurnIndex, turn.Model, turn.RequestedModel, string(turn.Transport), turn.OpenAIServiceTier}
+		if _, err := conn.ExecContext(ctx, openAIInsert, appendCounts(args, usage.OpenAIProjection(), native)...); err != nil {
 			return fmt.Errorf("insert OpenAI Turn: %w", err)
 		}
 	default:
@@ -338,11 +338,26 @@ func insertTurn(ctx context.Context, conn *sql.Conn, turn usage.Turn) error {
 	return nil
 }
 
-func nullable(value *int64) any {
-	if value == nil {
-		return nil
+func insertStatement[U usage.Usage](table string, metadata []string, projection usage.Projection[U]) string {
+	columns := slices.Clone(metadata)
+	for _, count := range projection.All() {
+		columns = append(columns, count.Name())
 	}
-	return *value
+	placeholders := strings.TrimSuffix(strings.Repeat("?, ", len(columns)), ", ")
+	return "INSERT INTO " + table + " (" + strings.Join(columns, ", ") + ") VALUES (" + placeholders + ")"
+}
+
+// appendCounts appends one argument per declared count; an unreported optional
+// count is SQL NULL.
+func appendCounts[U usage.Usage](args []any, projection usage.Projection[U], native U) []any {
+	for _, count := range projection.All() {
+		if value, ok := count.Value(native); ok {
+			args = append(args, value)
+		} else {
+			args = append(args, nil)
+		}
+	}
+	return args
 }
 
 type liveFailureState struct {
@@ -633,8 +648,7 @@ func attemptAdmission(path string, deadline time.Time, openDB func(string, strin
 	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
 		return db, conn, false, fmt.Errorf("acquire usage database migration transaction: %w", err)
 	}
-	if err := migrate(conn); err != nil {
-		_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
+	if err := migrateAcquired(conn); err != nil {
 		return db, conn, true, err
 	}
 	if _, err := conn.ExecContext(context.Background(), fmt.Sprintf("PRAGMA busy_timeout=%d", runtimeBusyTimeout.Milliseconds())); err != nil {
@@ -643,6 +657,53 @@ func attemptAdmission(path string, deadline time.Time, openDB func(string, strin
 	return db, conn, true, nil
 }
 
+// CreateCurrentSchema brings the database on conn to the current writer schema
+// by applying the writer's own pending migrations. It begins its own immediate
+// transaction, commits it, and rolls it back after a failure. It never ends a
+// transaction it did not begin: a canceled ctx or a connection already inside
+// a transaction is rejected untouched. It changes no other connection state,
+// so a caller may configure the connection first; for example, PRAGMA encoding
+// must precede any DDL. It exists for fixtures: production reporting never
+// creates or migrates a schema.
+func CreateCurrentSchema(ctx context.Context, conn *sql.Conn) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("begin usage schema creation: %w", err)
+	}
+	// A deferred BEGIN takes no lock, and without a cancelable context its
+	// result is exact: it fails only when the caller already has a transaction.
+	if _, err := conn.ExecContext(context.Background(), "BEGIN"); err != nil {
+		return fmt.Errorf("usage schema creation needs a connection outside any transaction: %w", err)
+	}
+	if _, err := conn.ExecContext(context.Background(), "ROLLBACK"); err != nil {
+		return fmt.Errorf("end usage schema creation probe: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		// The driver may report ctx.Err after BEGIN acquired the transaction.
+		// No caller transaction existed, so any open transaction is ours; with
+		// none, ROLLBACK harmlessly reports that no transaction is active.
+		_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
+		return fmt.Errorf("begin usage schema creation: %w", err)
+	}
+	return migrateAcquired(conn)
+}
+
+// migrateAcquired migrates inside an already acquired immediate transaction and
+// always ends it: COMMIT after success, ROLLBACK after any failure.
+func migrateAcquired(conn *sql.Conn) error {
+	err := migrate(conn)
+	if err == nil {
+		if _, commitErr := conn.ExecContext(context.Background(), "COMMIT"); commitErr != nil {
+			err = fmt.Errorf("commit usage schema migration: %w", commitErr)
+		}
+	}
+	if err != nil {
+		_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
+	}
+	return err
+}
+
+// migrate applies every pending migration and records the schema version. It
+// neither begins nor ends the transaction it runs in.
 func migrate(conn *sql.Conn) error {
 	var version int
 	if err := conn.QueryRowContext(context.Background(), "PRAGMA user_version").Scan(&version); err != nil {
@@ -663,10 +724,35 @@ func migrate(conn *sql.Conn) error {
 	if _, err := conn.ExecContext(context.Background(), fmt.Sprintf("PRAGMA user_version=%d", len(migrationNames))); err != nil {
 		return fmt.Errorf("set usage schema version %d: %w", len(migrationNames), err)
 	}
-	if _, err := conn.ExecContext(context.Background(), "COMMIT"); err != nil {
-		return fmt.Errorf("commit usage schema migration: %w", err)
-	}
 	return nil
+}
+
+// discoverMigrations lists the embedded forward migrations in apply order.
+// Their NNN_ file-name prefixes must count contiguously from 001, so the
+// schema version is the number of migration files.
+func discoverMigrations(files fs.FS) ([]string, error) {
+	names, err := fs.Glob(files, "migrations/*.sql")
+	if err != nil {
+		return nil, fmt.Errorf("list embedded usage migrations: %w", err)
+	}
+	if len(names) == 0 {
+		return nil, errors.New("no embedded usage migrations")
+	}
+	slices.Sort(names)
+	for index, name := range names {
+		if want := fmt.Sprintf("%03d_", index+1); !strings.HasPrefix(path.Base(name), want) {
+			return nil, fmt.Errorf("usage migration %s is out of sequence; want prefix %s", name, want)
+		}
+	}
+	return names, nil
+}
+
+func mustDiscoverMigrations(files fs.FS) []string {
+	names, err := discoverMigrations(files)
+	if err != nil {
+		panic(err)
+	}
+	return names
 }
 
 func setDeadlineBusyTimeout(ctx context.Context, conn *sql.Conn, deadline time.Time) error {
