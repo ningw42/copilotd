@@ -118,8 +118,21 @@ func WithShimMonitorClock(clock shim.Clock) Option {
 	}
 }
 
+// NewDialClient returns the upstream handshake client: proxy-aware, with no
+// total client timeout, and refusing redirects so a 3xx is Copilot's final
+// non-101 answer and is relayed rather than followed.
+func NewDialClient() *http.Client {
+	return &http.Client{
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+		Transport: &http.Transport{Proxy: http.ProxyFromEnvironment},
+	}
+}
+
 // New returns a WebSocket Proxy with an independently cancellable session
-// context. dialClient must not impose a total client timeout.
+// context. dialClient must not impose a total client timeout. Production
+// passes NewDialClient(), which also refuses redirects.
 func New(caller *upstream.Caller, dialClient *http.Client, dialTimeout, writeTimeout time.Duration, maxMessageBytes int64, registry shim.Registry, logger, shimLogger *slog.Logger, hookOverrunThreshold time.Duration, metrics WsMetrics, options ...Option) *Proxy {
 	baseCtx, cancel := context.WithCancel(context.Background())
 	drainCtx, cancelDrain := context.WithCancel(context.Background())
