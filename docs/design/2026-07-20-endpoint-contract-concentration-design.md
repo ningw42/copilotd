@@ -1,7 +1,13 @@
 # Concentrate the served-endpoint contract in `internal/endpoint`
 
-**Status:** proposed
+**Status:** proposed; Codex-shape selection amended by [#287](https://github.com/ningw42/copilotd/issues/287)
 **Date:** 2026-07-20
+
+> **Superseded historical detail.** The [#287](https://github.com/ningw42/copilotd/issues/287) amendment to
+> [ADR-0005](../adr/0005-codex-catalog-reemits-pinned-modelinfo.md)
+> drops "reviewer or limit override configured" from the request-time selection
+> in "Catalog rendering and the Codex shape". The Codex shape is selected when
+> the Codex catalog is enabled and the request carries a `client_version` key.
 
 ## Summary
 

@@ -38,7 +38,7 @@ settings, and supplying a GitHub OAuth token without login.
 
 Provider-shaped catalogs use provider schemas with Copilot's values, not a
 promise of direct-provider capabilities. The [Codex catalog](CONFIGURATION.md#--codex-catalog-enabled)
-is selected by `?client_version=` when enabled and configured.
+is selected by `?client_version=` when enabled.
 
 Chat Completions, embeddings, multi-tenant keys/quotas/billing, and multi-account
 pooling are not supported. Responses retrieve, delete, cancel, and input-item

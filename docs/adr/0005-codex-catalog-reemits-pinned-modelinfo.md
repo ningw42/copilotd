@@ -1,6 +1,7 @@
 # Codex catalog re-emits Codex's own complete release `ModelInfo`, mutating only named fields, opt-in
 
-**Status:** accepted; freshness/pinning amended by ADR-0009
+**Status:** accepted; freshness/pinning amended by ADR-0009; enablement and
+reviewer fidelity amended by [#287](https://github.com/ningw42/copilotd/issues/287)
 
 **Amendment:** ADR-0009 changes the fixed `rust-v0.144.5` vendored snapshot
 from the sole served source into the embedded fallback of a memory-only cached
@@ -12,7 +13,7 @@ contract remains in force: every accepted entry must be a complete Codex
 slug substitution, reviewer routing, and live-limit overlay.
 
 **Enablement and fidelity amendment ([#287](https://github.com/ningw42/copilotd/issues/287),
-approved; implementation pending):** `--codex-catalog-enabled` is the only
+approved and implemented):** `--codex-catalog-enabled` is the only
 configuration switch for serving the Codex catalog on the OpenAI Catalog when
 `client_version` is present. Aliases, reviewer routing, and live-limit overlays
 are optional additions, not prerequisites. Enabling the catalog explicitly opts

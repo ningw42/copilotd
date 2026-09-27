@@ -1,8 +1,14 @@
 # Concentrate the Catalog shape decision where the Catalog is rendered — Design
 
-Status: proposed design (Candidate 1 from `2026-09-04` architecture review), pending implementation
+Status: proposed design (Candidate 1 from `2026-09-04` architecture review), pending implementation; emission gate amended by [#287](https://github.com/ningw42/copilotd/issues/287)
 Date: 2026-09-04
 Review reference: `/tmp/architecture-review-20260904-223557.html` · Candidate 1 · Top recommendation
+
+> **Superseded historical detail.** The [#287](https://github.com/ningw42/copilotd/issues/287) amendment to
+> [ADR-0005](../adr/0005-codex-catalog-reemits-pinned-modelinfo.md)
+> removes the `d.RenderConfig.mutates()` term from the §4.1 gate sketch. The
+> Codex shape is served whenever the Codex catalog is enabled and the request
+> carries a `client_version` key, with or without render add-ons.
 
 ## 1. Goal & outcome
 

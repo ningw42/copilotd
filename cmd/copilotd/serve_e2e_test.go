@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -512,7 +513,6 @@ func TestServeFreshCodexCatalogAndReadinessEndToEnd(t *testing.T) {
 
 	cfg := e2eConfig(oauth)
 	cfg.CodexCatalogEnabled = true
-	cfg.CodexOverrideLimits = true
 	cfg.CodexCatalogRefreshInterval = time.Hour
 	edges := exchangeServeEdges(github)
 	edges.Discovery = impersonation.Edge{
@@ -583,6 +583,90 @@ func TestServeRefreshesCodexModelsForABareEnabledCatalog(t *testing.T) {
 	base := startServedLifecycle(t, discardLogger(t), serveInput{Config: cfg, Edges: edges})
 
 	awaitCachedValue(t, base, "codex_models", "fetched", tag)
+}
+
+// TestServeWiresEveryCodexCatalogAddOn proves the composition root hands each
+// Codex catalog add-on setting to the served renderer. Each expected value
+// depends on exactly one setting: the alias slug, the per-main-model reviewer,
+// the global reviewer, and the live-limit overlay.
+func TestServeWiresEveryCodexCatalogAddOn(t *testing.T) {
+	const (
+		tag    = "rust-v3.4.5"
+		commit = "fedcbafedcbafedcbafedcbafedcbafedcbafedc"
+	)
+	var entries []map[string]any
+	for _, slug := range []string{"gpt-main", "gpt-source"} {
+		var envelope struct {
+			Models []map[string]any `json:"models"`
+		}
+		if err := json.Unmarshal(completeCodexModelsBytes(t, slug, slug+" prompt"), &envelope); err != nil {
+			t.Fatalf("decode complete Codex entry: %v", err)
+		}
+		entries = append(entries, envelope.Models[0])
+	}
+	entries[0]["auto_review_model_override"] = "official-reviewer"
+	models, err := json.Marshal(map[string]any{"models": entries})
+	if err != nil {
+		t.Fatalf("encode Codex release models: %v", err)
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/models" {
+			t.Errorf("unexpected Copilot request %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = io.WriteString(w, `{"data":[`+
+			`{"id":"gpt-main","vendor":"OpenAI","model_picker_enabled":true,"supported_endpoints":["/responses"],"capabilities":{"limits":{"max_prompt_tokens":12345}}},`+
+			`{"id":"gpt-alias","vendor":"OpenAI","model_picker_enabled":true,"supported_endpoints":["/responses"]}]}`)
+	}))
+	t.Cleanup(upstream.Close)
+	edge := newCodexReleaseEdge(t, tag, commit, models)
+
+	cfg := lifecycleConfig("gho-codex-add-ons")
+	cfg.CodexCatalogEnabled = true
+	cfg.CodexCatalogRefreshInterval = time.Hour
+	cfg.CodexCatalogModelAliases = map[string]string{"gpt-alias": "gpt-source"}
+	cfg.CodexAutoReviewModel = "gpt-main"
+	cfg.CodexAutoReviewModelOverrides = map[string]string{"gpt-main": "gpt-alias"}
+	cfg.CodexOverrideLimits = true
+	edges := exchangeServeEdges(lifecycleExchangeStub(t, upstream.URL, make(chan http.Header, 1)))
+	edges.CodexModels = catalog.ModelsEdge{BaseURL: edge.URL, Client: edge.Client()}
+	base := startServedLifecycle(t, discardLogger(t), serveInput{Config: cfg, Edges: edges})
+	awaitCachedValue(t, base, "codex_models", "fetched", tag)
+
+	req, err := http.NewRequest(http.MethodGet, base+"/openai/v1/models?client_version=fixture", nil)
+	if err != nil {
+		t.Fatalf("build Codex catalog request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+testAPIKey)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET Codex catalog: %v", err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("Codex catalog = %d %s (%v), want 200", resp.StatusCode, body, err)
+	}
+	type renderedModel struct {
+		Slug          string `json:"slug"`
+		Reviewer      string `json:"auto_review_model_override"`
+		ContextWindow *int   `json:"context_window"`
+	}
+	var rendered struct {
+		Models []renderedModel `json:"models"`
+	}
+	if err := json.Unmarshal(body, &rendered); err != nil {
+		t.Fatalf("decode Codex catalog: %v; body=%s", err, body)
+	}
+	promptLimit := 12345
+	want := []renderedModel{
+		{Slug: "gpt-main", Reviewer: "gpt-alias", ContextWindow: &promptLimit},
+		{Slug: "gpt-alias", Reviewer: "gpt-main"},
+	}
+	if !reflect.DeepEqual(rendered.Models, want) {
+		t.Errorf("Codex catalog models = %s, want every add-on applied as %+v", body, want)
+	}
 }
 
 // TestServeRequestDrivenMintRecoveryEndToEnd proves that readiness and request

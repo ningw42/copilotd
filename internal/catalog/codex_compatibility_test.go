@@ -88,7 +88,8 @@ func TestVendoredCodexCatalogRoundTripFidelity(t *testing.T) {
 	}
 
 	// Every vendored entry, not only the live intersection below, reaches the
-	// wire with each raw field intact; the renderer always removes the reviewer.
+	// wire with each raw field intact, including the official reviewer field,
+	// when no add-on is configured.
 	everyEntry := make([]Model, len(vendoredSlugs))
 	for i, slug := range vendoredSlugs {
 		everyEntry[i] = Model{ID: slug}
@@ -102,9 +103,7 @@ func TestVendoredCodexCatalogRoundTripFidelity(t *testing.T) {
 		t.Fatalf("rendered slugs = %q, want every vendored entry %q", got, vendoredSlugs)
 	}
 	for i, entry := range everyRendered {
-		assertVendoredFieldsPreserved(t, vendoredSlugs[i], entry, vendoredModels[vendoredSlugs[i]], map[string]struct{}{
-			"auto_review_model_override": {},
-		})
+		assertSourceFieldsPreserved(t, vendoredSlugs[i], entry, vendoredModels[vendoredSlugs[i]], nil)
 	}
 
 	github := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -209,7 +208,7 @@ func TestVendoredCodexCatalogRoundTripFidelity(t *testing.T) {
 	for _, entry := range entries {
 		slug := decodeStringField(t, entry, "slug")
 		source := vendoredModels[slug]
-		assertVendoredFieldsPreserved(t, slug, entry, source, mutatedFields)
+		assertSourceFieldsPreserved(t, slug, entry, source, mutatedFields)
 		if got := decodeStringField(t, entry, "auto_review_model_override"); got != reviewer {
 			t.Errorf("%s reviewer = %q, want %q", slug, got, reviewer)
 		}
@@ -364,9 +363,9 @@ func codexEntrySlug(t *testing.T, entry map[string]json.RawMessage) string {
 	return slug
 }
 
-// assertVendoredFieldsPreserved requires entry to carry every raw source field
+// assertSourceFieldsPreserved requires entry to carry every raw source field
 // byte-for-byte, except governed mutations, and to add no ungoverned field.
-func assertVendoredFieldsPreserved(t *testing.T, slug string, entry, source map[string]json.RawMessage, governed map[string]struct{}) {
+func assertSourceFieldsPreserved(t *testing.T, slug string, entry, source map[string]json.RawMessage, governed map[string]struct{}) {
 	t.Helper()
 	for field, want := range source {
 		if _, mutated := governed[field]; mutated {

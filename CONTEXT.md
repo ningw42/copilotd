@@ -292,7 +292,8 @@ per-main-model override map over a global default — so different main models c
 route to different reviewers.
 A configured reviewer is injected only when its served slug is emitted from the
 resolved exact-and-aliased membership, ensuring Codex can resolve the reviewer's
-complete `ModelInfo`.
+complete `ModelInfo`. Otherwise, or when no reviewer is configured, the entry
+keeps its official `auto_review_model_override` unchanged.
 _Avoid_: auto-reviewer, guardian model.
 
 **Main model**:
@@ -385,9 +386,7 @@ are additionally enumerated by the shim registry.
 A divergence that drops or coalesces **Copilot-forwarded content**, fabricating
 nothing: the wire carries less of Copilot's content than Copilot sent, never
 content Copilot did not send, and its framing describes only what is actually
-sent. The shim seam also permits it (`emit=false`, coalesce-via-state). The
-Codex catalog's governed reviewer-field removal is classified as an
-**Alteration** under ADR-0005 rather than an Omission.
+sent. The shim seam also permits it (`emit=false`, coalesce-via-state).
 
 ### Caching
 
