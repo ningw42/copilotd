@@ -26,10 +26,12 @@ import (
 	"github.com/ningw42/copilotd/internal/cache"
 	"github.com/ningw42/copilotd/internal/catalog"
 	"github.com/ningw42/copilotd/internal/config"
+	"github.com/ningw42/copilotd/internal/endpoint"
 	"github.com/ningw42/copilotd/internal/forward"
 	"github.com/ningw42/copilotd/internal/identity"
 	"github.com/ningw42/copilotd/internal/impersonation"
 	"github.com/ningw42/copilotd/internal/logging"
+	"github.com/ningw42/copilotd/internal/requestsummary"
 	"github.com/ningw42/copilotd/internal/server"
 	"github.com/ningw42/copilotd/internal/shim"
 	"github.com/ningw42/copilotd/internal/upstream"
@@ -600,17 +602,19 @@ func finalizeServe(result serveResult, usageStore *sqlitestore.Store, timeout ti
 }
 
 // newServeServer assembles the serving graph over the lifecycle's resolved
-// dependencies: the Catalog descriptors, the upstream caller shared by the
-// HTTP and WebSocket forwarders and the Catalogs, both forwarders over the
-// served Shim registry, and the Usage report handler for reportQuery.
+// dependencies and mounts one built handler per Endpoint plus the Usage report
+// handler for reportQuery. The upstream caller is shared by the HTTP and
+// WebSocket forwarders and both Catalogs; both forwarders serve the Shim
+// registry. Each per-kind mount helper binds one Endpoint to both its mount
+// and its handler, so a registration line names its contract once and cannot
+// pair it with another contract's handler.
 func newServeServer(cfg config.ServeConfig, base *slog.Logger, mgr *identity.Manager, imp *impersonation.Set, codexModels *cache.Value[[]byte], cacheRegistry *cache.Registry, registry shim.Registry, reportQuery reporthttp.QueryFunc) *server.Server {
 	catalogs := catalog.RenderDescriptors{
 		Anthropic: catalog.AnthropicRenderConfig{
 			ModelIDNormalizationEnabled: cfg.AnthropicCatalogModelIDNormalizationEnabled,
 		},
 		Codex: catalog.CodexDescriptor{
-			Enabled: cfg.CodexCatalogEnabled,
-			Models:  codexModels,
+			Models: codexModels,
 			RenderConfig: catalog.CodexRenderConfig{
 				ModelAliases:             cfg.CodexCatalogModelAliases,
 				AutoReviewModel:          cfg.CodexAutoReviewModel,
@@ -632,12 +636,38 @@ func newServeServer(cfg config.ServeConfig, base *slog.Logger, mgr *identity.Man
 			Accept:          wsAccepts,
 			SessionTerminal: wsTerminals,
 		})
-	streamOutcomes := server.NewStreamOutcomeCounter()
+	// Both Catalogs share one internal/catalog child. catalog.Handler never
+	// records a shape for the Anthropic Catalog.
+	catalogLogger := logging.ForComponent(base, "internal/catalog")
+	recordCatalogShape := func(ctx context.Context, shape catalog.Shape) {
+		requestsummary.RecordCatalogShape(ctx, string(shape))
+	}
+	mountForward := func(ep endpoint.HTTPForward) server.Mount {
+		return server.MountHTTPForward(ep, fwd.Handler(ep))
+	}
+	mountWebSocket := func(ep endpoint.WSForward) server.Mount {
+		return server.MountWebSocket(ep, wsProxy.Handler(ep), wsProxy)
+	}
+	mountPassthrough := func(ep endpoint.Passthrough) server.Mount {
+		return server.MountPassthrough(ep, fwd.PassthroughHandler(ep))
+	}
+	mountCatalog := func(ep endpoint.Catalog) server.Mount {
+		return server.MountCatalog(ep, catalog.Handler(catalogLogger, ep, catalogs, caller, recordCatalogShape))
+	}
 
-	return server.New(cfg, logging.ForComponent(base, "internal/server"), logging.ForComponent(base, "internal/catalog"), logging.DependencyErrorLog(base, slog.LevelWarn), mgr, server.ReadyObservers{
+	return server.New(cfg.APIKey, cfg.ShutdownTimeout, logging.ForComponent(base, "internal/server"), logging.DependencyErrorLog(base, slog.LevelWarn), mgr, server.ReadyObservers{
 		Impersonation: imp,
 		Caches:        cacheRegistry,
-	}, fwd, caller, wsProxy, streamOutcomes, catalogs, reporthttp.Handler(reportQuery))
+	}, server.NewStreamOutcomeCounter(),
+		mountForward(endpoint.AnthropicMessages()),
+		mountForward(endpoint.AnthropicCountTokens()),
+		mountForward(endpoint.OpenAIResponsesHTTP()),
+		mountWebSocket(endpoint.OpenAIResponsesWS()),
+		mountPassthrough(endpoint.Models()),
+		mountCatalog(endpoint.AnthropicCatalog()),
+		mountCatalog(endpoint.OpenAICatalog()),
+		server.MountReport(reporthttp.Handler(reportQuery)),
+	)
 }
 
 // runServeStartup performs the ordered background startup sequence. The cache
@@ -761,6 +791,7 @@ func productionCodexModelsEdge() catalog.ModelsEdge {
 
 // configuredCodexModels keeps the opt-in boundary at the composition root: a
 // disabled Codex catalog registers no cached value and performs no GitHub read.
+// Its nil result is also the Codex catalog's disabled signal to catalog.
 func configuredCodexModels(cfg config.ServeConfig, edge catalog.ModelsEdge, registry *cache.Registry, base *slog.Logger) *cache.Value[[]byte] {
 	if !cfg.CodexCatalogEnabled {
 		return nil

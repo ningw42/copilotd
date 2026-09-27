@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"io"
 	"log"
 	"log/slog"
@@ -10,13 +11,13 @@ import (
 
 	"github.com/ningw42/copilotd/internal/cache"
 	"github.com/ningw42/copilotd/internal/catalog"
-	"github.com/ningw42/copilotd/internal/config"
+	"github.com/ningw42/copilotd/internal/endpoint"
 	"github.com/ningw42/copilotd/internal/forward"
 	"github.com/ningw42/copilotd/internal/identity"
 	"github.com/ningw42/copilotd/internal/logging"
+	"github.com/ningw42/copilotd/internal/requestsummary"
 	"github.com/ningw42/copilotd/internal/shim"
 	"github.com/ningw42/copilotd/internal/upstream"
-	"github.com/ningw42/copilotd/internal/usage/reporthttp"
 	"github.com/ningw42/copilotd/internal/wsforward"
 )
 
@@ -45,20 +46,44 @@ func serverLogLinesContaining(output string, fragments ...string) []string {
 	return matched
 }
 
-func newTestServer(cfg config.ServeConfig, serverLogger, catalogLogger *slog.Logger, provider identity.Provider, observers ReadyObservers, fwd *forward.Forwarder, source catalog.Source, wsProxy *wsforward.Proxy, streamOutcomes StreamOutcomeObserver, catalogs catalog.RenderDescriptors) *Server {
-	return New(cfg, serverLogger, catalogLogger, newTestDependencyErrorLog(), provider, observers, fwd, source, wsProxy, streamOutcomes, catalogs, reporthttp.Handler(nil))
+const testShutdownTimeout = 2 * time.Second
+
+// newTestServer builds a Server from the test API key, shutdown timeout and
+// readiness observers with base's internal/server child, routing only mounts.
+func newTestServer(base *slog.Logger, provider identity.Provider, mounts ...Mount) *Server {
+	return newObservedTestServer(base, provider, NewStreamOutcomeCounter(), mounts...)
 }
 
-func newTestServerFromBase(cfg config.ServeConfig, base *slog.Logger, provider identity.Provider, observers ReadyObservers, fwd *forward.Forwarder, source catalog.Source, wsProxy *wsforward.Proxy, streamOutcomes StreamOutcomeObserver, catalogs catalog.RenderDescriptors) *Server {
-	serverLogger := logging.ForComponent(base, "internal/server")
-	catalogLogger := logging.ForComponent(base, "internal/catalog")
-	return newTestServer(cfg, serverLogger, catalogLogger, provider, observers, fwd, source, wsProxy, streamOutcomes, catalogs)
+// newObservedTestServer is newTestServer reporting stream outcomes to
+// streamOutcomes.
+func newObservedTestServer(base *slog.Logger, provider identity.Provider, streamOutcomes StreamOutcomeObserver, mounts ...Mount) *Server {
+	return New(testAPIKey, testShutdownTimeout, logging.ForComponent(base, "internal/server"), newTestDependencyErrorLog(), provider, newTestReadyObservers(), streamOutcomes, mounts...)
 }
 
-func newTestHandler(apikey string, provider identity.Provider, observers ReadyObservers, fwd *forward.Forwarder, source catalog.Source, base *slog.Logger, streamOutcomes StreamOutcomeObserver, catalogs catalog.RenderDescriptors, wsProxy *wsforward.Proxy) http.Handler {
-	serverLogger := logging.ForComponent(base, "internal/server")
-	catalogLogger := logging.ForComponent(base, "internal/catalog")
-	return newHandler(apikey, provider, observers, fwd, source, serverLogger, catalogLogger, streamOutcomes, catalogs, wsProxy, reporthttp.Handler(nil))
+// newTestHandler is newTestServer's router alone, for tests that drive it
+// without a listener.
+func newTestHandler(base *slog.Logger, provider identity.Provider, mounts ...Mount) http.Handler {
+	return newHandler(testAPIKey, provider, newTestReadyObservers(), logging.ForComponent(base, "internal/server"), NewStreamOutcomeCounter(), mounts)
+}
+
+// forwardMount, passthroughMount, catalogMount and webSocketMount each mount
+// one Endpoint over a test dependency, the way newServeServer does.
+func forwardMount(fwd *forward.Forwarder, ep endpoint.HTTPForward) Mount {
+	return MountHTTPForward(ep, fwd.Handler(ep))
+}
+
+func passthroughMount(fwd *forward.Forwarder) Mount {
+	return MountPassthrough(endpoint.Models(), fwd.PassthroughHandler(endpoint.Models()))
+}
+
+func catalogMount(base *slog.Logger, ep endpoint.Catalog, catalogs catalog.RenderDescriptors, source catalog.Source) Mount {
+	return MountCatalog(ep, catalog.Handler(logging.ForComponent(base, "internal/catalog"), ep, catalogs, source, func(ctx context.Context, shape catalog.Shape) {
+		requestsummary.RecordCatalogShape(ctx, string(shape))
+	}))
+}
+
+func webSocketMount(proxy *wsforward.Proxy) Mount {
+	return MountWebSocket(endpoint.OpenAIResponsesWS(), proxy.Handler(endpoint.OpenAIResponsesWS()), proxy)
 }
 
 func newTestReadyObservers() ReadyObservers {
@@ -83,11 +108,6 @@ func newTestForwarder(provider identity.Provider, client *http.Client, outboundT
 	return forward.New(caller, outboundTimeout, writeTimeout, streamIdleTimeout, streamKeepaliveInterval, maxRequestBytes, registry, logger, logger, 0, options...)
 }
 
-func newTestForwarderWithLogger(provider identity.Provider, client *http.Client, outboundTimeout, writeTimeout, streamIdleTimeout, streamKeepaliveInterval time.Duration, maxRequestBytes, maxBufferedResponseBytes int64, logger *slog.Logger, registry shim.Registry, options ...forward.Option) *forward.Forwarder {
-	caller := upstream.New(provider, client, outboundTimeout, maxBufferedResponseBytes, logger)
-	return forward.New(caller, outboundTimeout, writeTimeout, streamIdleTimeout, streamKeepaliveInterval, maxRequestBytes, registry, logger, logger, 0, options...)
-}
-
 func newTestCatalogSource(provider identity.Provider) *upstream.Caller {
 	return newTestCatalogSourceWith(provider, forward.NewClient(time.Second), time.Second, 1<<20, slog.Default())
 }
@@ -98,21 +118,4 @@ func newTestCatalogSourceWith(provider identity.Provider, client *http.Client, o
 
 func newTestWSCaller(provider identity.Provider, logger *slog.Logger) *upstream.Caller {
 	return upstream.New(provider, http.DefaultClient, time.Second, 1<<20, logger)
-}
-
-func newTestWSProxy(provider identity.Provider) *wsforward.Proxy {
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	caller := newTestWSCaller(provider, logger)
-	return wsforward.New(
-		caller,
-		http.DefaultClient,
-		time.Second,
-		time.Second,
-		1<<20,
-		nil,
-		logger,
-		logger,
-		0,
-		wsforward.WsMetrics{},
-	)
 }

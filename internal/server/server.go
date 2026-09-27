@@ -14,12 +14,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/ningw42/copilotd/internal/catalog"
-	"github.com/ningw42/copilotd/internal/config"
-	"github.com/ningw42/copilotd/internal/forward"
 	"github.com/ningw42/copilotd/internal/identity"
 	"github.com/ningw42/copilotd/internal/logging"
-	"github.com/ningw42/copilotd/internal/wsforward"
 )
 
 // Inbound HTTP timeouts (client <-> copilotd), distinct from the Phase-1
@@ -44,10 +40,10 @@ var ErrForcedDrain = errors.New("shutdown grace period expired; remaining connec
 
 // Server owns the configured http.Server and drives its lifecycle.
 type Server struct {
-	cfg    config.ServeConfig
-	logger *slog.Logger
-	http   httpLifecycle
-	ws     websocketDrainer
+	shutdownTimeout time.Duration
+	logger          *slog.Logger
+	http            httpLifecycle
+	ws              WebSocketDrainer
 }
 
 type httpLifecycle interface {
@@ -56,23 +52,24 @@ type httpLifecycle interface {
 	Close() error
 }
 
-type websocketDrainer interface {
-	StartDrain()
-	Shutdown(context.Context) error
-}
-
-// New builds the server from cfg and logger. The identity Provider supplies the
-// outbound Copilot credential and local readiness, observers supply non-secret
-// readiness details, fwd drives forwarding endpoints, source supplies bounded
-// Catalog bytes, and streamOutcomes receives the bounded stream terminal-outcome
-// metric. reportHandler is the explicit local Usage reporting handler (including
-// its disabled variant), independent of inference dependencies. The listener is
-// supplied later to Run, so main owns bind and the
-// server owns serve/shutdown.
-// Invariant: catalog settings cross the render seam only through catalogs, never through cfg.
-func New(cfg config.ServeConfig, logger, catalogLogger *slog.Logger, dependencyErrorLog *log.Logger, provider identity.Provider, observers ReadyObservers, fwd *forward.Forwarder, source catalog.Source, wsProxy *wsforward.Proxy, streamOutcomes StreamOutcomeObserver, catalogs catalog.RenderDescriptors, reportHandler http.Handler) *Server {
+// New builds the server over already-built handlers. apiKey gates every
+// Endpoint mount and shutdownTimeout bounds the drain. The identity Provider
+// supplies local readiness, observers supply non-secret readiness details, and
+// streamOutcomes receives the bounded stream terminal-outcome metric. mounts
+// are the handlers the server routes: one per Endpoint plus the local Usage
+// report. Without a WebSocket mount, shutdown drains HTTP only; endpoint.WSForward
+// has one canonical contract, so the router rejects a second WebSocket mount.
+// The listener is supplied later to Run, so main owns bind and the server owns
+// serve/shutdown.
+func New(apiKey string, shutdownTimeout time.Duration, logger *slog.Logger, dependencyErrorLog *log.Logger, provider identity.Provider, observers ReadyObservers, streamOutcomes StreamOutcomeObserver, mounts ...Mount) *Server {
+	var ws WebSocketDrainer = noWebSocketDrainer{}
+	for _, mount := range mounts {
+		if mount.drainer != nil {
+			ws = mount.drainer
+		}
+	}
 	httpServer := &http.Server{
-		Handler:           newHandler(cfg.APIKey, provider, observers, fwd, source, logger, catalogLogger, streamOutcomes, catalogs, wsProxy, reportHandler),
+		Handler:           newHandler(apiKey, provider, observers, logger, streamOutcomes, mounts),
 		ReadHeaderTimeout: readHeaderTimeout,
 		ReadTimeout:       readTimeout,
 		WriteTimeout:      writeTimeout,
@@ -82,10 +79,10 @@ func New(cfg config.ServeConfig, logger, catalogLogger *slog.Logger, dependencyE
 		ErrorLog: dependencyErrorLog,
 	}
 	return &Server{
-		cfg:    cfg,
-		logger: logger,
-		ws:     wsProxy,
-		http:   httpServer,
+		shutdownTimeout: shutdownTimeout,
+		logger:          logger,
+		ws:              ws,
+		http:            httpServer,
 	}
 }
 
@@ -119,8 +116,8 @@ func (s *Server) Run(ctx context.Context, ln net.Listener) error {
 }
 
 func (s *Server) shutdown() error {
-	s.logger.Info("shutting down", slog.Duration(logging.TimeoutKey, s.cfg.ShutdownTimeout))
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), s.cfg.ShutdownTimeout)
+	s.logger.Info("shutting down", slog.Duration(logging.TimeoutKey, s.shutdownTimeout))
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), s.shutdownTimeout)
 	defer cancel()
 	// Close WebSocket admission first so late upgrades are refused, then drain
 	// both transports at once: neither may consume the other's grace period.

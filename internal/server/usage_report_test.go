@@ -10,8 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ningw42/copilotd/internal/catalog"
-	"github.com/ningw42/copilotd/internal/forward"
 	"github.com/ningw42/copilotd/internal/usage/report"
 	"github.com/ningw42/copilotd/internal/usage/reporthttp"
 )
@@ -19,11 +17,10 @@ import (
 func TestReportBypassesReadinessAndOnlyMatchesExactLocalPath(t *testing.T) {
 	provider := panickingProvider{panicOnReady: true}
 	logger := discardLogger(t)
-	fwd := newTestForwarder(provider, forward.NewClient(time.Second), time.Second, time.Second, time.Second, time.Second, 1<<20, 1<<20, nil)
 	reports := reporthttp.Handler(func(context.Context, report.Query) (report.Report, error) {
 		return report.Report{}, &report.Error{Code: report.Unavailable, Message: "Usage data is unavailable on this daemon."}
 	})
-	handler := newHandler("key", provider, newTestReadyObservers(), fwd, newTestCatalogSource(provider), logger, logger, NewStreamOutcomeCounter(), catalog.RenderDescriptors{}, newTestWSProxy(provider), reports)
+	handler := newHandler("key", provider, newTestReadyObservers(), logger, NewStreamOutcomeCounter(), []Mount{MountReport(reports)})
 	for _, tc := range []struct {
 		path   string
 		status int
@@ -39,7 +36,6 @@ func TestReportBypassesReadinessAndOnlyMatchesExactLocalPath(t *testing.T) {
 func TestForcedServerCloseCancelsActiveReportWork(t *testing.T) {
 	provider := readyStub("")
 	logger := discardLogger(t)
-	fwd := newTestForwarder(provider, forward.NewClient(time.Second), time.Second, time.Second, time.Second, time.Second, 1<<20, 1<<20, nil)
 	entered := make(chan struct{})
 	finished := make(chan struct{})
 	reports := reporthttp.Handler(func(ctx context.Context, _ report.Query) (report.Report, error) {
@@ -48,9 +44,9 @@ func TestForcedServerCloseCancelsActiveReportWork(t *testing.T) {
 		close(finished)
 		return report.Report{}, ctx.Err()
 	})
-	cfg := testConfig()
-	cfg.ShutdownTimeout = 20 * time.Millisecond
-	srv := New(cfg, logger, logger, newTestDependencyErrorLog(), provider, newTestReadyObservers(), fwd, newTestCatalogSource(provider), newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.RenderDescriptors{}, reports)
+	// With only the report mounted, this server has no WebSocket drain: the
+	// forced drain below is HTTP-only.
+	srv := New(testAPIKey, 20*time.Millisecond, logger, newTestDependencyErrorLog(), provider, newTestReadyObservers(), NewStreamOutcomeCounter(), MountReport(reports))
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)

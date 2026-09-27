@@ -2,7 +2,6 @@ package catalog
 
 import (
 	"context"
-	"errors"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -14,54 +13,6 @@ import (
 	"github.com/ningw42/copilotd/internal/upstream"
 )
 
-// Rendering bundles the request-time and representation concerns that stay
-// outside the facts-only endpoint contract.
-type Rendering struct {
-	Render func([]Model) ([]byte, error)
-	Codex  CodexDescriptor
-	// RecordShape, when non-nil, reports the catalog Shape that was served for an
-	// OpenAI Surface render. It is a narrow hook so catalog never imports requestsummary.
-	RecordShape func(context.Context, Shape)
-}
-
-// RenderOne renders the OpenAI Catalog for ep and returns the response bytes along
-// with the Shape that was actually served. It owns the shape decision: whether the
-// Codex client shape or the OpenAI provider shape wins.
-func RenderOne(ep endpoint.Catalog, rendering Rendering, r *http.Request, models []Model, responseCtx context.Context, logger *slog.Logger) ([]byte, Shape, error) {
-	if !rendering.Codex.servesCodexShape(ep, r) {
-		representation, err := rendering.Render(models)
-		if err != nil {
-			return nil, "", err
-		}
-		return representation, ShapeOpenAI, nil
-	}
-
-	if err := rendering.Codex.wiringError(); err != nil {
-		return nil, "", err
-	}
-	currentBytes, _ := rendering.Codex.Models.Current()
-	codexModels, err := parseCodexModels(currentBytes)
-	if err != nil {
-		return nil, "", err
-	}
-	representation, outcome, err := RenderCodex(codexModels, models, rendering.Codex.RenderConfig)
-	if err != nil {
-		return nil, "", err
-	}
-	for _, unapplied := range outcome.UnappliedAliases {
-		logger.WarnContext(responseCtx, "Codex catalog alias mapping was not applied",
-			slog.String(logging.ModelKey, unapplied.Alias),
-			slog.String(logging.MetadataSourceKey, unapplied.MetadataSource),
-			slog.String(logging.SkipReasonKey, string(unapplied.Reason)))
-	}
-	for _, skipped := range outcome.SkippedReviewers {
-		logger.WarnContext(responseCtx, "Codex catalog reviewer was skipped",
-			slog.String(logging.ModelKey, skipped.Model),
-			slog.String(logging.ReviewerKey, skipped.Reviewer))
-	}
-	return representation, ShapeCodex, nil
-}
-
 // RenderDescriptors contains the complete renderer-specific contracts projected
 // by the composition root. Its zero value preserves both provider-shaped catalogs.
 type RenderDescriptors struct {
@@ -69,22 +20,13 @@ type RenderDescriptors struct {
 	Codex     CodexDescriptor
 }
 
-// CodexDescriptor contains the opt-in gate and pure-render settings for the
-// OpenAI catalog's Codex client shape. A zero value preserves the provider-
-// shaped Phase 6a response. Enabled requires Models, the Codex models.json
-// cached value; there is no implicit vendored-snapshot source.
+// CodexDescriptor contains the models source and pure-render settings for the
+// OpenAI catalog's Codex client shape. A present Models source, the Codex
+// models.json cached value, enables the Codex catalog; a nil one disables it.
+// There is no implicit vendored-snapshot source.
 type CodexDescriptor struct {
-	Enabled      bool
 	Models       *cache.Value[[]byte]
 	RenderConfig CodexRenderConfig
-}
-
-// wiringError reports an enabled Codex shape that has no models source.
-func (d CodexDescriptor) wiringError() error {
-	if d.Enabled && d.Models == nil {
-		return errors.New("Codex catalog is enabled without a Codex models source (CodexDescriptor.Models)")
-	}
-	return nil
 }
 
 // Source performs one upstream call for the current Copilot model Catalog and
@@ -95,13 +37,17 @@ type Source interface {
 
 var _ Source = (*upstream.Caller)(nil)
 
-// Handler obtains one current Copilot Catalog and renders it for a Surface.
-// Credential/transport details stay behind the narrow Source interface. It
-// panics when the Codex shape is enabled without a models source: the
-// composition root always supplies one, so its absence is a wiring defect.
-func Handler(logger *slog.Logger, ep endpoint.Catalog, rendering Rendering, source Source) http.HandlerFunc {
-	if err := rendering.Codex.wiringError(); err != nil {
-		panic("catalog: " + err.Error())
+// Handler obtains one current Copilot Catalog and renders it in the
+// representation the Catalog Endpoint's Surface selects, configured by
+// descriptors. Credential/transport details stay behind the narrow Source
+// interface. recordShape, when non-nil, receives the request context and the
+// OpenAI Catalog Shape after each successful render; it is a narrow hook so
+// catalog never imports requestsummary.
+func Handler(logger *slog.Logger, ep endpoint.Catalog, descriptors RenderDescriptors, source Source, recordShape func(context.Context, Shape)) http.HandlerFunc {
+	if ep.Surface() != endpoint.OpenAI {
+		// Shape names OpenAI Catalog representations; the Anthropic Catalog has
+		// one representation and records none.
+		recordShape = nil
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		status, body, responseCtx, failure := source.Buffered(r.Context(), upstream.Call{
@@ -124,13 +70,13 @@ func Handler(logger *slog.Logger, ep endpoint.Catalog, rendering Rendering, sour
 			return
 		}
 		filtered := Filter(models, ep.RequiredRoute())
-		representation, shape, err := RenderOne(ep, rendering, r, filtered, responseCtx, logger)
+		representation, shape, err := descriptors.render(ep, r, filtered, responseCtx, logger)
 		if err != nil {
 			apierror.Write(w, ep.Surface(), apierror.BadGateway, "could not render the models catalog")
 			return
 		}
-		if rendering.RecordShape != nil {
-			rendering.RecordShape(r.Context(), shape)
+		if recordShape != nil {
+			recordShape(r.Context(), shape)
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -140,4 +86,41 @@ func Handler(logger *slog.Logger, ep endpoint.Catalog, rendering Rendering, sour
 			_, _ = w.Write(representation)
 		}
 	}
+}
+
+// render renders models in the representation ep's Surface selects and returns
+// the Shape actually served. It owns the OpenAI Catalog's shape decision:
+// whether the Codex client shape or the OpenAI provider shape wins. The
+// Anthropic Catalog has a single representation and reports no Shape.
+func (d RenderDescriptors) render(ep endpoint.Catalog, r *http.Request, models []Model, responseCtx context.Context, logger *slog.Logger) ([]byte, Shape, error) {
+	if ep.Surface() != endpoint.OpenAI {
+		representation, err := RenderAnthropicWithConfig(models, d.Anthropic)
+		return representation, "", err
+	}
+	if !d.Codex.servesCodexShape(ep, r) {
+		representation, err := RenderOpenAI(models)
+		return representation, ShapeOpenAI, err
+	}
+
+	currentBytes, _ := d.Codex.Models.Current()
+	codexModels, err := parseCodexModels(currentBytes)
+	if err != nil {
+		return nil, "", err
+	}
+	representation, outcome, err := RenderCodex(codexModels, models, d.Codex.RenderConfig)
+	if err != nil {
+		return nil, "", err
+	}
+	for _, unapplied := range outcome.UnappliedAliases {
+		logger.WarnContext(responseCtx, "Codex catalog alias mapping was not applied",
+			slog.String(logging.ModelKey, unapplied.Alias),
+			slog.String(logging.MetadataSourceKey, unapplied.MetadataSource),
+			slog.String(logging.SkipReasonKey, string(unapplied.Reason)))
+	}
+	for _, skipped := range outcome.SkippedReviewers {
+		logger.WarnContext(responseCtx, "Codex catalog reviewer was skipped",
+			slog.String(logging.ModelKey, skipped.Model),
+			slog.String(logging.ReviewerKey, skipped.Reviewer))
+	}
+	return representation, ShapeCodex, nil
 }

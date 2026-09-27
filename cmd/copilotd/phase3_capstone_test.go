@@ -87,11 +87,24 @@ func runPhase3Buffered(t *testing.T, cfg config.ServeConfig, decorate func(shim.
 	}
 
 	return phase3BufferedTranscript{
-		requestBody:  <-requestBodies,
+		requestBody:  awaitPhase3RequestBody(t, requestBodies, resp.StatusCode),
 		status:       resp.StatusCode,
 		contentType:  resp.Header.Get("Content-Type"),
 		proofHeader:  resp.Header.Get("X-Upstream-Proof"),
 		responseBody: string(body),
+	}
+}
+
+// awaitPhase3RequestBody returns the body the upstream stub received, failing
+// instead of hanging when the request never reached it.
+func awaitPhase3RequestBody(t *testing.T, requestBodies <-chan string, status int) string {
+	t.Helper()
+	select {
+	case body := <-requestBodies:
+		return body
+	case <-time.After(5 * time.Second):
+		t.Fatalf("request never reached the upstream stub; downstream status = %d", status)
+		return ""
 	}
 }
 
@@ -155,7 +168,7 @@ func runPhase3Stream(t *testing.T, cfg config.ServeConfig, decorate func(shim.Re
 	}
 
 	return phase3StreamTranscript{
-		requestBody:  <-requestBodies,
+		requestBody:  awaitPhase3RequestBody(t, requestBodies, resp.StatusCode),
 		status:       resp.StatusCode,
 		contentType:  resp.Header.Get("Content-Type"),
 		firstRead:    string(first),
