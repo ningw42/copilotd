@@ -181,7 +181,7 @@ func (p *Proxy) Shutdown(ctx context.Context) error
   default TLS verification, and **no** `Timeout` (a client-level timeout would
   kill the long-lived connection). The handshake is bounded by `dialTimeout` via
   context, not by the client. It also refuses redirects (amended by #291;
-  `wsforward.NewDialClient` builds it), as the HTTP Forwarder's client does:
+  `wsforward.NewDialClient` builds it), as the Forwarder's client does:
   following would replace Copilot's first answer, and net/http re-sends the
   Copilot token to a target on the same hostname or a subdomain of it, on any
   port. coder/websocket always wraps the client's `CheckRedirect`, so a client
@@ -525,7 +525,8 @@ transport exists, but no WS-only model is currently hidden). No
      deadline, `Run` returns an error matching `server.ErrForcedDrain`;
      `cmd/copilotd` logs it once at Warn and exits 0. Genuine drain errors stay
      ordinary errors (Error log, exit 1).
-- **`cmd/copilotd/main.go`** builds the dial client, the two WS counters, and the
+- **`cmd/copilotd/main.go`** builds the dial client (with
+  `wsforward.NewDialClient`, amended by #291), the two WS counters, and the
   `Proxy` (passing `cfg.WebSocketHandshakeTimeout`, `cfg.WriteTimeout`,
   `cfg.MaxRequestBytes`), and passes the `Proxy` to `server.New` alongside the
   existing `Forwarder`

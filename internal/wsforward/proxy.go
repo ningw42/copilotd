@@ -131,8 +131,8 @@ func NewDialClient() *http.Client {
 }
 
 // New returns a WebSocket Proxy with an independently cancellable session
-// context. dialClient must not impose a total client timeout and must refuse
-// redirects, as NewDialClient's does.
+// context. dialClient must not impose a total client timeout. Production
+// passes NewDialClient(), which also refuses redirects.
 func New(caller *upstream.Caller, dialClient *http.Client, dialTimeout, writeTimeout time.Duration, maxMessageBytes int64, registry shim.Registry, logger, shimLogger *slog.Logger, hookOverrunThreshold time.Duration, metrics WsMetrics, options ...Option) *Proxy {
 	baseCtx, cancel := context.WithCancel(context.Background())
 	drainCtx, cancelDrain := context.WithCancel(context.Background())
