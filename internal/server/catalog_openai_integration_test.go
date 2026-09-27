@@ -552,19 +552,47 @@ func TestCodexCatalogOverRealListener(t *testing.T) {
 		t.Errorf("upstream request IDs = %q, want first two resolved IDs %q/%q", gotUpstreamRequestIDs, getRequestID, headRequestID)
 	}
 
-	// The other three negotiation cases retain the Phase 6a OpenAI shape.
+	// A bare enable serves the Codex shape for every form of the client_version
+	// key and injects no reviewer.
+	bareBase, _ := newStack(true, catalog.CodexRenderConfig{}, true)
+	for _, query := range []string{"client_version=0.144.5", "client_version=", "client_version"} {
+		bareResponse, bareBody := requestCatalog(bareBase, http.MethodGet, "/openai/v1/models?"+query, "Authorization", "Bearer "+testAPIKey, "codex-capstone-bare")
+		if bareResponse.StatusCode != http.StatusOK {
+			t.Fatalf("bare-enable %q response = %d %s", query, bareResponse.StatusCode, bareBody)
+		}
+		var bareCatalog struct {
+			Models []map[string]json.RawMessage `json:"models"`
+		}
+		if err := json.Unmarshal(bareBody, &bareCatalog); err != nil {
+			t.Fatalf("bare-enable %q body is not a Codex catalog: %v\n%s", query, err, bareBody)
+		}
+		var slugs []string
+		for _, model := range bareCatalog.Models {
+			var slug string
+			if err := json.Unmarshal(model["slug"], &slug); err != nil {
+				t.Fatalf("decode bare-enable slug: %v", err)
+			}
+			slugs = append(slugs, slug)
+			if raw, ok := model["auto_review_model_override"]; ok {
+				t.Errorf("bare-enable %q gave %s reviewer %s, want the official absent field", query, slug, raw)
+			}
+		}
+		if want := []string{reviewer, activeModel}; strings.Join(slugs, ",") != strings.Join(want, ",") {
+			t.Errorf("bare-enable %q slugs = %q, want Copilot-ordered intersection %q", query, slugs, want)
+		}
+	}
+	bareHeadResponse, bareHeadBody := requestCatalog(bareBase, http.MethodHead, "/openai/v1/models?client_version=0.144.5", "Authorization", "Bearer "+testAPIKey, "codex-capstone-bare-head")
+	_, bareGetBody := requestCatalog(bareBase, http.MethodGet, "/openai/v1/models?client_version=0.144.5", "Authorization", "Bearer "+testAPIKey, "codex-capstone-bare-get")
+	if bareHeadResponse.StatusCode != http.StatusOK || len(bareHeadBody) != 0 || bareHeadResponse.Header.Get("Content-Length") != strconv.Itoa(len(bareGetBody)) {
+		t.Errorf("bare-enable HEAD = status %d length %q body %q, want GET length %d and no body", bareHeadResponse.StatusCode, bareHeadResponse.Header.Get("Content-Length"), bareHeadBody, len(bareGetBody))
+	}
+
+	// The other two negotiation cases retain the Phase 6a OpenAI shape.
 	noQueryResponse, noQueryBody := requestCatalog(codexBase, http.MethodGet, "/openai/v1/models", "Authorization", "Bearer "+testAPIKey, "codex-capstone-no-query")
 	if noQueryResponse.StatusCode != http.StatusOK {
 		t.Fatalf("no-client-version response = %d %s", noQueryResponse.StatusCode, noQueryBody)
 	}
 	assertOpenAIList(noQueryBody)
-
-	noInjectionBase, _ := newStack(true, catalog.CodexRenderConfig{}, true)
-	noInjectionResponse, noInjectionBody := requestCatalog(noInjectionBase, http.MethodGet, "/openai/v1/models?client_version=0.144.5", "Authorization", "Bearer "+testAPIKey, "codex-capstone-no-injection")
-	if noInjectionResponse.StatusCode != http.StatusOK {
-		t.Fatalf("no-injection response = %d %s", noInjectionResponse.StatusCode, noInjectionBody)
-	}
-	assertOpenAIList(noInjectionBody)
 
 	disabledBase, _ := newStack(false, catalog.CodexRenderConfig{AutoReviewModel: reviewer}, true)
 	disabledResponse, disabledBody := requestCatalog(disabledBase, http.MethodGet, "/openai/v1/models?client_version=0.144.5", "Authorization", "Bearer "+testAPIKey, "codex-capstone-disabled")

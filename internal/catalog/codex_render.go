@@ -8,8 +8,9 @@ import (
 )
 
 // CodexRenderConfig contains the aliases, reviewer routing, and limits policy
-// the pure Codex renderer may apply. Whether to emit the Codex catalog at all
-// is a handler concern.
+// the pure Codex renderer may apply. Each add-on alters only its own fields,
+// and the zero value re-emits the selected official entries unaltered.
+// Whether to emit the Codex catalog at all is a handler concern.
 type CodexRenderConfig struct {
 	// ModelAliases maps a live Copilot model ID to the exact official Codex
 	// entry that supplies its complete metadata.
@@ -20,13 +21,6 @@ type CodexRenderConfig struct {
 	// RenderCodex does not fall back to AutoReviewModel for that model.
 	AutoReviewModelOverrides map[string]string
 	OverrideLimits           bool
-}
-
-func (c CodexRenderConfig) mutates() bool {
-	return len(c.ModelAliases) > 0 ||
-		c.AutoReviewModel != "" ||
-		len(c.AutoReviewModelOverrides) > 0 ||
-		c.OverrideLimits
 }
 
 // SkippedReviewer identifies one emitted main model whose resolved reviewer
@@ -77,8 +71,8 @@ func codexAliasSkipReason(alias, source string, forwardableByID map[string]struc
 // RenderCodex resolves complete official metadata for Responses-forwardable
 // Copilot models, preserving Copilot's order. Codex entry fields are copied
 // verbatim except for the served alias slug; auto_review_model_override is
-// always removed and then optionally reinjected from deployment policy; and
-// live limits are optionally overlaid.
+// replaced only by an emitted deployment reviewer; and live limits are
+// optionally overlaid.
 func RenderCodex(codexModels CodexModels, forwardable []Model, cfg CodexRenderConfig) ([]byte, CodexRenderOutcome, error) {
 	var outcome CodexRenderOutcome
 	forwardableByID := make(map[string]struct{}, len(forwardable))
@@ -135,9 +129,8 @@ func RenderCodex(codexModels CodexModels, forwardable []Model, cfg CodexRenderCo
 			}
 			fields["slug"] = rawAlias
 		}
-		// The Codex entry's value is not authoritative for this deployment. Omit
-		// it unless the configured reviewer is itself safe to advertise.
-		delete(fields, "auto_review_model_override")
+		// Only a configured reviewer that is itself safe to advertise replaces
+		// the official value; otherwise the official field stays as accepted.
 		reviewer, overridden := cfg.AutoReviewModelOverrides[model.ID]
 		if !overridden {
 			reviewer = cfg.AutoReviewModel

@@ -150,7 +150,7 @@ func TestHandlerRendersTheAnthropicCatalogWithItsConfig(t *testing.T) {
 	}
 }
 
-func TestHandlerNegotiatesCodexShapeOnlyWhenEveryGateIsOpen(t *testing.T) {
+func TestHandlerNegotiatesCodexShapeFromSourceAndClientVersionKey(t *testing.T) {
 	upstreamBody := []byte(`{"data":[{"id":"gpt-5.4","name":"GPT-5.4","vendor":"OpenAI","model_picker_enabled":true,"supported_endpoints":["/responses","/v1/messages"]}]}`)
 	models, err := Decode(upstreamBody)
 	if err != nil {
@@ -176,9 +176,19 @@ func TestHandlerNegotiatesCodexShapeOnlyWhenEveryGateIsOpen(t *testing.T) {
 		overrideLimit     bool
 		wantCodex         bool
 	}{
-		{name: "client key absent", codexSource: true, reviewer: "gpt-5.4"},
-		{name: "Codex source absent", rawQuery: "client_version=fixture", reviewer: "gpt-5.4"},
-		{name: "nothing to inject", rawQuery: "client_version=fixture", codexSource: true},
+		{name: "client key absent", codexSource: true},
+		{name: "client key absent with reviewer", codexSource: true, reviewer: "gpt-5.4"},
+		{
+			name:              "Codex source absent with every add-on",
+			rawQuery:          "client_version=fixture",
+			reviewer:          "gpt-5.4",
+			aliases:           map[string]string{"gpt-example-alias": "gpt-5.4"},
+			reviewerOverrides: map[string]string{"gpt-5.4": "gpt-5.4"},
+			overrideLimit:     true,
+		},
+		{name: "bare enable with client value", rawQuery: "client_version=fixture", codexSource: true, wantCodex: true},
+		{name: "bare enable with empty client value", rawQuery: "client_version=", codexSource: true, wantCodex: true},
+		{name: "bare enable with valueless client key", rawQuery: "client_version", codexSource: true, wantCodex: true},
 		{
 			name:              "Anthropic Catalog with every add-on",
 			anthropicCatalog:  true,
@@ -189,9 +199,9 @@ func TestHandlerNegotiatesCodexShapeOnlyWhenEveryGateIsOpen(t *testing.T) {
 			reviewerOverrides: map[string]string{"gpt-5.4": "gpt-5.4"},
 			overrideLimit:     true,
 		},
-		{name: "aliases are enough to inject", rawQuery: "client_version=fixture", codexSource: true, aliases: map[string]string{"gpt-example-alias": "gpt-5.4"}, wantCodex: true},
-		{name: "empty client value is present with reviewer", rawQuery: "client_version=", codexSource: true, reviewer: "gpt-5.4", wantCodex: true},
-		{name: "valueless client key is present with limits", rawQuery: "client_version", codexSource: true, overrideLimit: true, wantCodex: true},
+		{name: "aliases add to the Codex shape", rawQuery: "client_version=fixture", codexSource: true, aliases: map[string]string{"gpt-example-alias": "gpt-5.4"}, wantCodex: true},
+		{name: "reviewer adds to the Codex shape", rawQuery: "client_version=", codexSource: true, reviewer: "gpt-5.4", wantCodex: true},
+		{name: "limits add to the Codex shape", rawQuery: "client_version", codexSource: true, overrideLimit: true, wantCodex: true},
 	}
 
 	for _, tc := range tests {
@@ -233,8 +243,8 @@ func TestHandlerNegotiatesCodexShapeOnlyWhenEveryGateIsOpen(t *testing.T) {
 					t.Errorf("Anthropic Catalog called the shape hook %d times with %q, want none", recorded.calls, recorded.shape)
 				}
 			case tc.wantCodex:
-				if got := recorder.Body.String(); !strings.HasPrefix(got, `{"models":`) {
-					t.Errorf("body = %s, want Codex catalog shape", got)
+				if got := renderedSlugs(t, decodeRenderedCodex(t, recorder.Body.Bytes())); !reflect.DeepEqual(got, []string{"gpt-5.4"}) {
+					t.Errorf("Codex catalog slugs = %q, want the sole live/accepted intersection gpt-5.4", got)
 				}
 				if recorded.calls != 1 || recorded.shape != ShapeCodex {
 					t.Errorf("shape hook calls/shape = %d/%q, want 1/%q", recorded.calls, recorded.shape, ShapeCodex)
@@ -253,38 +263,74 @@ func TestHandlerNegotiatesCodexShapeOnlyWhenEveryGateIsOpen(t *testing.T) {
 
 func TestHandlerCodexHEADMatchesGETHeadersAndSuppressesBody(t *testing.T) {
 	const alias = "gpt-example-alias"
-	upstreamBody := []byte(`{"data":[{"id":"` + alias + `","vendor":"OpenAI","model_picker_enabled":true,"supported_endpoints":["/responses"]}]}`)
-	descriptors := RenderDescriptors{
-		Codex: CodexDescriptor{
-			Models: pinnedCodexModels(t, "gpt-5.4"),
-			RenderConfig: CodexRenderConfig{
-				ModelAliases: map[string]string{alias: "gpt-5.4"},
-			},
-		},
+	upstreamBody := []byte(`{"data":[` +
+		`{"id":"gpt-5.4","vendor":"OpenAI","model_picker_enabled":true,"supported_endpoints":["/responses"]},` +
+		`{"id":"` + alias + `","vendor":"OpenAI","model_picker_enabled":true,"supported_endpoints":["/responses"]}]}`)
+	tests := []struct {
+		name         string
+		renderConfig CodexRenderConfig
+		wantSlugs    []string
+	}{
+		{name: "bare enable", wantSlugs: []string{"gpt-5.4"}},
+		{name: "alias", renderConfig: CodexRenderConfig{ModelAliases: map[string]string{alias: "gpt-5.4"}}, wantSlugs: []string{"gpt-5.4", alias}},
 	}
-	handler := Handler(discardHandlerLogger(), endpoint.OpenAICatalog(), descriptors, stubSource{status: http.StatusOK, body: upstreamBody}, nil)
 
-	getRecorder := httptest.NewRecorder()
-	handler(getRecorder, httptest.NewRequest(http.MethodGet, "/openai/v1/models?client_version=secret-query-value", nil))
-	headRecorder := httptest.NewRecorder()
-	handler(headRecorder, httptest.NewRequest(http.MethodHead, "/openai/v1/models?client_version=", nil))
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			descriptors := RenderDescriptors{
+				Codex: CodexDescriptor{
+					Models:       pinnedCodexModels(t, "gpt-5.4"),
+					RenderConfig: tc.renderConfig,
+				},
+			}
+			handler := Handler(discardHandlerLogger(), endpoint.OpenAICatalog(), descriptors, stubSource{status: http.StatusOK, body: upstreamBody}, nil)
 
-	if getRecorder.Code != http.StatusOK || headRecorder.Code != http.StatusOK {
-		t.Fatalf("GET/HEAD status = %d/%d, want 200/200", getRecorder.Code, headRecorder.Code)
+			getRecorder := httptest.NewRecorder()
+			handler(getRecorder, httptest.NewRequest(http.MethodGet, "/openai/v1/models?client_version=secret-query-value", nil))
+			headRecorder := httptest.NewRecorder()
+			handler(headRecorder, httptest.NewRequest(http.MethodHead, "/openai/v1/models?client_version=", nil))
+
+			if getRecorder.Code != http.StatusOK || headRecorder.Code != http.StatusOK {
+				t.Fatalf("GET/HEAD status = %d/%d, want 200/200", getRecorder.Code, headRecorder.Code)
+			}
+			if got := renderedSlugs(t, decodeRenderedCodex(t, getRecorder.Body.Bytes())); !reflect.DeepEqual(got, tc.wantSlugs) {
+				t.Errorf("GET Codex slugs = %q, want %q", got, tc.wantSlugs)
+			}
+			for _, header := range []string{"Content-Type", "Content-Length"} {
+				if got, want := headRecorder.Header().Get(header), getRecorder.Header().Get(header); got != want {
+					t.Errorf("HEAD %s = %q, want GET value %q", header, got, want)
+				}
+			}
+			if got := headRecorder.Body.Len(); got != 0 {
+				t.Errorf("HEAD body length = %d, want 0", got)
+			}
+			if got, want := getRecorder.Header().Get("Content-Length"), strconv.Itoa(getRecorder.Body.Len()); got != want {
+				t.Errorf("GET Content-Length = %q, want %q", got, want)
+			}
+			if got := getRecorder.Header().Get("X-Catalog-Shape"); got != "" {
+				t.Errorf("internal catalog shape header leaked as %q", got)
+			}
+		})
 	}
-	for _, header := range []string{"Content-Type", "Content-Length"} {
-		if got, want := headRecorder.Header().Get(header), getRecorder.Header().Get(header); got != want {
-			t.Errorf("HEAD %s = %q, want GET value %q", header, got, want)
-		}
+}
+
+func TestHandlerServesAnEmptyCodexCatalogWhenNoLiveModelIsAccepted(t *testing.T) {
+	upstreamBody := []byte(`{"data":[{"id":"gpt-copilot-only","vendor":"OpenAI","model_picker_enabled":true,"supported_endpoints":["/responses"]}]}`)
+	descriptors := RenderDescriptors{Codex: CodexDescriptor{Models: pinnedCodexModels(t, "gpt-5.4")}}
+	var recorded shapeRecorder
+	handler := Handler(discardHandlerLogger(), endpoint.OpenAICatalog(), descriptors, stubSource{status: http.StatusOK, body: upstreamBody}, recorded.record)
+	recorder := httptest.NewRecorder()
+
+	handler(recorder, httptest.NewRequest(http.MethodGet, "/openai/v1/models?client_version=fixture", nil))
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", recorder.Code, recorder.Body.String())
 	}
-	if got := headRecorder.Body.Len(); got != 0 {
-		t.Errorf("HEAD body length = %d, want 0", got)
+	if got, want := recorder.Body.String(), `{"models":[]}`; got != want {
+		t.Errorf("body = %s, want empty Codex catalog %s", got, want)
 	}
-	if got, want := getRecorder.Header().Get("Content-Length"), strconv.Itoa(getRecorder.Body.Len()); got != want {
-		t.Errorf("GET Content-Length = %q, want %q", got, want)
-	}
-	if got := getRecorder.Header().Get("X-Catalog-Shape"); got != "" {
-		t.Errorf("internal catalog shape header leaked as %q", got)
+	if recorded.calls != 1 || recorded.shape != ShapeCodex {
+		t.Errorf("shape hook calls/shape = %d/%q, want 1/%q", recorded.calls, recorded.shape, ShapeCodex)
 	}
 }
 

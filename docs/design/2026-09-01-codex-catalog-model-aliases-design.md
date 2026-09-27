@@ -1,6 +1,6 @@
 # Explicit Codex catalog model aliases — Design
 
-Status: approved
+Status: approved; emission gate and reviewer field amended by [#287](https://github.com/ningw42/copilotd/issues/287)
 Date: 2026-09-01
 Builds on:
 
@@ -9,6 +9,22 @@ Builds on:
 - ADR-0005, "Codex catalog re-emits Codex's own complete release `ModelInfo`, mutating only named fields, opt-in"
 - ADR-0009, "Refresh Codex models from the latest release in memory"
 - ADR-0012, "Declare each config setting once via a typed descriptor table"
+
+> **Superseded historical detail.** The [#287](https://github.com/ningw42/copilotd/issues/287) amendment to
+> [ADR-0005](../adr/0005-codex-catalog-reemits-pinned-modelinfo.md)
+> replaces two rules in this dated design. Where the text below conflicts with
+> them, the amendment wins:
+>
+> - **Emission gate** (§2.1, §6, §8, §11.5): the Codex shape is served whenever
+>   the Codex catalog is enabled and the request carries a `client_version`
+>   key. A non-empty alias map no longer needs to count as "something to
+>   inject", and an empty mutation set serves the unaltered Codex shape rather
+>   than the provider-shaped catalog.
+> - **Reviewer field** (§1, §5.2 Pass 2, §5.4, §11.2, §14): the inherited
+>   `auto_review_model_override` is no longer deleted. An alias clone keeps its
+>   metadata source's official reviewer field unless a configured reviewer that
+>   is in the emitted membership replaces it, so an alias alone changes only
+>   `slug`.
 
 ## 1. Goal and outcome
 

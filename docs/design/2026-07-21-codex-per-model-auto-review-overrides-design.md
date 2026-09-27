@@ -1,10 +1,24 @@
 # Per-model `auto_review_model_override` reviewer routing (`ningw42/copilotd#54`) — Design
 
-Status: approved (polished via brainstorming + grilling)
+Status: approved (polished via brainstorming + grilling); emission gate and reviewer field amended by [#287](https://github.com/ningw42/copilotd/issues/287)
 Date: 2026-07-21
 Tracking issue: `ningw42/copilotd#54` → closed and superseded by epic `ningw42/copilotd#88`
 Builds on: `docs/design/2026-07-19-phase-6b-codex-model-catalog-auto-review-design.md`
 (the global-only reviewer; this design was split out of that one during grilling — Phase 6b §2.2).
+
+> **Superseded historical detail.** The [#287](https://github.com/ningw42/copilotd/issues/287) amendment to
+> [ADR-0005](../adr/0005-codex-catalog-reemits-pinned-modelinfo.md)
+> replaces two rules in this dated design. Where the text below conflicts with
+> them, the amendment wins:
+>
+> - **Emission gate** (§1, §2.1, §3, §7, §9.3, §10): the Codex shape is served
+>   whenever the Codex catalog is enabled and the request carries a
+>   `client_version` key. A non-empty overrides map no longer needs to count as
+>   "something to inject", because no add-on is required.
+> - **Reviewer field** (§5.1, §5.2, §10): a resolved reviewer that is in the emitted
+>   membership replaces `auto_review_model_override`. A model with neither an
+>   override nor a global reviewer, or whose reviewer is skipped, keeps its
+>   official field unchanged, whether absent, null, or non-null.
 
 ## 1. Goal and outcome
 

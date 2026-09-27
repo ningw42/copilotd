@@ -16,12 +16,11 @@ const (
 	ShapeCodex Shape = "codex"
 )
 
-// servesCodexShape reports whether this descriptor's opt-in gates are open for the
-// OpenAI Surface and the given request. A present models source is the Codex
-// catalog's enable signal.
+// servesCodexShape reports whether this descriptor serves the Codex shape for
+// the OpenAI Surface and the given request. A present models source is the
+// Codex catalog's enable signal; render add-ons only alter what is served.
 func (d CodexDescriptor) servesCodexShape(ep endpoint.Catalog, r *http.Request) bool {
 	return ep.Surface() == endpoint.OpenAI &&
 		r.URL.Query().Has("client_version") &&
-		d.Models != nil &&
-		d.RenderConfig.mutates()
+		d.Models != nil
 }

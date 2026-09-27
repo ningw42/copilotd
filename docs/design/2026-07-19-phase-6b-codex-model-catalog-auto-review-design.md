@@ -1,12 +1,27 @@
 # Phase 6b — Codex model catalog + auto-review routing (`auto_review_model_override`) — Design
 
-Status: proposed design (polished via brainstorming + grilling), pending final written-spec review
+Status: proposed design (polished via brainstorming + grilling), pending final written-spec review; emission gate and reviewer field amended by [#287](https://github.com/ningw42/copilotd/issues/287)
 Date: 2026-07-19
 Tracking issue: [#55](https://github.com/ningw42/copilotd/issues/55) — the **client-shaped** half deferred by the Phase 6a design (§2.2, §12).
 Builds on: `docs/design/2026-07-18-phase-6a-provider-shaped-model-catalogs-design.md`,
 `docs/design/2026-07-18-phase-4-github-copilot-support-endpoint-design.md`.
 Follow-on: snapshot freshness automation is split to `ningw42/copilotd#53` (§16);
 per-model reviewer overrides to `ningw42/copilotd#54` (§2.2).
+
+> **Superseded historical detail.** The [#287](https://github.com/ningw42/copilotd/issues/287) amendment to
+> [ADR-0005](../adr/0005-codex-catalog-reemits-pinned-modelinfo.md)
+> replaces two rules in this dated design. Where the text below conflicts with
+> them, the amendment wins:
+>
+> - **Emission gate** (§2.1, §3, §6, §8, §13.2, §14.3, §15): the Codex shape
+>   is served whenever the Codex catalog is enabled and the request carries a
+>   `client_version` key. No reviewer, alias, or limits add-on is required; a
+>   bare enable serves the unaltered exact intersection, and an empty
+>   intersection is `{"models":[]}`, not the OpenAI list.
+> - **Reviewer field** (§7.3, §13.5): a configured reviewer that is in the
+>   emitted membership replaces `auto_review_model_override`. When no reviewer
+>   applies, or a configured one is skipped, the official field is re-emitted
+>   unchanged, whether absent, null, or non-null, instead of being omitted.
 
 ## 1. Goal and outcome
 

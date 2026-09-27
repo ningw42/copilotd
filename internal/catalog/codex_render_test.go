@@ -54,6 +54,35 @@ func TestRenderCodexIntersectsInLiveOrderAndEmitsCompleteEntries(t *testing.T) {
 	}
 }
 
+func TestRenderCodexWithoutAddOnsPreservesEverySelectedSourceEntry(t *testing.T) {
+	codexModels := syntheticCodexModels(t,
+		completeCodexEntry("gpt-absent-reviewer", map[string]any{
+			"future_field": map[string]any{"nested": []any{1, "two", nil}},
+		}),
+		completeCodexEntry("gpt-null-reviewer", map[string]any{"auto_review_model_override": nil}),
+		// The official reviewer is not emitted, and no deployment reviewer applies.
+		completeCodexEntry("gpt-official-reviewer", map[string]any{"auto_review_model_override": "codex-auto-review"}),
+		completeCodexEntry("codex-auto-review", nil),
+	)
+	models := []Model{{ID: "gpt-official-reviewer"}, {ID: "gpt-copilot-only"}, {ID: "gpt-null-reviewer"}, {ID: "gpt-absent-reviewer"}}
+
+	body, outcome, err := RenderCodex(codexModels, models, CodexRenderConfig{})
+	if err != nil {
+		t.Fatalf("RenderCodex: %v", err)
+	}
+	if len(outcome.UnappliedAliases) != 0 || len(outcome.SkippedReviewers) != 0 {
+		t.Errorf("outcome = %#v, want no events without add-ons", outcome)
+	}
+	entries := decodeRenderedCodex(t, body)
+	wantSlugs := []string{"gpt-official-reviewer", "gpt-null-reviewer", "gpt-absent-reviewer"}
+	if got := renderedSlugs(t, entries); !reflect.DeepEqual(got, wantSlugs) {
+		t.Fatalf("rendered slugs = %q, want live-order intersection %q", got, wantSlugs)
+	}
+	for i, entry := range entries {
+		assertSourceFieldsPreserved(t, wantSlugs[i], entry, codexModels[wantSlugs[i]], nil)
+	}
+}
+
 func TestRenderCodexClonesOfficialMetadataForLiveAlias(t *testing.T) {
 	const alias = "gpt-example-alias"
 	codexModels := syntheticCodexModels(t,
@@ -85,16 +114,8 @@ func TestRenderCodexClonesOfficialMetadataForLiveAlias(t *testing.T) {
 	if len(baselineEntries) != 2 || !reflect.DeepEqual(entries[0], baselineEntries[0]) || !reflect.DeepEqual(entries[2], baselineEntries[1]) {
 		t.Errorf("alias configuration changed unrelated exact entries:\nwith alias: %#v\nbaseline: %#v", entries, baselineEntries)
 	}
-	aliased := entries[1]
-	for field, want := range codexModels["gpt-5.4"] {
-		if field == "slug" || field == "auto_review_model_override" {
-			continue
-		}
-		assertRawFieldEqual(t, alias, field, aliased[field], want)
-	}
-	if _, ok := aliased["auto_review_model_override"]; ok {
-		t.Error("alias retained the metadata source reviewer")
-	}
+	// An alias alone changes only slug; the source's official reviewer stays.
+	assertSourceFieldsPreserved(t, alias, entries[1], codexModels["gpt-5.4"], map[string]struct{}{"slug": {}})
 }
 
 func TestRenderCodexRejectsInvalidRawMetadataSourceField(t *testing.T) {
@@ -421,7 +442,7 @@ func TestRenderCodexDoesNotAdvertiseUnappliedAliasAsReviewer(t *testing.T) {
 	}
 }
 
-func TestRenderCodexAliasRemovesSourceReviewerAndUsesAliasLiveLimits(t *testing.T) {
+func TestRenderCodexAliasRetainsSourceReviewerAndUsesAliasLiveLimits(t *testing.T) {
 	const (
 		alias  = "gpt-limit-alias"
 		source = "gpt-5.4"
@@ -457,9 +478,7 @@ func TestRenderCodexAliasRemovesSourceReviewerAndUsesAliasLiveLimits(t *testing.
 		t.Fatalf("RenderCodex overlay on: %v", err)
 	}
 	onAlias := decodeRenderedCodex(t, onBody)[1]
-	if _, ok := onAlias["auto_review_model_override"]; ok {
-		t.Error("alias retained its metadata source reviewer")
-	}
+	assertRawFieldEqual(t, alias, "auto_review_model_override", onAlias["auto_review_model_override"], sourceEntry["auto_review_model_override"])
 	assertJSONInt(t, onAlias, "context_window", aliasPromptLimit)
 	assertRawFieldEqual(t, alias, "max_context_window", onAlias["max_context_window"], sourceEntry["max_context_window"])
 }
@@ -487,21 +506,14 @@ func TestRenderCodexCopiesCurrentFieldsVerbatimAndDoesNotAliasThem(t *testing.T)
 		if err := json.Unmarshal(entry["slug"], &slug); err != nil {
 			t.Fatalf("decode rendered slug: %v", err)
 		}
-		for field, want := range codexModels[slug] {
-			if field == "auto_review_model_override" {
-				continue
-			}
-			if got := entry[field]; !bytes.Equal(got, want) {
-				t.Errorf("%s.%s changed:\n got: %s\nwant: %s", slug, field, got, want)
-			}
+		if slug != "gpt-5.4" {
+			// No configured reviewer applies, so the official field is untouched.
+			assertSourceFieldsPreserved(t, slug, entry, codexModels[slug], nil)
+			continue
 		}
-		rawReviewer, hasReviewer := entry["auto_review_model_override"]
-		if slug == "gpt-5.4" {
-			if got := decodeStringField(t, entry, "auto_review_model_override"); got != "gpt-5.6-luna" {
-				t.Errorf("%s reviewer = %q, want gpt-5.6-luna", slug, got)
-			}
-		} else if hasReviewer {
-			t.Errorf("%s retained auto_review_model_override without a reviewer: %s", slug, rawReviewer)
+		assertSourceFieldsPreserved(t, slug, entry, codexModels[slug], map[string]struct{}{"auto_review_model_override": {}})
+		if got := decodeStringField(t, entry, "auto_review_model_override"); got != "gpt-5.6-luna" {
+			t.Errorf("%s reviewer = %q, want gpt-5.6-luna", slug, got)
 		}
 	}
 
@@ -525,10 +537,10 @@ func TestRenderCodexInjectsOnlyAnEmittedReviewer(t *testing.T) {
 		wantValue string
 		wantSkips bool
 	}{
-		{name: "empty reviewer"},
+		{name: "empty reviewer preserves official values"},
 		{name: "emitted reviewer overwrites Codex value", reviewer: "gpt-5.6-luna", wantValue: "gpt-5.6-luna"},
-		{name: "Codex-only reviewer is skipped", reviewer: "codex-auto-review", wantSkips: true},
-		{name: "Copilot-only reviewer is skipped", reviewer: "gpt-5.3-codex", wantSkips: true},
+		{name: "Codex-only reviewer is skipped and preserves official values", reviewer: "codex-auto-review", wantSkips: true},
+		{name: "Copilot-only reviewer is skipped and preserves official values", reviewer: "gpt-5.3-codex", wantSkips: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -555,8 +567,12 @@ func TestRenderCodexInjectsOnlyAnEmittedReviewer(t *testing.T) {
 			for i, entry := range entries {
 				raw, ok := entry["auto_review_model_override"]
 				if tc.wantValue == "" {
-					if ok {
-						t.Errorf("models[%d] has unexpected override %s", i, raw)
+					// gpt-5.4's official reviewer survives even though it is not
+					// emitted; gpt-5.6-luna keeps its absent field.
+					slug := decodeStringField(t, entry, "slug")
+					official, hasOfficial := codexModels[slug]["auto_review_model_override"]
+					if ok != hasOfficial || !bytes.Equal(raw, official) {
+						t.Errorf("models[%d] override = %s (present %v), want official %s (present %v)", i, raw, ok, official, hasOfficial)
 					}
 					continue
 				}
@@ -566,6 +582,173 @@ func TestRenderCodexInjectsOnlyAnEmittedReviewer(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestRenderCodexEachAddOnAltersOnlyItsOwnFields(t *testing.T) {
+	const alias = "gpt-alias"
+	codexModels := syntheticCodexModels(t,
+		completeCodexEntry("gpt-5.4", map[string]any{
+			"auto_review_model_override": "official-reviewer",
+			"context_window":             272000,
+			"max_context_window":         1000000,
+		}),
+		completeCodexEntry("gpt-5.5", map[string]any{
+			"auto_review_model_override": "official-reviewer",
+			"context_window":             128000,
+		}),
+		completeCodexEntry("gpt-5.6-luna", map[string]any{"auto_review_model_override": nil}),
+	)
+	promptLimit, contextLimit, aliasPromptLimit := 111, 222, 333
+	models := []Model{
+		{ID: "gpt-5.4", Capabilities: Capabilities{Limits: Limits{MaxPromptTokens: &promptLimit, MaxContextWindowTokens: &contextLimit}}},
+		{ID: alias, Capabilities: Capabilities{Limits: Limits{MaxPromptTokens: &aliasPromptLimit}}},
+		{ID: "gpt-5.6-luna"},
+	}
+	aliases := map[string]string{alias: "gpt-5.5"}
+	// wantEntry names an emitted entry's source and each altered field's exact
+	// raw value. Every other source field must be byte-identical.
+	type wantEntry struct {
+		source  string
+		changed map[string]string
+	}
+
+	tests := []struct {
+		name string
+		cfg  CodexRenderConfig
+		want []wantEntry
+	}{
+		{
+			name: "per-model reviewer alters only its main model",
+			cfg:  CodexRenderConfig{AutoReviewModelOverrides: map[string]string{"gpt-5.4": "gpt-5.6-luna"}},
+			want: []wantEntry{
+				{source: "gpt-5.4", changed: map[string]string{"auto_review_model_override": `"gpt-5.6-luna"`}},
+				{source: "gpt-5.6-luna"},
+			},
+		},
+		{
+			name: "limits alter only live limit fields",
+			cfg:  CodexRenderConfig{OverrideLimits: true},
+			want: []wantEntry{
+				{source: "gpt-5.4", changed: map[string]string{"context_window": "111", "max_context_window": "222"}},
+				{source: "gpt-5.6-luna"},
+			},
+		},
+		{
+			name: "alias alters only its slug",
+			cfg:  CodexRenderConfig{ModelAliases: aliases},
+			want: []wantEntry{
+				{source: "gpt-5.4"},
+				{source: "gpt-5.5", changed: map[string]string{"slug": `"gpt-alias"`}},
+				{source: "gpt-5.6-luna"},
+			},
+		},
+		{
+			name: "combined add-ons alter only their governed fields",
+			cfg: CodexRenderConfig{
+				ModelAliases:             aliases,
+				AutoReviewModelOverrides: map[string]string{"gpt-5.6-luna": alias},
+				OverrideLimits:           true,
+			},
+			want: []wantEntry{
+				{source: "gpt-5.4", changed: map[string]string{"context_window": "111", "max_context_window": "222"}},
+				{source: "gpt-5.5", changed: map[string]string{"slug": `"gpt-alias"`, "context_window": "333"}},
+				{source: "gpt-5.6-luna", changed: map[string]string{"auto_review_model_override": `"gpt-alias"`}},
+			},
+		},
+		{
+			name: "global reviewer applies to every entry without an override",
+			cfg: CodexRenderConfig{
+				ModelAliases:             aliases,
+				AutoReviewModel:          "gpt-5.4",
+				AutoReviewModelOverrides: map[string]string{"gpt-5.4": alias},
+			},
+			want: []wantEntry{
+				{source: "gpt-5.4", changed: map[string]string{"auto_review_model_override": `"gpt-alias"`}},
+				{source: "gpt-5.5", changed: map[string]string{"slug": `"gpt-alias"`, "auto_review_model_override": `"gpt-5.4"`}},
+				{source: "gpt-5.6-luna", changed: map[string]string{"auto_review_model_override": `"gpt-5.4"`}},
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			body, outcome, err := RenderCodex(codexModels, models, tc.cfg)
+			if err != nil {
+				t.Fatalf("RenderCodex: %v", err)
+			}
+			if len(outcome.UnappliedAliases) != 0 || len(outcome.SkippedReviewers) != 0 {
+				t.Errorf("outcome = %#v, want every configured add-on applied", outcome)
+			}
+			entries := decodeRenderedCodex(t, body)
+			if len(entries) != len(tc.want) {
+				t.Fatalf("rendered %d entries, want %d", len(entries), len(tc.want))
+			}
+			for i, want := range tc.want {
+				governed := make(map[string]struct{}, len(want.changed))
+				for field, value := range want.changed {
+					governed[field] = struct{}{}
+					assertRawFieldEqual(t, want.source, field, entries[i][field], json.RawMessage(value))
+				}
+				assertSourceFieldsPreserved(t, want.source, entries[i], codexModels[want.source], governed)
+			}
+		})
+	}
+}
+
+func TestRenderCodexSkippedReviewerLeavesTheOfficialFieldUntouched(t *testing.T) {
+	const (
+		mainModel       = "gpt-5.4"
+		missingReviewer = "missing-reviewer"
+	)
+	originals := []struct {
+		name   string
+		fields map[string]any
+	}{
+		{name: "absent"},
+		{name: "null", fields: map[string]any{"auto_review_model_override": nil}},
+		{name: "non-null", fields: map[string]any{"auto_review_model_override": "official-reviewer"}},
+	}
+	failures := []struct {
+		name        string
+		cfg         CodexRenderConfig
+		wantSkipped []SkippedReviewer
+	}{
+		{
+			name: "unemitted global reviewer",
+			cfg:  CodexRenderConfig{AutoReviewModel: missingReviewer},
+			wantSkipped: []SkippedReviewer{
+				{Model: mainModel, Reviewer: missingReviewer},
+				{Model: "gpt-5.5", Reviewer: missingReviewer},
+			},
+		},
+		{
+			name: "unemitted per-model reviewer does not fall back to the global reviewer",
+			cfg: CodexRenderConfig{
+				AutoReviewModel:          "gpt-5.5",
+				AutoReviewModelOverrides: map[string]string{mainModel: missingReviewer},
+			},
+			wantSkipped: []SkippedReviewer{{Model: mainModel, Reviewer: missingReviewer}},
+		},
+	}
+	models := []Model{{ID: mainModel}, {ID: "gpt-5.5"}}
+	for _, original := range originals {
+		for _, failure := range failures {
+			t.Run(original.name+"/"+failure.name, func(t *testing.T) {
+				codexModels := syntheticCodexModels(t,
+					completeCodexEntry(mainModel, original.fields),
+					completeCodexEntry("gpt-5.5", nil),
+				)
+				body, outcome, err := RenderCodex(codexModels, models, failure.cfg)
+				if err != nil {
+					t.Fatalf("RenderCodex: %v", err)
+				}
+				if !reflect.DeepEqual(outcome.SkippedReviewers, failure.wantSkipped) {
+					t.Errorf("skipped reviewers = %#v, want %#v", outcome.SkippedReviewers, failure.wantSkipped)
+				}
+				entries := decodeRenderedCodex(t, body)
+				assertSourceFieldsPreserved(t, mainModel, entries[0], codexModels[mainModel], nil)
+			})
+		}
 	}
 }
 

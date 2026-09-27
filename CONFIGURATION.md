@@ -735,9 +735,23 @@ bounds, interrupts, or cancels hook execution.
 
 ### `--codex-catalog-enabled`
 
-Allows a Codex-shaped model catalog when the request has `client_version` and a
-catalog alias, global auto-review model, per-main-model reviewer override, or
-live-limit override is configured.
+Serves a Codex-shaped model catalog on `/openai/v1/models` when the request has
+a `client_version` query key; an empty or valueless key also counts. Requests
+without the key keep the provider-shaped OpenAI catalog. This is the only
+switch: no alias, reviewer, or live-limit setting is required.
+
+The catalog lists the exact intersection of picker-visible,
+Responses-forwardable Copilot models and the accepted official Codex catalog,
+in Copilot order. Each selected entry is re-emitted field-for-field, including
+its official `auto_review_model_override`. An empty intersection returns
+`{"models":[]}`. Enabling the catalog opts into the accepted release's complete
+prompt and behavior metadata, even when it differs from the client's bundled
+catalog.
+
+Catalog aliases, reviewer settings, and the live-limit overlay are optional
+add-ons that alter only their own fields. They are inert while this setting is
+`false`. While it is `true`, the Codex models cached value is registered,
+refreshed on `--codex-catalog-refresh-interval`, and reported by `/readyz`.
 
 ### `--codex-catalog-model-aliases`
 
@@ -811,8 +825,11 @@ Codex bytes are edited or persisted.
 
 Injects the model slug as Codex's auto-review model when its served slug belongs
 to the complete emitted Codex membership, including resolved exact official
-entries and Codex catalog aliases. The injected value takes precedence over
-Codex's provider default. As of Codex
+entries and Codex catalog aliases. The injected value replaces the entry's
+official `auto_review_model_override` and takes precedence over Codex's provider
+default. If the reviewer is not emitted, copilotd leaves the official field
+unchanged and warns once per affected main model on each Codex catalog request.
+Without a configured reviewer, every entry keeps its official field. As of Codex
 0.153.4, command-auth providers default to `gpt-5.6-luna`; an explicit value
 remains useful for stable routing across Codex versions and changing Copilot
 lineups.
@@ -828,9 +845,11 @@ copilotd serve --codex-auto-review-model-overrides \
 ```
 
 For each advertised main model, its per-model override wins; models without an
-override fall back to `--codex-auto-review-model`. A configured per-model entry
-is authoritative: if its reviewer cannot be advertised, copilotd skips that
-injection and warns instead of silently using the global reviewer.
+override fall back to `--codex-auto-review-model`, and keep their official
+reviewer field when that is empty. A configured per-model entry is
+authoritative: if its reviewer cannot be advertised, copilotd skips that
+injection, leaves the official field unchanged, and warns instead of silently
+using the global reviewer.
 
 The exact configuration precedence is flag > environment variable > TOML file >
 default. Every supplied layer must contain a valid override string; a malformed

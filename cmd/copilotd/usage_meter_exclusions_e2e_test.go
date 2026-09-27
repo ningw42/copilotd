@@ -49,7 +49,6 @@ func TestServeLifecycleUsageMeterExcludesCountTokensAndCatalogs(t *testing.T) {
 	codexEdge := newCodexReleaseEdge(t, usageMeterCodexTag, usageMeterCodexCommit, completeCodexModelsBytes(t, usageMeterCodexModel, "usage meter prompt"))
 	harness := startUsageMeterServeHarnessWithEdges(t, upstream.URL, discardLogger(t), func(cfg *config.ServeConfig) {
 		cfg.CodexCatalogEnabled = true
-		cfg.CodexOverrideLimits = true // opens the existing Codex shape gate
 		cfg.CodexCatalogRefreshInterval = time.Hour
 	}, nil, func(edges *serveEdges) {
 		edges.CodexModels = catalog.ModelsEdge{BaseURL: codexEdge.URL, Client: codexEdge.Client()}
