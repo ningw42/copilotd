@@ -18,7 +18,6 @@ import (
 	"github.com/ningw42/copilotd/internal/requestsummary"
 	"github.com/ningw42/copilotd/internal/shim"
 	"github.com/ningw42/copilotd/internal/upstream"
-	"github.com/ningw42/copilotd/internal/usage/reporthttp"
 	"github.com/ningw42/copilotd/internal/wsforward"
 )
 
@@ -87,21 +86,6 @@ func webSocketMount(proxy *wsforward.Proxy) Mount {
 	return MountWebSocket(endpoint.OpenAIResponsesWS(), proxy.Handler(endpoint.OpenAIResponsesWS()), proxy)
 }
 
-// productionMounts is the full production-shaped route set over test
-// dependencies: every Endpoint plus the disabled Usage report.
-func productionMounts(base *slog.Logger, fwd *forward.Forwarder, source catalog.Source, wsProxy *wsforward.Proxy, catalogs catalog.RenderDescriptors) []Mount {
-	return []Mount{
-		forwardMount(fwd, endpoint.AnthropicMessages()),
-		forwardMount(fwd, endpoint.AnthropicCountTokens()),
-		forwardMount(fwd, endpoint.OpenAIResponsesHTTP()),
-		webSocketMount(wsProxy),
-		passthroughMount(fwd),
-		catalogMount(base, endpoint.AnthropicCatalog(), catalogs, source),
-		catalogMount(base, endpoint.OpenAICatalog(), catalogs, source),
-		MountReport(reporthttp.Handler(nil)),
-	}
-}
-
 func newTestReadyObservers() ReadyObservers {
 	return ReadyObservers{Impersonation: staticImpersonationObserver{header: http.Header{
 		"Copilot-Integration-Id": {"vscode-chat"},
@@ -134,21 +118,4 @@ func newTestCatalogSourceWith(provider identity.Provider, client *http.Client, o
 
 func newTestWSCaller(provider identity.Provider, logger *slog.Logger) *upstream.Caller {
 	return upstream.New(provider, http.DefaultClient, time.Second, 1<<20, logger)
-}
-
-func newTestWSProxy(provider identity.Provider) *wsforward.Proxy {
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	caller := newTestWSCaller(provider, logger)
-	return wsforward.New(
-		caller,
-		http.DefaultClient,
-		time.Second,
-		time.Second,
-		1<<20,
-		nil,
-		logger,
-		logger,
-		0,
-		wsforward.WsMetrics{},
-	)
 }

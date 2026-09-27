@@ -60,6 +60,13 @@ func TestWebSocketMountRejectsAMissingDrainer(t *testing.T) {
 	if !strings.Contains(message, "no drainer") {
 		t.Errorf("construction panic = %q, want a missing drainer rejection", message)
 	}
+
+	message = constructionPanic(func() {
+		MountWebSocket(endpoint.OpenAIResponsesWS(), nil, nil)
+	})
+	if !strings.Contains(message, "nil handler") {
+		t.Errorf("construction panic with neither dependency = %q, want the missing handler reported first", message)
+	}
 }
 
 func TestMountsAcceptBuiltHandlers(t *testing.T) {

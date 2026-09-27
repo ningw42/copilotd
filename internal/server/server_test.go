@@ -13,7 +13,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ningw42/copilotd/internal/catalog"
 	"github.com/ningw42/copilotd/internal/config"
 	"github.com/ningw42/copilotd/internal/endpoint"
 	"github.com/ningw42/copilotd/internal/forward"
@@ -280,9 +279,15 @@ func TestAccessLogScopeComesFromMatchedRegistration(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			logger, buf := bufferLogger(t, "info")
-			provider := readyStub("")
-			forwarder := newTestForwarder(provider, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
-			h := newTestHandler(logger, provider, productionMounts(logger, forwarder, newTestCatalogSource(provider), newTestWSProxy(provider), catalog.RenderDescriptors{})...)
+			// Every case is answered by auth or the router, so no leaf handler runs.
+			leaf := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+				t.Errorf("leaf handler reached for %s %s", r.Method, r.URL.Path)
+			})
+			h := newTestHandler(logger, readyStub(""),
+				MountHTTPForward(endpoint.AnthropicMessages(), leaf),
+				MountHTTPForward(endpoint.OpenAIResponsesHTTP(), leaf),
+				MountWebSocket(endpoint.OpenAIResponsesWS(), leaf, noWebSocketDrainer{}),
+				MountCatalog(endpoint.OpenAICatalog(), leaf))
 			recorder := httptest.NewRecorder()
 
 			h.ServeHTTP(recorder, httptest.NewRequest(tc.method, tc.target, nil))

@@ -64,11 +64,10 @@ func MountCatalog(ep endpoint.Catalog, handler http.Handler) Mount {
 // the drainer's admission, then drains its sessions alongside HTTP under one
 // grace deadline.
 func MountWebSocket(ep endpoint.WSForward, handler http.Handler, drainer WebSocketDrainer) Mount {
-	requireHandler(handler, ep.Patterns())
+	mount := endpointMount(ep, handler, slog.Bool(logging.WSKey, true))
 	if drainer == nil {
 		panic(fmt.Sprintf("server: WebSocket mount %q has no drainer", ep.Patterns()))
 	}
-	mount := endpointMount(ep, handler, slog.Bool(logging.WSKey, true))
 	mount.drainer = drainer
 	return mount
 }

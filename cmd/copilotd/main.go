@@ -605,7 +605,9 @@ func finalizeServe(result serveResult, usageStore *sqlitestore.Store, timeout ti
 // dependencies and mounts one built handler per Endpoint plus the Usage report
 // handler for reportQuery. The upstream caller is shared by the HTTP and
 // WebSocket forwarders and both Catalogs; both forwarders serve the Shim
-// registry.
+// registry. Each per-kind mount helper binds one Endpoint to both its mount
+// and its handler, so a registration line names its contract once and cannot
+// pair it with another contract's handler.
 func newServeServer(cfg config.ServeConfig, base *slog.Logger, mgr *identity.Manager, imp *impersonation.Set, codexModels *cache.Value[[]byte], cacheRegistry *cache.Registry, registry shim.Registry, reportQuery reporthttp.QueryFunc) *server.Server {
 	catalogs := catalog.RenderDescriptors{
 		Anthropic: catalog.AnthropicRenderConfig{
@@ -640,18 +642,30 @@ func newServeServer(cfg config.ServeConfig, base *slog.Logger, mgr *identity.Man
 	recordCatalogShape := func(ctx context.Context, shape catalog.Shape) {
 		requestsummary.RecordCatalogShape(ctx, string(shape))
 	}
+	mountForward := func(ep endpoint.HTTPForward) server.Mount {
+		return server.MountHTTPForward(ep, fwd.Handler(ep))
+	}
+	mountWebSocket := func(ep endpoint.WSForward) server.Mount {
+		return server.MountWebSocket(ep, wsProxy.Handler(ep), wsProxy)
+	}
+	mountPassthrough := func(ep endpoint.Passthrough) server.Mount {
+		return server.MountPassthrough(ep, fwd.PassthroughHandler(ep))
+	}
+	mountCatalog := func(ep endpoint.Catalog) server.Mount {
+		return server.MountCatalog(ep, catalog.Handler(catalogLogger, ep, catalogs, caller, recordCatalogShape))
+	}
 
 	return server.New(cfg.APIKey, cfg.ShutdownTimeout, logging.ForComponent(base, "internal/server"), logging.DependencyErrorLog(base, slog.LevelWarn), mgr, server.ReadyObservers{
 		Impersonation: imp,
 		Caches:        cacheRegistry,
 	}, server.NewStreamOutcomeCounter(),
-		server.MountHTTPForward(endpoint.AnthropicMessages(), fwd.Handler(endpoint.AnthropicMessages())),
-		server.MountHTTPForward(endpoint.AnthropicCountTokens(), fwd.Handler(endpoint.AnthropicCountTokens())),
-		server.MountHTTPForward(endpoint.OpenAIResponsesHTTP(), fwd.Handler(endpoint.OpenAIResponsesHTTP())),
-		server.MountWebSocket(endpoint.OpenAIResponsesWS(), wsProxy.Handler(endpoint.OpenAIResponsesWS()), wsProxy),
-		server.MountPassthrough(endpoint.Models(), fwd.PassthroughHandler(endpoint.Models())),
-		server.MountCatalog(endpoint.AnthropicCatalog(), catalog.Handler(catalogLogger, endpoint.AnthropicCatalog(), catalogs, caller, recordCatalogShape)),
-		server.MountCatalog(endpoint.OpenAICatalog(), catalog.Handler(catalogLogger, endpoint.OpenAICatalog(), catalogs, caller, recordCatalogShape)),
+		mountForward(endpoint.AnthropicMessages()),
+		mountForward(endpoint.AnthropicCountTokens()),
+		mountForward(endpoint.OpenAIResponsesHTTP()),
+		mountWebSocket(endpoint.OpenAIResponsesWS()),
+		mountPassthrough(endpoint.Models()),
+		mountCatalog(endpoint.AnthropicCatalog()),
+		mountCatalog(endpoint.OpenAICatalog()),
 		server.MountReport(reporthttp.Handler(reportQuery)),
 	)
 }
