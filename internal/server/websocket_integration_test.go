@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
-	"github.com/ningw42/copilotd/internal/catalog"
+	"github.com/ningw42/copilotd/internal/endpoint"
 	"github.com/ningw42/copilotd/internal/forward"
 	"github.com/ningw42/copilotd/internal/identity"
 	"github.com/ningw42/copilotd/internal/wsforward"
@@ -44,7 +44,7 @@ func TestOpenAIResponsesHTTPAndWebSocketTransportsCoexist(t *testing.T) {
 	logger := discardLogger(t)
 	forwarder := newTestForwarder(provider, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 	wsProxy := wsforward.New(newTestWSCaller(provider, logger), http.DefaultClient, time.Second, time.Second, 1<<20, nil, logger, logger, 0, wsforward.WsMetrics{})
-	handler := newTestHandler(testAPIKey, provider, newTestReadyObservers(), forwarder, newTestCatalogSource(provider), logger, NewStreamOutcomeCounter(), catalog.RenderDescriptors{}, wsProxy)
+	handler := newTestHandler(logger, provider, forwardMount(forwarder, endpoint.OpenAIResponsesHTTP()), webSocketMount(wsProxy))
 	downstream := httptest.NewServer(handler)
 	t.Cleanup(downstream.Close)
 	t.Cleanup(func() {

@@ -14,8 +14,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ningw42/copilotd/internal/catalog"
-	"github.com/ningw42/copilotd/internal/forward"
 	"github.com/ningw42/copilotd/internal/logging"
 	"github.com/ningw42/copilotd/internal/usage"
 	"github.com/ningw42/copilotd/internal/usage/pricing"
@@ -92,7 +90,6 @@ func startReportBodyServer(t *testing.T, query reporthttp.QueryFunc, order strin
 	t.Helper()
 	logger := discardLogger(t)
 	provider := readyStub("")
-	fwd := newTestForwarder(provider, forward.NewClient(time.Second), time.Second, time.Second, time.Second, time.Second, 1<<20, 1<<20, nil)
 	handler := reporthttp.Handler(query)
 	edge := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Pin only incidental HTTP metadata, so a raw prefix comparison also
@@ -121,7 +118,7 @@ func startReportBodyServer(t *testing.T, query reporthttp.QueryFunc, order strin
 			}
 		}
 	})
-	srv := New(testConfig(), logger, logger, newTestDependencyErrorLog(), provider, newTestReadyObservers(), fwd, newTestCatalogSource(provider), newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.RenderDescriptors{}, edge)
+	srv := New(testAPIKey, testShutdownTimeout, logger, newTestDependencyErrorLog(), provider, newTestReadyObservers(), NewStreamOutcomeCounter(), MountReport(edge))
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)

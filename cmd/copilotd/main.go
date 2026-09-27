@@ -26,10 +26,12 @@ import (
 	"github.com/ningw42/copilotd/internal/cache"
 	"github.com/ningw42/copilotd/internal/catalog"
 	"github.com/ningw42/copilotd/internal/config"
+	"github.com/ningw42/copilotd/internal/endpoint"
 	"github.com/ningw42/copilotd/internal/forward"
 	"github.com/ningw42/copilotd/internal/identity"
 	"github.com/ningw42/copilotd/internal/impersonation"
 	"github.com/ningw42/copilotd/internal/logging"
+	"github.com/ningw42/copilotd/internal/requestsummary"
 	"github.com/ningw42/copilotd/internal/server"
 	"github.com/ningw42/copilotd/internal/shim"
 	"github.com/ningw42/copilotd/internal/upstream"
@@ -600,9 +602,10 @@ func finalizeServe(result serveResult, usageStore *sqlitestore.Store, timeout ti
 }
 
 // newServeServer assembles the serving graph over the lifecycle's resolved
-// dependencies: the Catalog descriptors, the upstream caller shared by the
-// HTTP and WebSocket forwarders and the Catalogs, both forwarders over the
-// served Shim registry, and the Usage report handler for reportQuery.
+// dependencies and mounts one built handler per Endpoint plus the Usage report
+// handler for reportQuery. The upstream caller is shared by the HTTP and
+// WebSocket forwarders and both Catalogs; both forwarders serve the Shim
+// registry.
 func newServeServer(cfg config.ServeConfig, base *slog.Logger, mgr *identity.Manager, imp *impersonation.Set, codexModels *cache.Value[[]byte], cacheRegistry *cache.Registry, registry shim.Registry, reportQuery reporthttp.QueryFunc) *server.Server {
 	catalogs := catalog.RenderDescriptors{
 		Anthropic: catalog.AnthropicRenderConfig{
@@ -631,12 +634,26 @@ func newServeServer(cfg config.ServeConfig, base *slog.Logger, mgr *identity.Man
 			Accept:          wsAccepts,
 			SessionTerminal: wsTerminals,
 		})
-	streamOutcomes := server.NewStreamOutcomeCounter()
+	// Both Catalogs share one internal/catalog child. catalog.Handler never
+	// records a shape for the Anthropic Catalog.
+	catalogLogger := logging.ForComponent(base, "internal/catalog")
+	recordCatalogShape := func(ctx context.Context, shape catalog.Shape) {
+		requestsummary.RecordCatalogShape(ctx, string(shape))
+	}
 
-	return server.New(cfg, logging.ForComponent(base, "internal/server"), logging.ForComponent(base, "internal/catalog"), logging.DependencyErrorLog(base, slog.LevelWarn), mgr, server.ReadyObservers{
+	return server.New(cfg.APIKey, cfg.ShutdownTimeout, logging.ForComponent(base, "internal/server"), logging.DependencyErrorLog(base, slog.LevelWarn), mgr, server.ReadyObservers{
 		Impersonation: imp,
 		Caches:        cacheRegistry,
-	}, fwd, caller, wsProxy, streamOutcomes, catalogs, reporthttp.Handler(reportQuery))
+	}, server.NewStreamOutcomeCounter(),
+		server.MountHTTPForward(endpoint.AnthropicMessages(), fwd.Handler(endpoint.AnthropicMessages())),
+		server.MountHTTPForward(endpoint.AnthropicCountTokens(), fwd.Handler(endpoint.AnthropicCountTokens())),
+		server.MountHTTPForward(endpoint.OpenAIResponsesHTTP(), fwd.Handler(endpoint.OpenAIResponsesHTTP())),
+		server.MountWebSocket(endpoint.OpenAIResponsesWS(), wsProxy.Handler(endpoint.OpenAIResponsesWS()), wsProxy),
+		server.MountPassthrough(endpoint.Models(), fwd.PassthroughHandler(endpoint.Models())),
+		server.MountCatalog(endpoint.AnthropicCatalog(), catalog.Handler(catalogLogger, endpoint.AnthropicCatalog(), catalogs, caller, recordCatalogShape)),
+		server.MountCatalog(endpoint.OpenAICatalog(), catalog.Handler(catalogLogger, endpoint.OpenAICatalog(), catalogs, caller, recordCatalogShape)),
+		server.MountReport(reporthttp.Handler(reportQuery)),
+	)
 }
 
 // runServeStartup performs the ordered background startup sequence. The cache

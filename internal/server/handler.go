@@ -1,19 +1,12 @@
 package server
 
 import (
-	"context"
 	"io"
 	"log/slog"
 	"net/http"
 
-	"github.com/ningw42/copilotd/internal/catalog"
-	"github.com/ningw42/copilotd/internal/endpoint"
-	"github.com/ningw42/copilotd/internal/forward"
 	"github.com/ningw42/copilotd/internal/identity"
 	"github.com/ningw42/copilotd/internal/logging"
-	"github.com/ningw42/copilotd/internal/requestsummary"
-	"github.com/ningw42/copilotd/internal/usage/reporthttp"
-	"github.com/ningw42/copilotd/internal/wsforward"
 )
 
 const (
@@ -22,16 +15,14 @@ const (
 )
 
 // newHandler builds the router wrapped in requestID -> accessLog -> recover.
-// Each registered binding then derives its logging scope between the mux and
-// the auth/readiness guards, so rejected Endpoint requests retain the binding's
+// Each mounted binding then derives its logging scope between the mux and the
+// auth/readiness guards, so rejected Endpoint requests retain the binding's
 // scope. The full Endpoint order is requestID -> accessLog -> recover -> mux ->
 // scoped -> auth -> local readiness -> handler. Probes use scoped -> handler and
-// are never gated by auth or readiness. The explicit local report handler also
-// bypasses those guards, but receives ordinary non-probe access classification.
-// Invariant: catalog settings cross the render seam only through catalogs.
-func newHandler(apikey string, provider identity.Provider, observers ReadyObservers, fwd *forward.Forwarder, source catalog.Source, logger, catalogLogger *slog.Logger, streamOutcomes StreamOutcomeObserver, catalogs catalog.RenderDescriptors, wsProxy *wsforward.Proxy, reportHandler http.Handler) http.Handler {
+// are never gated by auth or readiness. The local report mount also bypasses
+// those guards, but receives ordinary non-probe access classification.
+func newHandler(apikey string, provider identity.Provider, observers ReadyObservers, logger *slog.Logger, streamOutcomes StreamOutcomeObserver, mounts []Mount) http.Handler {
 	mux := http.NewServeMux()
-	mux.Handle(reporthttp.Path, scoped([]slog.Attr{slog.String(logging.InboundKey, reporthttp.Path)}, false, reportHandler))
 	registerProbe := func(pattern string, handler http.Handler) {
 		attrs := []slog.Attr{slog.String(logging.InboundKey, pattern)}
 		mux.Handle(pattern, scoped(attrs, true, handler))
@@ -39,48 +30,16 @@ func newHandler(apikey string, provider identity.Provider, observers ReadyObserv
 	registerProbe("GET "+healthPath, http.HandlerFunc(handleHealth))
 	registerProbe("GET "+readyPath, handleReady(provider, observers.Impersonation, observers.Caches))
 
-	// guard applies the Surface-endpoint-specific inner wrappers in order: auth
-	// (outer) then local readiness (inner), so auth runs first.
-	guard := func(surface endpoint.Surface, h http.Handler) http.Handler {
-		return authMW(apikey, surface, readinessMW(provider, surface, h))
-	}
-	mount := func(ep endpoint.Endpoint, h http.Handler) {
-		guarded := guard(ep.Surface(), h)
-		for _, pattern := range ep.Patterns() {
-			attrs := []slog.Attr{
-				slog.String(logging.InboundKey, pattern),
-				slog.String(logging.SurfaceKey, ep.Surface().String()),
-			}
-			mux.Handle(pattern, scoped(attrs, false, guarded))
+	for _, mount := range mounts {
+		handler := mount.handler
+		if mount.gated {
+			// Auth (outer) then local readiness (inner), so auth runs first.
+			handler = authMW(apikey, mount.surface, readinessMW(provider, mount.surface, handler))
+		}
+		for _, route := range mount.routes {
+			mux.Handle(route.pattern, scoped(route.scope, false, handler))
 		}
 	}
-	registerForward := func(ep endpoint.HTTPForward) { mount(ep, fwd.Handler(ep)) }
-	registerWS := func(ep endpoint.WSForward) {
-		guarded := guard(ep.Surface(), wsProxy.Handler(ep))
-		for _, pattern := range ep.Patterns() {
-			attrs := []slog.Attr{
-				slog.String(logging.InboundKey, pattern),
-				slog.String(logging.SurfaceKey, ep.Surface().String()),
-				slog.Bool(logging.WSKey, true),
-			}
-			mux.Handle(pattern, scoped(attrs, false, guarded))
-		}
-	}
-	registerPassthrough := func(ep endpoint.Passthrough) { mount(ep, fwd.PassthroughHandler(ep)) }
-	recordCatalogShape := func(ctx context.Context, shape catalog.Shape) {
-		requestsummary.RecordCatalogShape(ctx, string(shape))
-	}
-	registerCatalog := func(ep endpoint.Catalog) {
-		mount(ep, catalog.Handler(catalogLogger, ep, catalogs, source, recordCatalogShape))
-	}
-
-	registerForward(endpoint.AnthropicMessages())
-	registerForward(endpoint.AnthropicCountTokens())
-	registerForward(endpoint.OpenAIResponsesHTTP())
-	registerWS(endpoint.OpenAIResponsesWS())
-	registerPassthrough(endpoint.Models())
-	registerCatalog(endpoint.AnthropicCatalog())
-	registerCatalog(endpoint.OpenAICatalog())
 
 	return requestID(accessLog(logger, streamOutcomes, recoverMW(logger, mux)))
 }

@@ -22,19 +22,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ningw42/copilotd/internal/catalog"
 	"github.com/ningw42/copilotd/internal/config"
-	"github.com/ningw42/copilotd/internal/forward"
 	"github.com/ningw42/copilotd/internal/identity"
 	"github.com/ningw42/copilotd/internal/logging"
 	"github.com/ningw42/copilotd/internal/server"
-	"github.com/ningw42/copilotd/internal/upstream"
 	"github.com/ningw42/copilotd/internal/usage"
 	"github.com/ningw42/copilotd/internal/usage/pricing"
 	"github.com/ningw42/copilotd/internal/usage/report"
 	"github.com/ningw42/copilotd/internal/usage/reporthttp"
 	"github.com/ningw42/copilotd/internal/usage/sqlitestore"
-	"github.com/ningw42/copilotd/internal/wsforward"
 )
 
 // This is an OS-process acceptance test, not a call to run or a renderer. The
@@ -800,21 +796,16 @@ func waitForUsageReport(t *testing.T, endpoint string, query report.Query, ready
 // dedicated fixture and the package's only hand-wired server: the report route
 // passes through no Shim, and production's query returns structured errors
 // rather than panicking, so the serve lifecycle cannot serve this panicking
-// query. No inference runs; the static provider and minimal forwarding only
-// satisfy server.New, and no readiness observer is needed because /readyz is
-// never requested.
+// query. It mounts only the report. No inference runs, so there is no inference
+// graph; the ready static provider and empty observers are the server's own
+// lightweight readiness inputs, and /readyz is never requested.
 func startGenericRecoveryServer(t *testing.T, reportHandler http.Handler) string {
 	t.Helper()
 	cfg := e2eConfig("unused-recovery-oauth-token")
 	logger := discardLogger(t)
 	provider := identity.NewStatic(identity.Credential{BaseURL: "http://127.0.0.1:1", Token: "unused-recovery-copilot-token"}, true)
-	caller := upstream.New(provider, forward.NewClient(time.Second), time.Second, 1<<20, logging.ForComponent(logger, "internal/upstream"))
-	forwarder := forward.New(caller, time.Second, time.Second, time.Second, time.Second, 1<<20, nil,
-		logging.ForComponent(logger, "internal/sse"), logging.ForComponent(logger, "internal/shim"), 0)
-	wsProxy := wsforward.New(caller, http.DefaultClient, time.Second, time.Second, 1<<20, nil,
-		logging.ForComponent(logger, "internal/wsforward"), logging.ForComponent(logger, "internal/shim"), 0, wsforward.WsMetrics{})
-	srv := server.New(cfg, logging.ForComponent(logger, "internal/server"), logging.ForComponent(logger, "internal/catalog"), log.New(io.Discard, "", 0),
-		provider, server.ReadyObservers{}, forwarder, caller, wsProxy, server.NewStreamOutcomeCounter(), catalog.RenderDescriptors{}, reportHandler)
+	srv := server.New(cfg.APIKey, cfg.ShutdownTimeout, logging.ForComponent(logger, "internal/server"), log.New(io.Discard, "", 0),
+		provider, server.ReadyObservers{}, server.NewStreamOutcomeCounter(), server.MountReport(reportHandler))
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

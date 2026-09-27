@@ -15,6 +15,7 @@ import (
 
 	"github.com/ningw42/copilotd/internal/catalog"
 	"github.com/ningw42/copilotd/internal/config"
+	"github.com/ningw42/copilotd/internal/endpoint"
 	"github.com/ningw42/copilotd/internal/forward"
 	"github.com/ningw42/copilotd/internal/identity"
 	"github.com/ningw42/copilotd/internal/logging"
@@ -23,18 +24,6 @@ import (
 )
 
 const testAPIKey = "test-api-key"
-
-func testConfig() config.ServeConfig {
-	return config.ServeConfig{
-		Addr:            "127.0.0.1:0",
-		LogLevel:        "info",
-		LogFormat:       "text",
-		ShutdownTimeout: 2 * time.Second,
-		APIKey:          testAPIKey,
-		OutboundTimeout: 5 * time.Second,
-		MaxRequestBytes: 1 << 20,
-	}
-}
 
 // readyStub returns a ready Static provider carrying baseURL (empty for the
 // health/middleware tests that never reach the forwarder).
@@ -46,14 +35,12 @@ func readyStub(baseURL string) *identity.Static {
 	}, true)
 }
 
-// testHandler builds the assembled handler with a ready stub provider and a
-// forwarder, for the health/correlation/access-log tests that never exercise a
+// testHandler builds the assembled handler with a ready stub provider and no
+// mounts, for the health/correlation/access-log tests that never exercise a
 // Surface endpoint.
 func testHandler(t *testing.T, logger *slog.Logger) http.Handler {
 	t.Helper()
-	prov := readyStub("")
-	fwd := newTestForwarder(prov, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
-	return newTestHandler(testAPIKey, prov, newTestReadyObservers(), fwd, newTestCatalogSource(prov), logger, NewStreamOutcomeCounter(), catalog.RenderDescriptors{}, newTestWSProxy(prov))
+	return newTestHandler(logger, readyStub(""))
 }
 
 // bufferLogger returns a logger writing to an in-memory buffer at the given
@@ -197,9 +184,7 @@ func TestAccessLogHealthzAtDebug(t *testing.T) {
 
 func TestAccessLogReadyProbeStaysDebugWhenNotReady(t *testing.T) {
 	logger, buf := bufferLogger(t, "debug")
-	provider := identity.NewStatic(identity.Credential{}, false)
-	forwarder := newTestForwarder(provider, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
-	handler := newTestHandler(testAPIKey, provider, newTestReadyObservers(), forwarder, newTestCatalogSource(provider), logger, NewStreamOutcomeCounter(), catalog.RenderDescriptors{}, newTestWSProxy(provider))
+	handler := newTestHandler(logger, identity.NewStatic(identity.Credential{}, false))
 	recorder := httptest.NewRecorder()
 
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/readyz", nil))
@@ -295,7 +280,9 @@ func TestAccessLogScopeComesFromMatchedRegistration(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			logger, buf := bufferLogger(t, "info")
-			h := testHandler(t, logger)
+			provider := readyStub("")
+			forwarder := newTestForwarder(provider, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
+			h := newTestHandler(logger, provider, productionMounts(logger, forwarder, newTestCatalogSource(provider), newTestWSProxy(provider), catalog.RenderDescriptors{})...)
 			recorder := httptest.NewRecorder()
 
 			h.ServeHTTP(recorder, httptest.NewRequest(tc.method, tc.target, nil))
@@ -595,7 +582,7 @@ func TestPanicRecoveryRetainsMatchedScopeAndAccessLevel(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			logger, logs := bufferLogger(t, "debug")
 			forwarder := newTestForwarder(tt.provider, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
-			handler := newTestHandler(testAPIKey, tt.provider, newTestReadyObservers(), forwarder, newTestCatalogSource(tt.provider), logger, NewStreamOutcomeCounter(), catalog.RenderDescriptors{}, newTestWSProxy(tt.provider))
+			handler := newTestHandler(logger, tt.provider, forwardMount(forwarder, endpoint.OpenAIResponsesHTTP()))
 			request := httptest.NewRequest(tt.method, tt.target, strings.NewReader(tt.body))
 			request.Header.Set("X-Request-Id", "matched-panic")
 			request.Header.Set("Authorization", "Bearer "+testAPIKey)
@@ -679,9 +666,7 @@ func TestLifecycleSmoke(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	provider := readyStub("")
-	forwarder := newTestForwarder(provider, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
-	srv := newTestServerFromBase(testConfig(), discardLogger(t), provider, newTestReadyObservers(), forwarder, newTestCatalogSource(provider), newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.RenderDescriptors{})
+	srv := newTestServer(discardLogger(t), readyStub(""))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	runErr := make(chan error, 1)

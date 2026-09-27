@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/ningw42/copilotd/internal/catalog"
+	"github.com/ningw42/copilotd/internal/endpoint"
 	"github.com/ningw42/copilotd/internal/forward"
 	"github.com/ningw42/copilotd/internal/identity"
 	"github.com/ningw42/copilotd/internal/logging"
@@ -41,8 +42,8 @@ func TestAnthropicModelCatalogOverRealListener(t *testing.T) {
 		Headers: http.Header{"Copilot-Integration-Id": {"vscode-chat"}},
 	}, true)
 	logger, logs := bufferLogger(t, "info")
-	forwarder := newTestForwarder(provider, forward.NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
-	base := startServer(t, newTestServerFromBase(testConfig(), logger, provider, newTestReadyObservers(), forwarder, newTestCatalogSourceWith(provider, forward.NewClient(time.Second), time.Second, 1<<20, logger), newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.RenderDescriptors{}))
+	source := newTestCatalogSourceWith(provider, forward.NewClient(time.Second), time.Second, 1<<20, logger)
+	base := startServer(t, newTestServer(logger, provider, catalogMount(logger, endpoint.AnthropicCatalog(), catalog.RenderDescriptors{}, source)))
 
 	do := func(method, target, keyHeader, key, requestID string) (*http.Response, []byte) {
 		t.Helper()
@@ -178,10 +179,10 @@ func TestAnthropicModelCatalogNormalizesModelIDsWhenEnabled(t *testing.T) {
 		Token:   "copilot-token",
 		Headers: http.Header{"Copilot-Integration-Id": {"vscode-chat"}},
 	}, true)
-	forwarder := newTestForwarder(provider, forward.NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
-	base := startServer(t, newTestServerFromBase(testConfig(), discardLogger(t), provider, newTestReadyObservers(), forwarder, newTestCatalogSource(provider), newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.RenderDescriptors{
+	logger := discardLogger(t)
+	base := startServer(t, newTestServer(logger, provider, catalogMount(logger, endpoint.AnthropicCatalog(), catalog.RenderDescriptors{
 		Anthropic: catalog.AnthropicRenderConfig{ModelIDNormalizationEnabled: true},
-	}))
+	}, newTestCatalogSource(provider))))
 
 	req, err := http.NewRequest(http.MethodGet, base+"/anthropic/v1/models", nil)
 	if err != nil {

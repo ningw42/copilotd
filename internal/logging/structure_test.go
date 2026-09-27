@@ -110,8 +110,8 @@ var expectedComponentSinks = map[componentSink]struct{}{
 	{function: "newServeServer", consumer: "forward.New arg 8", component: "internal/shim"}:                {},
 	{function: "newServeServer", consumer: "wsforward.New arg 6", component: "internal/wsforward"}:         {},
 	{function: "newServeServer", consumer: "wsforward.New arg 7", component: "internal/shim"}:              {},
-	{function: "newServeServer", consumer: "server.New arg 1", component: "internal/server"}:               {},
-	{function: "newServeServer", consumer: "server.New arg 2", component: "internal/catalog"}:              {},
+	{function: "newServeServer", consumer: "local", component: "internal/catalog"}:                         {},
+	{function: "newServeServer", consumer: "server.New", component: "internal/server"}:                     {},
 	{function: "buildServeProvider", consumer: "identity.NewManager", component: "internal/identity"}:      {},
 	{function: "buildServeProvider", consumer: "impersonation.New", component: "internal/cache"}:           {},
 	{function: "configuredCodexModels", consumer: "catalog.NewModelsCache", component: "internal/cache"}:   {},
@@ -168,6 +168,66 @@ func emit(c *consumer) {
 	literal, ok := problems[0].key.(*ast.BasicLit)
 	if !ok || literal.Value != `"sneaky"` {
 		t.Fatalf("reported key = %#v, want sneaky string literal", problems[0].key)
+	}
+}
+
+func TestWebSocketKeyIsAllowedOnlyInsideAWSForwardRegistration(t *testing.T) {
+	tests := []struct {
+		name    string
+		source  string
+		allowed bool
+	}{
+		{name: "named registration taking endpoint.WSForward", allowed: true, source: `package sample
+func MountWebSocket(ep endpoint.WSForward, handler http.Handler) Mount {
+	return endpointMount(ep, handler, slog.Bool(logging.WSKey, true))
+}`},
+		{name: "function literal taking endpoint.WSForward", allowed: true, source: `package sample
+func newHandler() {
+	registerWS := func(ep endpoint.WSForward) { _ = slog.Bool(logging.WSKey, true) }
+	_ = registerWS
+}`},
+		{name: "named function taking another Endpoint kind", source: `package sample
+func MountHTTPForward(ep endpoint.HTTPForward, handler http.Handler) Mount {
+	return endpointMount(ep, handler, slog.Bool(logging.WSKey, true))
+}`},
+		{name: "named function taking the open Endpoint interface", source: `package sample
+func endpointMount(ep endpoint.Endpoint, handler http.Handler) Mount {
+	_ = slog.Bool(logging.WSKey, true)
+	return Mount{}
+}`},
+		{name: "function literal without endpoint.WSForward", source: `package sample
+func newHandler() {
+	registerForward := func(ep endpoint.HTTPForward) { _ = slog.Bool(logging.WSKey, true) }
+	_ = registerForward
+}`},
+		{name: "beside a nested WSForward literal", source: `package sample
+func newHandler() {
+	registerWS := func(ep endpoint.WSForward) {}
+	_ = registerWS
+	_ = slog.Bool(logging.WSKey, true)
+}`},
+		{name: "package-level value", source: `package sample
+var wsScope = slog.Bool(logging.WSKey, true)`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			syntax, err := parser.ParseFile(token.NewFileSet(), "registration.go", tc.source, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			uses := 0
+			inspectWithParents(syntax, func(node ast.Node, parents []ast.Node) {
+				if identifier, ok := node.(*ast.Ident); ok && identifier.Name == "WSKey" {
+					uses++
+					if got := insideWebSocketRegistration(parents); got != tc.allowed {
+						t.Errorf("WSKey allowed = %t, want %t", got, tc.allowed)
+					}
+				}
+			})
+			if uses != 1 {
+				t.Fatalf("found %d WSKey uses, want 1", uses)
+			}
+		})
 	}
 }
 
@@ -439,16 +499,26 @@ func checkWebSocketKeySource(t *testing.T, fset *token.FileSet, files []producti
 				return
 			}
 			if !insideWebSocketRegistration(parents) {
-				t.Errorf("%s: logging.WSKey is allowed only in a registration function literal with an endpoint.WSForward parameter", position(fset, identifier))
+				t.Errorf("%s: logging.WSKey is allowed only in a registration function or function literal with an endpoint.WSForward parameter", position(fset, identifier))
 			}
 		})
 	}
 }
 
+// insideWebSocketRegistration reports whether a named function or a function
+// literal enclosing the node takes an endpoint.WSForward parameter.
 func insideWebSocketRegistration(parents []ast.Node) bool {
 	for i := len(parents) - 1; i >= 0; i-- {
-		literal, ok := parents[i].(*ast.FuncLit)
-		if ok && hasSelectorParameter(literal.Type.Params, "endpoint", "WSForward") {
+		var params *ast.FieldList
+		switch function := parents[i].(type) {
+		case *ast.FuncDecl:
+			params = function.Type.Params
+		case *ast.FuncLit:
+			params = function.Type.Params
+		default:
+			continue
+		}
+		if hasSelectorParameter(params, "endpoint", "WSForward") {
 			return true
 		}
 	}

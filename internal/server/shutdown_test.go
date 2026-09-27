@@ -15,9 +15,11 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
-	"github.com/ningw42/copilotd/internal/catalog"
+	"github.com/ningw42/copilotd/internal/endpoint"
 	"github.com/ningw42/copilotd/internal/forward"
 	"github.com/ningw42/copilotd/internal/identity"
+	"github.com/ningw42/copilotd/internal/logging"
+	"github.com/ningw42/copilotd/internal/usage/reporthttp"
 	"github.com/ningw42/copilotd/internal/wsforward"
 )
 
@@ -94,9 +96,8 @@ func startMixedTransportFixture(t *testing.T, shutdownTimeout time.Duration) *mi
 	logger := discardLogger(t)
 	forwarder := newTestForwarder(provider, forward.NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 	wsProxy := wsforward.New(newTestWSCaller(provider, logger), http.DefaultClient, 5*time.Second, 5*time.Second, 1<<20, nil, logger, logger, 0, wsforward.WsMetrics{})
-	cfg := testConfig()
-	cfg.ShutdownTimeout = shutdownTimeout
-	srv := newTestServerFromBase(cfg, logger, provider, newTestReadyObservers(), forwarder, newTestCatalogSource(provider), wsProxy, NewStreamOutcomeCounter(), catalog.RenderDescriptors{})
+	srv := New(testAPIKey, shutdownTimeout, logging.ForComponent(logger, "internal/server"), newTestDependencyErrorLog(), provider, newTestReadyObservers(), NewStreamOutcomeCounter(),
+		forwardMount(forwarder, endpoint.OpenAIResponsesHTTP()), webSocketMount(wsProxy))
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -370,9 +371,7 @@ func TestShutdownClassifiesDrainResults(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			httpFake := &drainFake{err: tt.http.err, waitForDeadline: tt.http.waitForDeadline}
 			wsFake := &drainFake{err: tt.ws.err, waitForDeadline: tt.ws.waitForDeadline}
-			cfg := testConfig()
-			cfg.ShutdownTimeout = tt.shutdownTimeout
-			srv := &Server{cfg: cfg, logger: discardLogger(t), http: fakeHTTPLifecycle{httpFake}, ws: fakeWebSocketDrainer{wsFake}}
+			srv := &Server{shutdownTimeout: tt.shutdownTimeout, logger: discardLogger(t), http: fakeHTTPLifecycle{httpFake}, ws: fakeWebSocketDrainer{wsFake}}
 
 			done := make(chan error, 1)
 			go func() { done <- srv.shutdown() }()
@@ -408,6 +407,51 @@ func TestShutdownClassifiesDrainResults(t *testing.T) {
 			}
 			if a, b := httpFake.observedDeadline(), wsFake.observedDeadline(); a.IsZero() || !a.Equal(b) {
 				t.Errorf("drain deadlines HTTP=%v WebSocket=%v, want one shared grace deadline", a, b)
+			}
+		})
+	}
+}
+
+// TestShutdownWithoutAWebSocketMountDrainsOnlyHTTP builds the server through New
+// with no WebSocket mount, so its drain covers HTTP alone and keeps the same
+// clean and forced-drain classification.
+func TestShutdownWithoutAWebSocketMountDrainsOnlyHTTP(t *testing.T) {
+	tests := []struct {
+		name            string
+		shutdownTimeout time.Duration
+		waitForDeadline bool
+		wantForced      bool
+	}{
+		{name: "clean HTTP drain", shutdownTimeout: time.Second},
+		{name: "HTTP deadline", shutdownTimeout: 30 * time.Millisecond, waitForDeadline: true, wantForced: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			httpFake := &drainFake{waitForDeadline: tt.waitForDeadline}
+			srv := New(testAPIKey, tt.shutdownTimeout, discardLogger(t), newTestDependencyErrorLog(), readyStub(""), newTestReadyObservers(), NewStreamOutcomeCounter(),
+				MountReport(reporthttp.Handler(nil)))
+			srv.http = fakeHTTPLifecycle{httpFake}
+
+			done := make(chan error, 1)
+			go func() { done <- srv.shutdown() }()
+			var err error
+			select {
+			case err = <-done:
+			case <-time.After(tt.shutdownTimeout + 5*time.Second):
+				t.Fatal("shutdown did not return")
+			}
+
+			if !tt.wantForced {
+				if err != nil {
+					t.Fatalf("shutdown error = %v, want a clean HTTP-only drain", err)
+				}
+				return
+			}
+			if !errors.Is(err, ErrForcedDrain) || !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("shutdown error = %v, want ErrForcedDrain wrapping context.DeadlineExceeded", err)
+			}
+			if got := httpFake.closed.Load(); got != 1 {
+				t.Errorf("hard close calls = %d, want 1 after the forced drain", got)
 			}
 		})
 	}
