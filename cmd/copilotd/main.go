@@ -628,10 +628,9 @@ func newServeServer(cfg config.ServeConfig, base *slog.Logger, mgr *identity.Man
 	caller := upstream.New(mgr, forwardClient, cfg.OutboundTimeout, cfg.MaxBufferedResponseBytes, logging.ForComponent(base, "internal/upstream"))
 	fwd := forward.New(caller, cfg.OutboundTimeout, cfg.WriteTimeout, cfg.StreamIdleTimeout, cfg.StreamKeepaliveInterval, cfg.MaxRequestBytes, registry,
 		logging.ForComponent(base, "internal/sse"), logging.ForComponent(base, "internal/shim"), cfg.ShimHookOverrunThreshold)
-	wsDialClient := &http.Client{Transport: &http.Transport{Proxy: http.ProxyFromEnvironment}}
 	wsAccepts := server.NewWsAcceptCounter()
 	wsTerminals := server.NewWsSessionTerminalCounter()
-	wsProxy := wsforward.New(caller, wsDialClient, cfg.WebSocketHandshakeTimeout, cfg.WriteTimeout, cfg.MaxRequestBytes, registry,
+	wsProxy := wsforward.New(caller, wsforward.NewDialClient(), cfg.WebSocketHandshakeTimeout, cfg.WriteTimeout, cfg.MaxRequestBytes, registry,
 		logging.ForComponent(base, "internal/wsforward"), logging.ForComponent(base, "internal/shim"), cfg.ShimHookOverrunThreshold, wsforward.WsMetrics{
 			Accept:          wsAccepts,
 			SessionTerminal: wsTerminals,

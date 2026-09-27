@@ -9,6 +9,9 @@ concurrently under one shutdown deadline. The earlier unlocked
 superseded; counting mid-accept work is not. Amended for
 [#269](https://github.com/ningw42/copilotd/issues/269): a final non-101 answer
 to the upstream handshake is relayed rather than reported as a copilotd 502.
+Amended for [#291](https://github.com/ningw42/copilotd/issues/291): the dial
+client refuses redirects, so a `3xx` handshake answer is such a final non-101
+answer instead of being followed.
 Design for adding a WebSocket transport to copilotd's OpenAI Responses surface.
 It is grounded in
 [the 2026-07-19 research note](../research/2026-07-19-responses-websocket-mode.md)
@@ -16,10 +19,10 @@ and the current code.
 
 > **Superseded historical detail.** This dated design predates the shared
 > upstream call and the terminal request summary, and its original text omits
-> the pre-upgrade phase's cancellation rules. Text marked "amended by #261" or
-> "amended by #269" is current. Where the original text conflicts with the
-> contracts below, the contracts win. For current signatures,
-> `internal/wsforward` is authoritative.
+> the pre-upgrade phase's cancellation rules. Text marked "amended by #261",
+> "amended by #269", or "amended by #291" is current. Where the original text
+> conflicts with the contracts below, the contracts win. For current
+> signatures, `internal/wsforward` is authoritative.
 >
 > - **Logging** (§2 "Access logging", §3.1 step 7, §7's records, §11 item 13,
 >   §13): superseded by
@@ -177,7 +180,12 @@ func (p *Proxy) Shutdown(ctx context.Context) error
 - `dialClient` is a dedicated `*http.Client`: `Proxy: http.ProxyFromEnvironment`,
   default TLS verification, and **no** `Timeout` (a client-level timeout would
   kill the long-lived connection). The handshake is bounded by `dialTimeout` via
-  context, not by the client.
+  context, not by the client. It also refuses redirects (amended by #291;
+  `wsforward.NewDialClient` builds it), as the HTTP Forwarder's client does:
+  following would replace Copilot's first answer, and net/http re-sends the
+  Copilot token to a target on the same hostname or a subdomain of it, on any
+  port. coder/websocket always wraps the client's `CheckRedirect`, so a client
+  with no policy would not even keep net/http's ten-redirect limit.
 - `baseCtx`/`cancel` are created in `New`. It is the **single authority over live
   (post-upgrade) sessions**: each session's pump context is `WithCancel(baseCtx)`,
   so `Shutdown` cancelling `baseCtx` tears every session down.
@@ -219,7 +227,8 @@ a real status and full-request duration (§7):
    2. otherwise a cancelled phase (client left, or forced shutdown) → nothing
       written, even when the dial also returned a response;
    3. otherwise a final non-101 upstream answer (for example Copilot's
-      `401`/`403`/`429`) → **relayed**: Copilot's status and headers under the
+      `401`/`403`/`429`, or a `3xx` the dial client does not follow — amended
+      by #291) → **relayed**: Copilot's status and headers under the
       shared response-header policy, with its body only when provably complete
       (§4);
    4. anything else — no response at all, or a `101` that fails handshake
