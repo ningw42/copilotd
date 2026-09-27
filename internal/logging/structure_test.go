@@ -186,6 +186,11 @@ func newHandler() {
 	registerWS := func(ep endpoint.WSForward) { _ = slog.Bool(logging.WSKey, true) }
 	_ = registerWS
 }`},
+		{name: "named handler factory taking endpoint.WSForward", source: `package sample
+func (p *Proxy) Handler(ep endpoint.WSForward) http.HandlerFunc {
+	_ = slog.Bool(logging.WSKey, true)
+	return nil
+}`},
 		{name: "named function taking another Endpoint kind", source: `package sample
 func MountHTTPForward(ep endpoint.HTTPForward, handler http.Handler) Mount {
 	return endpointMount(ep, handler, slog.Bool(logging.WSKey, true))
@@ -499,30 +504,39 @@ func checkWebSocketKeySource(t *testing.T, fset *token.FileSet, files []producti
 				return
 			}
 			if !insideWebSocketRegistration(parents) {
-				t.Errorf("%s: logging.WSKey is allowed only in a registration function or function literal with an endpoint.WSForward parameter", position(fset, identifier))
+				t.Errorf("%s: logging.WSKey is allowed only in a Mount constructor or function literal with an endpoint.WSForward parameter", position(fset, identifier))
 			}
 		})
 	}
 }
 
-// insideWebSocketRegistration reports whether a named function or a function
-// literal enclosing the node takes an endpoint.WSForward parameter.
+// insideWebSocketRegistration reports whether the node is inside a WebSocket
+// registration: a named Mount constructor or a function literal taking an
+// endpoint.WSForward parameter. A named function that takes one but builds
+// anything else, such as a handler, is not a registration.
 func insideWebSocketRegistration(parents []ast.Node) bool {
 	for i := len(parents) - 1; i >= 0; i-- {
-		var params *ast.FieldList
 		switch function := parents[i].(type) {
 		case *ast.FuncDecl:
-			params = function.Type.Params
+			if hasSelectorParameter(function.Type.Params, "endpoint", "WSForward") && returnsMount(function.Type.Results) {
+				return true
+			}
 		case *ast.FuncLit:
-			params = function.Type.Params
-		default:
-			continue
-		}
-		if hasSelectorParameter(params, "endpoint", "WSForward") {
-			return true
+			if hasSelectorParameter(function.Type.Params, "endpoint", "WSForward") {
+				return true
+			}
 		}
 	}
 	return false
+}
+
+// returnsMount reports whether results is exactly one Mount.
+func returnsMount(results *ast.FieldList) bool {
+	if results == nil || len(results.List) != 1 || len(results.List[0].Names) > 1 {
+		return false
+	}
+	result, ok := results.List[0].Type.(*ast.Ident)
+	return ok && result.Name == "Mount"
 }
 
 func checkComponentInventory(t *testing.T, fset *token.FileSet, files []productionFile) {

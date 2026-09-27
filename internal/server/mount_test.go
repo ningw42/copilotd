@@ -1,7 +1,6 @@
 package server
 
 import (
-	"context"
 	"fmt"
 	"net/http"
 	"strings"
@@ -9,12 +8,6 @@ import (
 
 	"github.com/ningw42/copilotd/internal/endpoint"
 )
-
-// noopDrainer is a WebSocket drainer with nothing to drain.
-type noopDrainer struct{}
-
-func (noopDrainer) StartDrain()                    {}
-func (noopDrainer) Shutdown(context.Context) error { return nil }
 
 // constructionPanic runs build and returns its panic message, or "" when it
 // returned normally.
@@ -44,7 +37,7 @@ func TestMountsRejectAMissingHandlerBeforeWrapping(t *testing.T) {
 		{name: "passthrough", build: func(h http.Handler) Mount { return MountPassthrough(endpoint.Models(), h) }},
 		{name: "Catalog", build: func(h http.Handler) Mount { return MountCatalog(endpoint.OpenAICatalog(), h) }},
 		{name: "WebSocket", build: func(h http.Handler) Mount {
-			return MountWebSocket(endpoint.OpenAIResponsesWS(), h, noopDrainer{})
+			return MountWebSocket(endpoint.OpenAIResponsesWS(), h, noWebSocketDrainer{})
 		}},
 		{name: "report", build: MountReport},
 	}
@@ -75,7 +68,7 @@ func TestMountsAcceptBuiltHandlers(t *testing.T) {
 		"HTTP forward": func() { MountHTTPForward(endpoint.AnthropicMessages(), handler) },
 		"passthrough":  func() { MountPassthrough(endpoint.Models(), handler) },
 		"Catalog":      func() { MountCatalog(endpoint.AnthropicCatalog(), handler) },
-		"WebSocket":    func() { MountWebSocket(endpoint.OpenAIResponsesWS(), handler, noopDrainer{}) },
+		"WebSocket":    func() { MountWebSocket(endpoint.OpenAIResponsesWS(), handler, noWebSocketDrainer{}) },
 		"report":       func() { MountReport(handler) },
 	} {
 		if message := constructionPanic(build); message != "" {
