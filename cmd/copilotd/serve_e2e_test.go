@@ -563,6 +563,28 @@ func TestServeFreshCodexCatalogAndReadinessEndToEnd(t *testing.T) {
 	}
 }
 
+// TestServeRefreshesCodexModelsForABareEnabledCatalog proves that
+// --codex-catalog-enabled alone, with no alias, reviewer, per-model reviewer
+// override, or limit overlay, still registers and refreshes codex_models: the
+// release it accepts is what /readyz reports. The served shape is the catalog
+// negotiation tests' concern, not this test's.
+func TestServeRefreshesCodexModelsForABareEnabledCatalog(t *testing.T) {
+	const (
+		tag    = "rust-v2.3.4"
+		commit = "abcdefabcdefabcdefabcdefabcdefabcdefabcd"
+	)
+	edge := newCodexReleaseEdge(t, tag, commit, completeCodexModelsBytes(t, "bare-model", "bare release prompt"))
+	cfg := lifecycleConfig("gho-bare-codex-catalog")
+	cfg.CodexCatalogEnabled = true
+	cfg.CodexCatalogRefreshInterval = time.Hour
+	edges := offlineServeEdges()
+	edges.CodexModels = catalog.ModelsEdge{BaseURL: edge.URL, Client: edge.Client()}
+
+	base := startServedLifecycle(t, discardLogger(t), serveInput{Config: cfg, Edges: edges})
+
+	awaitCachedValue(t, base, "codex_models", "fetched", tag)
+}
+
 // TestServeRequestDrivenMintRecoveryEndToEnd proves that readiness and request
 // admission depend only on the local prerequisites already resolved before the
 // server binds. Every authenticated request can therefore reach the real

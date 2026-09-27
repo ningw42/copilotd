@@ -28,8 +28,7 @@ import (
 
 func testCodexDescriptor(cfg config.ServeConfig, models *cache.Value[[]byte]) catalog.CodexDescriptor {
 	return catalog.CodexDescriptor{
-		Enabled: cfg.CodexCatalogEnabled,
-		Models:  models,
+		Models: models,
 		RenderConfig: catalog.CodexRenderConfig{
 			ModelAliases:             cfg.CodexCatalogModelAliases,
 			AutoReviewModel:          cfg.CodexAutoReviewModel,
@@ -197,10 +196,14 @@ func TestCodexCatalogAliasConfigIsScopedToNegotiatedOpenAICatalog(t *testing.T) 
 	newStack := func(enabled bool) string {
 		t.Helper()
 		cfg := testConfig()
-		cfg.CodexCatalogEnabled = enabled
 		cfg.CodexCatalogModelAliases = map[string]string{alias: "gpt-5.4"}
+		// A disabled Codex catalog has no models source.
+		var models *cache.Value[[]byte]
+		if enabled {
+			models = pinnedCodexModels(t, "gpt-5.4")
+		}
 		forwarder := newTestForwarder(provider, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
-		return startServer(t, newTestServerFromBase(cfg, discardLogger(t), provider, newTestReadyObservers(), forwarder, newTestCatalogSource(provider), newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.RenderDescriptors{Codex: testCodexDescriptor(cfg, pinnedCodexModels(t, "gpt-5.4"))}))
+		return startServer(t, newTestServerFromBase(cfg, discardLogger(t), provider, newTestReadyObservers(), forwarder, newTestCatalogSource(provider), newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.RenderDescriptors{Codex: testCodexDescriptor(cfg, models)}))
 	}
 	request := func(base, target string) []byte {
 		t.Helper()
@@ -446,7 +449,6 @@ func TestCodexCatalogOverRealListener(t *testing.T) {
 	newStack := func(codex config.ServeConfig, ready bool) (string, *identity.Static) {
 		t.Helper()
 		cfg := testConfig()
-		cfg.CodexCatalogEnabled = codex.CodexCatalogEnabled
 		cfg.CodexAutoReviewModel = codex.CodexAutoReviewModel
 		cfg.CodexAutoReviewModelOverrides = codex.CodexAutoReviewModelOverrides
 		cfg.CodexOverrideLimits = codex.CodexOverrideLimits
@@ -455,8 +457,13 @@ func TestCodexCatalogOverRealListener(t *testing.T) {
 			Token:   "copilot-token",
 			Headers: http.Header{"Copilot-Integration-Id": {"vscode-chat"}},
 		}, ready)
+		// A disabled Codex catalog has no models source.
+		var models *cache.Value[[]byte]
+		if codex.CodexCatalogEnabled {
+			models = pinnedCodexModels(t, reviewer, activeModel)
+		}
 		forwarder := newTestForwarder(provider, forward.NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
-		return startServer(t, newTestServerFromBase(cfg, discardLogger(t), provider, newTestReadyObservers(), forwarder, newTestCatalogSource(provider), newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.RenderDescriptors{Codex: testCodexDescriptor(cfg, pinnedCodexModels(t, reviewer, activeModel))})), provider
+		return startServer(t, newTestServerFromBase(cfg, discardLogger(t), provider, newTestReadyObservers(), forwarder, newTestCatalogSource(provider), newTestWSProxy(provider), NewStreamOutcomeCounter(), catalog.RenderDescriptors{Codex: testCodexDescriptor(cfg, models)})), provider
 	}
 
 	requestCatalog := func(base, method, target, keyHeader, key, requestID string) (*http.Response, []byte) {

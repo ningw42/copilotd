@@ -609,8 +609,7 @@ func newServeServer(cfg config.ServeConfig, base *slog.Logger, mgr *identity.Man
 			ModelIDNormalizationEnabled: cfg.AnthropicCatalogModelIDNormalizationEnabled,
 		},
 		Codex: catalog.CodexDescriptor{
-			Enabled: cfg.CodexCatalogEnabled,
-			Models:  codexModels,
+			Models: codexModels,
 			RenderConfig: catalog.CodexRenderConfig{
 				ModelAliases:             cfg.CodexCatalogModelAliases,
 				AutoReviewModel:          cfg.CodexAutoReviewModel,
@@ -761,6 +760,7 @@ func productionCodexModelsEdge() catalog.ModelsEdge {
 
 // configuredCodexModels keeps the opt-in boundary at the composition root: a
 // disabled Codex catalog registers no cached value and performs no GitHub read.
+// Its nil result is also the Codex catalog's disabled signal to catalog.
 func configuredCodexModels(cfg config.ServeConfig, edge catalog.ModelsEdge, registry *cache.Registry, base *slog.Logger) *cache.Value[[]byte] {
 	if !cfg.CodexCatalogEnabled {
 		return nil

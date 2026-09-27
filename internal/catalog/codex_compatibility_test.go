@@ -179,17 +179,15 @@ func TestVendoredCodexCatalogRoundTripFidelity(t *testing.T) {
 		}
 	}
 
-	handler := Handler(discardHandlerLogger(), endpoint.OpenAICatalog(), Rendering{
-		Render: RenderOpenAI,
+	handler := Handler(discardHandlerLogger(), endpoint.OpenAICatalog(), RenderDescriptors{
 		Codex: CodexDescriptor{
-			Enabled: true,
-			Models:  modelsValue,
+			Models: modelsValue,
 			RenderConfig: CodexRenderConfig{
 				AutoReviewModel: reviewer,
 				OverrideLimits:  true,
 			},
 		},
-	}, stubSource{status: http.StatusOK, body: copilotBytes})
+	}, stubSource{status: http.StatusOK, body: copilotBytes}, nil)
 	recorder := httptest.NewRecorder()
 	handler(recorder, httptest.NewRequest(http.MethodGet, "/openai/v1/models?client_version=1.2.3", nil))
 

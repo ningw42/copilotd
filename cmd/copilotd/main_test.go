@@ -202,11 +202,11 @@ func TestConfiguredCodexModelsRegistersOnlyForEnabledCatalog(t *testing.T) {
 			if len(statuses) != tc.want {
 				t.Fatalf("registered cache statuses = %#v, want %d", statuses, tc.want)
 			}
-			if tc.enabled && statuses[0].Name != "codex_models" {
-				t.Errorf("registered status = %#v, want codex_models", statuses[0])
+			if tc.enabled && (statuses[0].Name != "codex_models" || statuses[0].Source != "fallback") {
+				t.Errorf("registered status = %#v, want codex_models pinned to its fallback", statuses[0])
 			}
-			if !tc.enabled && edgeCalls.Load() != 0 {
-				t.Errorf("disabled catalog made %d Codex edge calls, want 0", edgeCalls.Load())
+			if edgeCalls.Load() != 0 {
+				t.Errorf("pinned/disabled catalog made %d Codex edge calls, want 0", edgeCalls.Load())
 			}
 		})
 	}

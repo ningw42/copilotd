@@ -67,8 +67,11 @@ func newHandler(apikey string, provider identity.Provider, observers ReadyObserv
 		}
 	}
 	registerPassthrough := func(ep endpoint.Passthrough) { mount(ep, fwd.PassthroughHandler(ep)) }
-	registerCatalog := func(ep endpoint.Catalog, rendering catalog.Rendering) {
-		mount(ep, catalog.Handler(catalogLogger, ep, rendering, source))
+	recordCatalogShape := func(ctx context.Context, shape catalog.Shape) {
+		requestsummary.RecordCatalogShape(ctx, string(shape))
+	}
+	registerCatalog := func(ep endpoint.Catalog) {
+		mount(ep, catalog.Handler(catalogLogger, ep, catalogs, source, recordCatalogShape))
 	}
 
 	registerForward(endpoint.AnthropicMessages())
@@ -76,19 +79,8 @@ func newHandler(apikey string, provider identity.Provider, observers ReadyObserv
 	registerForward(endpoint.OpenAIResponsesHTTP())
 	registerWS(endpoint.OpenAIResponsesWS())
 	registerPassthrough(endpoint.Models())
-	registerCatalog(endpoint.AnthropicCatalog(), catalog.Rendering{
-		Render: func(models []catalog.Model) ([]byte, error) {
-			return catalog.RenderAnthropicWithConfig(models, catalogs.Anthropic)
-		},
-		RecordShape: nil,
-	})
-	registerCatalog(endpoint.OpenAICatalog(), catalog.Rendering{
-		Render: catalog.RenderOpenAI,
-		Codex:  catalogs.Codex,
-		RecordShape: func(ctx context.Context, shape catalog.Shape) {
-			requestsummary.RecordCatalogShape(ctx, string(shape))
-		},
-	})
+	registerCatalog(endpoint.AnthropicCatalog())
+	registerCatalog(endpoint.OpenAICatalog())
 
 	return requestID(accessLog(logger, streamOutcomes, recoverMW(logger, mux)))
 }
