@@ -1335,7 +1335,10 @@ func TestServeLifecycleStopsUsageAdmissionBeforeWarningForcedDrain(t *testing.T)
 		state: logState,
 	})
 	harness := startUsageMeterServeHarness(t, upstream.URL, base, func(cfg *config.ServeConfig) {
-		cfg.ShutdownTimeout = 75 * time.Millisecond
+		// This test proves admission and warning order, not the minimum native
+		// SQLite cleanup latency. Keep forced drain short while leaving its fresh
+		// finalization budget viable under full-race load and on Windows/arm64.
+		cfg.ShutdownTimeout = time.Second
 		seedLargeUsageReport(t, cfg.UsageDBPath)
 	}, holdBeforeUsageMeter(hold), usageBackpressureListener(t))
 	slowReport := startSlowUsageResponse(t, harness, "report-before-forced-drain-log")
