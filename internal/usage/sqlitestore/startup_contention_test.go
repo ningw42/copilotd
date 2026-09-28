@@ -16,6 +16,55 @@ import (
 	"modernc.org/sqlite"
 )
 
+func TestStoreRetriesImmediateWALBusyWithinOneStartupBudget(t *testing.T) {
+	parent := filepath.Join(t.TempDir(), "private")
+	if err := os.Mkdir(parent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(parent, "usage.db")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	blockerDB, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer blockerDB.Close()
+	blocker, err := blockerDB.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer blocker.Close()
+	if _, err := blocker.ExecContext(context.Background(), "BEGIN IMMEDIATE"); err != nil {
+		t.Fatal(err)
+	}
+
+	contention := &startupContention{t: t, blocker: blocker, releaseOnFirstBusy: true}
+	openDB := func(name, dsn string) (*sql.DB, error) {
+		connector, err := sqlite.NewConnector(dsn)
+		if err != nil {
+			return nil, err
+		}
+		return sql.OpenDB(startupContentionConnector{Connector: connector, contention: contention}), nil
+	}
+	started := time.Now()
+	store, err := openStore(path, slog.New(slog.NewTextHandler(io.Discard, nil)), openDB, flushInterval)
+	if err != nil {
+		t.Fatalf("Open after observed WAL SQLITE_BUSY: %v", err)
+	}
+	if contention.walBusy == 0 || !contention.walReleased {
+		t.Fatalf("WAL contention observation = busy:%d released:%t, want observed retry and synchronous release", contention.walBusy, contention.walReleased)
+	}
+	if elapsed := time.Since(started); elapsed >= startupBudget {
+		t.Errorf("Open elapsed = %v, want retry inside one startup budget", elapsed)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if report := store.Close(ctx); !report.DriverCleanupCompleted {
+		t.Fatal(report)
+	}
+}
+
 func TestStoreStartupSharesBudgetAcrossSequentialWALAndBeginContention(t *testing.T) {
 	t.Parallel()
 	parent := filepath.Join(t.TempDir(), "private")
@@ -41,7 +90,7 @@ func TestStoreStartupSharesBudgetAcrossSequentialWALAndBeginContention(t *testin
 	}
 	defer blocker.ExecContext(context.Background(), "ROLLBACK")
 
-	contention := &startupContention{t: t, blocker: blocker}
+	contention := &startupContention{t: t, blocker: blocker, holdBegin: true}
 	openDB := func(name, dsn string) (*sql.DB, error) {
 		if name != "sqlite" {
 			t.Fatalf("driver = %q, want sqlite", name)
@@ -91,14 +140,16 @@ func TestStoreStartupSharesBudgetAcrossSequentialWALAndBeginContention(t *testin
 // changed. Admission uses them serially, and returns before assertions read the
 // observations. The lock handoff is synchronous with SQL, not a sleep-order race.
 type startupContention struct {
-	t           *testing.T
-	blocker     *sql.Conn
-	firstWAL    time.Time
-	walBusy     int
-	walReleased bool
-	walCap      int64
-	beginCap    int64
-	beginWait   time.Duration
+	t                  *testing.T
+	blocker            *sql.Conn
+	releaseOnFirstBusy bool
+	holdBegin          bool
+	firstWAL           time.Time
+	walBusy            int
+	walReleased        bool
+	walCap             int64
+	beginCap           int64
+	beginWait          time.Duration
 }
 
 type startupContentionConnector struct {
@@ -131,7 +182,7 @@ func (c *startupContentionConn) QueryContext(ctx context.Context, query string, 
 		s.walBusy++
 		// Let the shipped clean-connection retries spend time on the first
 		// lock, then release it only after observing a real SQLITE_BUSY.
-		if !s.walReleased && time.Since(s.firstWAL) >= 250*time.Millisecond {
+		if !s.walReleased && (s.releaseOnFirstBusy || time.Since(s.firstWAL) >= 250*time.Millisecond) {
 			if _, err := s.blocker.ExecContext(context.Background(), "ROLLBACK"); err != nil {
 				s.t.Fatal(err)
 			}
@@ -143,7 +194,7 @@ func (c *startupContentionConn) QueryContext(ctx context.Context, query string, 
 
 func (c *startupContentionConn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
 	s := c.contention
-	if query != "BEGIN IMMEDIATE" {
+	if query != "BEGIN IMMEDIATE" || !s.holdBegin {
 		return c.Conn.(driver.ExecerContext).ExecContext(ctx, query, args)
 	}
 	if s.beginCap == 0 {

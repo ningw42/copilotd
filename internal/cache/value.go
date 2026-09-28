@@ -282,6 +282,12 @@ func (v *Value[V]) Run(ctx context.Context) {
 			return
 		case <-ticker.C():
 			_ = v.attempt(ctx)
+			// Cancellation may arrive while an edge call is in flight. Return
+			// directly after that attempt instead of re-entering a select where
+			// an already-ready ticker can win and start needless canceled work.
+			if ctx.Err() != nil {
+				return
+			}
 		}
 	}
 }

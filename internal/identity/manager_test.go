@@ -304,6 +304,33 @@ func TestManagerRejectsInvalidExchangeOriginsBeforePublishingCredential(t *testi
 	}
 }
 
+// observedWaitContext reports when Current has joined the singleflight result
+// channel and begun selecting on the caller context. Unlike a sleep, that
+// observation establishes the ordering the concurrency tests need.
+type observedWaitContext struct {
+	context.Context
+	once     sync.Once
+	observed chan<- struct{}
+}
+
+func (c *observedWaitContext) Done() <-chan struct{} {
+	c.once.Do(func() { c.observed <- struct{}{} })
+	return c.Context.Done()
+}
+
+func waitForObservedWaiters(t *testing.T, observed <-chan struct{}, count int) {
+	t.Helper()
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+	for range count {
+		select {
+		case <-observed:
+		case <-timer.C:
+			t.Fatalf("only some of %d callers reached the shared-flight wait", count)
+		}
+	}
+}
+
 // --- AC #2a: concurrent stale/empty-cache callers collapse to one exchange ---
 
 func TestManagerSingleInFlight(t *testing.T) {
@@ -336,12 +363,16 @@ func TestManagerSingleInFlight(t *testing.T) {
 	<-entered
 
 	// All remaining callers now find the key in flight and must join it.
+	observed := make(chan struct{}, n-1)
 	for i := 1; i < n; i++ {
 		wg.Add(1)
-		go func(i int) { defer wg.Done(); results[i], errs[i] = m.Current(context.Background()) }(i)
+		go func(i int) {
+			defer wg.Done()
+			ctx := &observedWaitContext{Context: context.Background(), observed: observed}
+			results[i], errs[i] = m.Current(ctx)
+		}(i)
 	}
-	// Let the joiners reach DoChan while the exchange is still blocked, then release.
-	time.Sleep(50 * time.Millisecond)
+	waitForObservedWaiters(t, observed, n-1)
 	close(release)
 	wg.Wait()
 
@@ -390,9 +421,14 @@ func TestManagerCancelOneWaiterDoesNotCancelExchange(t *testing.T) {
 	<-entered
 
 	// Caller B joins the in-flight exchange with a live context.
+	observed := make(chan struct{}, 1)
 	wgB.Add(1)
-	go func() { defer wgB.Done(); crB, erB = m.Current(context.Background()) }()
-	time.Sleep(50 * time.Millisecond) // let B reach its select on the shared channel
+	go func() {
+		defer wgB.Done()
+		ctx := &observedWaitContext{Context: context.Background(), observed: observed}
+		crB, erB = m.Current(ctx)
+	}()
+	waitForObservedWaiters(t, observed, 1)
 
 	// A abandons its wait; this must not cancel the shared exchange.
 	cancelA()

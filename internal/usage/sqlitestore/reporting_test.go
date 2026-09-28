@@ -133,7 +133,7 @@ func TestStoreRecoveredWriteFailureDoesNotPoisonLaterOrFinalLevels(t *testing.T)
 	for index := range 128 {
 		store.Record(usage.Turn{At: time.UnixMilli(int64(index + 2000)), ResponseID: fmt.Sprintf("pressure-writer-%d", index), Model: "m", Transport: usage.TransportBuffered, Usage: usage.OpenAIUsage{InputTokens: 1, OutputTokens: 1}})
 	}
-	time.Sleep(100 * time.Millisecond)
+	waitForStoreQueueToDrain(t, store)
 	for index := range 1025 {
 		store.Record(usage.Turn{At: time.UnixMilli(int64(index + 3000)), ResponseID: fmt.Sprintf("pressure-queue-%d", index), Model: "m", Transport: usage.TransportBuffered, Usage: usage.OpenAIUsage{InputTokens: 1, OutputTokens: 1}})
 	}

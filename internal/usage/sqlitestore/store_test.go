@@ -58,6 +58,21 @@ func openExternal(t *testing.T, path string) *sql.DB {
 	return db
 }
 
+func waitForStoreQueueToDrain(t *testing.T, store *sqlitestore.Store) {
+	t.Helper()
+	deadline := time.NewTimer(fixtureStoreCloseTimeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for sqlitestore.QueuedForTest(store) != 0 {
+		select {
+		case <-ticker.C:
+		case <-deadline.C:
+			t.Fatalf("store writer did not dequeue its initial batch; queued=%d", sqlitestore.QueuedForTest(store))
+		}
+	}
+}
+
 func ptr(value int64) *int64 { return &value }
 
 func TestStoreCreatesCurrentSchemaAndRoundTripsBothNativeTables(t *testing.T) {
@@ -288,47 +303,6 @@ func TestStoreConcurrentFreshOpenersShareOneMigratedDatabase(t *testing.T) {
 	}
 }
 
-func TestStoreRetriesImmediateWALBusyWithinOneStartupBudget(t *testing.T) {
-	parent := filepath.Join(t.TempDir(), "private")
-	if err := os.Mkdir(parent, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(parent, "usage.db")
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = file.Close()
-	locker := openExternal(t, path)
-	if _, err := locker.Exec("BEGIN IMMEDIATE"); err != nil {
-		t.Fatal(err)
-	}
-	type opened struct {
-		store *sqlitestore.Store
-		err   error
-	}
-	result := make(chan opened, 1)
-	started := time.Now()
-	go func() {
-		store, err := sqlitestore.Open(path, testStoreLogger(io.Discard))
-		result <- opened{store: store, err: err}
-	}()
-	time.Sleep(150 * time.Millisecond)
-	if _, err := locker.Exec("ROLLBACK"); err != nil {
-		t.Fatal(err)
-	}
-	got := <-result
-	if got.err != nil {
-		t.Fatalf("Open after immediate WAL SQLITE_BUSY: %v", got.err)
-	}
-	if elapsed := time.Since(started); elapsed < 100*time.Millisecond || elapsed >= 5*time.Second {
-		t.Errorf("Open elapsed = %v, want retry delay inside one five-second budget", elapsed)
-	}
-	if report := closeStore(t, got.store); !report.DriverCleanupCompleted {
-		t.Fatal(report)
-	}
-}
-
 func TestStoreStartupContentionBudgetExhaustionAndNonContentionFailure(t *testing.T) {
 	t.Run("contention exhaustion", func(t *testing.T) {
 		parent := filepath.Join(t.TempDir(), "private")
@@ -493,12 +467,23 @@ func TestStoreFlushesOnTimerAndShutdown(t *testing.T) {
 func TestStoreWALAllowsExternalReadSnapshotWhileWriterCommits(t *testing.T) {
 	path, store := openStore(t, io.Discard)
 	store.Record(usage.Turn{At: time.UnixMilli(1), ResponseID: "first", Model: "m", Transport: usage.TransportBuffered, Usage: usage.OpenAIUsage{InputTokens: 1, OutputTokens: 1}})
-	time.Sleep(1100 * time.Millisecond)
 	reader := openExternal(t, path)
+	deadline := time.Now().Add(2 * time.Second)
+	var snapshotCount int
+	for {
+		err := reader.QueryRow("SELECT count(*) FROM openai_turn").Scan(&snapshotCount)
+		if err == nil && snapshotCount == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("initial reader rows = %d, %v; want 1", snapshotCount, err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	if _, err := reader.Exec("BEGIN"); err != nil {
 		t.Fatal(err)
 	}
-	var snapshotCount int
+	// Establish the held snapshot before admitting the later batch.
 	if err := reader.QueryRow("SELECT count(*) FROM openai_turn").Scan(&snapshotCount); err != nil || snapshotCount != 1 {
 		t.Fatalf("initial reader snapshot = %d, %v; want 1", snapshotCount, err)
 	}
@@ -506,7 +491,7 @@ func TestStoreWALAllowsExternalReadSnapshotWhileWriterCommits(t *testing.T) {
 		store.Record(usage.Turn{At: time.UnixMilli(int64(i + 2)), ResponseID: fmt.Sprintf("later-%d", i), Model: "m", Transport: usage.TransportBuffered, Usage: usage.OpenAIUsage{InputTokens: 1, OutputTokens: 1}})
 	}
 	observer := openExternal(t, path)
-	deadline := time.Now().Add(2 * time.Second)
+	deadline = time.Now().Add(2 * time.Second)
 	for {
 		var count int
 		err := observer.QueryRow("SELECT count(*) FROM openai_turn").Scan(&count)
@@ -533,7 +518,12 @@ func TestStoreWALAllowsExternalReadSnapshotWhileWriterCommits(t *testing.T) {
 }
 
 func TestStoreRuntimeContentionLosesOneBatchThenRecovers(t *testing.T) {
-	path, store := openStore(t, io.Discard)
+	handler := &storeLogHandler{}
+	path := filepath.Join(t.TempDir(), "private", "usage.db")
+	store, err := sqlitestore.Open(path, slog.New(handler))
+	if err != nil {
+		t.Fatal(err)
+	}
 	locker := openExternal(t, path)
 	if _, err := locker.Exec("BEGIN IMMEDIATE"); err != nil {
 		t.Fatal(err)
@@ -541,9 +531,9 @@ func TestStoreRuntimeContentionLosesOneBatchThenRecovers(t *testing.T) {
 	for i := range 128 {
 		store.Record(usage.Turn{At: time.UnixMilli(int64(i + 1)), ResponseID: fmt.Sprintf("lost-%d", i), Model: "m", Transport: usage.TransportBuffered, Usage: usage.OpenAIUsage{InputTokens: 1, OutputTokens: 1}})
 	}
-	// The admitted connection's runtime busy timeout is five seconds. Let that
-	// bounded attempt exhaust before releasing the external writer.
-	time.Sleep(5300 * time.Millisecond)
+	// Release only after the writer reports that the real bounded attempt
+	// exhausted; elapsed sleep is not evidence that the batch settled.
+	waitForStoreLog(t, handler, "usage observations lost", 7*time.Second)
 	if _, err := locker.Exec("ROLLBACK"); err != nil {
 		t.Fatal(err)
 	}
@@ -558,7 +548,6 @@ func TestStoreRuntimeContentionLosesOneBatchThenRecovers(t *testing.T) {
 		t.Fatal(err)
 	}
 	store.Record(usage.Turn{At: time.UnixMilli(1000), ResponseID: "recovered-after-contention", Model: "m", Transport: usage.TransportBuffered, Usage: usage.OpenAIUsage{InputTokens: 2, OutputTokens: 3}})
-	time.Sleep(1100 * time.Millisecond)
 	report := closeStore(t, store)
 	if report.RuntimeWriteLosses != 128 || report.FinalFlushLosses != 0 || !report.DriverCleanupCompleted {
 		t.Fatalf("Close report = %+v, want exactly one exhausted runtime batch", report)
@@ -590,21 +579,24 @@ func TestStoreDeadlineEdgeBeginCleanupAllowsLaterBatchAndOtherWriter(t *testing.
 	if err := <-released; err != nil {
 		t.Fatal(err)
 	}
-	// Allow the runtime attempt to settle on either side of the real deadline.
-	time.Sleep(300 * time.Millisecond)
 	otherWriter := openExternal(t, path)
 	if _, err := otherWriter.Exec("PRAGMA busy_timeout=250"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := otherWriter.Exec("BEGIN IMMEDIATE"); err != nil {
-		t.Fatalf("other writer remained blocked after ambiguous BEGIN cleanup: %v", err)
+	acquired := false
+	deadline := time.Now().Add(2 * time.Second)
+	for !acquired {
+		if _, err := otherWriter.Exec("BEGIN IMMEDIATE"); err == nil {
+			acquired = true
+		} else if time.Now().After(deadline) {
+			t.Fatalf("other writer remained blocked after ambiguous BEGIN cleanup: %v", err)
+		}
 	}
 	if _, err := otherWriter.Exec("ROLLBACK"); err != nil {
 		t.Fatal(err)
 	}
 
 	store.Record(usage.Turn{At: time.UnixMilli(1000), ResponseID: "edge-recovered", Model: "m", Transport: usage.TransportBuffered, Usage: usage.OpenAIUsage{InputTokens: 2, OutputTokens: 3}})
-	time.Sleep(1100 * time.Millisecond)
 	report := closeStore(t, store)
 	if report.FinalFlushLosses != 0 || !report.DriverCleanupCompleted || (report.RuntimeWriteLosses != 0 && report.RuntimeWriteLosses != 128) {
 		t.Fatalf("deadline-edge report = %+v", report)
@@ -632,7 +624,7 @@ func TestStoreFullQueueDropsPromptlyWithoutSynchronousLogging(t *testing.T) {
 	for i := range 128 {
 		store.Record(usage.Turn{At: time.UnixMilli(int64(i + 1)), ResponseID: fmt.Sprintf("initial-%d", i), Model: "m", Transport: usage.TransportBuffered, Usage: usage.OpenAIUsage{InputTokens: 1, OutputTokens: 1}})
 	}
-	time.Sleep(100 * time.Millisecond)
+	waitForStoreQueueToDrain(t, store)
 	for i := range 1024 {
 		store.Record(usage.Turn{At: time.UnixMilli(int64(i + 1000)), ResponseID: fmt.Sprintf("queued-%d", i), Model: "m", Transport: usage.TransportBuffered, Usage: usage.OpenAIUsage{InputTokens: 1, OutputTokens: 1}})
 	}
@@ -654,14 +646,19 @@ func TestStoreFullQueueDropsPromptlyWithoutSynchronousLogging(t *testing.T) {
 }
 
 func TestStoreFailedBatchIsLostAndWriterContinuesWithoutReplay(t *testing.T) {
-	path, store := openStore(t, io.Discard)
+	handler := &storeLogHandler{}
+	path := filepath.Join(t.TempDir(), "private", "usage.db")
+	store, err := sqlitestore.Open(path, slog.New(handler))
+	if err != nil {
+		t.Fatal(err)
+	}
 	// One invalid transport poisons this complete transaction. The valid row in
 	// the same batch must not be replayed later.
 	store.Record(usage.Turn{At: time.UnixMilli(1), ResponseID: "failed-valid", Model: "m", Transport: usage.TransportBuffered, Usage: usage.OpenAIUsage{InputTokens: 1, OutputTokens: 1}})
 	store.Record(usage.Turn{At: time.UnixMilli(2), ResponseID: "failed-invalid", Model: "m", Transport: usage.Transport("invalid"), Usage: usage.OpenAIUsage{InputTokens: 1, OutputTokens: 1}})
-	time.Sleep(1200 * time.Millisecond)
+	waitForStoreLog(t, handler, "usage observations lost", 3*time.Second)
 	store.Record(usage.Turn{At: time.UnixMilli(3), ResponseID: "recovered", Model: "m", Transport: usage.TransportBuffered, Usage: usage.OpenAIUsage{InputTokens: 2, OutputTokens: 3}})
-	time.Sleep(1200 * time.Millisecond)
+	waitForStoreLog(t, handler, "usage storage recovered", 3*time.Second)
 	report := closeStore(t, store)
 	if report.RuntimeWriteLosses != 2 || report.FinalFlushLosses != 0 || !report.DriverCleanupCompleted {
 		t.Fatalf("Close report = %+v, want two runtime losses and completed cleanup", report)
@@ -854,11 +851,18 @@ func TestStoreCreatesPrivateArtifactsAndRejectsUnsafeDestinations(t *testing.T) 
 			t.Fatal(err)
 		}
 		store.Record(usage.Turn{At: time.Now(), ResponseID: "sidecars", Model: "m", Transport: usage.TransportBuffered, Usage: usage.OpenAIUsage{InputTokens: 1, OutputTokens: 1}})
-		time.Sleep(1100 * time.Millisecond)
 		for _, sidecar := range []string{path + "-wal", path + "-shm"} {
-			info, err := os.Stat(sidecar)
-			if err != nil || !info.Mode().IsRegular() || filepath.Dir(sidecar) != filepath.Dir(path) {
-				t.Errorf("live sidecar %q = %#v, %v; want regular file beside main database", sidecar, info, err)
+			deadline := time.Now().Add(2 * time.Second)
+			for {
+				info, err := os.Stat(sidecar)
+				if err == nil && info.Mode().IsRegular() && filepath.Dir(sidecar) == filepath.Dir(path) {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Errorf("live sidecar %q = %#v, %v; want regular file beside main database", sidecar, info, err)
+					break
+				}
+				time.Sleep(10 * time.Millisecond)
 			}
 		}
 		if report := closeStore(t, store); !report.DriverCleanupCompleted {

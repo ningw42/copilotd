@@ -199,6 +199,66 @@ func TestValueRunWaitsForTickerAndStopsOnCancellation(t *testing.T) {
 	}
 }
 
+func TestValueRunCancellationDuringAttemptDoesNotReenterTickerSelect(t *testing.T) {
+	t.Parallel()
+
+	ticker := &observedTicker{
+		ticks:   make(chan time.Time),
+		cCalls:  make(chan struct{}, 2),
+		stopped: make(chan struct{}),
+	}
+	fetchStarted := make(chan struct{})
+	value := cache.New(discardLogger(), cache.Cacheable[string]{
+		Fallback:        "embedded",
+		FallbackVersion: "v1",
+		TTL:             time.Hour,
+		Fetch: func(ctx context.Context) (string, string, error) {
+			close(fetchStarted)
+			<-ctx.Done()
+			return "", "", ctx.Err()
+		},
+		Hash: func(value string) string { return value },
+	}, cache.WithTicker(func(time.Duration) cache.Ticker { return ticker }))
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		value.Run(ctx)
+		close(done)
+	}()
+
+	select {
+	case <-ticker.cCalls:
+	case <-time.After(time.Second):
+		t.Fatal("Run did not enter its ticker select")
+	}
+	select {
+	case ticker.ticks <- time.Time{}:
+	case <-time.After(time.Second):
+		t.Fatal("Run did not receive its first tick")
+	}
+	select {
+	case <-fetchStarted:
+	case <-time.After(time.Second):
+		t.Fatal("refresh attempt did not start")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Run did not stop after in-flight attempt observed cancellation")
+	}
+	select {
+	case <-ticker.cCalls:
+		t.Fatal("Run re-entered the ticker select after its attempt observed cancellation")
+	default:
+	}
+	select {
+	case <-ticker.stopped:
+	default:
+		t.Fatal("Run did not stop its ticker")
+	}
+}
+
 func TestValueDisabledTTLDoesNotPrimeOrRun(t *testing.T) {
 	t.Parallel()
 
@@ -290,6 +350,18 @@ type fakeTicker struct {
 
 func (t *fakeTicker) C() <-chan time.Time { return t.ticks }
 func (t *fakeTicker) Stop()               { close(t.stopped) }
+
+type observedTicker struct {
+	ticks   chan time.Time
+	cCalls  chan struct{}
+	stopped chan struct{}
+}
+
+func (t *observedTicker) C() <-chan time.Time {
+	t.cCalls <- struct{}{}
+	return t.ticks
+}
+func (t *observedTicker) Stop() { close(t.stopped) }
 
 func TestValueWarmFetchFailureKeepsLastGood(t *testing.T) {
 	t.Parallel()
