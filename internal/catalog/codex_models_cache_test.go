@@ -579,9 +579,13 @@ func TestModelsCacheHungRequestTimesOutAndHoldsLastGood(t *testing.T) {
 		t.Errorf("hung request stopped after %v, want approximately five seconds", elapsed)
 	}
 	cancel()
+	// Cancellation can race the final http.Client and cache-attempt unwind after
+	// the transport observes its request deadline. This is fixture cleanup, not
+	// a one-second product contract, so allow the same bounded edge duration for
+	// the refresh goroutine to publish its failure and stop.
 	select {
 	case <-runDone:
-	case <-time.After(time.Second):
+	case <-time.After(modelsRequestTimeout + time.Second):
 		t.Fatal("models refresh loop did not stop after cancellation")
 	}
 

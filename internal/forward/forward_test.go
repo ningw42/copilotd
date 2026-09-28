@@ -2441,8 +2441,11 @@ func TestForwardProxyOriginErrors(t *testing.T) {
 	})
 
 	t.Run("unreachable upstream yields 502", func(t *testing.T) {
-		// 127.0.0.1:1 refuses connections immediately.
-		f := newTestForwarder(readyStub("http://127.0.0.1:1"), NewClient(5*time.Second), 2*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
+		client := NewClient(5 * time.Second)
+		client.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return nil, errors.New("synthetic unreachable upstream")
+		})
+		f := newTestForwarder(readyStub("https://unreachable.invalid"), client, 2*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 		req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{}`))
 		rec := newDeadlineRecorder()
 		f.Handler(endpoint.AnthropicMessages())(rec, req)
