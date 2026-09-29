@@ -122,15 +122,15 @@ func TestNewBuildsEachClientOnItsOwnTransport(t *testing.T) {
 	if call == handshake {
 		t.Fatal("call and handshake clients share one transport, want separate transports")
 	}
-	assertTransportSettings(t, "call", call, map[string]any{
-		"DisableCompression":    true,
-		"ForceAttemptHTTP2":     true,
-		"MaxIdleConns":          100,
-		"MaxIdleConnsPerHost":   100,
-		"IdleConnTimeout":       90 * time.Second,
-		"ResponseHeaderTimeout": responseHeaderTimeout,
+	assertTransportSettings(t, "call", call, &http.Transport{
+		DisableCompression:    true,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   100,
+		IdleConnTimeout:       90 * time.Second,
+		ResponseHeaderTimeout: responseHeaderTimeout,
 	})
-	assertTransportSettings(t, "handshake", handshake, nil)
+	assertTransportSettings(t, "handshake", handshake, &http.Transport{})
 }
 
 func TestCallerDoLeavesCompressionNegotiationAndDecodingToCaller(t *testing.T) {
@@ -196,30 +196,18 @@ func clientTransport(t *testing.T, name string, client *http.Client) *http.Trans
 	return transport
 }
 
-// assertTransportSettings checks the named fields of transport and that every
-// other exported field apart from Proxy keeps its zero value.
-func assertTransportSettings(t *testing.T, name string, transport *http.Transport, want map[string]any) {
+// assertTransportSettings compares every exported setting of transport with
+// want's, apart from Proxy, which clientTransport checks.
+func assertTransportSettings(t *testing.T, name string, transport, want *http.Transport) {
 	t.Helper()
-	value := reflect.ValueOf(transport).Elem()
-	for field := range want {
-		if _, ok := value.Type().FieldByName(field); !ok {
-			t.Fatalf("http.Transport has no field %s", field)
-		}
-	}
-	for i := range value.NumField() {
-		field := value.Type().Field(i)
+	got, expected := reflect.ValueOf(transport).Elem(), reflect.ValueOf(want).Elem()
+	for i := range got.NumField() {
+		field := got.Type().Field(i)
 		if !field.IsExported() || field.Name == "Proxy" {
 			continue
 		}
-		got := value.Field(i)
-		if expected, ok := want[field.Name]; ok {
-			if !reflect.DeepEqual(got.Interface(), expected) {
-				t.Errorf("%s transport %s = %v, want %v", name, field.Name, got.Interface(), expected)
-			}
-			continue
-		}
-		if !got.IsZero() {
-			t.Errorf("%s transport %s = %v, want zero value", name, field.Name, got.Interface())
+		if gotSetting, wantSetting := got.Field(i).Interface(), expected.Field(i).Interface(); !reflect.DeepEqual(gotSetting, wantSetting) {
+			t.Errorf("%s transport %s = %v, want %v", name, field.Name, gotSetting, wantSetting)
 		}
 	}
 }
