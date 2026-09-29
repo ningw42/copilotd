@@ -621,8 +621,8 @@ func serveUpgradeAgainst(t *testing.T, baseURL string, dialTimeout time.Duration
 
 // serveUntilClientLeaves serves one valid upgrade through a proxy whose
 // handshake runs on transport, cancels the inbound request once entered
-// closes, and waits for the handler. The recorder starts at Code 0 so an untouched response is
-// distinguishable from an explicit WriteHeader(200).
+// closes, and waits for the handler. The recorder starts at Code 0 so an
+// untouched response is distinguishable from an explicit WriteHeader(200).
 func serveUntilClientLeaves(t *testing.T, transport http.RoundTripper, entered <-chan struct{}) (*httptest.ResponseRecorder, *recordingWsMetrics) {
 	t.Helper()
 	provider := identity.NewStatic(identity.Credential{BaseURL: "http://upstream.invalid", Token: "copilot-token"}, true)

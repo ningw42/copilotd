@@ -566,24 +566,19 @@ func TestPassthroughReusesCallerConnectionPool(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			var seedProtocol string
 			var modelsProtocol string
 			var transportAttempts atomic.Int32
 			var usedCachedConnection atomic.Bool
 			var modelsCalls atomic.Int32
 
 			upstream := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				switch r.URL.Path {
-				case "/seed-idle-connection":
-					seedProtocol = r.Proto
-					w.WriteHeader(http.StatusNoContent)
-				case "/models":
-					modelsCalls.Add(1)
-					modelsProtocol = r.Proto
-					w.WriteHeader(http.StatusNoContent)
-				default:
+				if r.URL.Path != "/models" {
 					w.WriteHeader(http.StatusNotFound)
+					return
 				}
+				modelsCalls.Add(1)
+				modelsProtocol = r.Proto
+				w.WriteHeader(http.StatusNoContent)
 			}))
 			if test.tls {
 				upstream.EnableHTTP2 = true
@@ -593,31 +588,33 @@ func TestPassthroughReusesCallerConnectionPool(t *testing.T) {
 			}
 			defer upstream.Close()
 
-			transport := &http.Transport{}
+			f := newTestForwarder(readyStub(upstream.URL), time.Second, time.Second, time.Second, time.Second, time.Second, 1, 1, nil)
 			if test.tls {
-				transport.TLSClientConfig = upstream.Client().Transport.(*http.Transport).TLSClientConfig.Clone()
-				transport.ForceAttemptHTTP2 = true
+				// Only the test server's TLS roots need a replacement transport.
+				f = newStubForwarder(readyStub(upstream.URL), &http.Transport{
+					TLSClientConfig:   upstream.Client().Transport.(*http.Transport).TLSClientConfig.Clone(),
+					ForceAttemptHTTP2: true,
+				}, time.Second, time.Second, time.Second, time.Second, 1, 1, nil)
 			}
-			seedResponse, err := (&http.Client{Transport: transport}).Get(upstream.URL + "/seed-idle-connection")
-			if err != nil {
-				t.Fatalf("seed %s idle connection: %v", test.name, err)
+			serveModels := func(ctx context.Context) int {
+				rec := newDeadlineRecorder()
+				f.PassthroughHandler(endpoint.Models())(rec, httptest.NewRequest(http.MethodGet, "/models", nil).WithContext(ctx))
+				return rec.Code
 			}
-			if err := seedResponse.Body.Close(); err != nil {
-				t.Fatalf("close seed response body: %v", err)
+
+			// The first call leaves an idle connection in the Caller's pool.
+			if code := serveModels(context.Background()); code != http.StatusNoContent {
+				t.Fatalf("seed %s /models status = %d, want 204", test.name, code)
 			}
-			if seedProtocol != test.expectedProtocol {
-				t.Fatalf("seed protocol = %q, want %q", seedProtocol, test.expectedProtocol)
+			if modelsProtocol != test.expectedProtocol {
+				t.Fatalf("seed protocol = %q, want %q", modelsProtocol, test.expectedProtocol)
 			}
 
 			trace := &httptrace.ClientTrace{GotConn: func(info httptrace.GotConnInfo) {
 				transportAttempts.Add(1)
 				usedCachedConnection.Store(info.Reused)
 			}}
-			req := httptest.NewRequest(http.MethodGet, "/models", nil)
-			req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
-			f := newStubForwarder(readyStub(upstream.URL), transport, time.Second, time.Second, time.Second, time.Second, 1, 1, nil)
-			rec := newDeadlineRecorder()
-			f.PassthroughHandler(endpoint.Models())(rec, req)
+			code := serveModels(httptrace.WithClientTrace(context.Background(), trace))
 
 			if !usedCachedConnection.Load() {
 				t.Errorf("%s /models request did not reuse the Caller's pooled connection", test.name)
@@ -625,14 +622,14 @@ func TestPassthroughReusesCallerConnectionPool(t *testing.T) {
 			if got := transportAttempts.Load(); got != 1 {
 				t.Errorf("%s transport attempts = %d, want exactly one pooled attempt", test.name, got)
 			}
-			if got := modelsCalls.Load(); got != 1 {
-				t.Errorf("delivered upstream %s /models calls = %d, want one", test.name, got)
+			if got := modelsCalls.Load(); got != 2 {
+				t.Errorf("delivered upstream %s /models calls = %d, want two", test.name, got)
 			}
 			if modelsProtocol != test.expectedProtocol {
 				t.Errorf("models protocol = %q, want %q", modelsProtocol, test.expectedProtocol)
 			}
-			if rec.Code != http.StatusNoContent {
-				t.Errorf("%s response status = %d, want 204", test.name, rec.Code)
+			if code != http.StatusNoContent {
+				t.Errorf("%s response status = %d, want 204", test.name, code)
 			}
 		})
 	}

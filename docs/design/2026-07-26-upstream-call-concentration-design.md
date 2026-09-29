@@ -8,8 +8,13 @@
 > ([ADR-0015](../adr/0015-govern-log-record-structure-with-ordinary-slog.md)):
 > `Do` and `Buffered` (and the Catalog `Source`) also return the response-path
 > context, `Correlate` returns the correlated context, and `Caller.ReadBounded`
-> takes that context. The Go specimens and call sketches below predate that
-> plumbing. For current signatures, `internal/upstream` and
+> takes that context. Since
+> [#295](https://github.com/ningw42/copilotd/issues/295), `upstream.New` builds
+> both clients used for authenticated calls, and `wsforward` dials with
+> `Caller.HandshakeClient()`: neither `upstream.New` nor `wsforward.New` takes
+> an `*http.Client`, and the `client` and `dialClient` parameters below are
+> gone. The Go specimens and call sketches below predate that plumbing. For
+> current signatures, `internal/upstream` and
 > [ADR-0013](../adr/0013-govern-authenticated-upstream-calls-in-internal-upstream.md)
 > are authoritative.
 
