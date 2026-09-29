@@ -35,7 +35,7 @@ func stack(t *testing.T, upstreamURL string, ready bool) (*forward.Forwarder, *i
 			"Editor-Version":         {"vscode/1.104.1"},
 		},
 	}, ready)
-	return newTestForwarder(prov, forward.NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil), prov
+	return newTestForwarder(prov, 5*time.Second, 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil), prov
 }
 
 type controllerRecorder struct {
@@ -489,7 +489,7 @@ func TestModelsRequestOwnershipAndIdentityBoundariesAtAssembledServer(t *testing
 		t.Fatalf("exchange Authorization = %q, want GitHub OAuth token", got)
 	}
 
-	fwd := newTestForwarder(provider, forward.NewClient(time.Second), time.Second, time.Second, time.Second, time.Second, 1, 1, nil)
+	fwd := newTestForwarder(provider, time.Second, time.Second, time.Second, time.Second, time.Second, 1, 1, nil)
 	h := newHandler(apiKeySentinel, provider, newTestReadyObservers(), logging.ForComponent(logger, "internal/server"), NewStreamOutcomeCounter(), []Mount{passthroughMount(fwd)})
 	req := httptest.NewRequest(http.MethodGet, requestTarget, nil)
 	req.Body = io.NopCloser(strings.NewReader(requestBodySentinel))
@@ -647,7 +647,7 @@ func TestModelsHEADPreservesRequestAndResponseContractAtRealListener(t *testing.
 			"Editor-Version":         {"vscode/1.104.1"},
 		},
 	}, true)
-	fwd := newTestForwarder(provider, forward.NewClient(time.Second), time.Second, time.Second, time.Second, time.Second, 1, 1, nil)
+	fwd := newTestForwarder(provider, time.Second, time.Second, time.Second, time.Second, time.Second, 1, 1, nil)
 	logger, logs := bufferLogger(t, "info")
 	server := httptest.NewServer(newTestHandler(logger, provider, passthroughMount(fwd)))
 	defer server.Close()
@@ -757,7 +757,7 @@ func TestModelsAuthoritativeResponseAtAssembledBoundaryOmitsResponseDataFromLogs
 	defer upstream.Close()
 
 	provider := identity.NewStatic(identity.Credential{BaseURL: upstream.URL, Token: "copilot-token"}, true)
-	fwd := newTestForwarder(provider, forward.NewClient(time.Second), time.Second, time.Second, time.Nanosecond, time.Nanosecond, 1, 1, nil)
+	fwd := newTestForwarder(provider, time.Second, time.Second, time.Second, time.Nanosecond, time.Nanosecond, 1, 1, nil)
 	logger, logs := bufferLogger(t, "info")
 	h := newTestHandler(logger, provider, passthroughMount(fwd))
 	req := httptest.NewRequest(http.MethodGet, "/models", nil)
@@ -965,11 +965,11 @@ func TestModelsHEADLocalFailuresHaveNoWireBody(t *testing.T) {
 					return nil, errors.New("unexpected upstream call")
 				}
 			}
-			client := &http.Client{Transport: serverRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+			transport := serverRoundTripFunc(func(r *http.Request) (*http.Response, error) {
 				calls++
 				return roundTrip(r)
-			})}
-			fwd := newTestForwarder(provider, client, time.Second, time.Second, time.Second, time.Second, 1, 1, nil)
+			})
+			fwd := newStubForwarder(provider, transport, time.Second, time.Second, time.Second, time.Second, 1, 1, nil)
 			logger, logs := bufferLogger(t, "info")
 			server := httptest.NewServer(newTestHandler(logger, provider, passthroughMount(fwd)))
 			defer server.Close()
@@ -1024,7 +1024,7 @@ func TestModelsExplicitPatternsReachAccessLog(t *testing.T) {
 		BaseURL: upstream.URL,
 		Token:   "copilot-token",
 	}, true)
-	fwd := newTestForwarder(provider, forward.NewClient(time.Second), time.Second, time.Second, time.Second, time.Second, 1, 1, nil)
+	fwd := newTestForwarder(provider, time.Second, time.Second, time.Second, time.Second, time.Second, 1, 1, nil)
 	logger, logs := bufferLogger(t, "info")
 	h := newTestHandler(logger, provider, passthroughMount(fwd))
 
@@ -1219,7 +1219,7 @@ func TestEndToEndForwardViaRun(t *testing.T) {
 			"Editor-Version":         {"vscode/1.104.1"},
 		},
 	}, true)
-	fwd := newTestForwarder(prov, forward.NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
+	fwd := newTestForwarder(prov, 5*time.Second, 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 	base := startServer(t, newTestServer(discardLogger(t), prov, forwardMount(fwd, endpoint.AnthropicMessages())))
 
 	const reqBody = `{"model":"claude-3-5-sonnet","messages":[{"role":"user","content":"hi"}]}`
@@ -1313,7 +1313,7 @@ func TestOpenAIResponsesForwardVerbatim(t *testing.T) {
 			"Editor-Version":         {"vscode/1.104.1"},
 		},
 	}, true)
-	fwd := newTestForwarder(prov, forward.NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
+	fwd := newTestForwarder(prov, 5*time.Second, 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 	base := startServer(t, newTestServer(discardLogger(t), prov, forwardMount(fwd, endpoint.OpenAIResponsesHTTP())))
 
 	const reqBody = `{"model":"gpt-4o","input":"hi"}`
@@ -1467,7 +1467,7 @@ func TestOpenAIAuthAndReadiness(t *testing.T) {
 func TestOpenAIBodyCapAndUpstreamPassthrough(t *testing.T) {
 	t.Run("over cap -> OpenAI-shaped 413", func(t *testing.T) {
 		prov := identity.NewStatic(identity.Credential{BaseURL: "http://127.0.0.1:1", Token: "t"}, true)
-		fwd := newTestForwarder(prov, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 8, 1<<20, nil) // 8-byte request cap
+		fwd := newTestForwarder(prov, time.Second, time.Second, time.Second, 90*time.Second, 15*time.Second, 8, 1<<20, nil) // 8-byte request cap
 		h := newTestHandler(discardLogger(t), prov, forwardMount(fwd, endpoint.OpenAIResponsesHTTP()))
 		req := httptest.NewRequest(http.MethodPost, "/openai/v1/responses", strings.NewReader(`{"model":"way too long"}`))
 		req.Header.Set("Authorization", "Bearer "+testAPIKey)
@@ -1518,7 +1518,7 @@ func TestAnthropicStreamingEndToEnd(t *testing.T) {
 			Headers: http.Header{"Copilot-Integration-Id": {"vscode-chat"}},
 		}, true)
 		logger, logs := bufferLogger(t, "info")
-		fwd := newTestForwarder(prov, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
+		fwd := newTestForwarder(prov, time.Second, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 		base := startServer(t, newTestServer(logger, prov, forwardMount(fwd, endpoint.AnthropicMessages())))
 		return base, logs.String
 	}
@@ -1658,7 +1658,7 @@ func TestOpenAIStreamingEndToEnd(t *testing.T) {
 			Token:   "copilot-token",
 			Headers: http.Header{"Copilot-Integration-Id": {"vscode-chat"}},
 		}, true)
-		fwd := newTestForwarder(prov, forward.NewClient(time.Second), time.Second, time.Second, 2*time.Second, keepalive, 1<<20, 1<<20, nil)
+		fwd := newTestForwarder(prov, time.Second, time.Second, time.Second, 2*time.Second, keepalive, 1<<20, 1<<20, nil)
 		outcomes := NewStreamOutcomeCounter()
 		return startServer(t, newObservedTestServer(discardLogger(t), prov, outcomes, forwardMount(fwd, endpoint.OpenAIResponsesHTTP()))), outcomes
 	}
@@ -1814,7 +1814,7 @@ func TestStreamingClientHangupCancelsCopilotEndToEnd(t *testing.T) {
 		Token:   "copilot-token",
 		Headers: http.Header{"Copilot-Integration-Id": {"vscode-chat"}},
 	}, true)
-	fwd := newTestForwarder(prov, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
+	fwd := newTestForwarder(prov, time.Second, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 	outcomes := NewStreamOutcomeCounter()
 	base := startServer(t, newObservedTestServer(discardLogger(t), prov, outcomes, forwardMount(fwd, endpoint.AnthropicMessages())))
 	req, err := http.NewRequest(http.MethodPost, base+"/anthropic/v1/messages", strings.NewReader(`{"stream":true}`))

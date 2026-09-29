@@ -20,6 +20,7 @@ import (
 	"github.com/ningw42/copilotd/internal/requestsummary"
 	"github.com/ningw42/copilotd/internal/shim"
 	"github.com/ningw42/copilotd/internal/sse"
+	"github.com/ningw42/copilotd/internal/upstream"
 )
 
 type lockedLogBuffer struct {
@@ -175,7 +176,7 @@ func TestProxyObservesOnePreUpgradeAcceptOutcome(t *testing.T) {
 	tests := []struct {
 		name        string
 		provider    identity.Provider
-		client      *http.Client
+		handshake   http.RoundTripper
 		dialTimeout time.Duration
 		request     *http.Request
 		wantStatus  int
@@ -215,10 +216,10 @@ func TestProxyObservesOnePreUpgradeAcceptOutcome(t *testing.T) {
 				BaseURL: "http://upstream.invalid",
 				Token:   "private-copilot-token",
 			}, true),
-			client: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			handshake: roundTripFunc(func(request *http.Request) (*http.Response, error) {
 				<-request.Context().Done()
 				return nil, request.Context().Err()
-			})},
+			}),
 			dialTimeout: 5 * time.Millisecond,
 			request:     validUpgradeRequest(),
 			wantStatus:  http.StatusGatewayTimeout,
@@ -230,10 +231,10 @@ func TestProxyObservesOnePreUpgradeAcceptOutcome(t *testing.T) {
 				BaseURL: "http://upstream.invalid",
 				Token:   "private-copilot-token",
 			}, true),
-			client: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			handshake: roundTripFunc(func(request *http.Request) (*http.Response, error) {
 				<-request.Context().Done()
 				return nil, errors.New("generic transport failure after deadline")
-			})},
+			}),
 			dialTimeout: 5 * time.Millisecond,
 			request:     validUpgradeRequest(),
 			wantStatus:  http.StatusGatewayTimeout,
@@ -246,7 +247,7 @@ func TestProxyObservesOnePreUpgradeAcceptOutcome(t *testing.T) {
 				BaseURL: "http://upstream.invalid",
 				Token:   "private-copilot-token",
 			}, true),
-			client: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			handshake: roundTripFunc(func(request *http.Request) (*http.Response, error) {
 				<-request.Context().Done()
 				return &http.Response{
 					StatusCode: http.StatusForbidden,
@@ -254,7 +255,7 @@ func TestProxyObservesOnePreUpgradeAcceptOutcome(t *testing.T) {
 					Body:       http.NoBody,
 					Request:    request,
 				}, nil
-			})},
+			}),
 			dialTimeout: 5 * time.Millisecond,
 			request:     validUpgradeRequest().WithContext(logging.WithRequestID(context.Background(), "copilotd-expired-handshake")),
 			wantStatus:  http.StatusGatewayTimeout,
@@ -267,9 +268,9 @@ func TestProxyObservesOnePreUpgradeAcceptOutcome(t *testing.T) {
 				BaseURL: "http://upstream.invalid",
 				Token:   "private-copilot-token",
 			}, true),
-			client: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			handshake: roundTripFunc(func(*http.Request) (*http.Response, error) {
 				return nil, errors.New("connection refused")
-			})},
+			}),
 			request:    validUpgradeRequest(),
 			wantStatus: http.StatusBadGateway,
 			want:       AcceptDialFailed,
@@ -289,9 +290,9 @@ func TestProxyObservesOnePreUpgradeAcceptOutcome(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			client := test.client
-			if client == nil {
-				client = http.DefaultClient
+			var options []upstream.Option
+			if test.handshake != nil {
+				options = append(options, upstream.WithHandshakeTransport(test.handshake))
 			}
 			dialTimeout := test.dialTimeout
 			if dialTimeout == 0 {
@@ -300,8 +301,7 @@ func TestProxyObservesOnePreUpgradeAcceptOutcome(t *testing.T) {
 			observed := &recordingWsMetrics{}
 			logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
 			proxy := New(
-				newTestCaller(test.provider, logger),
-				client,
+				newTestCaller(test.provider, logger, options...),
 				dialTimeout,
 				time.Second,
 				1<<20,
@@ -462,7 +462,7 @@ func TestProxyMonitorsBothDirectionsWithCorrelatedScopeAndProcessRootedExecution
 			return hooks
 		},
 	}}
-	proxy := New(newTestCaller(provider, proxyLogger), http.DefaultClient, time.Second, time.Second, 1<<20,
+	proxy := New(newTestCaller(provider, proxyLogger), time.Second, time.Second, 1<<20,
 		registry, proxyLogger, shimLogger, 375*time.Millisecond, WsMetrics{}, WithShimMonitorClock(clock))
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -842,7 +842,6 @@ func startTelemetrySessionWithRegistry(t *testing.T, logger *slog.Logger, observ
 	}, true)
 	proxy := New(
 		newTestCaller(provider, logger),
-		http.DefaultClient,
 		time.Second,
 		time.Second,
 		maxMessageBytes,

@@ -128,7 +128,7 @@ func TestCallerClassifyMapsExecutionFailures(t *testing.T) {
 
 func TestCallerPrepareClassifiesDepartureDuringCredentialAcquisitionAsClientGone(t *testing.T) {
 	provider := &departingProvider{entered: make(chan struct{})}
-	caller := executionCaller(provider, nil, time.Second, 1<<20, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	caller := New(provider, time.Second, time.Second, 1<<20, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	type prepared struct {
@@ -255,7 +255,7 @@ func TestCallerPrepareClassifiesCredentialFailureByCallerContextAlone(t *testing
 			provider := readyExecutionProvider("https://upstream.invalid")
 			provider.SetError(tc.err)
 			var logs bytes.Buffer
-			caller := executionCaller(provider, nil, time.Second, 1<<20, debugJSONLogger(t, &logs))
+			caller := New(provider, time.Second, time.Second, 1<<20, debugJSONLogger(t, &logs))
 
 			request, failure := caller.Prepare(tc.context(t), executionCall())
 

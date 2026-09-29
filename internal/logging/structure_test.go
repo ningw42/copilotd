@@ -108,8 +108,8 @@ var expectedComponentSinks = map[componentSink]struct{}{
 	{function: "newServeServer", consumer: "upstream.New", component: "internal/upstream"}:                 {},
 	{function: "newServeServer", consumer: "forward.New arg 7", component: "internal/sse"}:                 {},
 	{function: "newServeServer", consumer: "forward.New arg 8", component: "internal/shim"}:                {},
-	{function: "newServeServer", consumer: "wsforward.New arg 6", component: "internal/wsforward"}:         {},
-	{function: "newServeServer", consumer: "wsforward.New arg 7", component: "internal/shim"}:              {},
+	{function: "newServeServer", consumer: "wsforward.New arg 5", component: "internal/wsforward"}:         {},
+	{function: "newServeServer", consumer: "wsforward.New arg 6", component: "internal/shim"}:              {},
 	{function: "newServeServer", consumer: "local", component: "internal/catalog"}:                         {},
 	{function: "newServeServer", consumer: "server.New", component: "internal/server"}:                     {},
 	{function: "buildServeProvider", consumer: "identity.NewManager", component: "internal/identity"}:      {},
@@ -611,7 +611,7 @@ func checkShimThresholdAssembly(t *testing.T, fset *token.FileSet, files []produ
 	mainFile := findProductionFile(t, files, "cmd/copilotd/main.go")
 	expected := map[string]int{
 		"forward.New":   9,
-		"wsforward.New": 8,
+		"wsforward.New": 7,
 	}
 	found := make(map[string]int)
 	ast.Inspect(mainFile.syntax, func(node ast.Node) bool {

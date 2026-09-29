@@ -20,20 +20,36 @@ const RequestIDHeader = "X-Request-Id"
 type Caller struct {
 	provider         identity.Provider
 	client           *http.Client
+	handshakeClient  *http.Client
 	logger           *slog.Logger
 	outboundTimeout  time.Duration
 	maxBufferedBytes int64
 }
 
-// New builds a Caller from the dependencies shared by every upstream call.
-func New(provider identity.Provider, client *http.Client, outboundTimeout time.Duration, maxBufferedBytes int64, logger *slog.Logger) *Caller {
+// New builds a Caller from the dependencies shared by every upstream call. It
+// builds both clients used for authenticated calls, each on its own transport,
+// and neither follows redirects. responseHeaderTimeout bounds the wait for
+// response headers on Do and Buffered calls.
+func New(provider identity.Provider, responseHeaderTimeout, outboundTimeout time.Duration, maxBufferedBytes int64, logger *slog.Logger, options ...Option) *Caller {
+	transports := defaultTransports(responseHeaderTimeout)
+	for _, configure := range options {
+		configure(&transports)
+	}
 	return &Caller{
 		provider:         provider,
-		client:           client,
+		client:           newClient(transports.call),
+		handshakeClient:  newClient(transports.handshake),
 		logger:           logger,
 		outboundTimeout:  outboundTimeout,
 		maxBufferedBytes: maxBufferedBytes,
 	}
+}
+
+// HandshakeClient returns the client for WebSocket handshakes. The WebSocket
+// forwarder dials with it and keeps ownership of the upgraded connection; like
+// every client the Caller builds, it returns the first upstream response.
+func (c *Caller) HandshakeClient() *http.Client {
+	return c.handshakeClient
 }
 
 // Do executes call and returns the upstream response plus its response-path

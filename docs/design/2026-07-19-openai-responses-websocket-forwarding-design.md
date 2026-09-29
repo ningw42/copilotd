@@ -11,7 +11,10 @@ superseded; counting mid-accept work is not. Amended for
 to the upstream handshake is relayed rather than reported as a copilotd 502.
 Amended for [#291](https://github.com/ningw42/copilotd/issues/291): the dial
 client refuses redirects, so a `3xx` handshake answer is such a final non-101
-answer instead of being followed.
+answer instead of being followed. Amended for
+[#295](https://github.com/ningw42/copilotd/issues/295): `internal/upstream`
+builds the dial client as the `Caller`'s handshake client, and `wsforward.New`
+no longer takes a client.
 Design for adding a WebSocket transport to copilotd's OpenAI Responses surface.
 It is grounded in
 [the 2026-07-19 research note](../research/2026-07-19-responses-websocket-mode.md)
@@ -20,9 +23,9 @@ and the current code.
 > **Superseded historical detail.** This dated design predates the shared
 > upstream call and the terminal request summary, and its original text omits
 > the pre-upgrade phase's cancellation rules. Text marked "amended by #261",
-> "amended by #269", or "amended by #291" is current. Where the original text
-> conflicts with the contracts below, the contracts win. For current
-> signatures, `internal/wsforward` is authoritative.
+> "amended by #269", "amended by #291", or "amended by #295" is current. Where
+> the original text conflicts with the contracts below, the contracts win. For
+> current signatures, `internal/wsforward` is authoritative.
 >
 > - **Logging** (§2 "Access logging", §3.1 step 7, §7's records, §11 item 13,
 >   §13): superseded by
@@ -181,7 +184,9 @@ func (p *Proxy) Shutdown(ctx context.Context) error
   default TLS verification, and **no** `Timeout` (a client-level timeout would
   kill the long-lived connection). The handshake is bounded by `dialTimeout` via
   context, not by the client. It also refuses redirects (amended by #291;
-  `wsforward.NewDialClient` builds it), as the Forwarder's client does:
+  amended by #295: `internal/upstream` builds it as the `Caller`'s handshake
+  client, and the `Proxy` obtains it from its `Caller`), as the Forwarder's
+  client does:
   following would replace Copilot's first answer, and net/http re-sends the
   Copilot token to a target on the same hostname or a subdomain of it, on any
   port. coder/websocket always wraps the client's `CheckRedirect`, so a client
@@ -525,11 +530,11 @@ transport exists, but no WS-only model is currently hidden). No
      deadline, `Run` returns an error matching `server.ErrForcedDrain`;
      `cmd/copilotd` logs it once at Warn and exits 0. Genuine drain errors stay
      ordinary errors (Error log, exit 1).
-- **`cmd/copilotd/main.go`** builds the dial client (with
-  `wsforward.NewDialClient`, amended by #291), the two WS counters, and the
-  `Proxy` (passing `cfg.WebSocketHandshakeTimeout`, `cfg.WriteTimeout`,
-  `cfg.MaxRequestBytes`), and passes the `Proxy` to `server.New` alongside the
-  existing `Forwarder`
+- **`cmd/copilotd/main.go`** builds the `Caller`, which builds the dial client
+  (amended by #295; #291's `wsforward.NewDialClient` is removed), the two WS
+  counters, and the `Proxy` (passing `cfg.WebSocketHandshakeTimeout`,
+  `cfg.WriteTimeout`, `cfg.MaxRequestBytes`), and passes the `Proxy` to
+  `server.New` alongside the existing `Forwarder`
   ([main.go wiring](../../cmd/copilotd/main.go#L319-L322)).
 
 ## 10. Dependencies

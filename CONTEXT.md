@@ -126,9 +126,11 @@ The single authenticated request copilotd makes to GitHub Copilot on behalf of
 one inbound request — credential, base URL join, header policy, request-id
 correlation, bounded reading of the response, and failure classification,
 centrally governed across every transport and Endpoint. Lives in
-`internal/upstream`. Reading a bounded response body is part of the call;
-**interpreting** it is not — pumping, upgrading, decoding, and copying stay
-with the caller.
+`internal/upstream`, which also builds the clients used for authenticated
+calls, the WebSocket handshake client included. The call refuses redirects: it
+returns Copilot's first response, a 3xx included. Reading a bounded response
+body is part of the call; **interpreting** it is not — pumping, upgrading,
+decoding, and copying stay with the caller.
 _Avoid_: outbound request (unqualified), fetch.
 
 **Impersonation**:

@@ -15,7 +15,6 @@ import (
 
 	"github.com/ningw42/copilotd/internal/config"
 	"github.com/ningw42/copilotd/internal/endpoint"
-	"github.com/ningw42/copilotd/internal/forward"
 	"github.com/ningw42/copilotd/internal/identity"
 	"github.com/ningw42/copilotd/internal/logging"
 	"github.com/ningw42/copilotd/internal/requestsummary"
@@ -586,7 +585,7 @@ func TestPanicRecoveryRetainsMatchedScopeAndAccessLevel(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			logger, logs := bufferLogger(t, "debug")
-			forwarder := newTestForwarder(tt.provider, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
+			forwarder := newTestForwarder(tt.provider, time.Second, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 			handler := newTestHandler(logger, tt.provider, forwardMount(forwarder, endpoint.OpenAIResponsesHTTP()))
 			request := httptest.NewRequest(tt.method, tt.target, strings.NewReader(tt.body))
 			request.Header.Set("X-Request-Id", "matched-panic")

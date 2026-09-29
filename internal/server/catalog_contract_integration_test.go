@@ -16,7 +16,6 @@ import (
 	"github.com/ningw42/copilotd/internal/catalog"
 	"github.com/ningw42/copilotd/internal/config"
 	"github.com/ningw42/copilotd/internal/endpoint"
-	"github.com/ningw42/copilotd/internal/forward"
 	"github.com/ningw42/copilotd/internal/identity"
 	"github.com/ningw42/copilotd/internal/logging"
 )
@@ -101,16 +100,16 @@ func TestCatalogLocalFailuresHaveGETEquivalentHEADFramingOverRealListener(t *tes
 						return nil, errors.New("unexpected upstream call")
 					}
 				}
-				client := &http.Client{Transport: serverRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+				transport := serverRoundTripFunc(func(r *http.Request) (*http.Response, error) {
 					calls.Add(1)
 					return roundTrip(r)
-				})}
+				})
 				responseLimit := scenario.responseLimit
 				if responseLimit == 0 {
 					responseLimit = 1 << 20
 				}
 				logger, logs := bufferLogger(t, "info")
-				source := newTestCatalogSourceWith(provider, client, time.Second, responseLimit, logger)
+				source := newStubCaller(provider, transport, time.Second, responseLimit, logger)
 				base := startServer(t, newTestServer(logger, provider, catalogMount(logger, surface.ep, catalog.RenderDescriptors{}, source)))
 
 				do := func(method string) (*http.Response, []byte) {
@@ -314,7 +313,7 @@ func TestCatalogCorrelationAccessLogsAndSecretRedaction(t *testing.T) {
 		t.Fatalf("build logger: %v", err)
 	}
 	provider := identity.NewStatic(identity.Credential{BaseURL: upstream.URL, Token: copilotToken}, true)
-	source := newTestCatalogSourceWith(provider, forward.NewClient(time.Second), time.Second, 1<<20, logger)
+	source := newTestCatalogSourceWith(provider, time.Second, time.Second, 1<<20, logger)
 	base := startServer(t, newTestServer(logger, provider, catalogMount(logger, endpoint.OpenAICatalog(), catalog.RenderDescriptors{}, source)))
 
 	do := func(method, requestID string) (*http.Response, []byte) {

@@ -624,13 +624,12 @@ func newServeServer(cfg config.ServeConfig, base *slog.Logger, mgr *identity.Man
 		},
 	}
 
-	forwardClient := forward.NewClient(cfg.ResponseHeaderTimeout)
-	caller := upstream.New(mgr, forwardClient, cfg.OutboundTimeout, cfg.MaxBufferedResponseBytes, logging.ForComponent(base, "internal/upstream"))
+	caller := upstream.New(mgr, cfg.ResponseHeaderTimeout, cfg.OutboundTimeout, cfg.MaxBufferedResponseBytes, logging.ForComponent(base, "internal/upstream"))
 	fwd := forward.New(caller, cfg.OutboundTimeout, cfg.WriteTimeout, cfg.StreamIdleTimeout, cfg.StreamKeepaliveInterval, cfg.MaxRequestBytes, registry,
 		logging.ForComponent(base, "internal/sse"), logging.ForComponent(base, "internal/shim"), cfg.ShimHookOverrunThreshold)
 	wsAccepts := server.NewWsAcceptCounter()
 	wsTerminals := server.NewWsSessionTerminalCounter()
-	wsProxy := wsforward.New(caller, wsforward.NewDialClient(), cfg.WebSocketHandshakeTimeout, cfg.WriteTimeout, cfg.MaxRequestBytes, registry,
+	wsProxy := wsforward.New(caller, cfg.WebSocketHandshakeTimeout, cfg.WriteTimeout, cfg.MaxRequestBytes, registry,
 		logging.ForComponent(base, "internal/wsforward"), logging.ForComponent(base, "internal/shim"), cfg.ShimHookOverrunThreshold, wsforward.WsMetrics{
 			Accept:          wsAccepts,
 			SessionTerminal: wsTerminals,

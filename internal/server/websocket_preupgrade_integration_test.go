@@ -45,7 +45,7 @@ func TestOpenAIWebSocketAuthAndReadinessRejectBeforeUpgrade(t *testing.T) {
 				Token:   "copilot-token",
 			}, test.ready)
 			logger := discardLogger(t)
-			proxy := wsforward.New(newTestWSCaller(provider, logger), http.DefaultClient, time.Second, time.Second, 1<<20, nil, logger, logger, 0, wsforward.WsMetrics{})
+			proxy := wsforward.New(newTestWSCaller(provider, logger), time.Second, time.Second, 1<<20, nil, logger, logger, 0, wsforward.WsMetrics{})
 			t.Cleanup(func() {
 				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 				defer cancel()

@@ -1,6 +1,7 @@
 # Govern authenticated GitHub Copilot calls in `internal/upstream`
 
-**Status:** accepted
+**Status:** accepted; client ownership and redirect refusal amended by
+[#295](https://github.com/ningw42/copilotd/issues/295)
 
 Every authenticated request copilotd makes to GitHub Copilot is an **upstream
 call** whose shared policy is governed by the dependency-light
@@ -10,6 +11,21 @@ response reading, and pre-commit failure classification and rendering. Consumers
 provide an `endpoint.Route` from their typed Endpoint contract and retain the
 transport- or response-specific tail: pumping an SSE stream, dialing or upgrading
 a WebSocket, decoding a Catalog, or copying bytes verbatim.
+
+**Client ownership amendment ([#295](https://github.com/ningw42/copilotd/issues/295)):**
+the upstream call refuses redirects. It returns Copilot's first response,
+including a 3xx with its `Location` and body. Following a redirect would replace
+Copilot's answer with another endpoint's, and net/http re-sends `Authorization`,
+and with it the Copilot token, to a target on the same hostname or a subdomain
+of it. `internal/upstream` therefore builds both clients used for authenticated
+calls, each on its own transport, and declares their redirect refusal once: the
+client behind `Caller.Do` and `Caller.Buffered`, and the WebSocket handshake
+client that the WebSocket forwarder obtains from its `Caller`. Neither
+`upstream.New` nor `wsforward.New` accepts a caller-supplied client or redirect
+policy. Tests may replace only the transport under either client, and the
+`Caller` still builds its redirect-refusing client around the replacement. The
+WebSocket forwarder still dials, upgrades, relays non-101 answers, and owns the
+raw connection.
 
 ## Why
 
