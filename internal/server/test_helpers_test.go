@@ -102,20 +102,33 @@ func (s staticCacheObserver) Observe() []cache.Status {
 	return append([]cache.Status(nil), s.statuses...)
 }
 
-func newTestForwarder(provider identity.Provider, client *http.Client, outboundTimeout, writeTimeout, streamIdleTimeout, streamKeepaliveInterval time.Duration, maxRequestBytes, maxBufferedResponseBytes int64, registry shim.Registry, options ...forward.Option) *forward.Forwarder {
+func newTestForwarder(provider identity.Provider, responseHeaderTimeout, outboundTimeout, writeTimeout, streamIdleTimeout, streamKeepaliveInterval time.Duration, maxRequestBytes, maxBufferedResponseBytes int64, registry shim.Registry, options ...forward.Option) *forward.Forwarder {
 	logger := slog.Default()
-	caller := upstream.New(provider, client, outboundTimeout, maxBufferedResponseBytes, logger)
+	caller := upstream.New(provider, responseHeaderTimeout, outboundTimeout, maxBufferedResponseBytes, logger)
+	return forward.New(caller, outboundTimeout, writeTimeout, streamIdleTimeout, streamKeepaliveInterval, maxRequestBytes, registry, logger, logger, 0, options...)
+}
+
+// newStubForwarder builds a Forwarder whose upstream calls run on transport.
+func newStubForwarder(provider identity.Provider, transport http.RoundTripper, outboundTimeout, writeTimeout, streamIdleTimeout, streamKeepaliveInterval time.Duration, maxRequestBytes, maxBufferedResponseBytes int64, registry shim.Registry, options ...forward.Option) *forward.Forwarder {
+	logger := slog.Default()
+	caller := newStubCaller(provider, transport, outboundTimeout, maxBufferedResponseBytes, logger)
 	return forward.New(caller, outboundTimeout, writeTimeout, streamIdleTimeout, streamKeepaliveInterval, maxRequestBytes, registry, logger, logger, 0, options...)
 }
 
 func newTestCatalogSource(provider identity.Provider) *upstream.Caller {
-	return newTestCatalogSourceWith(provider, forward.NewClient(time.Second), time.Second, 1<<20, slog.Default())
+	return newTestCatalogSourceWith(provider, time.Second, time.Second, 1<<20, slog.Default())
 }
 
-func newTestCatalogSourceWith(provider identity.Provider, client *http.Client, outboundTimeout time.Duration, maxBufferedResponseBytes int64, logger *slog.Logger) *upstream.Caller {
-	return upstream.New(provider, client, outboundTimeout, maxBufferedResponseBytes, logger)
+func newTestCatalogSourceWith(provider identity.Provider, responseHeaderTimeout, outboundTimeout time.Duration, maxBufferedResponseBytes int64, logger *slog.Logger) *upstream.Caller {
+	return upstream.New(provider, responseHeaderTimeout, outboundTimeout, maxBufferedResponseBytes, logger)
+}
+
+// newStubCaller builds a Caller whose calls run on transport. The replacement
+// carries its own settings, so the response-header timeout is left unset.
+func newStubCaller(provider identity.Provider, transport http.RoundTripper, outboundTimeout time.Duration, maxBufferedResponseBytes int64, logger *slog.Logger) *upstream.Caller {
+	return upstream.New(provider, 0, outboundTimeout, maxBufferedResponseBytes, logger, upstream.WithTransport(transport))
 }
 
 func newTestWSCaller(provider identity.Provider, logger *slog.Logger) *upstream.Caller {
-	return upstream.New(provider, http.DefaultClient, time.Second, 1<<20, logger)
+	return upstream.New(provider, time.Second, time.Second, 1<<20, logger)
 }

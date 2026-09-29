@@ -70,7 +70,7 @@ func TestWebSocketTelemetryEmitsEstablishmentAndTerminalAccessRecords(t *testing
 	logger, logs := websocketTelemetryLogger(t)
 	accepts := NewWsAcceptCounter()
 	terminals := NewWsSessionTerminalCounter()
-	proxy := wsforward.New(newTestWSCaller(provider, logger), http.DefaultClient, time.Second, time.Second, 1<<20, nil, logger, logger, 0, wsforward.WsMetrics{
+	proxy := wsforward.New(newTestWSCaller(provider, logger), time.Second, time.Second, 1<<20, nil, logger, logger, 0, wsforward.WsMetrics{
 		Accept:          accepts,
 		SessionTerminal: terminals,
 	})
@@ -201,7 +201,7 @@ func TestWebSocketErrorTerminalMakesAccessWarn(t *testing.T) {
 	provider := readyStub(upstream.URL)
 	logger, logs := websocketTelemetryLogger(t)
 	terminals := NewWsSessionTerminalCounter()
-	proxy := wsforward.New(newTestWSCaller(provider, logger), http.DefaultClient, time.Second, time.Second, 4, nil, logger, logger, 0, wsforward.WsMetrics{SessionTerminal: terminals})
+	proxy := wsforward.New(newTestWSCaller(provider, logger), time.Second, time.Second, 4, nil, logger, logger, 0, wsforward.WsMetrics{SessionTerminal: terminals})
 	base := startServer(t, newTestServer(logger, provider, webSocketMount(proxy)))
 
 	clientURL := "ws" + strings.TrimPrefix(base, "http") + "/openai/v1/responses"
@@ -248,7 +248,7 @@ func TestWebSocketPreUpgradeFailureEmitsOnlyAccessRecord(t *testing.T) {
 	logger, logs := websocketTelemetryLogger(t)
 	accepts := NewWsAcceptCounter()
 	terminals := NewWsSessionTerminalCounter()
-	proxy := wsforward.New(newTestWSCaller(provider, logger), http.DefaultClient, time.Second, time.Second, 1<<20, nil, logger, logger, 0, wsforward.WsMetrics{
+	proxy := wsforward.New(newTestWSCaller(provider, logger), time.Second, time.Second, 1<<20, nil, logger, logger, 0, wsforward.WsMetrics{
 		Accept:          accepts,
 		SessionTerminal: terminals,
 	})
@@ -336,7 +336,7 @@ func TestAssembledServerRecoversPostUpgradeObserverPanicAndClosesBothSockets(t *
 		Token:   "private-copilot-token",
 	}, true)
 	logger, logs := websocketTelemetryLogger(t)
-	proxy := wsforward.New(newTestWSCaller(provider, logger), http.DefaultClient, time.Second, time.Second, 1<<20, nil, logger, logger, 0, wsforward.WsMetrics{
+	proxy := wsforward.New(newTestWSCaller(provider, logger), time.Second, time.Second, 1<<20, nil, logger, logger, 0, wsforward.WsMetrics{
 		Accept: panicOnEstablished{},
 	})
 	base := startServer(t, newTestServer(logger, provider, webSocketMount(proxy)))

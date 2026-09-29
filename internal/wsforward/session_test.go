@@ -718,7 +718,6 @@ func TestProxySnapshotsRegistryAndBuildsFreshContextualChainPerSession(t *testin
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	proxy := New(
 		newTestCaller(provider, logger),
-		http.DefaultClient,
 		time.Second,
 		time.Second,
 		1<<20,
@@ -821,7 +820,6 @@ func TestProxyShutdownCancelsRunningClientTransformAndSiblingPump(t *testing.T) 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	proxy := New(
 		newTestCaller(provider, logger),
-		http.DefaultClient,
 		time.Second,
 		time.Second,
 		1<<20,
@@ -1208,7 +1206,6 @@ func startSessionWithRegistryAndMetrics(t *testing.T, maxMessageBytes int64, wri
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	proxy := New(
 		newTestCaller(provider, logger),
-		&http.Client{Transport: http.DefaultTransport},
 		time.Second,
 		writeTimeout,
 		maxMessageBytes,

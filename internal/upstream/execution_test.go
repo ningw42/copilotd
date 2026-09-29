@@ -27,7 +27,7 @@ func TestCallerDoUsesCallerContextVerbatimAndArmsNoTimer(t *testing.T) {
 	type contextKey struct{}
 	ctx := context.WithValue(context.Background(), contextKey{}, "caller-owned")
 	const outboundTimeout = 5 * time.Millisecond
-	client := &http.Client{Transport: executionRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+	transport := executionRoundTripFunc(func(request *http.Request) (*http.Response, error) {
 		if request.Context() != ctx {
 			t.Errorf("request context is derived, want caller context verbatim")
 		}
@@ -37,8 +37,8 @@ func TestCallerDoUsesCallerContextVerbatimAndArmsNoTimer(t *testing.T) {
 		case <-time.After(4 * outboundTimeout):
 			return executionResponse(request, http.StatusNoContent, http.NoBody), nil
 		}
-	})}
-	caller := executionCaller(readyExecutionProvider("https://upstream.invalid"), client, outboundTimeout, 1<<20, slog.Default())
+	})
+	caller := executionCaller(readyExecutionProvider("https://upstream.invalid"), transport, outboundTimeout, 1<<20, slog.Default())
 
 	response, _, failure := caller.Do(ctx, executionCall())
 
@@ -52,13 +52,13 @@ func TestCallerDoUsesCallerContextVerbatimAndArmsNoTimer(t *testing.T) {
 
 func TestCallerDoPropagatesCallerCancellation(t *testing.T) {
 	started := make(chan struct{})
-	client := &http.Client{Transport: executionRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+	transport := executionRoundTripFunc(func(request *http.Request) (*http.Response, error) {
 		close(started)
 		<-request.Context().Done()
 		return nil, request.Context().Err()
-	})}
+	})
 	var logs bytes.Buffer
-	caller := executionCaller(readyExecutionProvider("https://upstream.invalid"), client, time.Hour, 1<<20, debugJSONLogger(t, &logs))
+	caller := executionCaller(readyExecutionProvider("https://upstream.invalid"), transport, time.Hour, 1<<20, debugJSONLogger(t, &logs))
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	result := make(chan *Failure, 1)
@@ -85,10 +85,10 @@ func TestCallerDoPropagatesCallerCancellation(t *testing.T) {
 
 func TestCallerDoClassifiesExecutionFailure(t *testing.T) {
 	executionFailure := errors.New("dial failed")
-	client := &http.Client{Transport: executionRoundTripFunc(func(*http.Request) (*http.Response, error) {
+	transport := executionRoundTripFunc(func(*http.Request) (*http.Response, error) {
 		return nil, executionFailure
-	})}
-	caller := executionCaller(readyExecutionProvider("https://upstream.invalid"), client, time.Second, 1<<20, slog.Default())
+	})
+	caller := executionCaller(readyExecutionProvider("https://upstream.invalid"), transport, time.Second, 1<<20, slog.Default())
 
 	response, _, failure := caller.Do(context.Background(), executionCall())
 
@@ -112,12 +112,12 @@ func TestCallerDoCorrelatesSuccessfulResponse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build logger: %v", err)
 	}
-	client := &http.Client{Transport: executionRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+	transport := executionRoundTripFunc(func(request *http.Request) (*http.Response, error) {
 		response := executionResponse(request, http.StatusOK, http.NoBody)
 		response.Header.Set(RequestIDHeader, "upstream-request-id")
 		return response, nil
-	})}
-	caller := executionCaller(readyExecutionProvider("https://upstream.invalid"), client, time.Second, 1<<20, logger)
+	})
+	caller := executionCaller(readyExecutionProvider("https://upstream.invalid"), transport, time.Second, 1<<20, logger)
 	ctx := logging.WithRequestID(context.Background(), "copilotd-request-id")
 
 	response, responseCtx, failure := caller.Do(ctx, executionCall())
@@ -160,7 +160,7 @@ func TestCallerWithIdentityManagerLogsOnlySanitizedCredentialFailureCause(t *tes
 		GitHubBaseURL: exchange.URL,
 		HTTPClient:    exchange.Client(),
 	})
-	caller := executionCaller(manager, exchange.Client(), time.Second, 1<<20, logger)
+	caller := New(manager, time.Second, time.Second, 1<<20, logger)
 
 	response, _, failure := caller.Do(context.Background(), executionCall())
 
@@ -235,10 +235,10 @@ func TestReadBoundedAndCallerFormAgree(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			client := &http.Client{Transport: executionRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+			transport := executionRoundTripFunc(func(request *http.Request) (*http.Response, error) {
 				return executionResponse(request, http.StatusOK, io.NopCloser(tc.reader())), nil
-			})}
-			caller := New(readyExecutionProvider("https://upstream.invalid"), client, time.Hour, tc.max, slog.Default())
+			})
+			caller := executionCaller(readyExecutionProvider("https://upstream.invalid"), transport, time.Hour, tc.max, slog.Default())
 			response, responseCtx, failure := caller.Do(context.Background(), executionCall())
 			if failure != nil {
 				t.Fatalf("Do() failure = %#v, want response", failure)
@@ -292,8 +292,8 @@ func TestCallerReadBoundedClassifiesCallCancellationAcrossReaders(t *testing.T) 
 				var logs bytes.Buffer
 				logger := logging.ForComponent(debugJSONLogger(t, &logs), "internal/upstream")
 				upstreamBody := &executionCancelAwareBody{blockAfterChunks: true}
-				client := executionBodyClient(upstreamBody, http.Header{RequestIDHeader: {"upstream-read-canceled"}})
-				caller := New(readyExecutionProvider("https://upstream.invalid"), client, time.Hour, 1<<20, logger)
+				transport := executionBodyTransport(upstreamBody, http.Header{RequestIDHeader: {"upstream-read-canceled"}})
+				caller := executionCaller(readyExecutionProvider("https://upstream.invalid"), transport, time.Hour, 1<<20, logger)
 				ctx, cancel := context.WithCancelCause(logging.WithRequestID(context.Background(), "copilotd-read-canceled"))
 				defer cancel(context.Canceled)
 				response, responseCtx, failure := caller.Do(ctx, executionCall())
@@ -384,14 +384,14 @@ func TestCallerReadBoundedCorrelatesFailuresAcrossReaders(t *testing.T) {
 					if err != nil {
 						t.Fatalf("build logger: %v", err)
 					}
-					client := &http.Client{Transport: executionRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+					transport := executionRoundTripFunc(func(request *http.Request) (*http.Response, error) {
 						response := executionResponse(request, http.StatusOK, io.NopCloser(tc.reader()))
 						if correlation.upstreamRequestID != "" {
 							response.Header.Set(RequestIDHeader, correlation.upstreamRequestID)
 						}
 						return response, nil
-					})}
-					caller := New(readyExecutionProvider("https://upstream.invalid"), client, time.Hour, 8, logging.ForComponent(base, "internal/upstream"))
+					})
+					caller := executionCaller(readyExecutionProvider("https://upstream.invalid"), transport, time.Hour, 8, logging.ForComponent(base, "internal/upstream"))
 					ctx := context.Background()
 					if correlation.requestID != "" {
 						ctx = logging.WithRequestID(ctx, correlation.requestID)
@@ -438,8 +438,8 @@ func TestCallerReadBoundedKeepsOverCapClassificationAcrossCallContextCauses(t *t
 				// The transport has bytes ready even though the call is canceled
 				// before reading. Observing the cap must take precedence.
 				upstreamBody := &executionCancelAwareBody{chunks: [][]byte{[]byte("123456789")}}
-				client := executionBodyClient(upstreamBody, make(http.Header))
-				caller := New(readyExecutionProvider("https://upstream.invalid"), client, time.Hour, 8, slog.Default())
+				transport := executionBodyTransport(upstreamBody, make(http.Header))
+				caller := executionCaller(readyExecutionProvider("https://upstream.invalid"), transport, time.Hour, 8, slog.Default())
 				response, responseCtx, failure := caller.Do(ctx, executionCall())
 				if failure != nil {
 					t.Fatalf("Do() failure = %#v, want response", failure)
@@ -494,7 +494,7 @@ func TestCallerBufferedReturnsOneCredentialedResponse(t *testing.T) {
 	var calls int
 	var gotRequest *http.Request
 	upstreamBody := &executionObservedReadCloser{reader: strings.NewReader(responseBody)}
-	client := &http.Client{Transport: executionRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+	transport := executionRoundTripFunc(func(request *http.Request) (*http.Response, error) {
 		calls++
 		gotRequest = request.Clone(request.Context())
 		gotRequest.Header = request.Header.Clone()
@@ -506,8 +506,8 @@ func TestCallerBufferedReturnsOneCredentialedResponse(t *testing.T) {
 			t.Errorf("upstream request body = %q, want empty", body)
 		}
 		return executionResponse(request, http.StatusAccepted, upstreamBody), nil
-	})}
-	caller := executionCaller(readyExecutionProvider("https://upstream.invalid"), client, time.Second, 1<<20, slog.Default())
+	})
+	caller := executionCaller(readyExecutionProvider("https://upstream.invalid"), transport, time.Second, 1<<20, slog.Default())
 	ctx := logging.WithRequestID(context.Background(), "catalog-request-id")
 
 	status, body, _, failure := caller.Buffered(ctx, Call{
@@ -598,14 +598,14 @@ func TestCallerBufferedClassifiesSetupAndExecutionFailures(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			var calls int
-			client := &http.Client{Transport: executionRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+			transport := executionRoundTripFunc(func(request *http.Request) (*http.Response, error) {
 				calls++
 				if tc.execute == nil {
 					return nil, errors.New("must not be called")
 				}
 				return tc.execute(request)
-			})}
-			caller := executionCaller(tc.provider, client, time.Second, 1<<20, slog.Default())
+			})
+			caller := executionCaller(tc.provider, transport, time.Second, 1<<20, slog.Default())
 
 			status, body, _, failure := caller.Buffered(context.Background(), executionCall())
 
@@ -636,8 +636,7 @@ func TestCallerBufferedUsesConfiguredResponseHeaderTimeout(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}))
 	defer server.Close()
-	client := &http.Client{Transport: &http.Transport{ResponseHeaderTimeout: 10 * time.Millisecond}}
-	caller := executionCaller(readyExecutionProvider(server.URL), client, time.Second, 1<<20, slog.Default())
+	caller := New(readyExecutionProvider(server.URL), 10*time.Millisecond, time.Second, 1<<20, slog.Default())
 
 	status, body, _, failure := caller.Buffered(context.Background(), executionCall())
 
@@ -654,7 +653,7 @@ func TestCallerBufferedArmsTimeoutAfterResponseAndInterruptsStalledRead(t *testi
 	upstreamBody := &executionCancelAwareBody{blockAfterChunks: true}
 	parent, cancelParent := context.WithTimeout(context.Background(), time.Second)
 	defer cancelParent()
-	client := &http.Client{Transport: executionRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+	transport := executionRoundTripFunc(func(request *http.Request) (*http.Response, error) {
 		if request.Context() == parent {
 			t.Error("Buffered request uses parent context directly, want pre-Do derived context")
 		}
@@ -664,8 +663,8 @@ func TestCallerBufferedArmsTimeoutAfterResponseAndInterruptsStalledRead(t *testi
 		}
 		upstreamBody.bind(request.Context())
 		return executionResponse(request, http.StatusOK, upstreamBody), nil
-	})}
-	caller := executionCaller(readyExecutionProvider("https://upstream.invalid"), client, outboundTimeout, 1<<20, slog.Default())
+	})
+	caller := executionCaller(readyExecutionProvider("https://upstream.invalid"), transport, outboundTimeout, 1<<20, slog.Default())
 	started := time.Now()
 
 	status, body, _, failure := caller.Buffered(parent, executionCall())
@@ -692,9 +691,9 @@ func TestCallerBufferedClassifiesParentCancellationDuringReadAsClientGone(t *tes
 		blockAfterChunks: true,
 		firstRead:        firstRead,
 	}
-	client := executionBodyClient(upstreamBody, make(http.Header))
+	transport := executionBodyTransport(upstreamBody, make(http.Header))
 	var logs bytes.Buffer
-	caller := executionCaller(readyExecutionProvider("https://upstream.invalid"), client, time.Hour, 1<<20, debugJSONLogger(t, &logs))
+	caller := executionCaller(readyExecutionProvider("https://upstream.invalid"), transport, time.Hour, 1<<20, debugJSONLogger(t, &logs))
 	parent, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() {
@@ -733,12 +732,12 @@ func TestCallerBufferedClassifiesPlainReadFailureWithoutPartialBody(t *testing.T
 		strings.NewReader(`{"data":[`),
 		executionTerminalErrorReader{err: readFailure},
 	)}
-	client := &http.Client{Transport: executionRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+	transport := executionRoundTripFunc(func(request *http.Request) (*http.Response, error) {
 		response := executionResponse(request, http.StatusOK, upstreamBody)
 		response.Header.Set(RequestIDHeader, "upstream-read-failure")
 		return response, nil
-	})}
-	caller := New(readyExecutionProvider("https://upstream.invalid"), client, time.Second, 1<<20, logger)
+	})
+	caller := executionCaller(readyExecutionProvider("https://upstream.invalid"), transport, time.Second, 1<<20, logger)
 
 	status, body, _, failure := caller.Buffered(ctx, executionCall())
 
@@ -759,11 +758,11 @@ func TestCallerBufferedClassifiesPlainReadFailureWithoutPartialBody(t *testing.T
 
 func TestCallerBufferedRejectsOversizedResponseWithoutReturningTruncatedBody(t *testing.T) {
 	upstreamBody := &executionByteCountingReadCloser{reader: strings.NewReader("0123456789abcdef")}
-	client := &http.Client{Transport: executionRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+	transport := executionRoundTripFunc(func(request *http.Request) (*http.Response, error) {
 		return executionResponse(request, http.StatusOK, upstreamBody), nil
-	})}
+	})
 	const responseLimit = 8
-	caller := executionCaller(readyExecutionProvider("https://upstream.invalid"), client, time.Second, responseLimit, slog.Default())
+	caller := executionCaller(readyExecutionProvider("https://upstream.invalid"), transport, time.Second, responseLimit, slog.Default())
 
 	status, body, _, failure := caller.Buffered(context.Background(), executionCall())
 
@@ -784,10 +783,10 @@ func TestCallerBufferedRejectsOversizedResponseWithoutReturningTruncatedBody(t *
 func TestCallerBufferedAcceptsResponseAtSizeBoundary(t *testing.T) {
 	const responseBody = "12345678"
 	upstreamBody := &executionObservedReadCloser{reader: strings.NewReader(responseBody)}
-	client := &http.Client{Transport: executionRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+	transport := executionRoundTripFunc(func(request *http.Request) (*http.Response, error) {
 		return executionResponse(request, http.StatusOK, upstreamBody), nil
-	})}
-	caller := executionCaller(readyExecutionProvider("https://upstream.invalid"), client, time.Second, int64(len(responseBody)), slog.Default())
+	})
+	caller := executionCaller(readyExecutionProvider("https://upstream.invalid"), transport, time.Second, int64(len(responseBody)), slog.Default())
 
 	status, body, _, failure := caller.Buffered(context.Background(), executionCall())
 
@@ -804,12 +803,12 @@ func TestCallerBufferedAcceptsResponseAtSizeBoundary(t *testing.T) {
 
 func TestCallerBufferedLeavesSSELookingBodyOpaque(t *testing.T) {
 	const responseBody = "event: model\ndata: opaque-catalog-bytes\n\n"
-	client := &http.Client{Transport: executionRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+	transport := executionRoundTripFunc(func(request *http.Request) (*http.Response, error) {
 		response := executionResponse(request, http.StatusOK, io.NopCloser(strings.NewReader(responseBody)))
 		response.Header.Set("Content-Type", "text/event-stream")
 		return response, nil
-	})}
-	caller := executionCaller(readyExecutionProvider("https://upstream.invalid"), client, time.Second, 1<<20, slog.Default())
+	})
+	caller := executionCaller(readyExecutionProvider("https://upstream.invalid"), transport, time.Second, 1<<20, slog.Default())
 
 	status, body, _, failure := caller.Buffered(context.Background(), executionCall())
 
@@ -829,12 +828,12 @@ func TestCallerBufferedMakesIndependentUpstreamCalls(t *testing.T) {
 	}}
 	responses := []string{`{"data":[{"id":"first"}]}`, `{"data":[{"id":"second"}]}`}
 	var calls int
-	client := &http.Client{Transport: executionRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+	transport := executionRoundTripFunc(func(request *http.Request) (*http.Response, error) {
 		body := responses[calls]
 		calls++
 		return executionResponse(request, http.StatusOK, io.NopCloser(strings.NewReader(body))), nil
-	})}
-	caller := executionCaller(provider, client, time.Second, 1<<20, slog.Default())
+	})
+	caller := executionCaller(provider, transport, time.Second, 1<<20, slog.Default())
 
 	_, first, _, firstFailure := caller.Buffered(context.Background(), executionCall())
 	_, second, _, secondFailure := caller.Buffered(context.Background(), executionCall())
@@ -865,7 +864,7 @@ func TestCallerBufferedDoesNotReplayAfterUpstreamResponseFailure(t *testing.T) {
 		transportAttempts.Add(1)
 	}}
 	ctx := httptrace.WithClientTrace(context.Background(), trace)
-	caller := executionCaller(readyExecutionProvider(server.URL), &http.Client{}, time.Second, 1<<20, slog.Default())
+	caller := New(readyExecutionProvider(server.URL), time.Second, time.Second, 1<<20, slog.Default())
 
 	status, body, _, failure := caller.Buffered(ctx, executionCall())
 
@@ -902,14 +901,14 @@ func TestCallerBufferedReturnsOnlyDifferentUpstreamRequestID(t *testing.T) {
 			if err != nil {
 				t.Fatalf("build logger: %v", err)
 			}
-			client := &http.Client{Transport: executionRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+			transport := executionRoundTripFunc(func(request *http.Request) (*http.Response, error) {
 				response := executionResponse(request, http.StatusOK, http.NoBody)
 				if tc.upstreamRequestID != "" {
 					response.Header.Set(RequestIDHeader, tc.upstreamRequestID)
 				}
 				return response, nil
-			})}
-			caller := executionCaller(readyExecutionProvider("https://upstream.invalid"), client, time.Second, 1<<20, logger)
+			})
+			caller := executionCaller(readyExecutionProvider("https://upstream.invalid"), transport, time.Second, 1<<20, logger)
 			ctx := logging.WithRequestID(context.Background(), requestID)
 
 			_, _, responseCtx, failure := caller.Buffered(ctx, executionCall())
@@ -1003,14 +1002,10 @@ func executionCall() Call {
 	}
 }
 
-func executionCaller(provider identity.Provider, client *http.Client, outboundTimeout time.Duration, maxBufferedBytes int64, logger *slog.Logger) *Caller {
-	return &Caller{
-		provider:         provider,
-		client:           client,
-		logger:           logger,
-		outboundTimeout:  outboundTimeout,
-		maxBufferedBytes: maxBufferedBytes,
-	}
+// executionCaller builds a Caller whose calls run on transport. The replacement
+// carries its own settings, so the response-header timeout is left unset.
+func executionCaller(provider identity.Provider, transport http.RoundTripper, outboundTimeout time.Duration, maxBufferedBytes int64, logger *slog.Logger) *Caller {
+	return New(provider, 0, outboundTimeout, maxBufferedBytes, logger, WithTransport(transport))
 }
 
 func readyExecutionProvider(baseURL string) *identity.Static {
@@ -1144,13 +1139,13 @@ func (b *executionCancelAwareBody) Close() error {
 	return nil
 }
 
-func executionBodyClient(body *executionCancelAwareBody, header http.Header) *http.Client {
-	return &http.Client{Transport: executionRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+func executionBodyTransport(body *executionCancelAwareBody, header http.Header) http.RoundTripper {
+	return executionRoundTripFunc(func(request *http.Request) (*http.Response, error) {
 		body.bind(request.Context())
 		response := executionResponse(request, http.StatusOK, body)
 		response.Header = header
 		return response, nil
-	})}
+	})
 }
 
 func assertExecutionBodyCleanup(t *testing.T, body *executionCancelAwareBody, wantCanceledAtClose bool) {

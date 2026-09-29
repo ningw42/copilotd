@@ -40,7 +40,7 @@ func TestProxyRejectsInvalidUpgradeBeforeCredentialOrDial(t *testing.T) {
 		Token:   "copilot-token",
 	}, true)
 	provider.SetError(errors.New("credential resolution must not run"))
-	proxy := newPreupgradeTestProxy(provider, http.DefaultClient, time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	proxy := newPreupgradeTestProxy(provider, time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	t.Cleanup(func() { shutdownPreupgradeTestProxy(t, proxy) })
 
 	tests := []struct {
@@ -130,7 +130,7 @@ func TestProxyRejectsInvalidUpgradeBeforeCredentialOrDial(t *testing.T) {
 func TestProxyReturnsNotReadyForTokenWiseUpgradeWhenCredentialResolutionFails(t *testing.T) {
 	provider := identity.NewStatic(identity.Credential{}, true)
 	provider.SetError(errors.New("credential failure with secret details"))
-	proxy := newPreupgradeTestProxy(provider, http.DefaultClient, time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	proxy := newPreupgradeTestProxy(provider, time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	t.Cleanup(func() { shutdownPreupgradeTestProxy(t, proxy) })
 
 	request := validUpgradeRequest()
@@ -151,14 +151,14 @@ func TestProxyReturnsNotReadyForTokenWiseUpgradeWhenCredentialResolutionFails(t 
 }
 
 func TestProxyReturnsBadGatewayBeforeAcceptWhenUpstreamDialIsRefused(t *testing.T) {
-	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+	transport := roundTripFunc(func(*http.Request) (*http.Response, error) {
 		return nil, errors.New("connection refused with secret details")
-	})}
+	})
 	provider := identity.NewStatic(identity.Credential{
 		BaseURL: "http://upstream.invalid",
 		Token:   "copilot-token",
 	}, true)
-	proxy := newPreupgradeTestProxy(provider, client, time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	proxy := newPreupgradeTestProxy(provider, time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)), upstream.WithHandshakeTransport(transport))
 	t.Cleanup(func() { shutdownPreupgradeTestProxy(t, proxy) })
 
 	recorder := httptest.NewRecorder()
@@ -177,15 +177,15 @@ func TestProxyReturnsBadGatewayBeforeAcceptWhenUpstreamDialIsRefused(t *testing.
 }
 
 func TestProxyReturnsGatewayTimeoutBeforeAcceptWhenUpstreamDialTimesOut(t *testing.T) {
-	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
 		<-request.Context().Done()
 		return nil, request.Context().Err()
-	})}
+	})
 	provider := identity.NewStatic(identity.Credential{
 		BaseURL: "http://upstream.invalid",
 		Token:   "copilot-token",
 	}, true)
-	proxy := newPreupgradeTestProxy(provider, client, 20*time.Millisecond, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	proxy := newPreupgradeTestProxy(provider, 20*time.Millisecond, slog.New(slog.NewTextHandler(io.Discard, nil)), upstream.WithHandshakeTransport(transport))
 	t.Cleanup(func() { shutdownPreupgradeTestProxy(t, proxy) })
 
 	recorder := httptest.NewRecorder()
@@ -218,7 +218,7 @@ func TestProxyRelaysUpstreamHandshakeRejection(t *testing.T) {
 			}))
 			t.Cleanup(upstreamServer.Close)
 
-			recorder, accepts := serveUpgradeAgainst(t, upstreamServer.URL, upstreamServer.Client(), time.Second)
+			recorder, accepts := serveUpgradeAgainst(t, upstreamServer.URL, time.Second)
 
 			if recorder.Code != status {
 				t.Errorf("status = %d, want relayed %d without a downstream 101", recorder.Code, status)
@@ -242,6 +242,37 @@ func TestProxyRelaysUpstreamHandshakeRejection(t *testing.T) {
 	}
 }
 
+func TestProxyRelaysUpstreamHandshakeRedirectWithoutFollowingIt(t *testing.T) {
+	var targetCalls atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		targetCalls.Add(1)
+		w.WriteHeader(http.StatusTeapot)
+	}))
+	t.Cleanup(target.Close)
+	location := target.URL + "/redirect-target"
+	upstreamServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Location", location)
+		w.WriteHeader(http.StatusFound)
+	}))
+	t.Cleanup(upstreamServer.Close)
+
+	// The recorder is the downstream client and never follows a redirect.
+	recorder, accepts := serveUpgradeAgainst(t, upstreamServer.URL, time.Second)
+
+	if recorder.Code != http.StatusFound {
+		t.Errorf("status = %d, want relayed 302 without a downstream 101", recorder.Code)
+	}
+	if got := recorder.Header().Get("Location"); got != location {
+		t.Errorf("Location = %q, want Copilot's %q", got, location)
+	}
+	if got := targetCalls.Load(); got != 0 {
+		t.Errorf("redirect target requests = %d, want 0", got)
+	}
+	if len(accepts) != 1 || accepts[0] != AcceptDialFailed {
+		t.Errorf("accept observations = %v, want [%s]", accepts, AcceptDialFailed)
+	}
+}
+
 func TestProxyRelaysHandshakeRejectionHeadersThroughResponsePolicy(t *testing.T) {
 	upstreamServer := rawHandshakeUpstream(t, "HTTP/1.1 429 Too Many Requests\r\n"+
 		"Connection: X-Hop-Listed\r\n"+
@@ -255,7 +286,7 @@ func TestProxyRelaysHandshakeRejectionHeadersThroughResponsePolicy(t *testing.T)
 		"\r\n"+
 		"{}")
 
-	recorder, _ := serveUpgradeAgainst(t, upstreamServer.URL, upstreamServer.Client(), time.Second)
+	recorder, _ := serveUpgradeAgainst(t, upstreamServer.URL, time.Second)
 
 	if recorder.Code != http.StatusTooManyRequests {
 		t.Fatalf("status = %d, want relayed 429", recorder.Code)
@@ -280,7 +311,7 @@ func TestProxyOmitsHandshakeRejectionBodyAboveRetentionCap(t *testing.T) {
 		"\r\n"+
 		body)
 
-	recorder, _ := serveUpgradeAgainst(t, upstreamServer.URL, upstreamServer.Client(), time.Second)
+	recorder, _ := serveUpgradeAgainst(t, upstreamServer.URL, time.Second)
 
 	assertRelayedWithoutBody(t, recorder, http.StatusTooManyRequests)
 	if got := recorder.Header().Get("Retry-After"); got != "7" {
@@ -295,7 +326,7 @@ func TestProxyRelaysHandshakeRejectionBodyExactlyAtRetentionCap(t *testing.T) {
 		"\r\n"+
 		body)
 
-	recorder, _ := serveUpgradeAgainst(t, upstreamServer.URL, upstreamServer.Client(), time.Second)
+	recorder, _ := serveUpgradeAgainst(t, upstreamServer.URL, time.Second)
 
 	if recorder.Code != http.StatusForbidden {
 		t.Errorf("status = %d, want relayed 403", recorder.Code)
@@ -314,7 +345,7 @@ func TestProxyOmitsHandshakeRejectionBodyClosedBeforeDeclaredLength(t *testing.T
 		"\r\n"+
 		"short!!")
 
-	recorder, _ := serveUpgradeAgainst(t, upstreamServer.URL, upstreamServer.Client(), time.Second)
+	recorder, _ := serveUpgradeAgainst(t, upstreamServer.URL, time.Second)
 
 	assertRelayedWithoutBody(t, recorder, http.StatusTooManyRequests)
 }
@@ -326,7 +357,7 @@ func TestProxyOmitsCompleteHandshakeRejectionBodyOfUnknownLength(t *testing.T) {
 		"7\r\n{\"a\":1}\r\n"+
 		"0\r\n\r\n")
 
-	recorder, _ := serveUpgradeAgainst(t, upstreamServer.URL, upstreamServer.Client(), time.Second)
+	recorder, _ := serveUpgradeAgainst(t, upstreamServer.URL, time.Second)
 
 	// Complete, but nothing proves it: the omission is deliberate.
 	assertRelayedWithoutBody(t, recorder, http.StatusTooManyRequests)
@@ -338,7 +369,7 @@ func TestProxyOmitsIncompleteHandshakeRejectionBodyOfUnknownLength(t *testing.T)
 		"\r\n"+
 		"7\r\n{\"a\":1}\r\n")
 
-	recorder, _ := serveUpgradeAgainst(t, upstreamServer.URL, upstreamServer.Client(), time.Second)
+	recorder, _ := serveUpgradeAgainst(t, upstreamServer.URL, time.Second)
 
 	assertRelayedWithoutBody(t, recorder, http.StatusTooManyRequests)
 }
@@ -361,7 +392,7 @@ func TestProxyOmitsHandshakeRejectionBodyDecompressedByDialTransport(t *testing.
 	}))
 	t.Cleanup(upstreamServer.Close)
 
-	recorder, _ := serveUpgradeAgainst(t, upstreamServer.URL, upstreamServer.Client(), time.Second)
+	recorder, _ := serveUpgradeAgainst(t, upstreamServer.URL, time.Second)
 
 	assertRelayedWithoutBody(t, recorder, http.StatusTooManyRequests)
 	if got := recorder.Header().Values("Content-Encoding"); len(got) != 0 {
@@ -370,7 +401,7 @@ func TestProxyOmitsHandshakeRejectionBodyDecompressedByDialTransport(t *testing.
 }
 
 func TestProxyTimesOutHandshakeRejectionWhoseBodyStallsPastDialDeadline(t *testing.T) {
-	recorder, accepts := serveUpgradeAgainst(t, "http://upstream.invalid", stalledRejectionClient(make(chan struct{})), 20*time.Millisecond)
+	recorder, accepts := serveUpgradeAgainst(t, "http://upstream.invalid", 20*time.Millisecond, upstream.WithHandshakeTransport(stalledRejectionTransport(make(chan struct{}))))
 
 	if recorder.Code != http.StatusGatewayTimeout {
 		t.Errorf("status = %d, want 504: the deadline wins over the rejection", recorder.Code)
@@ -387,20 +418,20 @@ func TestProxyTimesOutHandshakeRejectionWhoseBodyStallsPastDialDeadline(t *testi
 func TestProxyWritesNothingWhenClientLeavesDuringHandshakeRejectionBody(t *testing.T) {
 	bodyEntered := make(chan struct{})
 
-	recorder, observed := serveUntilClientLeaves(t, stalledRejectionClient(bodyEntered), bodyEntered)
+	recorder, observed := serveUntilClientLeaves(t, stalledRejectionTransport(bodyEntered), bodyEntered)
 
 	assertNoPreUpgradeResponse(t, recorder, observed)
 }
 
 func TestProxyTimesOutDeadlineBearingDialErrorAfterClientLeaves(t *testing.T) {
 	requestEntered := make(chan struct{})
-	dialClient := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
 		close(requestEntered)
 		<-request.Context().Done()
 		return nil, fmt.Errorf("upstream handshake: %w", context.DeadlineExceeded)
-	})}
+	})
 
-	recorder, observed := serveUntilClientLeaves(t, dialClient, requestEntered)
+	recorder, observed := serveUntilClientLeaves(t, transport, requestEntered)
 
 	if recorder.Code != http.StatusGatewayTimeout {
 		t.Errorf("status = %d, want 504: a deadline-bearing error wins over cancellation", recorder.Code)
@@ -417,7 +448,7 @@ func TestProxyReturnsBadGatewayWhenUpstream101FailsHandshakeVerification(t *test
 		"Sec-WebSocket-Accept: not-the-expected-accept\r\n"+
 		"\r\n")
 
-	recorder, accepts := serveUpgradeAgainst(t, upstreamServer.URL, upstreamServer.Client(), time.Second)
+	recorder, accepts := serveUpgradeAgainst(t, upstreamServer.URL, time.Second)
 
 	if recorder.Code != http.StatusBadGateway {
 		t.Errorf("status = %d, want 502 for a 101 that fails verification", recorder.Code)
@@ -465,7 +496,7 @@ func TestProxyLogsRelayedHandshakeRejectionOnlyInCorrelatedAccessRecord(t *testi
 			}, true)
 			observed := &recordingWsMetrics{}
 			proxy := New(newTestCaller(provider, logging.ForComponent(base, "internal/upstream")),
-				upstreamServer.Client(), time.Second, time.Second, 1<<20, nil,
+				time.Second, time.Second, 1<<20, nil,
 				logging.ForComponent(base, "internal/wsforward"), logging.ForComponent(base, "internal/shim"), 0,
 				WsMetrics{Accept: observed, SessionTerminal: observed})
 			t.Cleanup(func() { shutdownPreupgradeTestProxy(t, proxy) })
@@ -533,7 +564,7 @@ func TestProxyLogsUpstreamRequestIDFromSuccessfulHandshake(t *testing.T) {
 		BaseURL: upstream.URL,
 		Token:   "copilot-token-secret",
 	}, true)
-	proxy := newPreupgradeTestProxy(provider, http.DefaultClient, time.Second, logger)
+	proxy := newPreupgradeTestProxy(provider, time.Second, logger)
 	t.Cleanup(func() { shutdownPreupgradeTestProxy(t, proxy) })
 
 	downstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -568,14 +599,14 @@ func TestProxyLogsUpstreamRequestIDFromSuccessfulHandshake(t *testing.T) {
 	}
 }
 
-// serveUpgradeAgainst serves one valid upgrade through a proxy whose dial client
+// serveUpgradeAgainst serves one valid upgrade through a proxy whose Caller
 // reaches baseURL, and returns the downstream response and accept outcomes.
-func serveUpgradeAgainst(t *testing.T, baseURL string, client *http.Client, dialTimeout time.Duration) (*httptest.ResponseRecorder, []AcceptOutcome) {
+func serveUpgradeAgainst(t *testing.T, baseURL string, dialTimeout time.Duration, options ...upstream.Option) (*httptest.ResponseRecorder, []AcceptOutcome) {
 	t.Helper()
 	provider := identity.NewStatic(identity.Credential{BaseURL: baseURL, Token: "copilot-token"}, true)
 	observed := &recordingWsMetrics{}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	proxy := New(newTestCaller(provider, logger), client, dialTimeout, time.Second, 1<<20, nil, logger, logger, 0,
+	proxy := New(newTestCaller(provider, logger, options...), dialTimeout, time.Second, 1<<20, nil, logger, logger, 0,
 		WsMetrics{Accept: observed, SessionTerminal: observed})
 	t.Cleanup(func() { shutdownPreupgradeTestProxy(t, proxy) })
 
@@ -588,15 +619,15 @@ func serveUpgradeAgainst(t *testing.T, baseURL string, client *http.Client, dial
 	return recorder, accepts
 }
 
-// serveUntilClientLeaves serves one valid upgrade through a proxy dialing with
-// dialClient, cancels the inbound request once entered closes, and waits for
-// the handler. The recorder starts at Code 0 so an untouched response is
-// distinguishable from an explicit WriteHeader(200).
-func serveUntilClientLeaves(t *testing.T, dialClient *http.Client, entered <-chan struct{}) (*httptest.ResponseRecorder, *recordingWsMetrics) {
+// serveUntilClientLeaves serves one valid upgrade through a proxy whose
+// handshake runs on transport, cancels the inbound request once entered
+// closes, and waits for the handler. The recorder starts at Code 0 so an
+// untouched response is distinguishable from an explicit WriteHeader(200).
+func serveUntilClientLeaves(t *testing.T, transport http.RoundTripper, entered <-chan struct{}) (*httptest.ResponseRecorder, *recordingWsMetrics) {
 	t.Helper()
 	provider := identity.NewStatic(identity.Credential{BaseURL: "http://upstream.invalid", Token: "copilot-token"}, true)
 	observed := &recordingWsMetrics{}
-	proxy := newAdmissionTestProxy(provider, dialClient, WsMetrics{Accept: observed, SessionTerminal: observed})
+	proxy := newAdmissionTestProxy(provider, WsMetrics{Accept: observed, SessionTerminal: observed}, upstream.WithHandshakeTransport(transport))
 	t.Cleanup(func() { shutdownPreupgradeTestProxy(t, proxy) })
 	requestCtx, cancelRequest := context.WithCancel(context.Background())
 	defer cancelRequest()
@@ -639,10 +670,10 @@ func assertRelayedWithoutBody(t *testing.T, recorder *httptest.ResponseRecorder,
 	}
 }
 
-// stalledRejectionClient answers the handshake with a final 429 whose body
+// stalledRejectionTransport answers the handshake with a final 429 whose body
 // read signals bodyEntered, then blocks until the dial request's context ends.
-func stalledRejectionClient(bodyEntered chan struct{}) *http.Client {
-	return &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+func stalledRejectionTransport(bodyEntered chan struct{}) http.RoundTripper {
+	return roundTripFunc(func(request *http.Request) (*http.Response, error) {
 		return &http.Response{
 			StatusCode:    http.StatusTooManyRequests,
 			Header:        http.Header{"Retry-After": {"7"}, "Content-Length": {"100"}},
@@ -650,7 +681,7 @@ func stalledRejectionClient(bodyEntered chan struct{}) *http.Client {
 			Body:          &stalledBody{ctx: request.Context(), entered: bodyEntered},
 			Request:       request,
 		}, nil
-	})}
+	})
 }
 
 type stalledBody struct {
@@ -685,8 +716,8 @@ func rawHandshakeUpstream(t *testing.T, raw string) *httptest.Server {
 	return server
 }
 
-func newPreupgradeTestProxy(provider identity.Provider, client *http.Client, dialTimeout time.Duration, logger *slog.Logger) *Proxy {
-	return New(newTestCaller(provider, logger), client, dialTimeout, time.Second, 1<<20, nil, logger, logger, 0, WsMetrics{})
+func newPreupgradeTestProxy(provider identity.Provider, dialTimeout time.Duration, logger *slog.Logger, options ...upstream.Option) *Proxy {
+	return New(newTestCaller(provider, logger, options...), dialTimeout, time.Second, 1<<20, nil, logger, logger, 0, WsMetrics{})
 }
 
 func shutdownPreupgradeTestProxy(t *testing.T, proxy *Proxy) {

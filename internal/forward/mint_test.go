@@ -46,7 +46,7 @@ func TestHTTPHandlersWriteNothingWhenClientLeavesDuringOnDemandMint(t *testing.T
 			if err != nil {
 				t.Fatalf("build logger: %v", err)
 			}
-			f := newTestForwarderWithLogger(manager, unreachableUpstream(t), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, callerLogger, nil)
+			f := newStubForwarderWithLogger(manager, unreachableUpstream(t), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, callerLogger, nil)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			request := httptest.NewRequest(tc.method, tc.path, strings.NewReader(`{}`)).WithContext(ctx)
@@ -82,7 +82,7 @@ func TestHTTPHandlersWriteNothingWhenClientLeavesDuringOnDemandMint(t *testing.T
 func TestForwardRendersNotReadyWhenOnDemandMintTimesOutForConnectedClient(t *testing.T) {
 	exchange, _ := newBlockingExchange(t)
 	manager := newMintTestManager(exchange, 20*time.Millisecond)
-	f := newTestForwarderWithLogger(manager, unreachableUpstream(t), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
+	f := newStubForwarderWithLogger(manager, unreachableUpstream(t), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
 	recorder := httptest.NewRecorder()
 
 	f.Handler(endpoint.AnthropicMessages())(recorder, httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", strings.NewReader(`{}`)))
@@ -128,10 +128,10 @@ func newMintTestManager(exchange *httptest.Server, exchangeTimeout time.Duration
 	})
 }
 
-func unreachableUpstream(t *testing.T) *http.Client {
+func unreachableUpstream(t *testing.T) http.RoundTripper {
 	t.Helper()
-	return &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+	return roundTripFunc(func(*http.Request) (*http.Response, error) {
 		t.Error("upstream call executed without a credential")
 		return nil, errors.New("upstream must not be called")
-	})}
+	})
 }

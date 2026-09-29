@@ -15,7 +15,6 @@ import (
 
 	"github.com/ningw42/copilotd/internal/catalog"
 	"github.com/ningw42/copilotd/internal/endpoint"
-	"github.com/ningw42/copilotd/internal/forward"
 	"github.com/ningw42/copilotd/internal/identity"
 	"github.com/ningw42/copilotd/internal/logging"
 )
@@ -42,7 +41,7 @@ func TestAnthropicModelCatalogOverRealListener(t *testing.T) {
 		Headers: http.Header{"Copilot-Integration-Id": {"vscode-chat"}},
 	}, true)
 	logger, logs := bufferLogger(t, "info")
-	source := newTestCatalogSourceWith(provider, forward.NewClient(time.Second), time.Second, 1<<20, logger)
+	source := newTestCatalogSourceWith(provider, time.Second, time.Second, 1<<20, logger)
 	base := startServer(t, newTestServer(logger, provider, catalogMount(logger, endpoint.AnthropicCatalog(), catalog.RenderDescriptors{}, source)))
 
 	do := func(method, target, keyHeader, key, requestID string) (*http.Response, []byte) {

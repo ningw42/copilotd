@@ -14,6 +14,7 @@ import (
 
 	"github.com/ningw42/copilotd/internal/endpoint"
 	"github.com/ningw42/copilotd/internal/identity"
+	"github.com/ningw42/copilotd/internal/upstream"
 )
 
 // gatedProvider parks every credential resolution until release closes, so a
@@ -43,9 +44,9 @@ func (p *gatedProvider) Current(ctx context.Context) (identity.Credential, error
 
 func (*gatedProvider) Ready() bool { return true }
 
-func newAdmissionTestProxy(provider identity.Provider, dialClient *http.Client, metrics WsMetrics) *Proxy {
+func newAdmissionTestProxy(provider identity.Provider, metrics WsMetrics, options ...upstream.Option) *Proxy {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return New(newTestCaller(provider, logger), dialClient, time.Second, time.Second, 1<<20, nil, logger, logger, 0, metrics)
+	return New(newTestCaller(provider, logger, options...), time.Second, time.Second, 1<<20, nil, logger, logger, 0, metrics)
 }
 
 // TestProxyShutdownRejectsLateUpgradesConcurrentlyWithLastAdmittedHandler hammers
@@ -62,7 +63,7 @@ func TestProxyShutdownRejectsLateUpgradesConcurrentlyWithLastAdmittedHandler(t *
 	for iteration := 0; iteration < iterations; iteration++ {
 		provider := newGatedProvider(admitted + late)
 		observed := &recordingWsMetrics{}
-		proxy := newAdmissionTestProxy(provider, &http.Client{Transport: http.DefaultTransport}, WsMetrics{Accept: observed})
+		proxy := newAdmissionTestProxy(provider, WsMetrics{Accept: observed})
 		handler := proxy.Handler(endpoint.OpenAIResponsesWS())
 
 		var admittedDone sync.WaitGroup
@@ -139,7 +140,7 @@ func TestProxyShutdownRejectsLateUpgradesConcurrentlyWithLastAdmittedHandler(t *
 
 func TestProxyShutdownWaitsForAdmittedHandlerMidCredential(t *testing.T) {
 	provider := newGatedProvider(1)
-	proxy := newAdmissionTestProxy(provider, &http.Client{Transport: http.DefaultTransport}, WsMetrics{})
+	proxy := newAdmissionTestProxy(provider, WsMetrics{})
 	handlerDone := make(chan struct{})
 	go func() {
 		defer close(handlerDone)
@@ -163,18 +164,18 @@ func TestProxyShutdownWaitsForAdmittedHandlerMidCredential(t *testing.T) {
 func TestProxyShutdownWaitsForAdmittedHandlerMidDial(t *testing.T) {
 	dialEntered := make(chan struct{})
 	releaseDial := make(chan struct{})
-	dialClient := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
 		close(dialEntered)
 		select {
 		case <-releaseDial:
 		case <-request.Context().Done():
 		}
 		return nil, errors.New("dial released")
-	})}
+	})
 	proxy := newAdmissionTestProxy(identity.NewStatic(identity.Credential{
 		BaseURL: "http://upstream.invalid",
 		Token:   "copilot-token",
-	}, true), dialClient, WsMetrics{})
+	}, true), WsMetrics{}, upstream.WithHandshakeTransport(transport))
 	handlerDone := make(chan struct{})
 	go func() {
 		defer close(handlerDone)
@@ -226,7 +227,7 @@ func assertShutdownPendingUntilRelease(t *testing.T, handler http.Handler, shutd
 
 func TestProxyShutdownIsRepeatableAndNeverReopensAdmission(t *testing.T) {
 	provider := newGatedProvider(1)
-	proxy := newAdmissionTestProxy(provider, &http.Client{Transport: http.DefaultTransport}, WsMetrics{})
+	proxy := newAdmissionTestProxy(provider, WsMetrics{})
 	for i := 0; i < 3; i++ {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		err := proxy.Shutdown(ctx)

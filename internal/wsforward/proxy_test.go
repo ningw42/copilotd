@@ -35,11 +35,11 @@ func TestRawNetworkConnUnwrapsNestedTransports(t *testing.T) {
 
 func TestProxyClientCancelDuringUpstreamHandshakeWritesNothingAndBooksNoMetric(t *testing.T) {
 	requestEntered := make(chan struct{})
-	dialClient := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
 		close(requestEntered)
 		<-request.Context().Done()
 		return nil, request.Context().Err()
-	})}
+	})
 	observed := &recordingWsMetrics{}
 	provider := identity.NewStatic(identity.Credential{
 		BaseURL: "http://upstream.invalid",
@@ -47,8 +47,7 @@ func TestProxyClientCancelDuringUpstreamHandshakeWritesNothingAndBooksNoMetric(t
 	}, true)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	proxy := New(
-		newTestCaller(provider, logger),
-		dialClient,
+		newTestCaller(provider, logger, upstream.WithHandshakeTransport(transport)),
 		time.Second,
 		time.Second,
 		1<<20,
@@ -101,18 +100,17 @@ func TestProxyClientCancelDuringUpstreamHandshakeWritesNothingAndBooksNoMetric(t
 
 func TestProxyForwardsClientHeaderAndStripsWebSocketOffers(t *testing.T) {
 	requests := make(chan http.Header, 1)
-	dialClient := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
 		requests <- request.Header.Clone()
 		return nil, errors.New("stop after capturing upstream handshake")
-	})}
+	})
 	provider := identity.NewStatic(identity.Credential{
 		BaseURL: "http://upstream.invalid",
 		Token:   "copilot-token",
 	}, true)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	proxy := New(
-		newTestCaller(provider, logger),
-		dialClient,
+		newTestCaller(provider, logger, upstream.WithHandshakeTransport(transport)),
 		time.Second,
 		time.Second,
 		1<<20,
@@ -152,13 +150,12 @@ func TestProxyCredentialResolutionUsesPhaseContextWithoutDialDeadline(t *testing
 		BaseURL: "http://upstream.invalid",
 		Token:   "copilot-token",
 	}}
-	dialClient := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+	transport := roundTripFunc(func(*http.Request) (*http.Response, error) {
 		return nil, errors.New("stop after credential resolution")
-	})}
+	})
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	proxy := New(
-		newTestCaller(provider, logger),
-		dialClient,
+		newTestCaller(provider, logger, upstream.WithHandshakeTransport(transport)),
 		time.Nanosecond,
 		time.Second,
 		1<<20,
@@ -189,18 +186,17 @@ func TestProxyPreservesBareQuestionMarkInUpstreamHandshake(t *testing.T) {
 		forceQuery bool
 	}
 	requests := make(chan capturedURL, 1)
-	dialClient := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
 		requests <- capturedURL{value: request.URL.String(), forceQuery: request.URL.ForceQuery}
 		return nil, errors.New("stop after capturing upstream URL")
-	})}
+	})
 	provider := identity.NewStatic(identity.Credential{
 		BaseURL: "http://upstream.invalid",
 		Token:   "copilot-token",
 	}, true)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	proxy := New(
-		newTestCaller(provider, logger),
-		dialClient,
+		newTestCaller(provider, logger, upstream.WithHandshakeTransport(transport)),
 		time.Second,
 		time.Second,
 		1<<20,
@@ -346,9 +342,9 @@ func testProxyShutdownForceClosesSessionThatOverrunsDeadline(t *testing.T, tlsUp
 		upstreamServer.Close()
 	})
 
-	dialClient := &http.Client{Transport: http.DefaultTransport}
+	var options []upstream.Option
 	if tlsUpstream {
-		dialClient = upstreamServer.Client()
+		options = append(options, upstream.WithHandshakeTransport(upstreamServer.Client().Transport))
 	}
 	provider := identity.NewStatic(identity.Credential{
 		BaseURL: upstreamServer.URL,
@@ -356,8 +352,7 @@ func testProxyShutdownForceClosesSessionThatOverrunsDeadline(t *testing.T, tlsUp
 	}, true)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	proxy := New(
-		newTestCaller(provider, logger),
-		dialClient,
+		newTestCaller(provider, logger, options...),
 		time.Second,
 		time.Second,
 		1<<20,
@@ -396,7 +391,7 @@ func testProxyShutdownForceClosesSessionThatOverrunsDeadline(t *testing.T, tlsUp
 func TestProxyClientCancelDuringCredentialAcquisitionWritesNothingAndBooksNoMetric(t *testing.T) {
 	provider := &blockingProvider{entered: make(chan struct{})}
 	observed := &recordingWsMetrics{}
-	proxy := newAdmissionTestProxy(provider, &http.Client{Transport: http.DefaultTransport}, WsMetrics{Accept: observed, SessionTerminal: observed})
+	proxy := newAdmissionTestProxy(provider, WsMetrics{Accept: observed, SessionTerminal: observed})
 	t.Cleanup(func() { shutdownPreupgradeTestProxy(t, proxy) })
 	requestCtx, cancelRequest := context.WithCancel(context.Background())
 	defer cancelRequest()
@@ -428,7 +423,7 @@ func TestProxyShutdownForceCancelsHandlerStillResolvingCredential(t *testing.T) 
 		entered: make(chan struct{}),
 	}
 	observed := &recordingWsMetrics{}
-	proxy := newAdmissionTestProxy(provider, &http.Client{Transport: http.DefaultTransport}, WsMetrics{Accept: observed, SessionTerminal: observed})
+	proxy := newAdmissionTestProxy(provider, WsMetrics{Accept: observed, SessionTerminal: observed})
 	recorder := httptest.NewRecorder()
 	recorder.Code = 0 // distinguish untouched from an explicit WriteHeader(200)
 	handlerDone := make(chan struct{})
@@ -491,7 +486,6 @@ func newTestProxy(provider identity.Provider) *Proxy {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	return New(
 		newTestCaller(provider, logger),
-		&http.Client{Transport: http.DefaultTransport},
 		time.Second,
 		time.Second,
 		1<<20,
@@ -503,8 +497,8 @@ func newTestProxy(provider identity.Provider) *Proxy {
 	)
 }
 
-func newTestCaller(provider identity.Provider, logger *slog.Logger) *upstream.Caller {
-	return upstream.New(provider, http.DefaultClient, time.Second, 1<<20, logger)
+func newTestCaller(provider identity.Provider, logger *slog.Logger, options ...upstream.Option) *upstream.Caller {
+	return upstream.New(provider, time.Second, time.Second, 1<<20, logger, options...)
 }
 
 func dialProxy(t *testing.T, proxy *Proxy) (*websocket.Conn, <-chan struct{}, *httptest.Server) {
@@ -576,7 +570,6 @@ func TestProxyForwardsMessagesAndBuildsUpstreamHandshake(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	proxy := New(
 		newTestCaller(provider, logger),
-		&http.Client{Transport: http.DefaultTransport},
 		time.Second,
 		time.Second,
 		1<<20,
@@ -682,7 +675,7 @@ func TestProxyUsesConfiguredProxyAndVerifiedTLSForWSSDial(t *testing.T) {
 	roots := x509.NewCertPool()
 	roots.AddCert(upstreamServer.Certificate())
 	proxyRequests := make(chan string, 1)
-	dialClient := &http.Client{Transport: &http.Transport{
+	transport := &http.Transport{
 		Proxy: func(request *http.Request) (*url.URL, error) {
 			proxyRequests <- request.URL.Scheme
 			return nil, nil
@@ -691,10 +684,10 @@ func TestProxyUsesConfiguredProxyAndVerifiedTLSForWSSDial(t *testing.T) {
 			MinVersion: tls.VersionTLS12,
 			RootCAs:    roots,
 		},
-	}}
+	}
 	provider := identity.NewStatic(identity.Credential{BaseURL: upstreamServer.URL, Token: "copilot-token"}, true)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	proxy := New(newTestCaller(provider, logger), dialClient, time.Second, time.Second, 1<<20, nil, logger, logger, 0, WsMetrics{})
+	proxy := New(newTestCaller(provider, logger, upstream.WithHandshakeTransport(transport)), time.Second, time.Second, 1<<20, nil, logger, logger, 0, WsMetrics{})
 	downstream := httptest.NewServer(proxy.Handler(endpoint.OpenAIResponsesWS()))
 	t.Cleanup(downstream.Close)
 	t.Cleanup(func() {
@@ -731,7 +724,7 @@ func TestProxyUsesConfiguredProxyAndVerifiedTLSForWSSDial(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("configured proxy callback was not used")
 	}
-	if dialClient.Transport.(*http.Transport).TLSClientConfig.InsecureSkipVerify {
+	if transport.TLSClientConfig.InsecureSkipVerify {
 		t.Error("upstream TLS verification is disabled")
 	}
 }

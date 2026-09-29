@@ -94,28 +94,6 @@ func (f *Forwarder) SuppressedShimErrorCount() uint64 {
 	return f.suppressedShimErrors.Count()
 }
 
-// NewClient builds the dedicated outbound client: a tuned, connection-pooling
-// transport that honors proxy env vars and default TLS verification. It returns
-// the first upstream response, leaves compression negotiation and decoding to
-// callers, and bounds time-to-first-byte without imposing a total duration on a
-// future streaming response.
-func NewClient(responseHeaderTimeout time.Duration) *http.Client {
-	return &http.Client{
-		CheckRedirect: func(*http.Request, []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-		Transport: &http.Transport{
-			Proxy:                 http.ProxyFromEnvironment,
-			DisableCompression:    true,
-			ForceAttemptHTTP2:     true,
-			MaxIdleConns:          100,
-			MaxIdleConnsPerHost:   100,
-			IdleConnTimeout:       90 * time.Second,
-			ResponseHeaderTimeout: responseHeaderTimeout,
-		},
-	}
-}
-
 // Handler returns the handler for one HTTP-forward endpoint contract. The
 // contract supplies both the upstream route and the Surface error dialect.
 // Anthropic requests are forwarded without a peek; the OpenAI surface peeks

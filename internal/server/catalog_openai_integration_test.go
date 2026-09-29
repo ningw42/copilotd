@@ -22,7 +22,6 @@ import (
 	"github.com/ningw42/copilotd/internal/catalog"
 	"github.com/ningw42/copilotd/internal/config"
 	"github.com/ningw42/copilotd/internal/endpoint"
-	"github.com/ningw42/copilotd/internal/forward"
 	"github.com/ningw42/copilotd/internal/identity"
 	"github.com/ningw42/copilotd/internal/logging"
 )
@@ -96,7 +95,7 @@ func TestCodexCatalogAliasOverRealListener(t *testing.T) {
 		},
 	}
 	provider := identity.NewStatic(identity.Credential{BaseURL: upstream.URL, Token: "copilot-token"}, true)
-	forwarder := newTestForwarder(provider, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
+	forwarder := newTestForwarder(provider, time.Second, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 	logger := discardLogger(t)
 	base := startServer(t, newTestServer(logger, provider,
 		catalogMount(logger, endpoint.OpenAICatalog(), catalog.RenderDescriptors{Codex: codex}, newTestCatalogSource(provider)),
@@ -198,7 +197,7 @@ func TestCodexCatalogAliasConfigIsScopedToNegotiatedOpenAICatalog(t *testing.T) 
 			codex.Models = pinnedCodexModels(t, "gpt-5.4")
 		}
 		catalogs := catalog.RenderDescriptors{Codex: codex}
-		forwarder := newTestForwarder(provider, forward.NewClient(time.Second), time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
+		forwarder := newTestForwarder(provider, time.Second, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
 		logger := discardLogger(t)
 		return startServer(t, newTestServer(logger, provider,
 			catalogMount(logger, endpoint.OpenAICatalog(), catalogs, newTestCatalogSource(provider)),
@@ -277,7 +276,7 @@ func TestCodexCatalogAliasWarningsOverRealListener(t *testing.T) {
 		}},
 	}
 	provider := identity.NewStatic(identity.Credential{BaseURL: upstream.URL, Token: tokenSecret}, true)
-	source := newTestCatalogSourceWith(provider, forward.NewClient(time.Second), time.Second, 1<<20, logger)
+	source := newTestCatalogSourceWith(provider, time.Second, time.Second, 1<<20, logger)
 	base := startServer(t, newTestServer(logger, provider, catalogMount(logger, endpoint.OpenAICatalog(), catalog.RenderDescriptors{Codex: codex}, source)))
 
 	for requestNumber := 0; requestNumber < 2; requestNumber++ {
@@ -662,7 +661,7 @@ func TestCodexCatalogConfigWiringWarningAndAccessLogConfidentiality(t *testing.T
 		}},
 	}
 	provider := identity.NewStatic(identity.Credential{BaseURL: upstream.URL, Token: copilotToken}, true)
-	source := newTestCatalogSourceWith(provider, forward.NewClient(time.Second), time.Second, 1<<20, logger)
+	source := newTestCatalogSourceWith(provider, time.Second, time.Second, 1<<20, logger)
 	base := startServer(t, newTestServer(logger, provider, catalogMount(logger, endpoint.OpenAICatalog(), catalog.RenderDescriptors{Codex: codex}, source)))
 
 	requestCatalog := func(target string) (*http.Response, []byte) {
@@ -751,11 +750,11 @@ func TestOpenAIModelCatalogMapsFetchFailuresOverRealListener(t *testing.T) {
 				BaseURL: "https://upstream.invalid",
 				Token:   "copilot-token",
 			}, true)
-			client := &http.Client{Transport: serverRoundTripFunc(func(*http.Request) (*http.Response, error) {
+			transport := serverRoundTripFunc(func(*http.Request) (*http.Response, error) {
 				return nil, tt.upstreamErr
-			})}
+			})
 			logger := discardLogger(t)
-			source := newTestCatalogSourceWith(provider, client, time.Second, 1<<20, logger)
+			source := newStubCaller(provider, transport, time.Second, 1<<20, logger)
 			base := startServer(t, newTestServer(logger, provider, catalogMount(logger, endpoint.OpenAICatalog(), catalog.RenderDescriptors{}, source)))
 
 			req, err := http.NewRequest(http.MethodGet, base+"/openai/v1/models", nil)

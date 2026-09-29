@@ -926,8 +926,10 @@ Buffering also delays response commitment until the read finishes and recomputes
 `Content-Length`, even though the meter leaves the payload unchanged. These costs
 are accepted by this design, not excused by assuming responses are small.
 
-The Upstream call explicitly requests `Accept-Encoding: identity`, and
-`forward.NewClient` disables automatic compression handling. If Copilot still
+The Upstream call explicitly requests `Accept-Encoding: identity`, and the
+`Caller`'s transport disables automatic compression handling (built by
+`forward.NewClient` originally, by `upstream.New` since
+[#295](https://github.com/ningw42/copilotd/issues/295)). If Copilot still
 returns unsupported encoding, a non-SSE body bypasses the buffered hooks and is
 not metered; an SSE response is rejected with 502 before any event hook. The
 current identity predicate accepts an absent encoding header or one trimmed,

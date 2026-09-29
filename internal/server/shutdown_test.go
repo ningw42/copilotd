@@ -16,7 +16,6 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/ningw42/copilotd/internal/endpoint"
-	"github.com/ningw42/copilotd/internal/forward"
 	"github.com/ningw42/copilotd/internal/identity"
 	"github.com/ningw42/copilotd/internal/logging"
 	"github.com/ningw42/copilotd/internal/usage/reporthttp"
@@ -94,8 +93,8 @@ func startMixedTransportFixture(t *testing.T, shutdownTimeout time.Duration) *mi
 
 	provider := identity.NewStatic(identity.Credential{BaseURL: upstream.URL, Token: "copilot-token"}, true)
 	logger := discardLogger(t)
-	forwarder := newTestForwarder(provider, forward.NewClient(5*time.Second), 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
-	wsProxy := wsforward.New(newTestWSCaller(provider, logger), http.DefaultClient, 5*time.Second, 5*time.Second, 1<<20, nil, logger, logger, 0, wsforward.WsMetrics{})
+	forwarder := newTestForwarder(provider, 5*time.Second, 5*time.Second, 5*time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, nil)
+	wsProxy := wsforward.New(newTestWSCaller(provider, logger), 5*time.Second, 5*time.Second, 1<<20, nil, logger, logger, 0, wsforward.WsMetrics{})
 	srv := New(testAPIKey, shutdownTimeout, logging.ForComponent(logger, "internal/server"), newTestDependencyErrorLog(), provider, newTestReadyObservers(), NewStreamOutcomeCounter(),
 		forwardMount(forwarder, endpoint.OpenAIResponsesHTTP()), webSocketMount(wsProxy))
 
