@@ -47,14 +47,14 @@ func readTestIdentity(t *testing.T) testIdentityRecord {
 	return identity
 }
 
-func TestCLDRRelease48IdentityMatchesVendoredSourceAndLicense(t *testing.T) {
+func TestCLDRRelease49IdentityMatchesVendoredSourceAndLicense(t *testing.T) {
 	identity := readTestIdentity(t)
-	if identity.Repository != "https://github.com/unicode-org/cldr" || identity.Release != "48" || identity.Tag != "release-48" ||
-		identity.Commit != "acd6d88ae493633240e19a87a721076a8a75c310" || identity.Tree != "bafae8fc919257506cb84327781ce4912b9b0c0b" ||
-		identity.Source.Path != "common/supplemental/windowsZones.xml" || identity.Source.GitBlob != "26a62c3f0645851fa13ebddbce9b6f20528d5777" ||
-		identity.Source.Size != 49378 || identity.Source.SHA256 != "9cf3db6a31fb382fee21b70be6feba1e82766b0fcd06e6261fb7936a73e537ff" ||
-		identity.License.Path != "LICENSE" || identity.License.GitBlob != "861b74f3c812088755fd185d964e82a244503bbd" || identity.License.Size != 2033 ||
-		identity.License.SHA256 != "b4c0ae8ef04f7059f96ce5bbe0467f9fe6f6d81bbe13517701dfeb961fb4d0b6" || identity.License.SPDX != "Unicode-3.0" {
+	if identity.Repository != "https://github.com/unicode-org/cldr" || identity.Release != "49" || identity.Tag != "release-49" ||
+		identity.Commit != "96e54b273d2da4ec6fbad350ba19ff23fa24a588" || identity.Tree != "bd84336f381c121e90534054a441c37fe0d9d500" ||
+		identity.Source.Path != "common/supplemental/windowsZones.xml" || identity.Source.GitBlob != "2dc8c386cb3aed1a8c21b4ba7bb7b8d4f3535507" ||
+		identity.Source.Size != 49892 || identity.Source.SHA256 != "5f902f94106a396cb7774f0b0e1ca4dfecb686494045350c0b4935d378e3913b" ||
+		identity.License.Path != "LICENSE" || identity.License.GitBlob != "b4132054a5d2b95b6f1a4c8b511a211086023e55" || identity.License.Size != 3193 ||
+		identity.License.SHA256 != "65eb33419e22a297550a811b5b535f5e532f9a7e0114b516c0ea18afd53c3804" || identity.License.SPDX != "Unicode-3.0" {
 		t.Fatalf("pinned identity = %+v", identity)
 	}
 	if CLDRRelease != identity.Release || CLDRTag != identity.Tag || CLDRCommit != identity.Commit || SourceSHA256 != identity.Source.SHA256 || WindowsOtherVersion != "7e11800" || TZDBTypeVersion != "2021a" {
@@ -86,7 +86,7 @@ func TestCLDRRelease48IdentityMatchesVendoredSourceAndLicense(t *testing.T) {
 	}
 }
 
-func TestCLDRRelease48CandidatesPreserveSourceOrder(t *testing.T) {
+func TestCLDRRelease49CandidatesPreserveSourceOrder(t *testing.T) {
 	got := Candidates("Central Standard Time", "US")
 	want := []string{
 		"America/Chicago",
@@ -106,12 +106,18 @@ func TestCLDRRelease48CandidatesPreserveSourceOrder(t *testing.T) {
 	}
 }
 
-func TestCLDRRelease48RepresentativeDefaultsAndAbsentMappings(t *testing.T) {
+func TestCLDRRelease49RepresentativeDefaultsAndAbsentMappings(t *testing.T) {
 	for _, tc := range []struct {
 		key, territory string
 		want           []string
 	}{
 		{key: "Central Standard Time", territory: "001", want: []string{"America/Chicago"}},
+		{key: "British Columbia Standard Time", territory: "001", want: []string{"America/Vancouver"}},
+		{key: "Alberta Standard Time", territory: "CA", want: []string{"America/Edmonton", "America/Inuvik"}},
+		{key: "Manitoba Standard Time", territory: "001", want: []string{"America/Winnipeg"}},
+		{key: "Mountain Standard Time", territory: "CA", want: []string{"America/Cambridge_Bay"}},
+		{key: "Central Standard Time", territory: "CA", want: []string{"America/Rankin_Inlet", "America/Resolute"}},
+		{key: "Pacific Standard Time", territory: "CA"},
 		{key: "China Standard Time", territory: "001", want: []string{"Asia/Shanghai"}},
 		{key: "China Standard Time", territory: "US"},
 		{key: "Nepal Standard Time", territory: "001", want: []string{"Asia/Katmandu"}},
@@ -124,7 +130,7 @@ func TestCLDRRelease48RepresentativeDefaultsAndAbsentMappings(t *testing.T) {
 	}
 }
 
-func TestCLDRRelease48EveryGeneratedCandidateLoadsThroughSharedValidator(t *testing.T) {
+func TestCLDRRelease49EveryGeneratedCandidateLoadsThroughSharedValidator(t *testing.T) {
 	seen := map[string]bool{}
 	for key, byTerritory := range generatedCandidates {
 		if len(byTerritory["001"]) == 0 {
@@ -145,16 +151,16 @@ func TestCLDRRelease48EveryGeneratedCandidateLoadsThroughSharedValidator(t *test
 			}
 		}
 	}
-	if len(generatedCandidates) != 139 || len(seen) != 445 {
+	if len(generatedCandidates) != 142 || len(seen) != 445 {
 		t.Fatalf("generated mapping inventory: Windows keys=%d distinct IANA names=%d", len(generatedCandidates), len(seen))
 	}
 }
 
-func TestCLDRRelease48GenerationIsReproducibleOffline(t *testing.T) {
+func TestCLDRRelease49GenerationIsReproducibleOffline(t *testing.T) {
 	command := exec.Command("go", "run", "../../../../scripts/generate-windows-zones", "-check")
 	command.Env = append(os.Environ(), "GOPROXY=off")
 	output, err := command.CombinedOutput()
-	if err != nil || !strings.Contains(string(output), "release-48") || !strings.Contains(string(output), SourceSHA256) {
+	if err != nil || !strings.Contains(string(output), "release-49") || !strings.Contains(string(output), SourceSHA256) {
 		t.Fatalf("offline generator check: %v\n%s", err, output)
 	}
 }

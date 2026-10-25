@@ -3,10 +3,10 @@
 package windowszonesdata
 
 const (
-	CLDRRelease         = "48"
-	CLDRTag             = "release-48"
-	CLDRCommit          = "acd6d88ae493633240e19a87a721076a8a75c310"
-	SourceSHA256        = "9cf3db6a31fb382fee21b70be6feba1e82766b0fcd06e6261fb7936a73e537ff"
+	CLDRRelease         = "49"
+	CLDRTag             = "release-49"
+	CLDRCommit          = "96e54b273d2da4ec6fbad350ba19ff23fa24a588"
+	SourceSHA256        = "5f902f94106a396cb7774f0b0e1ca4dfecb686494045350c0b4935d378e3913b"
 	WindowsOtherVersion = "7e11800"
 	TZDBTypeVersion     = "2021a"
 )
@@ -27,6 +27,10 @@ var generatedCandidates = map[string]map[string][]string{
 	"Alaskan Standard Time": {
 		"001": {"America/Anchorage"},
 		"US":  {"America/Anchorage", "America/Juneau", "America/Metlakatla", "America/Nome", "America/Sitka", "America/Yakutat"},
+	},
+	"Alberta Standard Time": {
+		"001": {"America/Edmonton"},
+		"CA":  {"America/Edmonton", "America/Inuvik"},
 	},
 	"Aleutian Standard Time": {
 		"001": {"America/Adak"},
@@ -98,6 +102,10 @@ var generatedCandidates = map[string]map[string][]string{
 		"001": {"Pacific/Bougainville"},
 		"PG":  {"Pacific/Bougainville"},
 	},
+	"British Columbia Standard Time": {
+		"001": {"America/Vancouver"},
+		"CA":  {"America/Vancouver"},
+	},
 	"Canada Central Standard Time": {
 		"001": {"America/Regina"},
 		"CA":  {"America/Regina", "America/Swift_Current"},
@@ -166,7 +174,7 @@ var generatedCandidates = map[string]map[string][]string{
 	},
 	"Central Standard Time": {
 		"001": {"America/Chicago"},
-		"CA":  {"America/Winnipeg", "America/Rankin_Inlet", "America/Resolute"},
+		"CA":  {"America/Rankin_Inlet", "America/Resolute"},
 		"MX":  {"America/Matamoros", "America/Ojinaga"},
 		"US":  {"America/Chicago", "America/Indiana/Knox", "America/Indiana/Tell_City", "America/Menominee", "America/North_Dakota/Beulah", "America/North_Dakota/Center", "America/North_Dakota/New_Salem"},
 	},
@@ -354,6 +362,10 @@ var generatedCandidates = map[string]map[string][]string{
 		"001": {"America/Punta_Arenas"},
 		"CL":  {"America/Punta_Arenas", "America/Coyhaique"},
 	},
+	"Manitoba Standard Time": {
+		"001": {"America/Winnipeg"},
+		"CA":  {"America/Winnipeg"},
+	},
 	"Marquesas Standard Time": {
 		"001": {"Pacific/Marquesas"},
 		"PF":  {"Pacific/Marquesas"},
@@ -379,7 +391,7 @@ var generatedCandidates = map[string]map[string][]string{
 	},
 	"Mountain Standard Time": {
 		"001": {"America/Denver"},
-		"CA":  {"America/Edmonton", "America/Cambridge_Bay", "America/Inuvik"},
+		"CA":  {"America/Cambridge_Bay"},
 		"MX":  {"America/Ciudad_Juarez"},
 		"US":  {"America/Denver", "America/Boise"},
 	},
@@ -439,7 +451,6 @@ var generatedCandidates = map[string]map[string][]string{
 	},
 	"Pacific Standard Time": {
 		"001": {"America/Los_Angeles"},
-		"CA":  {"America/Vancouver"},
 		"US":  {"America/Los_Angeles"},
 	},
 	"Pacific Standard Time (Mexico)": {

@@ -119,8 +119,8 @@ func repositoryRoot() (string, error) {
 }
 
 func generate(identity identityRecord, source []byte) ([]byte, error) {
-	if identity.Release != "48" || identity.Tag != "release-48" || len(identity.Commit) != 40 || identity.Source.Path != "common/supplemental/windowsZones.xml" {
-		return nil, errors.New("identity is not the approved CLDR release-48 source")
+	if identity.Release != "49" || identity.Tag != "release-49" || len(identity.Commit) != 40 || identity.Source.Path != "common/supplemental/windowsZones.xml" {
+		return nil, errors.New("identity is not the approved CLDR release-49 source")
 	}
 	var document supplementalData
 	decoder := xml.NewDecoder(bytes.NewReader(source))
