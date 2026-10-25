@@ -124,6 +124,8 @@ for upgrades, backups, retention, and Windows permission caveats.
 ## Documentation and development
 
 - [Configuration](CONFIGURATION.md): operator settings and usage-report contract.
+- [Automation setup](AUTOMATION_SETUP.md): release notifications to Kura and the
+  required repository secret.
 - [Domain glossary](CONTEXT.md): canonical terminology.
 - [Architecture decisions](docs/adr/) and [design documents](docs/design/):
   rationale and implementation details; historical plans are not a completion checklist.
