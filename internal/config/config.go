@@ -16,6 +16,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/peterbourgon/ff/v4"
 )
@@ -48,6 +49,7 @@ const (
 	defaultAnthropicCatalogModelIDNormalizationEnabled = false
 	defaultShimNopEnabled                              = false
 	defaultShimResponsesItemIDStabilizerEnabled        = false
+	defaultShimModelOverrideEnabled                    = false
 	defaultShimUsageMeterEnabled                       = false
 	defaultUsagePricingRefreshInterval                 = 24 * time.Hour
 	defaultShimHookOverrunThreshold                    = time.Second
@@ -143,6 +145,12 @@ type ServeConfig struct {
 	// ShimResponsesItemIDStabilizerEnabled controls the opt-in OpenAI Responses
 	// item-id stabilizer shim. It is disabled by default.
 	ShimResponsesItemIDStabilizerEnabled bool
+
+	// ShimModelOverrideEnabled controls the opt-in, request-only Model override
+	// Shim. ModelOverrides is its exact source-to-target model ID map. The map is
+	// validated even while the Shim is disabled; an empty map changes nothing.
+	ShimModelOverrideEnabled bool
+	ModelOverrides           map[string]string
 
 	// ShimUsageMeterEnabled controls the opt-in Usage meter Shim. UsageDBPath is
 	// its private local SQLite destination. Both settings are serve-only.
@@ -313,6 +321,8 @@ func serveSpecs() ([]spec[ServeConfig], *configPathField[ServeConfig]) {
 		boolField("anthropic-catalog-model-id-normalization-enabled", defaultAnthropicCatalogModelIDNormalizationEnabled, func(c *ServeConfig) *bool { return &c.AnthropicCatalogModelIDNormalizationEnabled }, "normalize Anthropic-vendored Claude model IDs to hyphenated slugs (opt-in)"),
 		boolField("shim-nop-enabled", defaultShimNopEnabled, func(c *ServeConfig) *bool { return &c.ShimNopEnabled }, "enable the canonical no-op shim"),
 		boolField("shim-responses-item-id-stabilizer-enabled", defaultShimResponsesItemIDStabilizerEnabled, func(c *ServeConfig) *bool { return &c.ShimResponsesItemIDStabilizerEnabled }, "stabilize churning OpenAI Responses item ids (opt-in)"),
+		boolField("shim-model-override-enabled", defaultShimModelOverrideEnabled, func(c *ServeConfig) *bool { return &c.ShimModelOverrideEnabled }, "substitute configured upstream model IDs in inference requests (opt-in)"),
+		stringMapField("model-overrides", func(c *ServeConfig) *map[string]string { return &c.ModelOverrides }, parseModelOverrides, "request model overrides (source=target,...)"),
 		boolField("shim-usage-meter-enabled", defaultShimUsageMeterEnabled, func(c *ServeConfig) *bool { return &c.ShimUsageMeterEnabled }, "persist native Turns; exposes unauthenticated reports on --addr (opt-in)"),
 		stringField("usage-db-path", defaultUsageDBPath(), func(c *ServeConfig) *string { return &c.UsageDBPath }, validUsageDBPath, "path to the private local usage SQLite database"),
 		durationField("usage-pricing-refresh-interval", defaultUsagePricingRefreshInterval, inHours, func(c *ServeConfig) *time.Duration { return &c.UsagePricingRefreshInterval }, nonNegative, "models.dev pricing refresh cadence (0 pins the embedded floor)"),
@@ -446,6 +456,24 @@ func parseAutoReviewModelOverrides(raw string) (map[string]string, error) {
 		keyLabel:    "main model",
 		valueLabel:  "reviewer model",
 	}, nil)
+}
+
+// parseModelOverrides parses the Model override map. Self-mappings are valid
+// no-ops. IDs must be valid UTF-8 so a target is sent exactly as configured and
+// a source can match a decoded request model.
+func parseModelOverrides(raw string) (map[string]string, error) {
+	const setting = "model-overrides"
+	return parseStringMap(raw, stringMapSyntax{
+		settingName: setting,
+		pairForm:    "source=target",
+		keyLabel:    "source model",
+		valueLabel:  "target model",
+	}, func(source, target string) error {
+		if !utf8.ValidString(source) || !utf8.ValidString(target) {
+			return fmt.Errorf("invalid %s: rule %q=%q is not valid UTF-8", setting, source, target)
+		}
+		return nil
+	})
 }
 
 // defaultOAuthTokenFile is the default path to the GitHub OAuth token file:

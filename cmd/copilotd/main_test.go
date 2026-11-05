@@ -16,6 +16,7 @@ import (
 	"github.com/ningw42/copilotd/internal/cache"
 	"github.com/ningw42/copilotd/internal/catalog"
 	"github.com/ningw42/copilotd/internal/config"
+	"github.com/ningw42/copilotd/internal/endpoint"
 	"github.com/ningw42/copilotd/internal/logging"
 	"github.com/ningw42/copilotd/internal/usage"
 	"github.com/ningw42/copilotd/internal/usage/pricing"
@@ -46,14 +47,16 @@ func TestConfiguredShimRegistryFoldsTogglesAndLogsEnabledOrder(t *testing.T) {
 		name              string
 		nopEnabled        bool
 		stabilizerEnabled bool
+		overrideEnabled   bool
 		meterEnabled      bool
 		wantLog           string
 	}{
 		{name: "empty enabled chain", wantLog: "enabled_shims=[]"},
 		{name: "enabled nop chain", nopEnabled: true, wantLog: "enabled_shims=[nop]"},
 		{name: "enabled stabilizer chain", stabilizerEnabled: true, wantLog: "enabled_shims=[responses-item-id-stabilizer]"},
+		{name: "enabled model override chain", overrideEnabled: true, wantLog: "enabled_shims=[model-override]"},
 		{name: "requested meter without sink remains disabled", meterEnabled: true, wantLog: "enabled_shims=[]"},
-		{name: "canonical enabled order", nopEnabled: true, stabilizerEnabled: true, meterEnabled: true, wantLog: "enabled_shims=\"[nop responses-item-id-stabilizer usage-meter]\""},
+		{name: "canonical enabled order", nopEnabled: true, stabilizerEnabled: true, overrideEnabled: true, meterEnabled: true, wantLog: "enabled_shims=\"[nop responses-item-id-stabilizer model-override usage-meter]\""},
 	}
 
 	for _, tc := range tests {
@@ -65,11 +68,13 @@ func TestConfiguredShimRegistryFoldsTogglesAndLogsEnabledOrder(t *testing.T) {
 			registry := configuredShimRegistry(config.ServeConfig{
 				ShimNopEnabled:                       tc.nopEnabled,
 				ShimResponsesItemIDStabilizerEnabled: tc.stabilizerEnabled,
+				ShimModelOverrideEnabled:             tc.overrideEnabled,
 				ShimUsageMeterEnabled:                tc.meterEnabled,
 			}, sink)
-			if len(registry) != 3 || registry[0].Name != "nop" || registry[0].Enabled != tc.nopEnabled ||
+			if len(registry) != 4 || registry[0].Name != "nop" || registry[0].Enabled != tc.nopEnabled ||
 				registry[1].Name != "responses-item-id-stabilizer" || registry[1].Enabled != tc.stabilizerEnabled ||
-				registry[2].Name != "usage-meter" || registry[2].Enabled != (tc.meterEnabled && sink != nil) {
+				registry[2].Name != "model-override" || registry[2].Enabled != tc.overrideEnabled ||
+				registry[3].Name != "usage-meter" || registry[3].Enabled != (tc.meterEnabled && sink != nil) {
 				t.Fatalf("configured registry = %+v", registry)
 			}
 
@@ -78,6 +83,29 @@ func TestConfiguredShimRegistryFoldsTogglesAndLogsEnabledOrder(t *testing.T) {
 			logShimChain(logger, registry)
 			if got := buf.String(); !strings.Contains(got, tc.wantLog) {
 				t.Errorf("startup log = %q, want %q", got, tc.wantLog)
+			}
+		})
+	}
+}
+
+func TestConfiguredShimRegistrySuppliesModelOverrides(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		enabled bool
+		want    string
+	}{
+		{name: "enabled", enabled: true, want: `{"model":"gpt-5.6-sol-fast"}`},
+		{name: "disabled with configured rules", want: `{"model":"gpt-5.6-sol"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			registry := configuredShimRegistry(config.ServeConfig{
+				ShimModelOverrideEnabled: tc.enabled,
+				ModelOverrides:           map[string]string{"gpt-5.6-sol": "gpt-5.6-sol-fast"},
+			}, nil)
+			chain := registry.NewChain(context.Background(), endpoint.Anthropic, endpoint.RouteAnthropicCountTokens)
+			_, got, err := chain.RunRequest(context.Background(), "", http.Header{}, []byte(`{"model":"gpt-5.6-sol"}`))
+			if err != nil || string(got) != tc.want {
+				t.Errorf("RunRequest() = %q, %v, want %q", got, err, tc.want)
 			}
 		})
 	}

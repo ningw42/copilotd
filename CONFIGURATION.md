@@ -287,6 +287,8 @@ file/schema replacement remains unsupported.
 | --- | --- | --- | --- |
 | [`--config <PATH>`](#--config) | `COPILOTD_CONFIG` | — | No file |
 | [`--shim-responses-item-id-stabilizer-enabled=<BOOL>`](#--shim-responses-item-id-stabilizer-enabled) | `COPILOTD_SHIM_RESPONSES_ITEM_ID_STABILIZER_ENABLED` | `shim-responses-item-id-stabilizer-enabled` | `false` |
+| [`--shim-model-override-enabled=<BOOL>`](#--shim-model-override-enabled) | `COPILOTD_SHIM_MODEL_OVERRIDE_ENABLED` | `shim-model-override-enabled` | `false` |
+| [`--model-overrides <MAP>`](#--model-overrides) | `COPILOTD_MODEL_OVERRIDES` | `model-overrides` | Empty |
 | [`--shim-usage-meter-enabled=<BOOL>`](#--shim-usage-meter-enabled) | `COPILOTD_SHIM_USAGE_METER_ENABLED` | `shim-usage-meter-enabled` | `false` |
 | [`--usage-db-path <PATH>`](#--usage-db-path) | `COPILOTD_USAGE_DB_PATH` | `usage-db-path` | Unix: `<user config dir>/copilotd/usage.db`; Windows: `%LOCALAPPDATA%\\copilotd\\usage.db` |
 | [`--usage-pricing-refresh-interval <DURATION>`](#--usage-pricing-refresh-interval) | `COPILOTD_USAGE_PRICING_REFRESH_INTERVAL` | `usage-pricing-refresh-interval` | `24h` |
@@ -434,6 +436,87 @@ to it; no id is minted, and any payload it cannot confidently rewrite is
 forwarded verbatim. Scoped to the OpenAI `/responses` endpoint, so every other
 surface is untouched. Disabled by default, leaving both transports
 byte-for-byte verbatim.
+
+### `--shim-model-override-enabled`
+
+Enables the opt-in, request-only Model override Shim (`model-override`), which
+sends an operator-selected upstream model ID in place of the model a client
+requests, according to [`--model-overrides`](#--model-overrides). Disabled by
+default: no request changes, even when the map holds rules. Enabled with an empty
+map, it also changes nothing. The policy is recorded in
+[ADR-0020](docs/adr/0020-request-only-model-overrides.md).
+
+### `--model-overrides`
+
+Sets the Model override map as a comma-separated string of
+`SOURCE_MODEL_ID=TARGET_MODEL_ID` pairs. The default is an empty map. For
+example, to send requests for Sol to its Fast variant:
+
+```toml
+shim-model-override-enabled = true
+model-overrides = "gpt-5.6-sol=gpt-5.6-sol-fast"
+```
+
+The map can also be supplied through `COPILOTD_MODEL_OVERRIDES` or
+`--model-overrides`, and the switch through
+`COPILOTD_SHIM_MODEL_OVERRIDE_ENABLED` or `--shim-model-override-enabled`.
+
+Parsing follows the other map settings. Surrounding whitespace and empty comma
+segments are ignored, and each non-empty segment splits on its first `=`. A
+missing `=`, an empty source or target, a source repeated after trimming, or an
+ID that is not valid UTF-8 fails configuration resolution before the server
+binds, even while the Shim is disabled. Every supplied TOML, environment, and
+flag layer is parsed eagerly; among valid layers, flag > environment > TOML >
+default precedence replaces the complete map, and layers are never merged.
+Self-mappings are accepted no-ops. Rules are not checked against Copilot's
+models.
+
+**Matching.** Each request receives one exact, case-sensitive lookup of its
+decoded model ID, and the result is never looked up again. With `A=B,B=C`, a
+request for `A` is sent as `B` and a request for `B` as `C`; reciprocal rules
+cannot loop. The request's model string is not trimmed or normalized before the
+lookup. There are no wildcard, prefix, pattern, or per-Surface rules.
+
+**Where it applies.** The rule replaces the unique top-level string `model` in:
+
+- Anthropic Messages (`/anthropic/v1/messages`) and Count Tokens
+  (`/anthropic/v1/messages/count_tokens`) requests;
+- OpenAI Responses HTTP requests (`/openai/v1/responses`), buffered or streaming;
+- OpenAI Responses WebSocket Text Messages whose unique top-level `type` is
+  `response.create`.
+
+Only that JSON value changes. Field order, whitespace, unknown and duplicate
+fields, numeric spellings, nested `model` fields, and prompt text are forwarded
+byte-for-byte. Each request and Message is handled independently: a WebSocket
+turn without a model is never given one from an earlier turn.
+
+**Passthrough, not enforcement.** A request is forwarded unchanged when it is
+malformed, is not a single JSON object, has trailing content, or lacks a unique,
+losslessly decodable string `model` (missing, `null`, non-string, or
+duplicated). Other WebSocket events, ambiguous or missing `type` fields, and
+Binary Messages are also unchanged. The Shim never rejects a request, drops a
+Message, retries, or ends a session. It is a convenience, not an access-control
+or routing-enforcement boundary: a request it cannot interpret reaches Copilot
+exactly as the client sent it.
+
+**Authoritative rules, no fallback.** A rule applies even when its source is
+itself a live Copilot model, which is then shadowed under that ID for supported
+requests. Targets are not checked for availability or compatibility. When
+Copilot rejects a target, its error is forwarded under the existing transport
+behavior; the source is never retried. Changing a model ID does not translate a
+request between protocols, so a target must accept the requesting Surface's
+payload.
+
+**Catalogs and responses are unchanged.** Rules do not add, hide, or alter any
+catalog entry, Codex catalog alias, metadata, limits, or reviewer field, or the
+raw `/models` response; a rule neither advertises its source nor hides its
+target. A Codex reviewer selection is simply subject to the same rule when a
+client later requests it. Operators own any mismatch between advertised metadata
+or limits and their chosen target. Responses, including model IDs, native usage,
+service tier, and errors, are Copilot's. With the Usage meter enabled, an HTTP
+Turn's Requested model is the substituted ID sent upstream, while its Reported
+model and service tier still come from the completion; WebSocket Turns still
+have no Requested model. No tier is inferred from a rule or a target's name.
 
 ### `--shim-usage-meter-enabled`
 
@@ -768,7 +851,9 @@ copilotd serve \
 ```
 
 The left side is a real Copilot model ID that Codex selects and sends unchanged
-to `/responses`; this setting never rewrites an inference request. The right
+to `/responses`; this setting itself never rewrites an inference request, though
+an enabled [Model override](#--model-overrides) rule naming the alias still
+applies. The right
 side is used only as a metadata source. It must name a complete entry in the
 current accepted official Codex catalog, but it need not be live in Copilot.
 The example's per-main-model override also demonstrates valid self-review by

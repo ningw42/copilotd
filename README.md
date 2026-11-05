@@ -91,8 +91,9 @@ See [report options and limits](CONFIGURATION.md#usage) and
 - **Opt-in inference shims.** Ordered shims transform or observe the forward path
   without accessing Copilot or driving retries. Support catalogs own their
   representations outside the shim layers.
-- **Transform without fabrication.** Shims must use upstream-basis information,
-  make buffering costs explicit, and keep post-commit hooks prompt and
+- **Transform without fabrication.** Shims must use upstream-basis information
+  (or, for the opt-in request-only Model override, explicit operator
+  configuration), make buffering costs explicit, and keep post-commit hooks prompt and
   non-blocking. Departures from verbatim forwarding belong in the
   [divergence ledger](docs/divergence-ledger.md).
 - **Observability without secrets.** Structured, request-correlated logs and

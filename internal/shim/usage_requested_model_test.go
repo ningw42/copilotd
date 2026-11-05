@@ -15,7 +15,7 @@ import (
 func TestUsageMeterObservesRequestedModelWithoutChangingRequestOrReportedModel(t *testing.T) {
 	ctx := context.Background()
 	sink := &memoryUsageSink{}
-	registry := CanonicalRegistry(sink)
+	registry := CanonicalRegistry(sink, nil)
 	registry[len(registry)-1].Enabled = true
 	chain := registry.NewChain(ctx, endpoint.OpenAI, endpoint.RouteOpenAIResponses)
 	// Synthetic request and response literals isolate Requested-model intent
@@ -64,7 +64,7 @@ func TestUsageMeterNeverInfersOpenAIServiceTierFromRequestIntent(t *testing.T) {
 func TestUsageMeterOpenAISSEUsesResponseTierWithoutRequestFallback(t *testing.T) {
 	ctx := context.Background()
 	sink := &memoryUsageSink{}
-	registry := CanonicalRegistry(sink)
+	registry := CanonicalRegistry(sink, nil)
 	registry[len(registry)-1].Enabled = true
 	chain := registry.NewChain(ctx, endpoint.OpenAI, endpoint.RouteOpenAIResponses)
 	// Synthetic SSE literals exercise a priority/Fast request followed by one
@@ -163,7 +163,7 @@ func TestUsageMeterRequestedModelNullableSemantics(t *testing.T) {
 func TestUsageMeterWebSocketIgnoresSyntheticRequestMetadataAndHasNoClientHook(t *testing.T) {
 	ctx := context.Background()
 	sink := &memoryUsageSink{}
-	registry := CanonicalRegistry(sink)
+	registry := CanonicalRegistry(sink, nil)
 	registry[len(registry)-1].Enabled = true
 	chain := registry.NewChain(ctx, endpoint.OpenAI, endpoint.RouteOpenAIResponses)
 	// Explicitly invoke the HTTP request hook to populate metadata. Production
@@ -215,7 +215,7 @@ func TestUsageMeterRequestedModelNeverBackfillsCompletionRequirements(t *testing
 }
 
 func enabledBufferedUsageFixture(ctx context.Context, surface endpoint.Surface, sink *memoryUsageSink) (*Chain, []byte) {
-	registry := CanonicalRegistry(sink)
+	registry := CanonicalRegistry(sink, nil)
 	registry[len(registry)-1].Enabled = true
 	route := endpoint.RouteOpenAIResponses
 	response := `{"id":"r","model":"reported","status":"completed","usage":{"input_tokens":1,"output_tokens":2}}`

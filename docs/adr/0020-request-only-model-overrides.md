@@ -1,7 +1,9 @@
 # Admit explicit request-only model overrides
 
-**Status:** accepted for implementation in
-[#297](https://github.com/ningw42/copilotd/issues/297); not yet implemented.
+**Status:** accepted and implemented in
+[#297](https://github.com/ningw42/copilotd/issues/297) as the `model-override`
+Shim; operator documentation is in
+[CONFIGURATION.md](../../CONFIGURATION.md#--model-overrides).
 
 copilotd admits an opt-in Model override Shim that substitutes an explicitly
 configured model ID in outbound inference requests across its supported
