@@ -282,7 +282,8 @@ _Avoid_: model list (unqualified).
 A real, live Copilot Responses model ID that is absent from the accepted
 official Codex catalog and is emitted with a complete cloned official
 `ModelInfo`. It is the slug Codex selects and sends unchanged to inference;
-it is not an inference name rewrite.
+it is not itself an inference name rewrite, though an enabled Model override
+rule may name it like any other requested model.
 _Avoid_: inference alias, model rewrite.
 
 **Metadata source**:

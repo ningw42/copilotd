@@ -10,22 +10,26 @@ import (
 	"github.com/ningw42/copilotd/internal/endpoint"
 )
 
+// enableOnly enables exactly the named canonical registrations, as the
+// composition root does from configuration.
+func enableOnly(t *testing.T, registry Registry, names ...string) Registry {
+	t.Helper()
+	for i := range registry {
+		registry[i].Enabled = slices.Contains(names, registry[i].Name)
+	}
+	for _, name := range names {
+		if !slices.ContainsFunc(registry, func(r Registration) bool { return r.Name == name }) {
+			t.Fatalf("CanonicalRegistry has no %s registration", name)
+		}
+	}
+	return registry
+}
+
 // modelOverrideChain builds the request or session chain exactly as the
 // forwarders do, with only the canonical model-override registration enabled.
 func modelOverrideChain(t *testing.T, rules map[string]string, surface endpoint.Surface, route endpoint.Route) *Chain {
 	t.Helper()
-	registry := CanonicalRegistry(nil, rules)
-	found := false
-	for i := range registry {
-		if registry[i].Name == "model-override" {
-			registry[i].Enabled = true
-			found = true
-		}
-	}
-	if !found {
-		t.Fatal("CanonicalRegistry has no model-override registration")
-	}
-	return registry.NewChain(context.Background(), surface, route)
+	return enableOnly(t, CanonicalRegistry(nil, rules), "model-override").NewChain(context.Background(), surface, route)
 }
 
 // overrideHTTPBody runs one inbound HTTP request body through the enabled
@@ -225,6 +229,11 @@ func TestModelOverrideRegistrationIsDisabledAndScopedToInferenceRequests(t *test
 	if registry[index].Enabled {
 		t.Error("model-override is enabled by default, want opt-in")
 	}
+	first := registry[index].New(context.Background(), endpoint.OpenAI, endpoint.RouteOpenAIResponses)
+	second := registry[index].New(context.Background(), endpoint.OpenAI, endpoint.RouteOpenAIResponses)
+	if _, ok := first.(*modelOverride); !ok || first == second {
+		t.Errorf("model-override factory = %T, %T; want a distinct Model override instance per request or session", first, second)
+	}
 	if meter := slices.IndexFunc(registry, func(r Registration) bool { return r.Name == "usage-meter" }); meter <= index {
 		t.Errorf("usage-meter at %d, want after model-override at %d so it observes the substituted model", meter, index)
 	}
@@ -286,10 +295,7 @@ func TestModelOverrideHasNoResponseHooks(t *testing.T) {
 func TestModelOverrideRunsBeforeUsageMeterSoRequestedModelIsSubstituted(t *testing.T) {
 	ctx := context.Background()
 	sink := &memoryUsageSink{}
-	registry := CanonicalRegistry(sink, map[string]string{"gpt-5.6-sol": "gpt-5.6-sol-fast"})
-	for i := range registry {
-		registry[i].Enabled = registry[i].Name == "model-override" || registry[i].Name == "usage-meter"
-	}
+	registry := enableOnly(t, CanonicalRegistry(sink, map[string]string{"gpt-5.6-sol": "gpt-5.6-sol-fast"}), "model-override", "usage-meter")
 	chain := registry.NewChain(ctx, endpoint.OpenAI, endpoint.RouteOpenAIResponses)
 	if _, got, err := chain.RunRequest(ctx, "", nil, []byte(`{"model":"gpt-5.6-sol","service_tier":"priority"}`)); err != nil || string(got) != `{"model":"gpt-5.6-sol-fast","service_tier":"priority"}` {
 		t.Fatalf("RunRequest() = %q, %v, want substituted model and preserved service_tier intent", got, err)
@@ -306,10 +312,7 @@ func TestModelOverrideRunsBeforeUsageMeterSoRequestedModelIsSubstituted(t *testi
 }
 
 func TestModelOverrideCarriesNoStateAcrossConcurrentRequests(t *testing.T) {
-	registry := CanonicalRegistry(nil, map[string]string{"A": "B", "C": "D"})
-	for i := range registry {
-		registry[i].Enabled = registry[i].Name == "model-override"
-	}
+	registry := enableOnly(t, CanonicalRegistry(nil, map[string]string{"A": "B", "C": "D"}), "model-override")
 	cases := []struct{ body, want string }{
 		{`{"model":"A"}`, `{"model":"B"}`},
 		{`{"model":"C"}`, `{"model":"D"}`},
@@ -333,10 +336,7 @@ func TestModelOverrideRegistryIsIndependentOfLaterRuleChanges(t *testing.T) {
 	rules := map[string]string{"A": "B"}
 	registry := CanonicalRegistry(nil, rules)
 	rules["A"], rules["X"] = "C", "Y"
-	for i := range registry {
-		registry[i].Enabled = registry[i].Name == "model-override"
-	}
-	chain := registry.NewChain(context.Background(), endpoint.Anthropic, endpoint.RouteAnthropicMessages)
+	chain := enableOnly(t, registry, "model-override").NewChain(context.Background(), endpoint.Anthropic, endpoint.RouteAnthropicMessages)
 	for body, want := range map[string]string{`{"model":"A"}`: `{"model":"B"}`, `{"model":"X"}`: `{"model":"X"}`} {
 		if _, got, err := chain.RunRequest(context.Background(), "", nil, []byte(body)); err != nil || string(got) != want {
 			t.Errorf("RunRequest(%s) = %q, %v, want %q from the rules at construction", body, got, err, want)

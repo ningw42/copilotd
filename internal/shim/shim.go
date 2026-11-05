@@ -422,7 +422,7 @@ type NopShim struct{}
 // the Model override's source-to-target map; it is copied, so later changes to
 // the caller's map do not affect the registry.
 func CanonicalRegistry(sink usage.Sink, modelOverrides map[string]string) Registry {
-	override := newModelOverride(modelOverrides)
+	overrideTargets := newModelOverrideTargets(modelOverrides)
 	registry := Registry{
 		{
 			Name:    "nop",
@@ -448,7 +448,7 @@ func CanonicalRegistry(sink usage.Sink, modelOverrides map[string]string) Regist
 			Enabled: false,
 			Scope:   modelOverrideScope,
 			New: func(context.Context, endpoint.Surface, endpoint.Route) any {
-				return override
+				return &modelOverride{targets: overrideTargets}
 			},
 		},
 		{

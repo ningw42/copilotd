@@ -359,15 +359,7 @@ func TestServeLifecycleModelOverrideForwardsUpstreamRejectionWithoutFallback(t *
 		}
 	}
 
-	conn, response, err := websocket.Dial(context.Background(), "ws"+strings.TrimPrefix(base, "http")+"/openai/v1/responses", &websocket.DialOptions{
-		HTTPHeader: http.Header{"Authorization": {"Bearer " + testAPIKey}},
-	})
-	if err != nil {
-		if response != nil && response.Body != nil {
-			_ = response.Body.Close()
-		}
-		t.Fatalf("dial WebSocket transport: %v", err)
-	}
+	conn := dialUsageMeterWebSocket(t, base, "model-override-rejection")
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	for turn := range 2 {

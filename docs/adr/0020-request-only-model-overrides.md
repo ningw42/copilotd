@@ -72,8 +72,10 @@ model-overrides = "gpt-5.6-sol=gpt-5.6-sol-fast"
 
 Use the existing string-map configuration conventions: comma-separated
 `source=target` entries, trimmed configuration whitespace, nonempty source and
-target, and duplicate source IDs rejected at startup. Empty entries follow the
-existing parser convention. Self-mappings are accepted no-ops. Configuration
+target, and duplicate source IDs rejected at startup. The implementation also
+rejects IDs that are not valid UTF-8, so a target is sent exactly as configured
+rather than with replacement characters. Empty entries follow the existing
+parser convention. Self-mappings are accepted no-ops. Configuration
 follows flags > environment > TOML > default, replacing rather than merging
 maps across layers. Invalid configuration fails before binding, even when the
 Shim is disabled. A disabled Shim or an empty map changes no traffic.

@@ -19,22 +19,26 @@ const responseCreateEvent = "response.create"
 // configured upstream model ID; only that JSON value's bytes are replaced. The
 // lookup is never repeated on its own result, so rules cannot chain or loop.
 //
-// It is stateless and immutable after construction: every HTTP request and
-// WebSocket Message is interpreted independently, so one instance is safely
-// shared by every request and session. It has no response hooks.
+// An instance holds no per-request or per-session state: every HTTP request and
+// WebSocket Message is interpreted independently. Instances share one immutable
+// target map built when the registry is constructed. It has no response hooks.
 type modelOverride struct {
-	// targets maps each source model ID to its target as an encoded JSON string.
-	// Self-mappings are omitted so a matching source remains byte-verbatim.
-	targets map[string][]byte
+	targets modelOverrideTargets
 }
+
+// modelOverrideTargets maps each source model ID to its target as an encoded
+// JSON string. Self-mappings are omitted so a matching source remains
+// byte-verbatim. It is never mutated after construction.
+type modelOverrideTargets map[string][]byte
 
 var (
 	_ RequestTransformer       = (*modelOverride)(nil)
 	_ ClientMessageTransformer = (*modelOverride)(nil)
 )
 
-func newModelOverride(rules map[string]string) *modelOverride {
-	targets := make(map[string][]byte, len(rules))
+// newModelOverrideTargets copies and pre-encodes rules once per registry.
+func newModelOverrideTargets(rules map[string]string) modelOverrideTargets {
+	targets := make(modelOverrideTargets, len(rules))
 	for source, target := range rules {
 		if source == target {
 			continue
@@ -47,7 +51,7 @@ func newModelOverride(rules map[string]string) *modelOverride {
 		}
 		targets[source] = encoded
 	}
-	return &modelOverride{targets: targets}
+	return targets
 }
 
 // modelOverrideScope selects the supported inference request inputs: the two
@@ -86,7 +90,7 @@ func (o *modelOverride) rewrite(payload []byte, requireResponseCreate bool) []by
 	if len(o.targets) == 0 {
 		return payload
 	}
-	members, ok := scanTopLevelMembers(payload)
+	members, ok := scanModelOverrideMembers(payload)
 	if !ok {
 		return payload
 	}
@@ -111,9 +115,9 @@ func (o *modelOverride) rewrite(payload []byte, requireResponseCreate bool) []by
 	return append(rewritten, payload[span.end:]...)
 }
 
-// topLevelMember records how often one top-level member name occurred and the
-// exact byte span of its last raw value.
-type topLevelMember struct {
+// modelOverrideMember records how often one top-level member name occurred
+// and the exact byte span of its last raw value.
+type modelOverrideMember struct {
 	occurrences int
 	start, end  int
 }
@@ -121,7 +125,7 @@ type topLevelMember struct {
 // decode returns the member's string value only when it occurs exactly once,
 // is a JSON string, and decodes losslessly. AppendUnquote rejects every other
 // value kind as well as lone surrogate escapes.
-func (m topLevelMember) decode(payload []byte) (string, bool) {
+func (m modelOverrideMember) decode(payload []byte) (string, bool) {
 	if m.occurrences != 1 {
 		return "", false
 	}
@@ -133,15 +137,15 @@ func (m topLevelMember) decode(payload []byte) (string, bool) {
 }
 
 type modelOverrideMembers struct {
-	model, eventType topLevelMember
+	model, eventType modelOverrideMember
 }
 
-// scanTopLevelMembers walks exactly one JSON object followed only by
+// scanModelOverrideMembers walks exactly one JSON object followed only by
 // whitespace, recording the top-level model and type members by their decoded
 // names. Unrelated values are validated but never decoded or re-encoded, and
 // unrelated duplicate names are allowed. A payload that is not valid UTF-8 is
 // malformed JSON text.
-func scanTopLevelMembers(payload []byte) (modelOverrideMembers, bool) {
+func scanModelOverrideMembers(payload []byte) (modelOverrideMembers, bool) {
 	var members modelOverrideMembers
 	if !utf8.Valid(payload) {
 		return members, false
@@ -159,7 +163,7 @@ func scanTopLevelMembers(payload []byte) (modelOverrideMembers, bool) {
 			return members, false
 		}
 		// A Token is voided by the next read, so resolve its name first.
-		var member *topLevelMember
+		var member *modelOverrideMember
 		switch name.String() {
 		case "model":
 			member = &members.model
