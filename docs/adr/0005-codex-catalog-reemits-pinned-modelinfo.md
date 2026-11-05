@@ -101,8 +101,11 @@ accepted release; limits are
 Codex's numbers unless the operator opts into the overlay; coverage is exact
 Copilot-forwardable/accepted Codex intersections plus explicitly configured live
 aliases with accepted metadata sources; and overriding official reviewer
-routing requires operator config. Alias slugs are real Copilot inference IDs and
-are not rewritten on the inference path. Recorded in
+routing requires operator config. Alias slugs are real Copilot inference IDs;
+catalog aliasing itself does not rewrite inference requests.
+[ADR-0020](0020-request-only-model-overrides.md) separately approves an opt-in,
+request-only Model override without changing this catalog contract. In its
+absence, the selected ID continues to be forwarded unchanged. Recorded in
 `docs/design/2026-07-19-phase-6b-codex-model-catalog-auto-review-design.md` §13
 and `docs/design/2026-09-01-codex-catalog-model-aliases-design.md` §9.
 

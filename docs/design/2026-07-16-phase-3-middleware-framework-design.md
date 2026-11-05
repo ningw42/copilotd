@@ -685,14 +685,23 @@ fits without breaking changes.
 The analysis below records design-time fit, not current implementation status.
 Codex auto-review subsequently shipped as
 [catalog behavior](2026-07-19-phase-6b-codex-model-catalog-auto-review-design.md).
-The remaining model-name mapping and unsupported-param ideas are triage
-candidates in [#188](https://github.com/ningw42/copilotd/issues/188) and
-[#189](https://github.com/ningw42/copilotd/issues/189), not approved commitments.
+The original request-and-response model-name mapping and generic
+unsupported-parameter ideas were rejected in
+[#188](https://github.com/ningw42/copilotd/issues/188) and
+[#189](https://github.com/ningw42/copilotd/issues/189).
+[ADR-0020](../adr/0020-request-only-model-overrides.md) subsequently approves a
+narrower, request-only operator Model override across HTTP and WebSocket; it
+does not approve the response-restoration seed below.
+
+**Request-shape correction:** Anthropic Count Tokens has a top-level `model`,
+as shown by the official SDK's
+[MessageCountTokensParams](https://github.com/anthropics/anthropic-sdk-typescript/blob/main/src/resources/messages/messages.ts).
+It therefore participates in the approved request-only override.
 
 | Seed shim | Hooks | State | Fit |
 | --- | --- | --- | --- |
 | Stable Responses item-IDs | `EventTransformer` (pin first-seen id) | `map[output_index]string` for item events **plus** a scalar response-`id` (the top-level `resp_…` on `response.created/…/completed` has no `output_index`; item events dual-key by `item_id` and `output_index`) | **Fits** — alters existing fields |
-| Model-name mapping | `RequestTransformer` (save+rewrite) + `BufferedTransformer`/`EventTransformer` (restore) | `clientModel string`; reads `route` to know `count_tokens` bodies carry no top-level `model` | **Fits** — alters existing fields |
+| Model-name mapping | `RequestTransformer` (save+rewrite) + `BufferedTransformer`/`EventTransformer` (restore) | Historical response-restoration proposal retains `clientModel string`; the approved request-only Model override needs no restoration state | **Fits** — alters existing fields; response restoration remains out of scope |
 | Unsupported-param handling | `RequestTransformer` (strip) or pre-commit `apierror.Reject(InvalidRequest,…)`; reads `route` (the `/messages` vs `count_tokens` param whitelist differs) | none | **Fits** |
 | `codex-auto-review` availability | **Fit-unknown; possibly not a shim.** The initial seed catalog defined it only as "make the behavior the Codex auto-review flow expects available." If it needs a second model call it is core (like self-heal); if it needs a response field Copilot omits it is a fabrication ledger decision (§10.2); if it needs an unforwarded endpoint it is Phase-5 support-endpoint territory. Only a model/param map is a clean `RequestTransformer`. | — | **Deferred to Phase 4 after behavior capture** — do not assume "additive hook" |
 | Self-heal retries | **Not a shim.** 401/403 re-mint → `forward`/identity core; thinking-block strip → client/parity judgment | — | **Out of the framework** |

@@ -151,8 +151,9 @@ sanctioned term for a **cached value**'s re-fetch cadence, e.g.
 `--impersonation-refresh-interval`.)
 
 **Shim**:
-A composable inference layer that either closes one specific parity gap or
-observes forwarded inference data without changing it. A shim spans transports
+A composable inference layer that closes one specific parity gap, applies an
+explicit operator-selected Model override, or observes forwarded inference data
+without changing it. A shim spans transports
 through one registry: it may hook the inbound request, the response Prelude, the
 buffered body, the SSE stream, and — opt-in and bidirectional — individual
 WebSocket **Messages** in each direction. The
@@ -208,6 +209,12 @@ The nullable processing-tier label reported by a completed OpenAI response,
 preserved as Turn evidence independently of native token counts. It is not
 reconstructed from request intent, model names, or configuration.
 _Avoid_: requested tier, inferred tier
+
+**Model override**:
+An explicit operator-selected substitution of a client-supplied inference model
+ID with an upstream model ID, independent of Catalog advertisement and leaving
+upstream response identity unchanged.
+_Avoid_: model alias (ambiguous with Codex catalog aliases), Route
 
 **Requested model**:
 The explicit model string in the upstream-bound HTTP inference request after

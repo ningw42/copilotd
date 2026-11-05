@@ -4,6 +4,14 @@ copilotd does not provide a generic inference shim that translates a client's
 model alias to a different GitHub Copilot model ID and then restores the
 client's requested name in responses.
 
+**Narrow reconsideration (#297):** an opt-in, request-only Model override is
+accepted for implementation by
+[ADR-0020](../docs/adr/0020-request-only-model-overrides.md). It admits an explicit
+operator selection without a compatibility failure; it does not change Catalogs or
+restore client-selected names in responses. The rejection below remains the
+rationale for broader request-and-response normalization, not a prohibition on
+that accepted request-only scope.
+
 ## Why this is out of scope
 
 The inference path is raw-passthrough-first. Rewriting a model ID changes the
@@ -22,13 +30,15 @@ sends those IDs unchanged; they do not require inference rewriting.
 
 Keeping a generic mapping feature in anticipation of an unknown client alias
 would add policy and transport complexity without a demonstrated parity gap.
-The existing shim framework could host a narrowly scoped mapping later, but
-framework capability alone is not a reason to ship an Alteration.
+The request-only override accepted in #297 has a concrete deployment use case;
+that acceptance does not justify restoring model names in responses or changing
+Catalog behavior. Framework capability alone still does not justify those
+additional Alterations.
 
 ## Reconsideration criteria
 
-Reconsider this decision when there is a reproducible client compatibility
-failure that identifies:
+Reconsider the remaining response-normalization scope when there is a
+reproducible client compatibility failure that identifies:
 
 - the exact client alias rejected by GitHub Copilot and the accepted Copilot
   model ID it must map to;
@@ -45,3 +55,4 @@ an Alteration in the divergence ledger.
 ## Prior requests
 
 - [#188 — Evaluate inference model-name mapping](https://github.com/ningw42/copilotd/issues/188)
+- [#297 — Request-only Model override reconsideration](https://github.com/ningw42/copilotd/issues/297) — request-only scope accepted for implementation.
