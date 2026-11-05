@@ -20,60 +20,61 @@ import (
 	"github.com/ningw42/copilotd/internal/config"
 )
 
-// modelOverrideHTTPCase is one inbound inference request. overridden is the
-// exact body Copilot must receive when the configured Model override applies;
-// otherwise Copilot must receive body itself.
+// modelOverrideHTTPCase is one inbound inference request and the exact body
+// Copilot must receive for it with the Model override enabled.
 type modelOverrideHTTPCase struct {
 	name, path, mode string
-	body, overridden string
+	body, upstream   string
 	// table names the Usage meter's Turn table; Count Tokens is not metered.
-	table string
-	// requested is the persisted Requested model when the override applies.
+	table     string
 	requested sql.NullString
 }
 
 var modelOverrideHTTPCases = []modelOverrideHTTPCase{
 	{
 		name: "anthropic messages buffered", path: "/anthropic/v1/messages", mode: "buffered", table: "anthropic_turn",
-		body:       `{"model":"claude-src","max_tokens":8,"messages":[{"role":"user","content":"is claude-src \"claude-src\"?"}]}`,
-		overridden: `{"model":"claude-target","max_tokens":8,"messages":[{"role":"user","content":"is claude-src \"claude-src\"?"}]}`,
-		requested:  sql.NullString{String: "claude-target", Valid: true},
+		body:      `{"model":"claude-src","max_tokens":8,"messages":[{"role":"user","content":"is claude-src \"claude-src\"?"}]}`,
+		upstream:  `{"model":"claude-target","max_tokens":8,"messages":[{"role":"user","content":"is claude-src \"claude-src\"?"}]}`,
+		requested: sql.NullString{String: "claude-target", Valid: true},
 	},
 	{
 		name: "anthropic messages sse", path: "/anthropic/v1/messages", mode: "sse", table: "anthropic_turn",
-		body:       `{"stream":true, "model" : "claude-src", "metadata":{"model":"claude-src"}}`,
-		overridden: `{"stream":true, "model" : "claude-target", "metadata":{"model":"claude-src"}}`,
-		requested:  sql.NullString{String: "claude-target", Valid: true},
+		body:      `{"stream":true, "model" : "claude-src", "metadata":{"model":"claude-src"}}`,
+		upstream:  `{"stream":true, "model" : "claude-target", "metadata":{"model":"claude-src"}}`,
+		requested: sql.NullString{String: "claude-target", Valid: true},
 	},
 	{
 		name: "anthropic count tokens", path: "/anthropic/v1/messages/count_tokens", mode: "buffered",
-		body:       `{"model":"claude-src","messages":[{"role":"user","content":"count claude-src"}]}`,
-		overridden: `{"model":"claude-target","messages":[{"role":"user","content":"count claude-src"}]}`,
+		body:     `{"model":"claude-src","messages":[{"role":"user","content":"count claude-src"}]}`,
+		upstream: `{"model":"claude-target","messages":[{"role":"user","content":"count claude-src"}]}`,
 	},
 	{
 		name: "openai responses buffered", path: "/openai/v1/responses", mode: "buffered", table: "openai_turn",
-		body:       `{"model":"gpt-5.6-sol","service_tier":"priority","input":"gpt-5.6-sol prompt","seed":123456789012345678901234567890}`,
-		overridden: `{"model":"gpt-5.6-sol-fast","service_tier":"priority","input":"gpt-5.6-sol prompt","seed":123456789012345678901234567890}`,
-		requested:  sql.NullString{String: "gpt-5.6-sol-fast", Valid: true},
+		body:      `{"model":"gpt-5.6-sol","service_tier":"priority","input":"gpt-5.6-sol prompt","seed":123456789012345678901234567890}`,
+		upstream:  `{"model":"gpt-5.6-sol-fast","service_tier":"priority","input":"gpt-5.6-sol prompt","seed":123456789012345678901234567890}`,
+		requested: sql.NullString{String: "gpt-5.6-sol-fast", Valid: true},
 	},
 	{
 		name: "openai responses sse", path: "/openai/v1/responses", mode: "sse", table: "openai_turn",
-		body:       `{"model":"gpt-5.6-sol","stream":true}`,
-		overridden: `{"model":"gpt-5.6-sol-fast","stream":true}`,
-		requested:  sql.NullString{String: "gpt-5.6-sol-fast", Valid: true},
+		body:      `{"model":"gpt-5.6-sol","stream":true}`,
+		upstream:  `{"model":"gpt-5.6-sol-fast","stream":true}`,
+		requested: sql.NullString{String: "gpt-5.6-sol-fast", Valid: true},
 	},
 	{
 		name: "openai unmapped model", path: "/openai/v1/responses", mode: "buffered", table: "openai_turn",
 		body:      `{"model":"gpt-5.6-luna"}`,
+		upstream:  `{"model":"gpt-5.6-luna"}`,
 		requested: sql.NullString{String: "gpt-5.6-luna", Valid: true},
 	},
 	{
 		name: "openai model absent", path: "/openai/v1/responses", mode: "buffered", table: "openai_turn",
-		body: `{"input":"gpt-5.6-sol"}`,
+		body:     `{"input":"gpt-5.6-sol"}`,
+		upstream: `{"input":"gpt-5.6-sol"}`,
 	},
 	{
 		name: "anthropic duplicate model", path: "/anthropic/v1/messages", mode: "buffered", table: "anthropic_turn",
-		body: `{"model":"claude-src","model":"claude-src"}`,
+		body:     `{"model":"claude-src","model":"claude-src"}`,
+		upstream: `{"model":"claude-src","model":"claude-src"}`,
 	},
 }
 
@@ -103,187 +104,138 @@ func modelOverrideWebSocketCompletion(n int) []byte {
 }
 
 type modelOverrideWSMessage struct {
-	kind       websocket.MessageType
-	data       string
-	overridden string
+	kind           websocket.MessageType
+	data, upstream string
 }
 
 // One session's client Messages in order. Each is interpreted independently.
 var modelOverrideWebSocketMessages = []modelOverrideWSMessage{
-	{kind: websocket.MessageText, data: `{"type":"response.create","model":"gpt-5.6-sol","input":"gpt-5.6-sol"}`, overridden: `{"type":"response.create","model":"gpt-5.6-sol-fast","input":"gpt-5.6-sol"}`},
-	{kind: websocket.MessageText, data: `{"type":"response.create","input":"later turn without a model"}`},
-	{kind: websocket.MessageBinary, data: `{"type":"response.create","model":"gpt-5.6-sol"}`},
-	{kind: websocket.MessageText, data: `{"type":"session.update","model":"gpt-5.6-sol"}`},
-	{kind: websocket.MessageText, data: `{"type":"response.create","type":"response.create","model":"gpt-5.6-sol"}`},
-	{kind: websocket.MessageText, data: `{"model":"gpt-5.6-sol","previous_response_id":"ws-0","type":"response.create"}`, overridden: `{"model":"gpt-5.6-sol-fast","previous_response_id":"ws-0","type":"response.create"}`},
-	{kind: websocket.MessageText, data: `{"type":"response.create","model":"gpt-5.6-luna"}`},
+	{kind: websocket.MessageText, data: `{"type":"response.create","model":"gpt-5.6-sol","input":"gpt-5.6-sol"}`, upstream: `{"type":"response.create","model":"gpt-5.6-sol-fast","input":"gpt-5.6-sol"}`},
+	{kind: websocket.MessageText, data: `{"type":"response.create","input":"later turn without a model"}`, upstream: `{"type":"response.create","input":"later turn without a model"}`},
+	{kind: websocket.MessageBinary, data: `{"type":"response.create","model":"gpt-5.6-sol"}`, upstream: `{"type":"response.create","model":"gpt-5.6-sol"}`},
+	{kind: websocket.MessageText, data: `{"type":"session.update","model":"gpt-5.6-sol"}`, upstream: `{"type":"session.update","model":"gpt-5.6-sol"}`},
+	{kind: websocket.MessageText, data: `{"type":"response.create","type":"response.create","model":"gpt-5.6-sol"}`, upstream: `{"type":"response.create","type":"response.create","model":"gpt-5.6-sol"}`},
+	{kind: websocket.MessageText, data: `{"model":"gpt-5.6-sol","previous_response_id":"ws-0","type":"response.create"}`, upstream: `{"model":"gpt-5.6-sol-fast","previous_response_id":"ws-0","type":"response.create"}`},
+	{kind: websocket.MessageText, data: `{"type":"response.create","model":"gpt-5.6-luna"}`, upstream: `{"type":"response.create","model":"gpt-5.6-luna"}`},
 }
 
 // TestServeLifecycleModelOverrideReachesEveryInferenceTransport drives the
 // production lifecycle with the Usage meter enabled and no catalog. Configured
 // rules substitute only the matched model on every supported HTTP operation and
-// WebSocket response.create Message; disabled or empty configuration changes no
-// traffic. Every response reaches the client byte-unchanged.
+// WebSocket response.create Message, and every response reaches the client
+// byte-unchanged.
 func TestServeLifecycleModelOverrideReachesEveryInferenceTransport(t *testing.T) {
-	rules := map[string]string{"gpt-5.6-sol": "gpt-5.6-sol-fast", "claude-src": "claude-target"}
-	for _, scenario := range []struct {
-		name    string
-		enabled bool
-		rules   map[string]string
-		applies bool
-	}{
-		{name: "enabled", enabled: true, rules: rules, applies: true},
-		{name: "disabled with rules", rules: rules},
-		{name: "enabled with empty map", enabled: true},
-	} {
-		t.Run(scenario.name, func(t *testing.T) {
-			upstreamBody := func(body, overridden string) string {
-				if scenario.applies && overridden != "" {
-					return overridden
-				}
-				return body
-			}
-			caseFor := func(id string) (modelOverrideHTTPCase, bool) {
-				var index int
-				if _, err := fmt.Sscanf(id, "case-%d", &index); err != nil || index < 0 || index >= 2*len(modelOverrideHTTPCases) {
-					return modelOverrideHTTPCase{}, false
-				}
-				return modelOverrideHTTPCases[index%len(modelOverrideHTTPCases)], true
-			}
-			wsReceived := make(chan modelOverrideWSMessage, len(modelOverrideWebSocketMessages))
-			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
-					conn, err := websocket.Accept(w, r, nil)
-					if err != nil {
-						t.Errorf("accept upstream WebSocket: %v", err)
-						return
-					}
-					defer func() { _ = conn.CloseNow() }()
-					for n := 0; ; n++ {
-						kind, data, err := conn.Read(context.Background())
-						if err != nil {
-							return
-						}
-						wsReceived <- modelOverrideWSMessage{kind: kind, data: string(data)}
-						if err := conn.Write(context.Background(), websocket.MessageText, modelOverrideWebSocketCompletion(n)); err != nil {
-							t.Errorf("write upstream completion %d: %v", n, err)
-							return
-						}
-					}
-				}
-				id := r.URL.Query().Get("case")
-				tc, ok := caseFor(id)
-				if !ok {
-					t.Errorf("unexpected upstream request %s %s?%s; the Model override must not consult a catalog", r.Method, r.URL.Path, r.URL.RawQuery)
-					http.Error(w, "unexpected", http.StatusBadRequest)
-					return
-				}
-				got, err := io.ReadAll(r.Body)
-				if want := upstreamBody(tc.body, tc.overridden); err != nil || string(got) != want {
-					t.Errorf("%s (%s): upstream body = %q, %v, want %q", tc.name, id, got, err, want)
-				}
-				contentType, body := modelOverrideCompletion(r.URL.Path, r.URL.Query().Get("mode"), id)
-				w.Header().Set("Content-Type", contentType)
-				_, _ = io.WriteString(w, body)
-			}))
-			t.Cleanup(upstream.Close)
-			harness := startUsageMeterServeHarness(t, upstream.URL, discardLogger(t), func(cfg *config.ServeConfig) {
-				cfg.ShimModelOverrideEnabled = scenario.enabled
-				cfg.ModelOverrides = scenario.rules
-			}, nil)
-
-			client := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
-			t.Cleanup(client.CloseIdleConnections)
-			send := func(index int) {
-				tc := modelOverrideHTTPCases[index%len(modelOverrideHTTPCases)]
-				id := fmt.Sprintf("case-%d", index)
-				req, err := http.NewRequest(http.MethodPost, harness.baseURL+tc.path+"?case="+id+"&mode="+tc.mode, strings.NewReader(tc.body))
-				if err != nil {
-					t.Error(err)
-					return
-				}
-				req.Header.Set("Authorization", "Bearer "+testAPIKey)
-				resp, err := client.Do(req)
-				if err != nil {
-					t.Errorf("%s: %v", tc.name, err)
-					return
-				}
-				body, err := io.ReadAll(resp.Body)
-				_ = resp.Body.Close()
-				upstreamPath := strings.TrimPrefix(strings.TrimPrefix(tc.path, "/anthropic"), "/openai/v1")
-				if _, want := modelOverrideCompletion(upstreamPath, tc.mode, id); err != nil || resp.StatusCode != http.StatusOK || string(body) != want {
-					t.Errorf("%s: response = %d %q (%v), want upstream bytes %q", tc.name, resp.StatusCode, body, err, want)
-				}
-			}
-			for i := range modelOverrideHTTPCases {
-				send(i)
-			}
-			// A concurrent second pass interleaves mapped and unmapped requests:
-			// no request inherits another's substitution.
-			var concurrent sync.WaitGroup
-			for i := range modelOverrideHTTPCases {
-				concurrent.Go(func() { send(len(modelOverrideHTTPCases) + i) })
-			}
-			concurrent.Wait()
-
-			conn := dialUsageMeterWebSocket(t, harness.baseURL, "model-override-websocket")
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			for n, message := range modelOverrideWebSocketMessages {
-				if err := conn.Write(ctx, message.kind, []byte(message.data)); err != nil {
-					t.Fatalf("write client Message %d: %v", n, err)
-				}
-				select {
-				case got := <-wsReceived:
-					if want := upstreamBody(message.data, message.overridden); got.kind != message.kind || got.data != want {
-						t.Errorf("upstream Message %d = (%v, %q), want (%v, %q)", n, got.kind, got.data, message.kind, want)
-					}
-				case <-ctx.Done():
-					t.Fatalf("client Message %d did not reach Copilot", n)
-				}
-				kind, reply, err := conn.Read(ctx)
-				if err != nil || kind != websocket.MessageText || !bytes.Equal(reply, modelOverrideWebSocketCompletion(n)) {
-					t.Fatalf("server Message %d = (%v, %q, %v), want upstream bytes unchanged", n, kind, reply, err)
-				}
-			}
-			if err := conn.Close(websocket.StatusNormalClosure, "done"); err != nil {
-				t.Errorf("close WebSocket session: %v", err)
-			}
-
-			if !scenario.applies {
+	wsReceived := make(chan modelOverrideWSMessage, len(modelOverrideWebSocketMessages))
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
+			conn, err := websocket.Accept(w, r, nil)
+			if err != nil {
+				t.Errorf("accept upstream WebSocket: %v", err)
 				return
 			}
-			db, report := externalUsageDB(t, harness)
-			assertCleanUsageReport(t, report)
-			for i := range 2 * len(modelOverrideHTTPCases) {
-				tc := modelOverrideHTTPCases[i%len(modelOverrideHTTPCases)]
-				if tc.table == "" {
-					continue
+			defer func() { _ = conn.CloseNow() }()
+			for n := 0; ; n++ {
+				kind, data, err := conn.Read(context.Background())
+				if err != nil {
+					return
 				}
-				idColumn, reported, tier := "message_id", "claude-reported", "NULL"
-				if tc.table == "openai_turn" {
-					idColumn, reported, tier = "response_id", "gpt-5.6-sol-reported", "service_tier"
-				}
-				var model, transport string
-				var requested, serviceTier sql.NullString
-				err := db.QueryRow("SELECT model, requested_model, transport, "+tier+" FROM "+tc.table+" WHERE "+idColumn+"=?", fmt.Sprintf("case-%d", i)).Scan(&model, &requested, &transport, &serviceTier)
-				wantTier := sql.NullString{}
-				if tc.table == "openai_turn" {
-					wantTier = sql.NullString{String: "default", Valid: true}
-				}
-				if err != nil || model != reported || requested != tc.requested || transport != tc.mode || serviceTier != wantTier {
-					t.Errorf("%s case-%d Turn: model=%q requested=%+v transport=%q tier=%+v err=%v, want Requested %+v with completion-derived evidence", tc.name, i, model, requested, transport, serviceTier, err, tc.requested)
+				wsReceived <- modelOverrideWSMessage{kind: kind, data: string(data)}
+				if err := conn.Write(context.Background(), websocket.MessageText, modelOverrideWebSocketCompletion(n)); err != nil {
+					t.Errorf("write upstream completion %d: %v", n, err)
+					return
 				}
 			}
-			for n := range modelOverrideWebSocketMessages {
-				var model, transport string
-				var requested, serviceTier sql.NullString
-				err := db.QueryRow("SELECT model, requested_model, transport, service_tier FROM openai_turn WHERE response_id=?", fmt.Sprintf("ws-%d", n)).Scan(&model, &requested, &transport, &serviceTier)
-				if err != nil || model != "gpt-5.6-sol-reported" || requested.Valid || transport != "websocket" || serviceTier != (sql.NullString{String: "priority", Valid: true}) {
-					t.Errorf("WebSocket Turn ws-%d: model=%q requested=%+v transport=%q tier=%+v err=%v, want unavailable Requested model", n, model, requested, transport, serviceTier, err)
-				}
+		}
+		id := r.URL.Query().Get("case")
+		var index int
+		if _, err := fmt.Sscanf(id, "case-%d", &index); err != nil || index < 0 || index >= len(modelOverrideHTTPCases) {
+			t.Errorf("unexpected upstream request %s %s?%s; the Model override must not consult a catalog", r.Method, r.URL.Path, r.URL.RawQuery)
+			http.Error(w, "unexpected", http.StatusBadRequest)
+			return
+		}
+		tc := modelOverrideHTTPCases[index]
+		if got, err := io.ReadAll(r.Body); err != nil || string(got) != tc.upstream {
+			t.Errorf("%s: upstream body = %q, %v, want %q", tc.name, got, err, tc.upstream)
+		}
+		contentType, body := modelOverrideCompletion(r.URL.Path, tc.mode, id)
+		w.Header().Set("Content-Type", contentType)
+		_, _ = io.WriteString(w, body)
+	}))
+	t.Cleanup(upstream.Close)
+	harness := startUsageMeterServeHarness(t, upstream.URL, discardLogger(t), func(cfg *config.ServeConfig) {
+		cfg.ShimModelOverrideEnabled = true
+		cfg.ModelOverrides = map[string]string{"gpt-5.6-sol": "gpt-5.6-sol-fast", "claude-src": "claude-target"}
+	}, nil)
+
+	client := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
+	t.Cleanup(client.CloseIdleConnections)
+	for i, tc := range modelOverrideHTTPCases {
+		id := fmt.Sprintf("case-%d", i)
+		req, err := http.NewRequest(http.MethodPost, harness.baseURL+tc.path+"?case="+id, strings.NewReader(tc.body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer "+testAPIKey)
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		body, err := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		upstreamPath := strings.TrimPrefix(strings.TrimPrefix(tc.path, "/anthropic"), "/openai/v1")
+		if _, want := modelOverrideCompletion(upstreamPath, tc.mode, id); err != nil || resp.StatusCode != http.StatusOK || string(body) != want {
+			t.Errorf("%s: response = %d %q (%v), want upstream bytes %q", tc.name, resp.StatusCode, body, err, want)
+		}
+	}
+
+	conn := dialUsageMeterWebSocket(t, harness.baseURL, "model-override-websocket")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for n, message := range modelOverrideWebSocketMessages {
+		if err := conn.Write(ctx, message.kind, []byte(message.data)); err != nil {
+			t.Fatalf("write client Message %d: %v", n, err)
+		}
+		select {
+		case got := <-wsReceived:
+			if got.kind != message.kind || got.data != message.upstream {
+				t.Errorf("upstream Message %d = (%v, %q), want (%v, %q)", n, got.kind, got.data, message.kind, message.upstream)
 			}
-		})
+		case <-ctx.Done():
+			t.Fatalf("client Message %d did not reach Copilot", n)
+		}
+		kind, reply, err := conn.Read(ctx)
+		if err != nil || kind != websocket.MessageText || !bytes.Equal(reply, modelOverrideWebSocketCompletion(n)) {
+			t.Fatalf("server Message %d = (%v, %q, %v), want upstream bytes unchanged", n, kind, reply, err)
+		}
+	}
+	if err := conn.Close(websocket.StatusNormalClosure, "done"); err != nil {
+		t.Errorf("close WebSocket session: %v", err)
+	}
+
+	db, report := externalUsageDB(t, harness)
+	assertCleanUsageReport(t, report)
+	for i, tc := range modelOverrideHTTPCases {
+		if tc.table == "" {
+			continue
+		}
+		idColumn, reported, tier, wantTier := "message_id", "claude-reported", "NULL", sql.NullString{}
+		if tc.table == "openai_turn" {
+			idColumn, reported, tier, wantTier = "response_id", "gpt-5.6-sol-reported", "service_tier", sql.NullString{String: "default", Valid: true}
+		}
+		var model, transport string
+		var requested, serviceTier sql.NullString
+		err := db.QueryRow("SELECT model, requested_model, transport, "+tier+" FROM "+tc.table+" WHERE "+idColumn+"=?", fmt.Sprintf("case-%d", i)).Scan(&model, &requested, &transport, &serviceTier)
+		if err != nil || model != reported || requested != tc.requested || transport != tc.mode || serviceTier != wantTier {
+			t.Errorf("%s Turn: model=%q requested=%+v transport=%q tier=%+v err=%v, want Requested %+v with completion-derived evidence", tc.name, model, requested, transport, serviceTier, err, tc.requested)
+		}
+	}
+	for n := range modelOverrideWebSocketMessages {
+		var model, transport string
+		var requested, serviceTier sql.NullString
+		err := db.QueryRow("SELECT model, requested_model, transport, service_tier FROM openai_turn WHERE response_id=?", fmt.Sprintf("ws-%d", n)).Scan(&model, &requested, &transport, &serviceTier)
+		if err != nil || model != "gpt-5.6-sol-reported" || requested.Valid || transport != "websocket" || serviceTier != (sql.NullString{String: "priority", Valid: true}) {
+			t.Errorf("WebSocket Turn ws-%d: model=%q requested=%+v transport=%q tier=%+v err=%v, want unavailable Requested model", n, model, requested, transport, serviceTier, err)
+		}
 	}
 }
 

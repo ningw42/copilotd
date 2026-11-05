@@ -419,10 +419,10 @@ type NopShim struct{}
 
 // CanonicalRegistry returns a fresh copy of the canonical registration order.
 // A nil sink leaves the Usage meter registration disabled. modelOverrides is
-// the Model override's source-to-target map; it is copied, so later changes to
-// the caller's map do not affect the registry.
+// the Model override's source-to-target map as validated by configuration:
+// nonempty, valid UTF-8 model IDs. Instances share it, so the caller must not
+// modify it afterwards.
 func CanonicalRegistry(sink usage.Sink, modelOverrides map[string]string) Registry {
-	overrideTargets := newModelOverrideTargets(modelOverrides)
 	registry := Registry{
 		{
 			Name:    "nop",
@@ -448,7 +448,7 @@ func CanonicalRegistry(sink usage.Sink, modelOverrides map[string]string) Regist
 			Enabled: false,
 			Scope:   modelOverrideScope,
 			New: func(context.Context, endpoint.Surface, endpoint.Route) any {
-				return &modelOverride{targets: overrideTargets}
+				return &modelOverride{rules: modelOverrides}
 			},
 		},
 		{

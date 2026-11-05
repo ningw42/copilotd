@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 
@@ -86,9 +87,19 @@ func TestModelOverrideUsesOneExactCaseSensitiveLookup(t *testing.T) {
 	}
 }
 
+// nestedArrays wraps 0 in depth JSON arrays.
+func nestedArrays(depth int) string {
+	return strings.Repeat("[", depth) + "0" + strings.Repeat("]", depth)
+}
+
 func TestModelOverrideReplacesOnlyTheTopLevelModelValueBytes(t *testing.T) {
 	rules := map[string]string{"gpt-5.6-sol": "gpt-5.6-sol-fast", "quoted": `quo"te\back/雪<&>`}
 	for _, tc := range []struct{ name, body, want string }{
+		{
+			name: "deep nesting within the JSON decoder's depth limit",
+			body: `{"x":` + nestedArrays(5000) + `,"model":"gpt-5.6-sol"}`,
+			want: `{"x":` + nestedArrays(5000) + `,"model":"gpt-5.6-sol-fast"}`,
+		},
 		{
 			name: "escaped key",
 			body: `{"mod\u0065l":"gpt-5.6-sol"}`,
@@ -175,6 +186,9 @@ func TestModelOverrideDeclinesUninterpretableRequestsByPassthrough(t *testing.T)
 		{name: "trailing text", body: `{"model":"A"} x`},
 		{name: "trailing second object", body: `{"model":"A"}{"model":"A"}`},
 		{name: "trailing close brace", body: `{"model":"A"}}`},
+		// RFC 8259 section 9 lets a parser limit nesting depth; Go's JSON
+		// decoders stop at 10,000 levels, so such a body is not interpretable.
+		{name: "nesting beyond the JSON decoder's depth limit", body: `{"model":"A","x":` + nestedArrays(20000) + `}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) { assertOverride(t, rules, tc.body, tc.body) })
 	}
@@ -272,6 +286,11 @@ func TestModelOverrideChangesNoTrafficWhenDisabledOrEmpty(t *testing.T) {
 	}
 	for _, rules := range []map[string]string{nil, {}} {
 		assertOverride(t, rules, body, body)
+		message := &Message{Kind: MessageText, Data: []byte(`{"type":"response.create","model":"A"}`)}
+		transform := modelOverrideChain(t, rules, endpoint.OpenAI, endpoint.RouteOpenAIResponses).WSClientAdapter(context.Background(), nil)
+		if emit := transform(context.Background(), message); !emit || message.Kind != MessageText || string(message.Data) != `{"type":"response.create","model":"A"}` {
+			t.Errorf("empty-map override Message = (%t, %v, %q), want emitted unchanged", emit, message.Kind, message.Data)
+		}
 	}
 }
 
@@ -330,21 +349,4 @@ func TestModelOverrideCarriesNoStateAcrossConcurrentRequests(t *testing.T) {
 		})
 	}
 	wg.Wait()
-}
-
-func TestModelOverrideRegistryIsIndependentOfLaterRuleChanges(t *testing.T) {
-	rules := map[string]string{"A": "B"}
-	registry := CanonicalRegistry(nil, rules)
-	rules["A"], rules["X"] = "C", "Y"
-	chain := enableOnly(t, registry, "model-override").NewChain(context.Background(), endpoint.Anthropic, endpoint.RouteAnthropicMessages)
-	for body, want := range map[string]string{`{"model":"A"}`: `{"model":"B"}`, `{"model":"X"}`: `{"model":"X"}`} {
-		if _, got, err := chain.RunRequest(context.Background(), "", nil, []byte(body)); err != nil || string(got) != want {
-			t.Errorf("RunRequest(%s) = %q, %v, want %q from the rules at construction", body, got, err, want)
-		}
-	}
-}
-
-func TestModelOverrideNeverSendsAReplacementSpelledTarget(t *testing.T) {
-	// Configuration rejects such a rule; the Shim still refuses to mangle it.
-	assertOverride(t, map[string]string{"A": "bad-\xff"}, `{"model":"A"}`, `{"model":"A"}`)
 }

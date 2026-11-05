@@ -44,8 +44,9 @@ The Shim replaces only a unique top-level string `model` value in these inputs:
 All payload bytes outside the replaced value remain unchanged. In particular,
 nested model fields, prompts, unknown fields, numeric spellings, and whitespace
 are not re-encoded. Missing, non-string, duplicate, malformed, or lossily
-decodable model evidence declines by passthrough. Malformed JSON, ambiguous
-WebSocket type fields, other event types, and Binary Messages also remain
+decodable model evidence declines by passthrough. Malformed JSON, JSON nested
+beyond the decoder's RFC 8259 section 9 depth limit, ambiguous WebSocket type
+fields, other event types, and Binary Messages also remain
 unchanged. No model is inserted when absent; there is no per-turn inheritance
 or session state. The same uncertainty policy applies to HTTP and WebSocket:
 no new local rejection, drop, retry, or session termination. This convenience

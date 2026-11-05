@@ -20,39 +20,16 @@ const responseCreateEvent = "response.create"
 // lookup is never repeated on its own result, so rules cannot chain or loop.
 //
 // An instance holds no per-request or per-session state: every HTTP request and
-// WebSocket Message is interpreted independently. Instances share one immutable
-// target map built when the registry is constructed. It has no response hooks.
+// WebSocket Message is interpreted independently. Instances share the validated
+// rules map, which nothing modifies while serving. It has no response hooks.
 type modelOverride struct {
-	targets modelOverrideTargets
+	rules map[string]string
 }
-
-// modelOverrideTargets maps each source model ID to its target as an encoded
-// JSON string. Self-mappings are omitted so a matching source remains
-// byte-verbatim. It is never mutated after construction.
-type modelOverrideTargets map[string][]byte
 
 var (
 	_ RequestTransformer       = (*modelOverride)(nil)
 	_ ClientMessageTransformer = (*modelOverride)(nil)
 )
-
-// newModelOverrideTargets copies and pre-encodes rules once per registry.
-func newModelOverrideTargets(rules map[string]string) modelOverrideTargets {
-	targets := make(modelOverrideTargets, len(rules))
-	for source, target := range rules {
-		if source == target {
-			continue
-		}
-		encoded, err := jsontext.AppendQuote(nil, target)
-		if err != nil {
-			// Configuration rejects IDs that are not valid UTF-8. Never send a
-			// replacement-character spelling of an operator's target.
-			continue
-		}
-		targets[source] = encoded
-	}
-	return targets
-}
 
 // modelOverrideScope selects the supported inference request inputs: the two
 // Anthropic HTTP operations and OpenAI Responses over HTTP and WebSocket.
@@ -87,7 +64,7 @@ func (o *modelOverride) TransformClientMessage(_ context.Context, message *Messa
 // rewrite returns payload with its unique top-level string model replaced by a
 // mapped target. Any uncertainty returns payload itself, unchanged.
 func (o *modelOverride) rewrite(payload []byte, requireResponseCreate bool) []byte {
-	if len(o.targets) == 0 {
+	if len(o.rules) == 0 {
 		return payload
 	}
 	members, ok := scanModelOverrideMembers(payload)
@@ -104,14 +81,16 @@ func (o *modelOverride) rewrite(payload []byte, requireResponseCreate bool) []by
 	if !ok {
 		return payload
 	}
-	target, mapped := o.targets[model]
-	if !mapped {
+	target, mapped := o.rules[model]
+	if !mapped || target == model {
+		// A self-mapping keeps the client's exact spelling of the model.
 		return payload
 	}
 	span := members.model
-	rewritten := make([]byte, 0, len(payload)-(span.end-span.start)+len(target))
+	rewritten := make([]byte, 0, len(payload))
 	rewritten = append(rewritten, payload[:span.start]...)
-	rewritten = append(rewritten, target...)
+	// Configuration accepts only valid UTF-8 IDs, so quoting cannot fail.
+	rewritten, _ = jsontext.AppendQuote(rewritten, target)
 	return append(rewritten, payload[span.end:]...)
 }
 

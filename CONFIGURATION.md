@@ -491,8 +491,9 @@ byte-for-byte. Each request and Message is handled independently: a WebSocket
 turn without a model is never given one from an earlier turn.
 
 **Passthrough, not enforcement.** A request is forwarded unchanged when it is
-malformed, is not a single JSON object, has trailing content, or lacks a unique,
-losslessly decodable string `model` (missing, `null`, non-string, or
+malformed, is not a single JSON object, has trailing content, nests JSON deeper
+than the decoder's 10,000-level limit (as RFC 8259 section 9 permits), or lacks
+a unique, losslessly decodable string `model` (missing, `null`, non-string, or
 duplicated). Other WebSocket events, ambiguous or missing `type` fields, and
 Binary Messages are also unchanged. The Shim never rejects a request, drops a
 Message, retries, or ends a session. It is a convenience, not an access-control
