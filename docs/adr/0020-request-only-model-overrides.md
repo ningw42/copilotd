@@ -1,7 +1,9 @@
 # Admit explicit request-only model overrides
 
-**Status:** accepted for implementation in
-[#297](https://github.com/ningw42/copilotd/issues/297); not yet implemented.
+**Status:** accepted and implemented in
+[#297](https://github.com/ningw42/copilotd/issues/297) as the `model-override`
+Shim; operator documentation is in
+[CONFIGURATION.md](../../CONFIGURATION.md#--model-overrides).
 
 copilotd admits an opt-in Model override Shim that substitutes an explicitly
 configured model ID in outbound inference requests across its supported
@@ -42,8 +44,9 @@ The Shim replaces only a unique top-level string `model` value in these inputs:
 All payload bytes outside the replaced value remain unchanged. In particular,
 nested model fields, prompts, unknown fields, numeric spellings, and whitespace
 are not re-encoded. Missing, non-string, duplicate, malformed, or lossily
-decodable model evidence declines by passthrough. Malformed JSON, ambiguous
-WebSocket type fields, other event types, and Binary Messages also remain
+decodable model evidence declines by passthrough. Malformed JSON, JSON nested
+beyond the decoder's RFC 8259 section 9 depth limit, ambiguous WebSocket type
+fields, other event types, and Binary Messages also remain
 unchanged. No model is inserted when absent; there is no per-turn inheritance
 or session state. The same uncertainty policy applies to HTTP and WebSocket:
 no new local rejection, drop, retry, or session termination. This convenience
@@ -70,8 +73,10 @@ model-overrides = "gpt-5.6-sol=gpt-5.6-sol-fast"
 
 Use the existing string-map configuration conventions: comma-separated
 `source=target` entries, trimmed configuration whitespace, nonempty source and
-target, and duplicate source IDs rejected at startup. Empty entries follow the
-existing parser convention. Self-mappings are accepted no-ops. Configuration
+target, and duplicate source IDs rejected at startup. The implementation also
+rejects IDs that are not valid UTF-8, so a target is sent exactly as configured
+rather than with replacement characters. Empty entries follow the existing
+parser convention. Self-mappings are accepted no-ops. Configuration
 follows flags > environment > TOML > default, replacing rather than merging
 maps across layers. Invalid configuration fails before binding, even when the
 Shim is disabled. A disabled Shim or an empty map changes no traffic.

@@ -1,7 +1,8 @@
 # Divergence ledger
 
-The complete accounting of **every way copilotd's wire output departs from pure
-verbatim forwarding of Copilot.** copilotd is a transparent proxy; each entry here is
+The complete accounting of **every way copilotd's wire output — a response to a
+client or a request sent to Copilot — departs from pure verbatim forwarding.**
+copilotd is a transparent proxy; each entry here is
 a deliberate, governed exception to that transparency. Every divergence is identified
 **off-band** (request-id, logs) and **never by a field on the wire** — a client
 cannot tell a diverged response from a genuine first-party one by inspecting the
@@ -19,7 +20,11 @@ single place the divergence is defined, and this row is a pointer to it.
 | copilotd-originated error signals | `internal/apierror` — the `Kind` enum ("every copilotd-originated error condition"): `Unauthorized`, `NotReady`, `BackgroundUnsupported`, `NotAWebSocketUpgrade`, `PayloadTooLarge`, `BadGateway`, `GatewayTimeout`, `ShimError`, `InvalidRequest` | copilotd returns its own surface-shaped error response instead of forwarding one from Copilot (missing/invalid API key, no credential, oversized body, unreachable/slow upstream, a shim rejection). |
 | Synthesized stream terminals | [ADR-0003](adr/0003-synthesized-stream-terminals-off-band-origin.md) + the SSE engine | copilotd appends a terminal error event when an upstream SSE stream on an SSE-semantic Route dies without one, so a client's SSE parser never hangs. |
 
-## Alteration — an upstream-basis value rewritten to another, fabricating nothing
+## Alteration — an existing value rewritten to another, fabricating nothing
+
+An Alteration of a response rewrites one upstream-basis value to another. A
+request-side Alteration replaces a client-supplied value in the request sent to
+Copilot with an explicit operator-configured one.
 
 | Divergence | Source of truth | What it diverges | Toggle |
 |---|---|---|---|
@@ -27,7 +32,8 @@ single place the divergence is defined, and this row is a pointer to it.
 | Anthropic catalog model-ID normalization | [ADR-0004](adr/0004-provider-shaped-catalogs-report-copilot-values.md) + `internal/catalog` | Rewrites dots to hyphens only for `vendor:"Anthropic"` / `claude-` IDs on `/anthropic/v1/models`, including `first_id` and `last_id`. Other IDs and inference forwarding remain verbatim. | `--anthropic-catalog-model-id-normalization-enabled` / `AnthropicCatalogModelIDNormalizationEnabled` — **off by default** |
 | Codex catalog reviewer override | [ADR-0005](adr/0005-codex-catalog-reemits-pinned-modelinfo.md) | Replaces the accepted official entry's `auto_review_model_override` with deployment reviewer routing selected by the served Main-model slug, only when the configured reviewer is in the emitted Codex membership. Otherwise, and whenever no reviewer applies, the official field is re-emitted unchanged. | `--codex-catalog-enabled` plus `--codex-auto-review-model` / `--codex-auto-review-model-overrides` — **off by default** |
 | Codex catalog live-limit overlay | [ADR-0005](adr/0005-codex-catalog-reemits-pinned-modelinfo.md) | Replaces accepted official `context_window` and `max_context_window` values, when available, with the served model's live Copilot limits. | `--codex-catalog-enabled` plus `--codex-catalog-override-limits` — **off by default** |
-| Explicit Codex catalog alias | [ADR-0005](adr/0005-codex-catalog-reemits-pinned-modelinfo.md) + [design](design/2026-09-01-codex-catalog-model-aliases-design.md) | Clones one complete accepted official Codex entry and replaces its `slug` with a configured real, live Copilot Responses model ID; inference forwards that alias unchanged. | `--codex-catalog-enabled` plus `--codex-catalog-model-aliases` — **off by default** |
+| Explicit Codex catalog alias | [ADR-0005](adr/0005-codex-catalog-reemits-pinned-modelinfo.md) + [design](design/2026-09-01-codex-catalog-model-aliases-design.md) | Clones one complete accepted official Codex entry and replaces its `slug` with a configured real, live Copilot Responses model ID. The alias itself configures no inference rewrite; inference forwards it unchanged unless a Model override rule names it. | `--codex-catalog-enabled` plus `--codex-catalog-model-aliases` — **off by default** |
+| Request-only Model override | [ADR-0020](adr/0020-request-only-model-overrides.md) + [configuration](../CONFIGURATION.md#--model-overrides); shim `model-override` | In requests sent to Copilot, replaces the unique top-level string `model` with an operator-configured upstream model ID after one exact lookup, on Anthropic Messages and Count Tokens and on OpenAI Responses HTTP requests and WebSocket `response.create` Text Messages. Every other request byte, every Catalog, and every response stay unchanged; input it cannot interpret passes through verbatim. | `--shim-model-override-enabled` plus `--model-overrides` / `ShimModelOverrideEnabled` + `ModelOverrides` — **off by default** |
 
 ## Omission — dropping or coalescing Copilot-forwarded content
 

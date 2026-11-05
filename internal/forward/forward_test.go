@@ -332,7 +332,7 @@ func TestForwardWithoutBufferedHookCommitsBeforeReadingVerbatimBody(t *testing.T
 			Request: r,
 		}, nil
 	})
-	registry := shim.CanonicalRegistry(nil)
+	registry := shim.CanonicalRegistry(nil, nil)
 	registry[0].Enabled = true
 	f := newStubForwarder(readyStub("https://upstream.invalid"), transport, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1, registry)
 	rec := &commitObservingRecorder{deadlineRecorder: newDeadlineRecorder(), body: body}
@@ -828,7 +828,7 @@ func TestForwardEnabledNopIsByteExactWithEmptyChainOnBothPaths(t *testing.T) {
 			}
 
 			empty := run(nil)
-			nopRegistry := shim.CanonicalRegistry(nil)
+			nopRegistry := shim.CanonicalRegistry(nil, nil)
 			nopRegistry[0].Enabled = true
 			nop := run(nopRegistry)
 
@@ -871,7 +871,7 @@ func TestForwardResponsesItemIDStabilizerSSEGateScopeAndFailSafe(t *testing.T) {
 
 	run := func(t *testing.T, ep endpoint.HTTPForward, enabled bool) (*deadlineRecorder, requestsummary.StreamResult) {
 		t.Helper()
-		registry := shim.CanonicalRegistry(nil)
+		registry := shim.CanonicalRegistry(nil, nil)
 		registry[1].Enabled = enabled
 		f := newTestForwarder(readyStub(upstream.URL), 5*time.Second, time.Second, time.Second, 90*time.Second, 15*time.Second, 1<<20, 1<<20, registry)
 		req := httptest.NewRequest(http.MethodPost, "/provider/route", strings.NewReader(`{"stream":true}`))

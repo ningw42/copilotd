@@ -466,7 +466,7 @@ func observeOpenAIUsage(t *testing.T, transport syntheticOpenAITransportCase, re
 	ctx := context.Background()
 	switch transport.transport {
 	case usage.TransportBuffered:
-		registry := CanonicalRegistry(sink)
+		registry := CanonicalRegistry(sink, nil)
 		registry[len(registry)-1].Enabled = true
 		chain := registry.NewChain(ctx, endpoint.OpenAI, endpoint.RouteOpenAIResponses)
 		raw := []byte(response)

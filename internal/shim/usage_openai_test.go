@@ -36,13 +36,13 @@ func (s *memoryUsageSink) snapshot() []usage.Turn {
 }
 
 func enabledOpenAIUsageStream(ctx context.Context, sink usage.Sink) sse.FrameTransformer {
-	registry := CanonicalRegistry(sink)
+	registry := CanonicalRegistry(sink, nil)
 	registry[len(registry)-1].Enabled = true
 	return registry.NewChain(ctx, endpoint.OpenAI, endpoint.RouteOpenAIResponses).StreamAdapter(ctx, nil)
 }
 
 func enabledOpenAIUsageWSServer(ctx context.Context, sink usage.Sink) MessageTransform {
-	registry := CanonicalRegistry(sink)
+	registry := CanonicalRegistry(sink, nil)
 	registry[len(registry)-1].Enabled = true
 	return registry.NewChain(ctx, endpoint.OpenAI, endpoint.RouteOpenAIResponses).WSServerAdapter(ctx, nil)
 }
@@ -227,7 +227,7 @@ func TestOpenAIUsageMeterAdvancesDuplicateSSESubmissionOrdinalWhenSinkDrops(t *t
 
 func TestOpenAIUsageMeterObservesUpstreamBasisInsideItemIDStabilizer(t *testing.T) {
 	sink := &memoryUsageSink{}
-	registry := CanonicalRegistry(sink)
+	registry := CanonicalRegistry(sink, nil)
 	registry[1].Enabled = true
 	registry[len(registry)-1].Enabled = true
 	if registry[1].Name != "responses-item-id-stabilizer" || registry[len(registry)-1].Name != "usage-meter" {
@@ -422,7 +422,7 @@ func TestOpenAIUsageMeterHandlesSustainedWebSocketTurnsWithoutHistoryDependence(
 
 func TestOpenAIUsageMeterObservesUpstreamBasisInsideItemIDStabilizerWebSocket(t *testing.T) {
 	sink := &memoryUsageSink{}
-	registry := CanonicalRegistry(sink)
+	registry := CanonicalRegistry(sink, nil)
 	registry[1].Enabled = true
 	registry[len(registry)-1].Enabled = true
 	adapter := registry.NewChain(context.Background(), endpoint.OpenAI, endpoint.RouteOpenAIResponses).WSServerAdapter(context.Background(), nil)
@@ -583,12 +583,12 @@ func TestOpenAIUsageMeterDoesNotAddCrossFieldArithmeticValidation(t *testing.T) 
 }
 
 func TestCanonicalRegistryKeepsUsageMeterExactLastWithOpenAIStreamingHooksActive(t *testing.T) {
-	withoutSink := CanonicalRegistry(nil)
-	if len(withoutSink) != 3 || withoutSink[2].Name != "usage-meter" || withoutSink[2].Enabled {
-		t.Fatalf("CanonicalRegistry(nil) = %+v, want disabled usage-meter last", withoutSink)
+	withoutSink := CanonicalRegistry(nil, nil)
+	if len(withoutSink) != 4 || withoutSink[3].Name != "usage-meter" || withoutSink[3].Enabled {
+		t.Fatalf("CanonicalRegistry(nil, nil) = %+v, want disabled usage-meter last", withoutSink)
 	}
 	sink := &memoryUsageSink{}
-	withSink := CanonicalRegistry(sink)
+	withSink := CanonicalRegistry(sink, nil)
 	registration := withSink[len(withSink)-1]
 	if registration.Name != "usage-meter" || registration.Enabled || registration.Scope == nil {
 		t.Fatalf("usage registration = %+v", registration)
@@ -805,7 +805,7 @@ func observeSyntheticOpenAICompletions(t *testing.T, transport syntheticOpenAITr
 	var observe func([]byte)
 	switch transport.transport {
 	case usage.TransportBuffered:
-		registry := CanonicalRegistry(sink)
+		registry := CanonicalRegistry(sink, nil)
 		registry[len(registry)-1].Enabled = true
 		chain := registry.NewChain(ctx, endpoint.OpenAI, endpoint.RouteOpenAIResponses)
 		observe = func(response []byte) {

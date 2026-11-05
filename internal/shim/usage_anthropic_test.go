@@ -18,7 +18,7 @@ import (
 )
 
 func enabledAnthropicUsageChain(ctx context.Context, sink usage.Sink) *Chain {
-	registry := CanonicalRegistry(sink)
+	registry := CanonicalRegistry(sink, nil)
 	registry[len(registry)-1].Enabled = true
 	return registry.NewChain(ctx, endpoint.Anthropic, endpoint.RouteAnthropicMessages)
 }

@@ -1,9 +1,11 @@
 // Package shim defines copilotd's composable inference-extension contract.
 //
-// A Shim may close a parity gap by transforming inference data or observe it
+// A Shim may close a parity gap by transforming inference data, apply an
+// explicit operator-selected Model override, or observe inference data
 // read-only by returning every input unchanged. Shims may alter, drop, hold, or
 // coalesce information derived from a request or upstream response, but must not
-// fabricate information without an upstream basis. A hook must not access
+// fabricate information without an upstream basis; only the Model override
+// substitutes operator-configured request values (ADR-0020). A hook must not access
 // Copilot or drive an upstream retry. These rules are policy invariants enforced
 // by review rather than by the type system.
 //
@@ -34,6 +36,17 @@
 // WebSocket paths, it pins the first genuine upstream item id per output index
 // and rewrites later item-id surfaces to that value. This is an Alteration, not
 // Fabrication: it never mints an id.
+//
+// The Model override is registered as model-override and is governed by the
+// --shim-model-override-enabled and --model-overrides flags, represented in
+// configuration as ShimModelOverrideEnabled and ModelOverrides. It is opt-in,
+// off by default, and request-only. On Anthropic Messages and Count Tokens and
+// on OpenAI Responses HTTP requests and WebSocket response.create Text Messages,
+// one exact lookup replaces only the unique top-level string model value; every
+// other byte, Catalog, and response is unchanged. Input it cannot confidently
+// interpret is declined by passthrough, so it is not an enforcement boundary.
+// It is ordered before the Usage meter, whose HTTP Requested model is therefore
+// the substituted upstream-bound ID.
 package shim
 
 import (
@@ -405,8 +418,11 @@ func (a *sseAdapter) transformFrames(ctx context.Context, shimName string, trans
 type NopShim struct{}
 
 // CanonicalRegistry returns a fresh copy of the canonical registration order.
-// A nil sink leaves the Usage meter registration disabled.
-func CanonicalRegistry(sink usage.Sink) Registry {
+// A nil sink leaves the Usage meter registration disabled. modelOverrides is
+// the Model override's source-to-target map as validated by configuration:
+// nonempty, valid UTF-8 model IDs. Instances share it, so the caller must not
+// modify it afterwards.
+func CanonicalRegistry(sink usage.Sink, modelOverrides map[string]string) Registry {
 	registry := Registry{
 		{
 			Name:    "nop",
@@ -423,6 +439,16 @@ func CanonicalRegistry(sink usage.Sink) Registry {
 			},
 			New: func(context.Context, endpoint.Surface, endpoint.Route) any {
 				return newResponsesItemIDStabilizer()
+			},
+		},
+		{
+			// The request half of the onion runs in registration order, so the
+			// Usage meter observes the substituted upstream-bound model.
+			Name:    "model-override",
+			Enabled: false,
+			Scope:   modelOverrideScope,
+			New: func(context.Context, endpoint.Surface, endpoint.Route) any {
+				return &modelOverride{rules: modelOverrides}
 			},
 		},
 		{

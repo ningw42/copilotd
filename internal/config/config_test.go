@@ -324,6 +324,148 @@ func TestCodexCatalogModelAliasesUsesWholesalePrecedence(t *testing.T) {
 	}
 }
 
+func TestModelOverrideDefaultsToDisabledWithAnEmptyMap(t *testing.T) {
+	got, err := loadServe([]string{"--apikey", testAPIKey}, noEnv())
+	if err != nil {
+		t.Fatalf("loadServe() error = %v", err)
+	}
+	if got.ShimModelOverrideEnabled || got.ModelOverrides != nil {
+		t.Errorf("model override = (%t, %#v), want disabled with canonical nil map", got.ShimModelOverrideEnabled, got.ModelOverrides)
+	}
+}
+
+func TestModelOverrideSettingsUseWholesalePrecedence(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "copilotd.toml")
+	if err := os.WriteFile(path, []byte("shim-model-override-enabled = true\nmodel-overrides = \"gpt-5.6-sol=gpt-5.6-sol-fast,file-only=file-target\"\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	tests := []struct {
+		name        string
+		args        []string
+		env         map[string]string
+		wantEnabled bool
+		want        map[string]string
+	}{
+		{
+			name:        "TOML replaces default",
+			args:        []string{"--config", path},
+			wantEnabled: true,
+			want:        map[string]string{"gpt-5.6-sol": "gpt-5.6-sol-fast", "file-only": "file-target"},
+		},
+		{
+			name: "environment replaces TOML",
+			args: []string{"--config", path},
+			env: map[string]string{
+				"COPILOTD_SHIM_MODEL_OVERRIDE_ENABLED": "false",
+				"COPILOTD_MODEL_OVERRIDES":             "env-source=env-target",
+			},
+			want: map[string]string{"env-source": "env-target"},
+		},
+		{
+			name: "flag replaces environment",
+			args: []string{"--config", path, "--shim-model-override-enabled=true", "--model-overrides", "flag-source=flag-target"},
+			env: map[string]string{
+				"COPILOTD_SHIM_MODEL_OVERRIDE_ENABLED": "false",
+				"COPILOTD_MODEL_OVERRIDES":             "env-source=env-target",
+			},
+			wantEnabled: true,
+			want:        map[string]string{"flag-source": "flag-target"},
+		},
+		{
+			name: "empty flag replaces lower layers with an empty map",
+			args: []string{"--config", path, "--model-overrides", ""},
+			env: map[string]string{
+				"COPILOTD_MODEL_OVERRIDES": "env-source=env-target",
+			},
+			wantEnabled: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			env := map[string]string{"COPILOTD_APIKEY": testAPIKey}
+			for key, value := range tc.env {
+				env[key] = value
+			}
+			got, err := loadServe(tc.args, envFunc(env))
+			if err != nil {
+				t.Fatalf("loadServe() error = %v", err)
+			}
+			if got.ShimModelOverrideEnabled != tc.wantEnabled || !reflect.DeepEqual(got.ModelOverrides, tc.want) {
+				t.Errorf("model override = (%t, %#v), want (%t, %#v)", got.ShimModelOverrideEnabled, got.ModelOverrides, tc.wantEnabled, tc.want)
+			}
+		})
+	}
+}
+
+func TestModelOverridesFollowStringMapConventions(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want map[string]string
+	}{
+		{name: "empty segments", raw: " , , "},
+		{
+			name: "configuration whitespace is trimmed and IDs stay case-sensitive",
+			raw:  " gpt-5.6-sol = gpt-5.6-sol-fast ,, GPT-5.6-SOL=upper , ",
+			want: map[string]string{"gpt-5.6-sol": "gpt-5.6-sol-fast", "GPT-5.6-SOL": "upper"},
+		},
+		{name: "self-mapping is accepted", raw: "gpt-5.6-sol=gpt-5.6-sol", want: map[string]string{"gpt-5.6-sol": "gpt-5.6-sol"}},
+		{name: "chained and reciprocal rules are accepted", raw: "A=B,B=C,X=Y,Y=X", want: map[string]string{"A": "B", "B": "C", "X": "Y", "Y": "X"}},
+		{name: "target splits on the first equals sign", raw: "A=B=C", want: map[string]string{"A": "B=C"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := loadServe([]string{"--apikey", testAPIKey, "--model-overrides", tc.raw}, noEnv())
+			if err != nil {
+				t.Fatalf("loadServe() error = %v", err)
+			}
+			if !reflect.DeepEqual(got.ModelOverrides, tc.want) {
+				t.Errorf("ModelOverrides = %#v, want %#v", got.ModelOverrides, tc.want)
+			}
+		})
+	}
+}
+
+func TestModelOverridesRejectMalformedRulesEvenWhenDisabled(t *testing.T) {
+	tests := map[string]string{
+		"missing equals":                "gpt-5.6-sol",
+		"empty source":                  "=gpt-5.6-sol-fast",
+		"empty target":                  "gpt-5.6-sol=",
+		"whitespace-only target":        "gpt-5.6-sol=  ",
+		"duplicate source after trim":   "gpt-5.6-sol=gpt-5.6-sol-fast, gpt-5.6-sol =other",
+		"source is not valid UTF-8":     "gpt-\xff=gpt-5.6-sol-fast",
+		"target is not valid UTF-8":     "gpt-5.6-sol=gpt-\xff",
+		"malformed among valid entries": "A=B,broken,C=D",
+	}
+	for name, value := range tests {
+		t.Run(name, func(t *testing.T) {
+			_, err := loadServe([]string{
+				"--apikey", testAPIKey,
+				"--shim-model-override-enabled=false",
+				"--model-overrides", value,
+			}, noEnv())
+			if err == nil {
+				t.Fatalf("loadServe() error = nil, want %q rejected", value)
+			}
+			if !strings.Contains(err.Error(), "model-overrides") {
+				t.Errorf("error = %q, want key context", err)
+			}
+		})
+	}
+}
+
+func TestModelOverridesRejectMalformedLowerPrecedenceLayer(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "copilotd.toml")
+	if err := os.WriteFile(path, []byte(`model-overrides = "file-malformed"`+"\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	_, err := loadServe([]string{"--config", path, "--model-overrides", "flag-source=flag-target"},
+		envFunc(map[string]string{"COPILOTD_APIKEY": testAPIKey}))
+	if want := `invalid model-overrides "file-malformed" from config file:`; err == nil || !strings.Contains(err.Error(), want) {
+		t.Errorf("error = %v, want source-attributed prefix %q", err, want)
+	}
+}
+
 func TestCodexCatalogModelAliasesIsLoggedNormalizedWhenCatalogDisabled(t *testing.T) {
 	got, err := loadServe([]string{
 		"--apikey", testAPIKey,
@@ -1605,11 +1747,16 @@ func TestConfigLogValueEmitsOnlyNonSecretFields(t *testing.T) {
 		ShimNopEnabled:                       true,
 		ShimResponsesItemIDStabilizerEnabled: true,
 		ShimUsageMeterEnabled:                true,
-		UsageDBPath:                          "/home/op/.config/copilotd/usage.db",
-		UsagePricingRefreshInterval:          12 * time.Hour,
-		ShimHookOverrunThreshold:             750 * time.Millisecond,
-		GithubOAuthToken:                     "gho-super-secret-oauth-value",
-		CodexCatalogEnabled:                  true,
+		ShimModelOverrideEnabled:             true,
+		ModelOverrides: map[string]string{
+			"gpt-5.6-sol": "gpt-5.6-sol-fast",
+			"A":           "B",
+		},
+		UsageDBPath:                 "/home/op/.config/copilotd/usage.db",
+		UsagePricingRefreshInterval: 12 * time.Hour,
+		ShimHookOverrunThreshold:    750 * time.Millisecond,
+		GithubOAuthToken:            "gho-super-secret-oauth-value",
+		CodexCatalogEnabled:         true,
 		CodexCatalogModelAliases: map[string]string{
 			"gpt-example-alias": "gpt-example",
 		},
@@ -1652,6 +1799,8 @@ func TestConfigLogValueEmitsOnlyNonSecretFields(t *testing.T) {
 		"config.shim-nop-enabled=true",
 		"config.shim-responses-item-id-stabilizer-enabled=true",
 		"config.shim-usage-meter-enabled=true",
+		"config.shim-model-override-enabled=true",
+		`config.model-overrides="A=B,gpt-5.6-sol=gpt-5.6-sol-fast"`,
 		"config.usage-db-path=/home/op/.config/copilotd/usage.db",
 		"config.usage-pricing-refresh-interval=12h0m0s",
 		"config.shim-hook-overrun-threshold=750ms",
@@ -1716,6 +1865,8 @@ func TestConfigLogValueEmitsOnlyNonSecretFields(t *testing.T) {
 		"usage-db-path",
 		"usage-pricing-refresh-interval",
 		"shim-hook-overrun-threshold",
+		"shim-model-override-enabled",
+		"model-overrides",
 		"codex-catalog-enabled",
 		"codex-catalog-model-aliases",
 		"codex-auto-review-model",

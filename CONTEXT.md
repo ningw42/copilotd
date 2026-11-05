@@ -238,7 +238,9 @@ The required outcome when a post-commit shim cannot confidently interpret an SSE
 frame or WebSocket Message: return that input unchanged and continue the stream or
 session. This is distinct from an intentional drop or an SSE hold. The Responses item-id
 stabilizer is the canonical example — malformed or unrecognized payloads stay
-byte-verbatim rather than faulting the transport.
+byte-verbatim rather than faulting the transport. The Model override applies the
+same outcome to inference requests it cannot interpret, even though its HTTP
+request hook could reject.
 _Avoid_: fail open, ignore the error
 
 **Prelude**:
@@ -280,7 +282,8 @@ _Avoid_: model list (unqualified).
 A real, live Copilot Responses model ID that is absent from the accepted
 official Codex catalog and is emitted with a complete cloned official
 `ModelInfo`. It is the slug Codex selects and sends unchanged to inference;
-it is not an inference name rewrite.
+it is not itself an inference name rewrite, though an enabled Model override
+rule may name it like any other requested model.
 _Avoid_: inference alias, model rewrite.
 
 **Metadata source**:
@@ -371,8 +374,8 @@ _Avoid_: id rewriting (unqualified); id minting (nothing is minted).
 ### Divergence
 
 **Divergence ledger**:
-The complete accounting of every way copilotd's wire output departs from pure
-verbatim forwarding of Copilot. Three kinds — **Fabrication**, **Alteration**, and
+The complete accounting of every way copilotd's wire output — a response to a
+client or a request sent to Copilot — departs from pure verbatim forwarding. Three kinds — **Fabrication**, **Alteration**, and
 **Omission** — each identified off-band (request-id, logs), never by a field on the wire. The
 enumeration lives in `docs/divergence-ledger.md`, one entry per divergence pointing at
 its authoritative source; this glossary defines only the kinds.
@@ -387,7 +390,9 @@ fabricate information without an upstream basis."
 **Alteration**:
 A divergence that rewrites an **upstream-basis** value to another upstream-basis
 value, **fabricating nothing** — e.g. the Responses item-id stabilizer pinning one
-genuine upstream id per `output_index`. Opt-in and off by default; enumerated by the
+genuine upstream id per `output_index`. A request-side Alteration instead replaces
+a client-supplied value in the request sent to Copilot with an explicit
+operator-configured one, as the **Model override** does. Opt-in and off by default; enumerated by the
 divergence ledger and exposed through a config flag. Transport-owned Alterations
 are additionally enumerated by the shim registry.
 

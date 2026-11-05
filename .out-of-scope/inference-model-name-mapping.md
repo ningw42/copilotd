@@ -5,7 +5,7 @@ model alias to a different GitHub Copilot model ID and then restores the
 client's requested name in responses.
 
 **Narrow reconsideration (#297):** an opt-in, request-only Model override is
-accepted for implementation by
+implemented as the `model-override` Shim under
 [ADR-0020](../docs/adr/0020-request-only-model-overrides.md). It admits an explicit
 operator selection without a compatibility failure; it does not change Catalogs or
 restore client-selected names in responses. The rejection below remains the
@@ -55,4 +55,4 @@ an Alteration in the divergence ledger.
 ## Prior requests
 
 - [#188 — Evaluate inference model-name mapping](https://github.com/ningw42/copilotd/issues/188)
-- [#297 — Request-only Model override reconsideration](https://github.com/ningw42/copilotd/issues/297) — request-only scope accepted for implementation.
+- [#297 — Request-only Model override reconsideration](https://github.com/ningw42/copilotd/issues/297) — request-only scope implemented.

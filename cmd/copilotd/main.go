@@ -705,13 +705,15 @@ func logCodexCatalogStaging(logger *slog.Logger, cfg config.ServeConfig) {
 }
 
 func configuredShimRegistry(cfg config.ServeConfig, sink usage.Sink) shim.Registry {
-	registry := shim.CanonicalRegistry(sink)
+	registry := shim.CanonicalRegistry(sink, cfg.ModelOverrides)
 	for i := range registry {
 		switch registry[i].Name {
 		case "nop":
 			registry[i].Enabled = cfg.ShimNopEnabled
 		case "responses-item-id-stabilizer":
 			registry[i].Enabled = cfg.ShimResponsesItemIDStabilizerEnabled
+		case "model-override":
+			registry[i].Enabled = cfg.ShimModelOverrideEnabled
 		case "usage-meter":
 			registry[i].Enabled = cfg.ShimUsageMeterEnabled && sink != nil
 		}
