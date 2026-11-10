@@ -9,12 +9,13 @@ approval remains unverified.
 The Usage meter is the sole usage-specific exception to copilotd's no-database
 state-at-rest policy. When explicitly enabled, it persists best-effort Turn
 observations in a private local SQLite database using the cgo-free
-`modernc.org/sqlite v1.59.0` driver, which embeds SQLite 3.53.4, paired with its
-required `modernc.org/libc v1.75.7`. The historical feasibility run used driver
-`v1.58.0` with libc `v1.75.6`; the reporting introduction used driver `v1.58.0`
-with libc `v1.75.7`, as recorded in the
-[reporting verification evidence](../verification/usage-reporting.md). Those dated
-results are not certification of the updated driver. The meter remains off by
+`modernc.org/sqlite` driver, which embeds SQLite. `modernc.org/libc` must be
+exactly the version that driver's own `go.mod` requires, because its transpiled
+code is generated against that libc; `go.mod` is the single authority for both
+pinned versions. The driver and libc versions behind each dated evidence run are
+recorded in the [driver feasibility evidence](../research/sqlite-feasibility/FINDINGS.md)
+and the [reporting verification evidence](../verification/usage-reporting.md).
+Those dated results are not certification of a later driver. The meter remains off by
 default, creates no usage files while disabled, requires no companion service,
 and does not change
 the in-memory-only treatment of Copilot tokens or cached values.
