@@ -18,7 +18,7 @@ upstream-basis values. It therefore honors the shim policy invariant "must not
 fabricate information without an upstream basis," and, like every divergence, it is
 identified off-band, never by a field on the wire.
 
-[ADR-0010](0010-bidirectional-websocket-message-transform-seam.md) accepted the
+[ADR-0006](0006-openai-responses-websocket-transport.md) accepted the
 cross-transport transform **seam**; this ADR accepts the
 **divergence-from-verbatim policy** that seam now carries — the seam's anticipated
 first consumer.
@@ -61,6 +61,6 @@ fix, and the only stable per-item anchor upstream is `output_index`.
   surface on its byte-verbatim fast path.
 
 References ADR-0002 (payload-opaque SSE), ADR-0003 (off-band origin of copilotd's own
-signals), ADR-0006 and ADR-0010 (WebSocket transport and transform seam).
+signals), and ADR-0006 (WebSocket transport and transform seam).
 
 See `docs/design/2026-07-23-responses-item-id-stabilization-design.md`.

@@ -124,20 +124,12 @@ description of `internal/usage` as types and sink contract only. SQL, table
 facts and message lifecycle do not move there.
 
 Estimated-cost reporting consumes this frozen native evidence without changing
-it. It selects a Pricing model's context tariff separately for each Turn:
-OpenAI uses complete `input_tokens`, while Anthropic uses a checked sum of
-uncached input, aggregate cache creation, and cache read. OpenAI cache counts
-remain subsets of complete input, Anthropic cache counts remain additive,
-reasoning/thinking/TTL subsets are not charged again, and one aggregate
-cache-creation count uses the selected single cache-write rate. OpenAI then uses
-only bounded completed-response `fast`/`priority` evidence to select an accepted
-Fast declaration; normal rates remain the fallback for unavailable or
-unrecognized evidence. Fast context rates preserve each same-model category's
-explicit Fast premium through exact projection-time composition. Missing or
-inconsistent context evidence, missing required pricing or native-formula
-evidence, or an invalid chargeable relationship excludes the whole Turn from
-the monetary subtotal. Optional cache rates are unnecessary for known-zero
-cache counts; ignored reasoning/thinking/TTL details are not required for pricing.
+it and keeps each count's Surface-native meaning: OpenAI cache counts remain
+subsets of complete input, Anthropic cache counts remain additive, and
+reasoning/thinking/TTL subsets are not charged again. The valuation rules
+themselves are pricing policy, recorded in the
+[estimated-cost design](../design/2026-09-11-usage-cost-reporting-design.md) and
+the [service-tier pricing design](../design/2026-09-12-openai-service-tier-pricing-design.md).
 
 ## Observer policy
 
@@ -150,10 +142,6 @@ non-blocking sink.
 
 The [native usage evidence](../research/2026-09-05-native-usage-shapes.md) and
 [Usage meter design](../design/2026-07-26-token-usage-meter-design.md) record the
-provider semantics and evidence limitations behind this decision. Issue #197
-lands the frozen persistence shape and buffered OpenAI parser; issue #198 adds
-the buffered Anthropic parser; issue #199 adds self-contained OpenAI SSE
-completion observation; issue #200 adds the same self-contained observer to
-OpenAI WebSocket server Messages; and issue #201 adds request-scoped Anthropic
-SSE accumulation. All five supported paths now preserve this frozen native
+provider semantics, evidence limitations, and per-issue rollout behind this
+decision. All five supported recording paths preserve this frozen native
 projection.

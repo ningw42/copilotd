@@ -2,15 +2,16 @@
 
 **Status:** accepted
 
-This decision amends ADR-0005 for freshness and version pinning:
-`rust-v0.144.5` becomes the embedded floor rather than the sole served source.
+This decision amends ADR-0005 for freshness and version pinning: the vendored
+snapshot becomes the embedded floor rather than the sole served source.
 ADR-0005's complete-entry fidelity and enumerated-mutation rules remain
 unchanged; the accept-gate rejects any fetched entry that cannot satisfy that
-required `ModelInfo` contract. It also amends ADR-0008 by generalizing
-`versionFact` into the cache registry and moving per-fact freshness into the
-uniform `/readyz` `caches` block while retaining effective impersonation headers.
-The embedded floor may advance independently when a newer stable snapshot passes
-that contract; it was advanced to `rust-v0.153.4` on 2026-09-05.
+required `ModelInfo` contract. It also amends ADR-0008 by generalizing its
+concrete `versionFact` into `cache.Value` instances driven by the process-wide
+cache registry, and by moving per-fact freshness into the uniform `/readyz`
+`caches` block while retaining effective impersonation headers. The embedded
+floor may advance independently when a newer stable snapshot passes that
+contract; its current identity is recorded only in `release.json`, linked below.
 
 The Codex catalog serves `models.json` from a memory-only **cached value**. Its
 embedded [vendored snapshot](../../internal/catalog/codexdata/models.json), with

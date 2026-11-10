@@ -83,40 +83,25 @@ the boundary established by issue #146.
 ## Reusable-watchdog cost model
 
 Each active SSE adapter and each active WebSocket direction owns one reusable
-watchdog. The watchdog allocates one callback timer at adapter construction and
-resets that timer for successive synchronous invocations. An ordinary monitored
-invocation pays fixed synchronization and monotonic-clock costs but creates no
-goroutine and allocates no timer. The threshold-zero path creates no watchdog or
-timer, and a Chain with no participating post-commit hook retains its nil-adapter
-fast path.
-
-The timer callback performs only threshold publication and returns, including
-for a hook that remains permanently in flight; monitoring adds no second
-execution waiting on the hook and emits no periodic reminders. A transport-level
-test of that case would itself leak the deliberately non-returning hook
-goroutine; deterministic watchdog coverage pins callback termination, and the
-synchronous adapter call boundary carries that property to both transports.
-Reset races reject a queued callback from a previous invocation until the current
-invocation has actually reached its own deadline.
-
-The invocation-state mutex is released before logger or request-summary I/O. A
-separate publication lock preserves crossing-before-ending record order. The
-shipped adapters are synchronous and single-flight; if a future caller violates
-that invariant, its concurrent call runs unmonitored rather than letting
-observability manufacture a transport-visible panic.
-
-Focused benchmarks compare the enabled and unmonitored paths without imposing a
-machine-specific nanosecond ceiling. On the implementation host, enabled
-monitoring added fixed synchronization while retaining the same allocation
-counts: SSE remained at three existing frame-fold allocations per operation,
-and both WebSocket directions remained at zero allocations per operation.
+watchdog whose single callback timer is reset per synchronous invocation. An
+ordinary monitored invocation pays fixed synchronization and monotonic-clock
+costs but creates no goroutine and allocates no timer. The threshold-zero path
+creates no watchdog, and a Chain with no participating post-commit hook retains
+its nil-adapter fast path. The timer callback only publishes the crossing and
+returns, even for a hook that stays permanently in flight: monitoring adds no
+second execution waiting on the hook and emits no periodic reminders.
 
 Post-commit calls are synchronous and single-flight per SSE adapter or WebSocket
-direction. Consequently one direction can produce at most one crossing/ending
-pair per threshold interval. Every overrun is nevertheless reported: a
-sufficiently long stream may accumulate an unbounded number of pairs. That
-record-volume trade-off is accepted so a finite earlier overrun can never
-suppress a later permanently in-flight invocation.
+direction, so one direction produces at most one crossing/ending pair per
+threshold interval. If a future caller violates that invariant, its concurrent
+call runs unmonitored rather than letting observability manufacture a
+transport-visible panic. Every overrun is reported, so a sufficiently long
+stream may accumulate an unbounded number of pairs. That record-volume trade-off
+is accepted so a finite earlier overrun can never suppress a later permanently
+in-flight invocation.
+
+Locking, reset-race handling, and benchmark coverage are documented beside the
+implementation in `internal/shim/monitor.go` and its tests.
 
 ## Considered alternatives
 

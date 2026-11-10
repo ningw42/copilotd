@@ -9,36 +9,26 @@ approval remains unverified.
 The Usage meter is the sole usage-specific exception to copilotd's no-database
 state-at-rest policy. When explicitly enabled, it persists best-effort Turn
 observations in a private local SQLite database using the cgo-free
-`modernc.org/sqlite v1.59.0` driver, which embeds SQLite 3.53.4, paired with its
-required `modernc.org/libc v1.75.7`. The historical feasibility run used driver
-`v1.58.0` with libc `v1.75.6`; the reporting introduction used driver `v1.58.0`
-with libc `v1.75.7`, as recorded in the
-[reporting verification evidence](../verification/usage-reporting.md). Those dated
-results are not certification of the updated driver. The meter remains off by
+`modernc.org/sqlite` driver, which embeds SQLite. `modernc.org/libc` must be
+exactly the version that driver's own `go.mod` requires, because its transpiled
+code is generated against that libc; `go.mod` is the single authority for both
+pinned versions. The driver and libc versions behind each dated evidence run are
+recorded in the [driver feasibility evidence](../research/sqlite-feasibility/FINDINGS.md)
+and the [reporting verification evidence](../verification/usage-reporting.md).
+Those dated results are not certification of a later driver. The meter remains off by
 default, creates no usage files while disabled, requires no companion service,
 and does not change
 the in-memory-only treatment of Copilot tokens or cached values.
 
 ## Reporting extension
 
-[ADR-0019](0019-serve-unauthenticated-usage-reports.md) and the
-[Usage reporting design](../design/2026-09-07-usage-reporting-design.md) extend
-the original external-query-only scope with daemon-owned reports and an HTTP
-terminal client. Reports support Anthropic, OpenAI, or both, with all calendar
-periods, named zones, and independent month defaults (#207–#209). #210 adds
-conservative terminal-local discovery on supported Unix configurations; #256
-adds representative native-Windows detection from direct Win32 evidence and
-pinned CLDR 48 mappings. #211 adds exact Reported-model filters, detailed
-native tables, and validated original-byte JSON. #212 retains integrated
-contention/lifecycle evidence. #213 adds executable acceptance and native CI;
-actual target/revision certification is tracked in its retained results, not
-inferred from the pipeline. The estimated-cost extension keeps prices and money
-out of SQLite: one current accepted in-memory snapshot values committed native
-observations at report time, selecting any context tariff per Turn from its
-persisted complete Surface-native input. A later refresh can therefore revalue
-history without changing stored Turns or adding a migration. The CLI's period
-cost totals are presentation only. The persistence, file, and finalization
-policies below remain unchanged.
+[ADR-0019](0019-serve-unauthenticated-usage-reports.md) extends the original
+external-query-only scope with daemon-owned reports and an HTTP terminal client.
+Estimated cost keeps prices and money out of SQLite: one current accepted
+in-memory snapshot values committed native observations at report time, so a
+later refresh can revalue history without changing stored Turns or adding a
+migration. The persistence, file, and finalization policies below remain
+unchanged.
 
 ## Why SQLite
 
@@ -138,9 +128,6 @@ process exit. The same finalizer applies after bind or serve failure once the
 store has opened.
 
 The [Usage meter design](../design/2026-07-26-token-usage-meter-design.md)
-details these trade-offs. The private store and buffered OpenAI recording path
-land in #197, buffered
-Anthropic recording lands in #198, OpenAI SSE completion recording lands in
-#199, OpenAI WebSocket completion recording lands in #200, and Anthropic SSE
-completion recording lands in #201. All five supported paths now use this
-unchanged persistence policy.
+details these trade-offs and the per-issue rollout. All five supported recording
+paths — buffered, SSE, and WebSocket OpenAI, and buffered and SSE Anthropic —
+use this persistence policy.

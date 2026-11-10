@@ -1,20 +1,11 @@
 # Serve daemon-owned Usage reports without authentication on the existing listener
 
-**Status:** maintainer-approved direction on 2026-09-07; native Anthropic, OpenAI,
-and combined reports with all calendar periods, explicit named zones, and month
-range defaults implemented in #207–#209; #210 adds conservative Unix terminal-local
-timezone discovery. #256 revises native Windows omission from explicit-only to a
-documented representative CLDR 48 mapping derived from direct Win32 evidence.
-#211 adds exact Reported-model filters, detailed native tables, and validated
-original-byte JSON.
-#212 retains integrated concurrency/lifecycle evidence; #213 adds complete
-executable acceptance and the native pipeline. The estimated-cost follow-up adds
-daemon-owned valuation in #236 and its atomic additive version-1 HTTP contract in
-#237; #238 adds CLI cost presentation and deterministic executable acceptance.
-Actual native release certification is recorded per revision on #213, not implied
-by implementation status. Protocol
-details and verification gates live in the
-[Usage reporting design](../design/2026-09-07-usage-reporting-design.md).
+**Status:** accepted (maintainer-approved direction on 2026-09-07) and
+implemented. Protocol details, the per-issue rollout, and verification gates
+live in the [Usage reporting design](../design/2026-09-07-usage-reporting-design.md),
+the [estimated-cost design](../design/2026-09-11-usage-cost-reporting-design.md),
+and the [verification guide](../verification/usage-reporting.md). Native release
+certification is recorded per revision on #213, not implied by this status.
 
 copilotd exposes calendar aggregates of its configured usage database through
 an unauthenticated local HTTP handler on the same listener as inference.
@@ -48,87 +39,38 @@ not an inference-authentication exemption accidentally inherited from probes.
 ## Consequences
 
 - Anyone who can reach an enabled report route can read aggregate history,
-  including model identities and activity patterns. An inference API key does
-  not restrict reports. Default loopback binding, missing CORS headers, and
-  private database permissions are not substitutes for network access policy.
+  including model identities, activity patterns, current valuation, and pricing
+  coverage. An inference API key does not restrict reports. Default loopback
+  binding, missing CORS headers, and private database permissions are not
+  substitutes for network access policy.
 - Reports cover all persisted Turns in the configured database, including
   other writers and earlier process runs. They establish neither per-process
   attribution nor complete consumption or Copilot charges.
 - Reads use separate read-only SQLite access and never migrate, force a flush,
   or borrow the writer's dedicated connection. Report failure does not change
   inference readiness or writer admission. Work/admission limits reduce normal
-  interference but are not resource isolation from untrusted traffic.
-- The CLI defaults to the terminal host's named timezone and sends it explicitly.
-  Ambiguous or unsupported local detection requires `--timezone`; neither a
-  current UTC offset nor the daemon's local clock silently replaces that choice.
-  Unix filesystem discovery initially evaluates every recognized root for
-  ambiguity, forbidden provenance, and unreadable evidence. After one name is
-  selected, its final consistency check is deliberately limited to the selected
-  filename path and the root alias that established that name. Selected directory
-  identity/type, symlink, and TZif changes still fail; unrelated directory
-  size/mtime activity and later changes to unused roots do not. Native Windows
-  instead uses direct `GetDynamicTimeZoneInformation` key/disabled-DST evidence
-  plus usable `GetUserDefaultGeoName` territory. It selects the first ordered
-  pinned-CLDR-48 exact-territory candidate, falling back to that key's first `001`
-  candidate when territory is unavailable, malformed, or unmapped. This is a
-  representative mapping policy, not discovery of a unique city.
+  interference but are not resource isolation from untrusted traffic. External
+  SQLite inspection remains supported alongside the bounded HTTP path.
+- The daemon owns calendar arithmetic; only an accepted IANA-style timezone name
+  crosses HTTP. The CLI defaults to the terminal host's named timezone and sends
+  it explicitly. Ambiguous or unsupported local detection requires `--timezone`
+  before any HTTP request; neither a current UTC offset, the daemon's local
+  clock, nor UTC silently replaces that choice. Explicit flag, environment, and
+  TOML values keep precedence. Unix discovery is conservative and fails on
+  ambiguous or unreadable evidence. Native Windows uses a representative mapping
+  from direct Win32 evidence through pinned CLDR data — a mapping policy, not
+  discovery of a unique city. The exact discovery rules are in the design's
+  timezone section and [CONFIGURATION.md](../../CONFIGURATION.md).
+- Estimated cost is daemon-owned valuation at report time. There is no
+  HTTP-side or CLI-side pricing, no report-time network fetch, and no Catalog
+  normalization or Requested-model substitution. The extension is additive on
+  the same route and schema version: a client treats a wholly absent extension
+  as an older daemon and rejects recognized partial shapes.
+- JSON output is the validated original response bytes. Terminal `Total` rows
+  are presentation only, derived from validated rows with checked arithmetic,
+  and never replace the server's aggregates. There is no cross-Surface total.
 - The CLI requires a running reachable daemon; offline history and reporting
   while the Usage meter is disabled remain outside this design.
 - The HTTP handler has no upstream dependency and is not a project Endpoint,
   Route, or Surface. It retains local errors instead of borrowing an inference
   error dialect, and introduces no change to forwarded Copilot responses.
-
-The implementation serves Anthropic, OpenAI, or both (the default) with daily
-groups by default, all four calendar periods, explicit named zones, independent
-current-month date defaults, and period-grouped native terminal sections. Both
-selected histories share one snapshot and request-wide limits. Omitted report
-timezones now use supported configuration visible to the CLI process on Linux/macOS;
-SSH/container/WSL execution does not discover a physical workstation outside it.
-Native Windows uses only the direct Win32 and pinned mapping policy above; Windows
-`TZ`, localized names, current offsets, `time.Local`, PowerShell, and .NET are not
-production identity inputs. Failed dynamic-timezone calls, empty/custom/unmapped
-keys, disabled dynamic daylight behavior, missing defaults, unloadable selected names, and
-unsupported/ambiguous Unix configurations require an explicit name before HTTP;
-there is no silent UTC fallback. Explicit flag/environment/selected-TOML values
-retain precedence and validation. The report protocol and daemon-owned calendar
-arithmetic are unchanged: only the accepted IANA-style name crosses HTTP.
-Native evidence and its platform limits are recorded in the
-[verification guide](../verification/usage-reporting.md) and revision-specific
-#213 run results; failed runs retain diagnostic artifacts, while successful runs
-do not. Cross-compilation alone is not certification. Exact UTF-8 model filters,
-detailed native period/range tables, and original-byte JSON output now share the
-same report and client validator. Terminal tables derive a presentation-only
-`Total` for each period from its validated Reported-model rows; this does not
-change or replace the server's per-model and whole-range aggregates or the
-original-byte JSON. The #237 extension preserves the route, schema version, and
-native fields while adding identified pricing provenance, exact USD cost/coverage
-at every aggregate level, and row/model pricing matches. #241 selects any
-models.dev context tariff per persisted Turn from complete Surface-native input
-and removes the presentation-only `pricing.context_policy` member without
-replacing it; the client tolerates that member from an older daemon as additive
-data. #238 initially placed the Estimated-cost column
-after `Model(s)` in each primary Surface table and added exact-before-rounding
-period cost totals, coverage notes, provenance/caveat text, and resolution details
-without repeating money in secondary tables or introducing a cross-Surface total.
-The current terminal presentation labels that column `Est. Cost ($)`, prefixes
-numeric values with `$`, and ends each primary table with the validated per-Surface
-whole-range `Total` in the period column with `All` in `Model(s)`, while each
-period aggregate uses `All` in `Model(s)`; it still introduces no cross-Surface
-total. #248
-adds per-Turn OpenAI response-tier valuation inside the pricing module: bounded
-`fast`/`priority` evidence selects accepted explicit Fast base rates and exact
-same-model/same-snapshot derived Fast context rates. It adds no report fields,
-coverage reasons, protocol version, CLI tier details, or report-time network
-work. A new client represents a wholly absent extension as an older daemon and rejects
-recognized partial shapes; unknown additive fields and validated original bytes
-remain intact. Terminal-only native and monetary coverage counters use checked
-int64 arithmetic; monetary amounts use the exact pricing representation. Overflow
-in independently valid but inconsistent rows fails text rendering before stdout;
-JSON still emits its validated original bytes. No Catalog normalization,
-Requested-model substitution, HTTP-side/CLI-side pricing, or report-time network
-fetch is introduced. Because the report path remains unauthenticated, model
-identities, activity patterns, current valuation, and pricing coverage share the
-same deliberate network disclosure.
-External SQLite inspection remains supported alongside the new
-bounded HTTP path. [#212 contention/lifecycle evidence](../research/2026-09-08-usage-reporting-concurrency.md)
-and #213's native release gate remain distinct from feature implementation.
