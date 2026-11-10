@@ -2,8 +2,8 @@
 
 **Status:** accepted
 
-copilotd's configuration module declares each `serve`/`login` setting **exactly
-once**, as a typed descriptor — a generic `field[C, T]` behind a type-erased
+copilotd's configuration module declares each `serve`/`login`/`usage` setting
+**exactly once**, as a typed descriptor — a generic `field[C, T]` behind a type-erased
 `spec[C]` interface — and a single generic engine derives every per-setting
 aspect from that one row: default value, `ff` flag registration, env/TOML overlay
 and parse, precedence, `LogValue` redaction, and validation. Precedence
@@ -14,7 +14,7 @@ re-encoded per field. The mechanism uses **compiler-checked generics
 
 ## Why
 
-Today each setting is spread across roughly eight parallel sites — a `defaultXxx`
+Before this decision each setting was spread across roughly eight parallel sites — a `defaultXxx`
 const, the struct field, flag registration, the default-init literal, the flag
 layer, the env/file parse ladder, `validate`, and the `LogValue` enumeration —
 kept in agreement only by discipline. Nothing forces them to match, so they drift

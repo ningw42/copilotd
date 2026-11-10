@@ -86,8 +86,8 @@ The existing request and client-Message hooks own the transform; the Forwarder
 stays payload-opaque outside its existing seams. There are no response hooks
 for this Shim and no changes to usage persistence or valuation.
 
-The request-only Alteration must be recorded in the divergence ledger when
-implemented. No output claims that the configured target was accepted or that
+The request-only Alteration is recorded in the
+[divergence ledger](../divergence-ledger.md). No output claims that the configured target was accepted or that
 a particular service tier was delivered.
 
 ## Trade-off and prior rejection

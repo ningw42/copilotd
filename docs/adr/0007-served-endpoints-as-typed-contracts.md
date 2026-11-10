@@ -1,6 +1,6 @@
 # Model served endpoints as typed contracts with a facts-only boundary
 
-**Status:** proposed
+**Status:** accepted
 
 copilotd models each served operation as a single typed **Endpoint contract** in
 the dependency-light `internal/endpoint` package. An Endpoint is an **inbound

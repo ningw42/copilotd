@@ -28,10 +28,9 @@ Copilot sent is copilotd's baseline behavior. Making that discipline part of the
 hook signatures lets the compiler prevent routine post-commit error propagation
 rather than relying on review.
 
-This decision is not based on current usage counts. The pre-commit hooks also have
-no shipped implementations, yet their errors remain sound because they can be
-rendered before commit. Current usage only makes this contract change inexpensive;
-the commit boundary makes it correct.
+This decision is not based on usage counts. Pre-commit hook errors remain sound
+because they can be rendered before commit, whether or not a shipped Shim returns
+one; the commit boundary, not usage, makes this contract correct.
 
 ## Considered options
 
@@ -69,8 +68,9 @@ the commit boundary makes it correct.
 - Promptness and SSE terminal position remain review-enforced authoring
   obligations; this decision adds no execution-time bound and no framework
   policing of post-terminal content.
-- [ADR-0010](0010-bidirectional-websocket-message-transform-seam.md) is amended,
-  not superseded. Its bidirectional seam, fold order, one-to-at-most-one
+- The WebSocket seam in
+  [ADR-0006](0006-openai-responses-websocket-transport.md) is amended, not
+  superseded. Its bidirectional seam, fold order, one-to-at-most-one
   cardinality, and payload-opacity decisions remain in force; only routine
   transform errors are removed, leaving panic as the shim-originated fatal path.
 

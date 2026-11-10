@@ -21,24 +21,13 @@ the in-memory-only treatment of Copilot tokens or cached values.
 
 ## Reporting extension
 
-[ADR-0019](0019-serve-unauthenticated-usage-reports.md) and the
-[Usage reporting design](../design/2026-09-07-usage-reporting-design.md) extend
-the original external-query-only scope with daemon-owned reports and an HTTP
-terminal client. Reports support Anthropic, OpenAI, or both, with all calendar
-periods, named zones, and independent month defaults (#207–#209). #210 adds
-conservative terminal-local discovery on supported Unix configurations; #256
-adds representative native-Windows detection from direct Win32 evidence and
-pinned CLDR 48 mappings. #211 adds exact Reported-model filters, detailed
-native tables, and validated original-byte JSON. #212 retains integrated
-contention/lifecycle evidence. #213 adds executable acceptance and native CI;
-actual target/revision certification is tracked in its retained results, not
-inferred from the pipeline. The estimated-cost extension keeps prices and money
-out of SQLite: one current accepted in-memory snapshot values committed native
-observations at report time, selecting any context tariff per Turn from its
-persisted complete Surface-native input. A later refresh can therefore revalue
-history without changing stored Turns or adding a migration. The CLI's period
-cost totals are presentation only. The persistence, file, and finalization
-policies below remain unchanged.
+[ADR-0019](0019-serve-unauthenticated-usage-reports.md) extends the original
+external-query-only scope with daemon-owned reports and an HTTP terminal client.
+Estimated cost keeps prices and money out of SQLite: one current accepted
+in-memory snapshot values committed native observations at report time, so a
+later refresh can revalue history without changing stored Turns or adding a
+migration. The persistence, file, and finalization policies below remain
+unchanged.
 
 ## Why SQLite
 
@@ -138,9 +127,6 @@ process exit. The same finalizer applies after bind or serve failure once the
 store has opened.
 
 The [Usage meter design](../design/2026-07-26-token-usage-meter-design.md)
-details these trade-offs. The private store and buffered OpenAI recording path
-land in #197, buffered
-Anthropic recording lands in #198, OpenAI SSE completion recording lands in
-#199, OpenAI WebSocket completion recording lands in #200, and Anthropic SSE
-completion recording lands in #201. All five supported paths now use this
-unchanged persistence policy.
+details these trade-offs and the per-issue rollout. All five supported recording
+paths — buffered, SSE, and WebSocket OpenAI, and buffered and SSE Anthropic —
+use this persistence policy.

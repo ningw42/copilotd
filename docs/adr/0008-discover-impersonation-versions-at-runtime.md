@@ -2,11 +2,12 @@
 
 **Status:** accepted; cache component and readiness shape amended by ADR-0009
 
-**Amendment:** ADR-0009 generalizes the concrete `versionFact` into
-`cache.Value[string]` instances driven by the process-wide cache registry. The
-discovery behavior, embedded fallbacks, and cadence remain unchanged. Per-fact
-freshness moves from `impersonation.discovery` into the uniform `/readyz`
-`caches` block; `impersonation.effective_headers` remains in place.
+**Amendment:** ADR-0009 holds the two facts in `cache.Value[string]` instances
+driven by the process-wide cache registry, replacing the original concrete
+`versionFact`. The discovery behavior, embedded fallbacks, and cadence remain
+unchanged. Per-fact freshness moves from `impersonation.discovery` into the
+uniform `/readyz` `caches` block; `impersonation.effective_headers` remains in
+place.
 
 copilotd impersonates the VS Code Copilot client through a fixed header set. Two of
 those headers carry version numbers that rot — `Editor-Version` (the VS Code
@@ -51,8 +52,7 @@ the prior stance — recorded in `config.go` §6.7 — that these were operator-
   in-memory model. The cache is memory-only.
 - **Runtime discovery with an embedded fallback, memory-only** (chosen): the two
   facts self-update with zero operator action and the fallback guarantees a
-  never-worse baseline. The first implementation used a concrete `versionFact`;
-  ADR-0009 later generalized it after the Codex consumer supplied the second use.
+  never-worse baseline.
 
 ## Consequences
 
@@ -82,8 +82,5 @@ the prior stance — recorded in `config.go` §6.7 — that these were operator-
   `--copilot-user-agent` are removed in favor of the bare-version fallbacks
   `--vscode-version` and `--plugin-version`; `--impersonation-refresh-interval`
   (default 24h, `0` disables discovery) is added. Pre-1.0, no aliases are kept.
-- The former concrete `versionFact` is generalized by ADR-0009 into the cache
-  registry once the Codex `models.json` consumer supplies the second matching
-  use case.
 
 See `docs/design/2026-07-20-impersonation-version-discovery-design.md`.

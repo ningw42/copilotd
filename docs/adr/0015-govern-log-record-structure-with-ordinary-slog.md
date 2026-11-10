@@ -66,17 +66,17 @@ not level, not Info counts, not method choice from an in-scope context.
 ## Why
 
 Structure is what an operator queries and what drifts silently; message text is
-what a human reads and fixes one line at a time. Today it is folklore: 33
-production emissions across 10 files invent their own keys, none names its
-package, five default-logger fallbacks hide an absent logger, and level is
-habit. Each obligation therefore sits where its fact already lives: ownership at
+what a human reads and fixes one line at a time. Before this decision it was
+folklore: 33 production emissions across 10 files invented their own keys, none
+named its package, five default-logger fallbacks hid an absent logger, and level
+was habit. Each obligation therefore sits where its fact already lives: ownership at
 construction, scope at the boundary that learns it, level at the site that knows
 the consequence.
 
 ## Considered options
 
-- **Convention and review only:** rejected — the current tree is what convention
-  produced; an omission is invisible in a diff.
+- **Convention and review only:** rejected — the pre-conversion tree was what
+  convention produced; an omission is invisible in a diff.
 - **A copilotd logger type with its own methods:** rejected — it moves each
   decision away from the site that owns it, and a plain constant registry left
   nothing to enforce.
@@ -109,8 +109,9 @@ the consequence.
   filtering; a second redaction mechanism, since ADR-0012's `LogValue` already
   keeps config secrets out; and adapting third-party records to synthesize a
   Component.
-- The tree does not comply today; the conversion is designed separately and
-  lands atomically with its gate, so no merged state claims a rule it violates.
+- The tree complies: the conversion landed atomically with its gate
+  (`internal/logging/structure_test.go`), so no merged state claimed a rule it
+  violated.
 
-The decisions sit on issue #139 and its closed children; the conversion is
+The decisions sit on issue #139 and its closed children; the conversion was
 designed under #149.
