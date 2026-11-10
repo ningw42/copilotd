@@ -2,9 +2,9 @@
 {
   projectRootFile = "flake.nix";
 
-  # Nix — we write it now.
+  # Nix — the flake and its hook/formatter modules.
   programs.nixfmt.enable = true;
 
-  # Go — the project language. No-ops until the first .go file lands.
+  # Go — the project language.
   programs.gofmt.enable = true;
 }

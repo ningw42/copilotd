@@ -79,9 +79,11 @@
           ldflags = [
             "-s"
             "-w"
-            # Version is deliberately left at its "dev" default (§8): there is no
-            # release-versioning scheme yet. Only Commit and Date are sourced
-            # from the flake, so the build stays reproducible.
+            # Version is deliberately left at its "dev" default (§8): release
+            # binaries are stamped from the pushed tag by
+            # .github/workflows/release.yml, which a flake build cannot see.
+            # Only Commit and Date are sourced from the flake, so the build
+            # stays reproducible.
             "-X github.com/ningw42/copilotd/internal/build.Commit=${commit}"
             "-X github.com/ningw42/copilotd/internal/build.Date=${date}"
           ];

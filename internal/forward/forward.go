@@ -2,10 +2,10 @@
 // GitHub Copilot and copies the response back with minimal interpretation. It is
 // deliberately Copilot-agnostic — it sees only the shared upstream Caller and
 // never learns how its credential was minted. Inference requests use the
-// bounded shim/SSE path;
-// support requests use a focused streaming passthrough path. Both apply the
-// centrally governed upstream header policy and copy responses body-verbatim.
-// Only copilotd-originated signals are synthesized via apierror.
+// bounded shim/SSE path; support requests use a focused streaming passthrough
+// path. Both apply the centrally governed upstream header policy and copy
+// responses body-verbatim. Only copilotd-originated signals are synthesized
+// via apierror.
 package forward
 
 import (
