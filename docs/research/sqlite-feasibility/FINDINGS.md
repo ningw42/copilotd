@@ -58,8 +58,8 @@ Primary driver sources at the selected tag:
   copilotd targets as supported with SQLite 3.53.4.
 - [`go.mod`](https://gitlab.com/cznic/sqlite/-/blob/v1.58.0/go.mod)
   requires Go 1.25 and pins `modernc.org/libc v1.75.6`; its warning requires the
-  exact matching libc version downstream. The historical probe and current root
-  graph both use it.
+  exact matching libc version downstream. The historical probe and root graph
+  at the migration both used it; current pins live in the root `go.mod`.
 - [`CHANGELOG.md`](https://gitlab.com/cznic/sqlite/-/blob/v1.58.0/CHANGELOG.md)
   identifies v1.58.0 as the SQLite 3.53.4 update, records support for
   `darwin/arm64`, `windows/amd64`, and `windows/arm64`, and states that the driver
@@ -83,7 +83,7 @@ its descriptor before SQLite opens or locks the file.
 
 Run from the repository root, with Go supplied by `nix develop`. On 2026-09-06,
 the transferred driver/admission/process subset below passed on Linux both
-normally and under `-race`, three repetitions each. These are current root-test
+normally and under `-race`, three repetitions each. These are dated root-test
 results, separate from the 2026-09-05 timings and probe builds. They add no native
 Windows/Darwin evidence or substitute for final four-target feature builds.
 
@@ -92,8 +92,8 @@ production migration/filesystem/writer tests:
 
 | Root test file | Distinct check |
 | --- | --- |
-| [`driver_characterization_test.go`](../../../internal/usage/sqlitestore/driver_characterization_test.go) | Native immediate WAL `SQLITE_BUSY` despite a 2000 ms timeout; 500 ms native wait versus a 50 ms context, followed by connection reuse. Upgrade-sensitive driver characterization, **not a requirement that future drivers remain slow to cancel**. |
-| [`admission_test.go`](../../../internal/usage/sqlitestore/admission_test.go) | WAL, NORMAL, full runtime `busy_timeout=5000`, the writer-owned migrated schema version, and SQLite 3.53.4 read from the actual physical connection returned by production admission, not an unrelated external connection. The dated 2026-09-06 run above exercised `user_version=2`; after migration 3 the current assertion is `user_version=3`, without relabeling that historical run as new evidence. |
+| [`driver_characterization_test.go`](../../../internal/usage/sqlitestore/driver_characterization_test.go) | Native immediate WAL `SQLITE_BUSY` despite a 2000 ms timeout; prompt cancellation of a contended transaction with a 50 ms context despite a 2000 ms native timeout, followed by connection reuse. Updated by the 2026-11-10 driver evidence below; the earlier slow-cancellation observation remains historical. |
+| [`admission_test.go`](../../../internal/usage/sqlitestore/admission_test.go) | WAL, NORMAL, full runtime `busy_timeout=5000`, the writer-owned migrated schema version, and SQLite 3.54.1 read from the actual physical connection returned by production admission, not an unrelated external connection. The dated 2026-09-06 run above exercised `user_version=2`; after migration 3 the current assertion is `user_version=3`, without relabeling that historical run as new evidence. |
 | [`process_test.go`](../../../internal/usage/sqlitestore/process_test.go) | Two OS subprocesses both ready before releasing fresh `Store.Open`; each records a Turn and performs bounded `Close`; shared schema and both rows verified afterward. Child cleanup is bounded. The barrier attempts concurrency, not proof of measured overlap inside SQLite. |
 | [`startup_contention_test.go`](../../../internal/usage/sqlitestore/startup_contention_test.go) | Real production startup first contends at WAL, then at `BEGIN IMMEDIATE`; physical timeout readback proves the later stage receives a shrinking remainder of one five-second budget. |
 | [`flush_test.go`](../../../internal/usage/sqlitestore/flush_test.go) | Real-store fill flush observed independently of the timer and shutdown. |
@@ -151,6 +151,39 @@ use `llvm-objdump --macho --dylibs-used` (or `otool -L` on Darwin); for PE use
 `llvm-readobj --file-headers --coff-imports`. These object-inspection tools must
 be available separately; there is no retained research inspector. Cross-building
 and inspecting an executable do **not** execute it on Windows or Darwin.
+
+## Driver upgrade evidence (2026-11-10)
+
+The root dependency upgrade selects `modernc.org/sqlite v1.62.0` and exactly
+`modernc.org/libc v1.80.1`, as required by the driver's tagged
+[`go.mod`](https://gitlab.com/cznic/sqlite/-/blob/v1.62.0/go.mod). The independently
+latest libc v1.80.2 is deliberately not selected. The driver's
+[`changelog`](https://gitlab.com/cznic/sqlite/-/blob/v1.62.0/CHANGELOG.md) records
+SQLite 3.54.1 and context-interruptible native lock waits introduced in v1.61.0.
+
+With Go 1.27.3 on Linux amd64, the real store/report suites passed. Three repeated
+driver/admission/process runs observed WAL activation returning `SQLITE_BUSY` in
+57–73 microseconds despite a 2000 ms native timeout; a contended `BEGIN IMMEDIATE`
+returned `context.DeadlineExceeded` in 50.7–50.8 ms with a 50 ms context and a
+2000 ms native timeout. The same connection remained usable and acquired a new
+transaction after the blocker released its lock. Production admission read back
+SQLite 3.54.1, WAL, NORMAL, `busy_timeout=5000`, and schema version 3.
+
+The local native verifier
+(`nix develop -c go run ./scripts/verify-usage -target linux/amd64 -runner local-nix`)
+passed with `CGO_ENABLED=0`, including the uncached full suite
+and mandatory test accounting. The full race suite, `go vet`, module checksum
+verification, tidy check, and local `nix flake check` also passed. All four
+release-target binaries built with `CGO_ENABLED=0`; `go version -m` confirmed the
+selected driver/libc pair and target in each, and `go tool nm` found the linked
+SQLite driver's `Open` symbol. Windows and Darwin were not executed locally;
+these cross-builds do not renew native platform certification.
+
+The cancellation characterization now requires prompt cancellation rather than
+preserving the historical 500 ms delay. The product still caps native waits by
+the remaining budget and retains its bounded finalizer: a cancellable lock wait
+does not make arbitrary filesystem or log I/O interruptible. The dated original
+results below are unchanged and are not recertification of this driver.
 
 ## Historical release-target build and artifact evidence (2026-09-05)
 
@@ -252,10 +285,12 @@ connection used **500 ms** native timeout and a **50 ms** context for contended
 **501.02113 ms**, then remained usable for `SELECT 1`.
 
 The initial exploratory prompt-cancellation assertion had failed after
-**5.004477578 s** with a five-second native timeout. The maintained driver test
-characterizes the observed 500/50 ms behavior and subsequent connection reuse;
-a future driver that cancels promptly should trigger reevaluation, not be
-rejected as violating a product requirement to stay slow.
+**5.004477578 s** with a five-second native timeout. The transferred driver test
+initially characterized the observed 500/50 ms behavior and subsequent connection
+reuse.
+The [2026-11-10 upgrade](#driver-upgrade-evidence-2026-11-10) reevaluated that
+expectation for prompt cancellation rather than preserving slow cancellation as
+a product requirement.
 
 Consequence for this candidate: cap native `busy_timeout` to the operation's
 current remaining budget **before every potentially blocking lock operation**.

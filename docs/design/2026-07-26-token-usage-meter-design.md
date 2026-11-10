@@ -793,7 +793,9 @@ Costs and lifecycle obligations:
    cleanup. Before every potentially blocking native stage—including transaction
    acquisition, write, and commit—it recomputes the remaining monotonic budget
    and caps native `busy_timeout` to that remainder in addition to passing the
-   context. `ExecContext` alone does not preempt the driver's busy wait.
+   context. The original driver's busy wait was not promptly context-interruptible;
+   the [current driver evidence](../research/sqlite-feasibility/FINDINGS.md#driver-upgrade-evidence-2026-11-10)
+   records prompt cancellation. Native timeout caps remain an explicit policy.
 5. A deadline, storage failure, or ambiguous batch result is not replayed. Every
    queued or not-confirmed row is conservatively counted as lost; only a batch
    confirmed committed is excluded from loss.

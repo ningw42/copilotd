@@ -38,7 +38,7 @@ func TestAdmissionConfiguresActualDedicatedConnection(t *testing.T) {
 		{"PRAGMA busy_timeout", "5000"}, // Full runtime policy, not the last startup remainder.
 		{"PRAGMA user_version", strconv.Itoa(SchemaVersion())},
 		// Upgrade-sensitive identity check for the driver selected in root go.mod.
-		{"SELECT sqlite_version()", "3.53.4"},
+		{"SELECT sqlite_version()", "3.54.1"},
 	} {
 		var got string
 		if err := conn.QueryRowContext(context.Background(), check.query).Scan(&got); err != nil {

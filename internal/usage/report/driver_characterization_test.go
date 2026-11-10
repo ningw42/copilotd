@@ -56,7 +56,7 @@ func TestPinnedDriverFirstReadOnlyWALConnections(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		if version != "3.53.4" || journal != "wal" || encoding != "UTF-8" || busy != 100 || only != 1 || value != 7 {
+		if version != "3.54.1" || journal != "wal" || encoding != "UTF-8" || busy != 100 || only != 1 || value != 7 {
 			t.Fatalf("first read-only WAL connection: %s %s %s %d %d %d", version, journal, encoding, busy, only, value)
 		}
 		if _, err := conn.ExecContext(context.Background(), "INSERT INTO history VALUES(8)"); err == nil {

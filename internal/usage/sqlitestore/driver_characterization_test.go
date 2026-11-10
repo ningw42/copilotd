@@ -45,7 +45,7 @@ func TestDriverWALActivationReturnsImmediateBusyDespiteNativeTimeout(t *testing.
 	}
 }
 
-func TestDriverCancellationWaitsForNativeBusyTimeout(t *testing.T) {
+func TestDriverCancellationInterruptsNativeBusyTimeout(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "usage.db")
 	blocker := driverConnection(t, path)
 	var mode string
@@ -58,12 +58,12 @@ func TestDriverCancellationWaitsForNativeBusyTimeout(t *testing.T) {
 	defer blocker.ExecContext(context.Background(), "ROLLBACK")
 
 	challenger := driverConnection(t, path)
-	if _, err := challenger.ExecContext(context.Background(), "PRAGMA busy_timeout=500"); err != nil {
+	if _, err := challenger.ExecContext(context.Background(), "PRAGMA busy_timeout=2000"); err != nil {
 		t.Fatal(err)
 	}
 	var timeout int
-	if err := challenger.QueryRowContext(context.Background(), "PRAGMA busy_timeout").Scan(&timeout); err != nil || timeout != 500 {
-		t.Fatalf("native busy_timeout = %d, %v; want 500ms", timeout, err)
+	if err := challenger.QueryRowContext(context.Background(), "PRAGMA busy_timeout").Scan(&timeout); err != nil || timeout != 2000 {
+		t.Fatalf("native busy_timeout = %d, %v; want 2000ms", timeout, err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
@@ -74,8 +74,12 @@ func TestDriverCancellationWaitsForNativeBusyTimeout(t *testing.T) {
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("contended BEGIN error = %v, want context deadline exceeded", err)
 	}
-	if elapsed < 400*time.Millisecond || elapsed > 2*time.Second {
-		t.Errorf("contended BEGIN took %s, want observed native wait near 500ms despite 50ms context", elapsed)
+	// Since v1.61.0 the driver watches cancellation inside the native busy
+	// handler. Allow scheduling slack while distinguishing it from waiting
+	// for the full two-second native timeout. Keep the reuse checks below:
+	// prompt cancellation must not leave the connection unusable.
+	if elapsed >= time.Second {
+		t.Errorf("contended BEGIN took %s, want cancellation before the 2s native timeout with a 50ms context", elapsed)
 	}
 	var one int
 	if err := challenger.QueryRowContext(context.Background(), "SELECT 1").Scan(&one); err != nil || one != 1 {

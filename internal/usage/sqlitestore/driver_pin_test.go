@@ -16,8 +16,8 @@ import (
 // review gate: bump the driver with `go get modernc.org/sqlite@<version>`, then
 // update both together.
 const (
-	pinnedDriverVersion = "v1.59.0"
-	requiredLibcVersion = "v1.75.7"
+	pinnedDriverVersion = "v1.62.0"
+	requiredLibcVersion = "v1.80.1"
 )
 
 func TestLibcMatchesTheVersionTheDriverRequires(t *testing.T) {
