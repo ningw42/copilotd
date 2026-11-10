@@ -1,28 +1,28 @@
 {
   "release": {
     "repository": "openai/codex",
-    "tag": "rust-v0.164.0",
-    "peeled_commit": "6aaac694803004a63c6f393d153c96d22521a6b9",
-    "audit_date": "2026-10-25",
-    "github_release_id": 421457270,
-    "published_at": "2026-10-23T04:48:10Z",
-    "tag_object": "fe3b29455488c2e189e43ad5526a107900c5e1b7"
+    "tag": "rust-v0.167.0",
+    "peeled_commit": "086ccc833bc9cf01024ad2dd6af7dbd421b6bf9a",
+    "audit_date": "2026-11-10",
+    "github_release_id": 435979892,
+    "published_at": "2026-11-06T01:40:00Z",
+    "tag_object": "cb41599ccbe371272892f156286a236aa097bada"
   },
   "models": {
     "source_path": "codex-rs/models-manager/models.json",
-    "git_blob": "72a78e0eacf94103f4babda2a5245aba4ce848c1",
-    "sha256": "943ca7fe1d19ed019054158303f0dbbd80b3bef43b3aa425a71aa7cb3fb52c2b",
-    "size": 472072,
+    "git_blob": "489ebe3f2483348641a16160ce8491dd077eabca",
+    "sha256": "1384625c0b6b3e67d3c60da29becea2b017f2c283fc1e2d05b8edafb4698eb10",
+    "size": 539696,
     "audited_bundled_default": "gpt-6.1-sol"
   },
   "manifest": {
     "asset_name": "codex-package_SHA256SUMS",
-    "github_asset_id": 667987181,
-    "sha256": "28fa3c96ec1b66c34c0a5b8ac26e9c4d2dcbb82d0b0d66bd0a8108c0f4b1e522"
+    "github_asset_id": 715502731,
+    "sha256": "5d8ef91a8b6396158fa135e4e890841535a601c113e087822b228b20166b9a4d"
   },
   "executable_audit": {
     "asset_name": "codex-x86_64-unknown-linux-musl.zst",
-    "archive_sha256": "be6825b7a9a1511d10093df93715c1b5b75d1b543613f5c42e7cc1141688d7f5",
-    "executable_sha256": "b93f6811d3f653f0fb83be4050d857fb9abbb111dfa2ce160563327daff7f306"
+    "archive_sha256": "3911007fc94091b5eea2a10512b2b4fc52b673bc0cb3026e4cbff0cd518dd060",
+    "executable_sha256": "cdcb45aaa01d0f14e298985e09465aebccd47f64ecd298aea44814af7b62bbda"
   }
 }
