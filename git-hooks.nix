@@ -24,5 +24,14 @@
   detect-private-keys.enable = true;
 
   # Enforce Conventional Commits (runs at the commit-msg stage).
-  convco.enable = true;
+  convco = {
+    enable = true;
+    # Work around nixpkgs' missing system libgit2 dependency for convco 0.7.2.
+    # TODO(removal): drop this override once nixpkgs supplies the SHA-256-enabled libgit2.
+    package = pkgs.convco.overrideAttrs (old: {
+      buildInputs = old.buildInputs ++ [
+        (pkgs.libgit2.override { withExperimentalSha256 = true; })
+      ];
+    });
+  };
 }
