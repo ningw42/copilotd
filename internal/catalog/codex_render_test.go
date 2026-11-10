@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -826,7 +827,7 @@ func TestRenderCodexSkipsBadExplicitReviewerWithoutGlobalFallback(t *testing.T) 
 	}
 
 	entries := decodeRenderedCodex(t, body)
-	if got := renderedSlugs(t, entries); !contains(got, "gpt-5.6-luna") {
+	if got := renderedSlugs(t, entries); !slices.Contains(got, "gpt-5.6-luna") {
 		t.Fatalf("rendered slugs %q dropped the main model", got)
 	}
 	if _, ok := entries[0]["auto_review_model_override"]; ok {
@@ -920,7 +921,7 @@ func TestRenderCodexDropsAReviewerCopilotStopsForwarding(t *testing.T) {
 			t.Errorf("skipped reviewers[%d] = %#v, want model %q reviewer gpt-5.4", i, skipped, slugs[i])
 		}
 	}
-	if contains(slugs, "gpt-5.4") {
+	if slices.Contains(slugs, "gpt-5.4") {
 		t.Errorf("rendered slugs %q retained model Copilot stopped forwarding", slugs)
 	}
 }
