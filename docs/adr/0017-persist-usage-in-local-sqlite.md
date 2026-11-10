@@ -105,10 +105,13 @@ an escaped SQLite file URI containing only store-owned parameters, so literal
 filename punctuation cannot become a driver DSN. Queue and write stages receive
 a fresh bounded context. Before every potentially
 blocking SQL stage, including lock acquisition, write, and commit, the writer
-recomputes the remaining monotonic budget and caps native `busy_timeout`;
-`ExecContext` alone does not preempt this driver's busy wait. Deadline, storage
-failure, and ambiguous completion conservatively count every not-confirmed row
-as lost, with no replay.
+recomputes the remaining monotonic budget and caps native `busy_timeout`. The
+original driver did not promptly interrupt native lock waits on context
+cancellation; the current driver does, as recorded in the
+[driver evidence](../research/sqlite-feasibility/FINDINGS.md#driver-upgrade-evidence-2026-11-10).
+The explicit native caps remain policy rather than relying solely on that driver
+behavior. Deadline, storage failure, and ambiguous completion conservatively
+count every not-confirmed row as lost, with no replay.
 
 While the logger is still alive, finalization serializes a terminal aggregate
 after the bounded native-cleanup wait, covering queue-full drops, runtime write
