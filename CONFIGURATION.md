@@ -121,7 +121,7 @@ second precedence order.
 - On native Windows, call `GetDynamicTimeZoneInformation` directly and require
   a nonempty registry key with dynamic daylight behavior enabled. Read a user
   ISO territory through `GetUserDefaultGeoName` when available and usable. Select
-  the first ordered CLDR 48 candidate for the exact key/territory mapping; if
+  the first ordered CLDR 49 candidate for the exact key/territory mapping; if
   territory lookup is unavailable, malformed, or unmapped for the key, select
   the first candidate from that key's `001` mapping. The result is representative,
   not a claim about the user's unique city, and it is accepted only after shared
@@ -129,7 +129,7 @@ second precedence order.
   keys, disabled dynamic daylight behavior, missing `001` defaults, and unloadable names require
   an explicit override before HTTP. Production does not infer from Windows `TZ`,
   current offsets, localized names, `time.Local`, PowerShell, or .NET, and never
-  silently selects UTC. WSL follows Linux. CLDR 48 source, Unicode license,
+  silently selects UTC. WSL follows Linux. CLDR 49 source, Unicode license,
   immutable identity, generator, and upgrade procedure live under
   `internal/usage/reportcli/windowszonesdata`; a data upgrade is separately
   reviewed. Explicit named loading retains the embedded fallback on every

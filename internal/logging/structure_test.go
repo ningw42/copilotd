@@ -483,7 +483,7 @@ func checkAttrComposite(t *testing.T, fset *token.FileSet, literal *ast.Composit
 	for _, element := range literal.Elts {
 		keyValue, ok := element.(*ast.KeyValueExpr)
 		if !ok {
-			if element == literal.Elts[0] && !isRegistryKey(element.(ast.Expr), loggingPackage, registry) {
+			if element == literal.Elts[0] && !isRegistryKey(element, loggingPackage, registry) {
 				t.Errorf("%s: slog.Attr key must resolve directly to the logging registry", position(fset, element))
 			}
 			continue

@@ -64,9 +64,9 @@ const (
 
 	// Impersonation defaults present copilotd to Copilot as the VS Code Copilot
 	// client so upstream client/user-agent allowlist checks pass. The two bare
-	// versions are fallbacks for runtime discovery; main derives the exact header
-	// values from them. The discovery interval controls the runtime orchestration
-	// and zero disables discovery.
+	// versions are fallbacks for runtime discovery; internal/impersonation derives
+	// the exact header values from them. The discovery interval controls the
+	// runtime orchestration and zero disables discovery.
 	defaultCopilotIntegrationID         = "vscode-chat"
 	defaultVSCodeVersionFallback        = "1.145.2"
 	defaultPluginVersionFallback        = "0.48.1"
@@ -99,9 +99,9 @@ type ServeConfig struct {
 	LogFile         string // empty = stderr
 	ShutdownTimeout time.Duration
 
-	// GithubOAuthTokenFile is the path to the raw GitHub OAuth token file. This
-	// phase only parses and stores it; reading/writing the file lands later. It
-	// is a path, not the secret itself, so it is safe to log.
+	// GithubOAuthTokenFile is the path to the raw GitHub OAuth token file serve
+	// resolves the token from when no inline token is supplied. It is a path, not
+	// the secret itself, so it is safe to log.
 	GithubOAuthTokenFile string
 
 	// APIKey is the required inbound secret clients present (Authorization: Bearer
@@ -179,9 +179,8 @@ type ServeConfig struct {
 	CodexCatalogRefreshInterval time.Duration
 
 	// GithubOAuthToken is the inline GitHub OAuth token; when present it takes
-	// precedence over the GitHub OAuth token file (resolution lands in #12). It is
-	// a secret — omitted from LogValue (redaction by construction). This phase only
-	// stores it.
+	// precedence over the GitHub OAuth token file (identity.ResolveOAuthToken). It
+	// is a secret — omitted from LogValue (redaction by construction).
 	GithubOAuthToken string
 
 	// StartupMintRetries bounds the transient-failure retries of the startup mint
@@ -189,8 +188,8 @@ type ServeConfig struct {
 	StartupMintRetries int
 
 	// The impersonation fallbacks and static identifiers (§6.7). Non-secret;
-	// logged normally. Runtime discovery will replace the bare-version fallbacks
-	// when it succeeds; the cadence is parsed and stored but remains inert here.
+	// logged normally. Runtime discovery replaces the bare-version fallbacks when
+	// it succeeds, re-running on ImpersonationRefreshInterval; zero disables it.
 	VSCodeVersionFallback        string
 	PluginVersionFallback        string
 	CopilotIntegrationID         string

@@ -76,7 +76,7 @@ func (s *responsesItemIDStabilizer) rewrite(payload []byte) []byte {
 		return payload
 	}
 
-	outcome := responsesItemIDUnchanged
+	var outcome responsesItemIDRewriteOutcome
 	if outputIndexRaw, hasOutputIndex := top["output_index"]; hasOutputIndex {
 		outputIndex, valid := decodeRawInt(outputIndexRaw)
 		if !valid {

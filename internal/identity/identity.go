@@ -58,8 +58,8 @@ type Provider interface {
 	Ready() bool
 }
 
-// Static is a fixed-value Provider used to wire the forward path before the real
-// minting Manager exists, and as a test double. Its Credential is constant; its
+// Static is a fixed-value Provider used as a test double for the minting
+// Manager; production serves the Manager. Its Credential is constant; its
 // local readiness and an optional Current error are settable so tests can
 // exercise the readiness gate and request-time credential-failure path. It is
 // safe for concurrent use.

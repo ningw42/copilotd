@@ -596,9 +596,7 @@ func admit(path string, openDB func(string, string) (*sql.DB, error)) (*sql.DB, 
 		if remaining <= 0 {
 			continue
 		}
-		backoff := min(setupRetryBackoff, remaining)
-		timer := time.NewTimer(backoff)
-		<-timer.C
+		time.Sleep(min(setupRetryBackoff, remaining))
 	}
 }
 

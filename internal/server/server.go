@@ -18,16 +18,17 @@ import (
 	"github.com/ningw42/copilotd/internal/logging"
 )
 
-// Inbound HTTP timeouts (client <-> copilotd), distinct from the Phase-1
-// outbound client. All four are named constants so the two deliberate zeros
+// Inbound HTTP timeouts (client <-> copilotd), distinct from the upstream
+// clients' bounds. All four are named constants so the two deliberate zeros
 // read as intentional, not forgotten.
 const (
 	readHeaderTimeout = 5 * time.Second
 	idleTimeout       = 60 * time.Second
 
 	// Deliberately unbounded (0): a blunt global cap fights large LLM uploads
-	// (long histories, base64 images) and long SSE responses. Real per-request
-	// bounding is introduced in later phases.
+	// (long histories, base64 images) and long SSE responses. The forwarding
+	// and report handlers bound their own work instead: a request-body cap,
+	// per-write deadlines, and the stream idle timeout.
 	readTimeout  = 0 * time.Second
 	writeTimeout = 0 * time.Second
 )

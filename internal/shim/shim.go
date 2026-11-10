@@ -418,12 +418,13 @@ func (a *sseAdapter) transformFrames(ctx context.Context, shimName string, trans
 type NopShim struct{}
 
 // CanonicalRegistry returns a fresh copy of the canonical registration order.
-// A nil sink leaves the Usage meter registration disabled. modelOverrides is
-// the Model override's source-to-target map as validated by configuration:
-// nonempty, valid UTF-8 model IDs. Instances share it, so the caller must not
-// modify it afterwards.
+// Every registration starts disabled; the composition root enables the ones
+// configuration selects, and must leave the Usage meter disabled for a nil
+// sink. modelOverrides is the Model override's source-to-target map as
+// validated by configuration: nonempty, valid UTF-8 model IDs. Instances share
+// it, so the caller must not modify it afterwards.
 func CanonicalRegistry(sink usage.Sink, modelOverrides map[string]string) Registry {
-	registry := Registry{
+	return Registry{
 		{
 			Name:    "nop",
 			Enabled: false,
@@ -466,8 +467,4 @@ func CanonicalRegistry(sink usage.Sink, modelOverrides map[string]string) Regist
 			},
 		},
 	}
-	if sink == nil {
-		registry[len(registry)-1].Enabled = false
-	}
-	return registry
 }

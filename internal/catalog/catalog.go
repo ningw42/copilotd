@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/ningw42/copilotd/internal/endpoint"
@@ -87,7 +88,7 @@ func Decode(body []byte) ([]Model, error) {
 func Filter(models []Model, requiredRoute endpoint.Route) []Model {
 	filtered := make([]Model, 0, len(models))
 	for _, model := range models {
-		if !model.ModelPickerEnabled || !contains(model.SupportedRoutes, requiredRoute) {
+		if !model.ModelPickerEnabled || !slices.Contains(model.SupportedRoutes, requiredRoute) {
 			continue
 		}
 		filtered = append(filtered, model)
@@ -229,17 +230,17 @@ func renderAnthropicCapabilities(capabilities Capabilities) anthropicCapabilitie
 	}
 	if capabilities.Limits.Vision != nil {
 		rendered.PDFInput = &supportedCapability{
-			Supported: contains(capabilities.Limits.Vision.SupportedMediaTypes, "application/pdf"),
+			Supported: slices.Contains(capabilities.Limits.Vision.SupportedMediaTypes, "application/pdf"),
 		}
 	}
 	if len(supports.ReasoningEffort) > 0 {
 		rendered.Effort = &effortCapability{
 			Supported: true,
-			Low:       supportedCapability{Supported: contains(supports.ReasoningEffort, "low")},
-			Medium:    supportedCapability{Supported: contains(supports.ReasoningEffort, "medium")},
-			High:      supportedCapability{Supported: contains(supports.ReasoningEffort, "high")},
-			XHigh:     supportedCapability{Supported: contains(supports.ReasoningEffort, "xhigh")},
-			Max:       supportedCapability{Supported: contains(supports.ReasoningEffort, "max")},
+			Low:       supportedCapability{Supported: slices.Contains(supports.ReasoningEffort, "low")},
+			Medium:    supportedCapability{Supported: slices.Contains(supports.ReasoningEffort, "medium")},
+			High:      supportedCapability{Supported: slices.Contains(supports.ReasoningEffort, "high")},
+			XHigh:     supportedCapability{Supported: slices.Contains(supports.ReasoningEffort, "xhigh")},
+			Max:       supportedCapability{Supported: slices.Contains(supports.ReasoningEffort, "max")},
 		}
 	}
 	if supports.AdaptiveThinking != nil || supports.MinThinkingBudget != nil || supports.MaxThinkingBudget != nil {
@@ -251,13 +252,4 @@ func renderAnthropicCapabilities(capabilities Capabilities) anthropicCapabilitie
 		rendered.Thinking = thinking
 	}
 	return rendered
-}
-
-func contains[T comparable](values []T, want T) bool {
-	for _, value := range values {
-		if value == want {
-			return true
-		}
-	}
-	return false
 }
