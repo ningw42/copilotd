@@ -134,7 +134,7 @@ func TestUsageMeterRequestedModelNullableSemantics(t *testing.T) {
 				{name: "identical duplicate", body: `{"model":"a","model":"a"}`},
 				{name: "escaped duplicate", body: `{"model":null,"\u006dodel":"b"}`},
 				// A lone surrogate escape is grammatical JSON in valid UTF-8, but
-				// decoding it would substitute U+FFFD for what the client sent.
+				// decoding it would substitute U+FFFD for what the request carried.
 				{name: "lone high surrogate", body: `{"model":"A\ud800"}`},
 				{name: "lone low surrogate", body: `{"model":"A\udc00"}`},
 				{name: "valid surrogate pair", body: `{"model":"\ud83d\ude80"}`, want: stringPointer("\U0001F680")},

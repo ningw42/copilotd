@@ -64,29 +64,29 @@ func (o *modelOverride) rewrite(payload []byte, requireResponseCreate bool) []by
 	if len(o.rules) == 0 {
 		return payload
 	}
-	model := topLevelMember{name: "model"}
-	eventType := topLevelMember{name: "type"}
-	if !scanTopLevelMembers(payload, &model, &eventType) {
+	modelMember := topLevelMember{name: "model"}
+	typeMember := topLevelMember{name: "type"}
+	if !scanTopLevelMembers(payload, &modelMember, &typeMember) {
 		return payload
 	}
 	if requireResponseCreate {
-		event, ok := eventType.uniqueString(payload)
-		if !ok || event != responseCreateEvent {
+		eventType, ok := typeMember.uniqueString()
+		if !ok || eventType != responseCreateEvent {
 			return payload
 		}
 	}
-	source, ok := model.uniqueString(payload)
+	model, ok := modelMember.uniqueString()
 	if !ok {
 		return payload
 	}
-	target, mapped := o.rules[source]
-	if !mapped || target == source {
+	target, mapped := o.rules[model]
+	if !mapped || target == model {
 		// A self-mapping keeps the client's exact spelling of the model.
 		return payload
 	}
 	rewritten := make([]byte, 0, len(payload))
-	rewritten = append(rewritten, payload[:model.start]...)
+	rewritten = append(rewritten, payload[:modelMember.start]...)
 	// Configuration accepts only valid UTF-8 IDs, so quoting cannot fail.
 	rewritten, _ = jsontext.AppendQuote(rewritten, target)
-	return append(rewritten, payload[model.end:]...)
+	return append(rewritten, payload[modelMember.end:]...)
 }

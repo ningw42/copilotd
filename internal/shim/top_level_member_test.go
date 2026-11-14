@@ -1,15 +1,12 @@
 package shim
 
-import (
-	"strings"
-	"testing"
-)
+import "testing"
 
 func TestScanTopLevelMembersReportsOccurrencesSpansAndStrictStrings(t *testing.T) {
 	for _, tc := range []struct {
 		name, payload string
 		occurrences   int
-		// span is the raw value the reported byte span selects.
+		// span is the last occurrence's raw value, exactly as written.
 		span string
 		// value and unique are the strict string decode of the member.
 		value  string
@@ -54,12 +51,13 @@ func TestScanTopLevelMembersReportsOccurrencesSpansAndStrictStrings(t *testing.T
 			if member.occurrences != tc.occurrences {
 				t.Errorf("occurrences = %d, want %d", member.occurrences, tc.occurrences)
 			}
-			if tc.occurrences > 0 {
-				if got := string(payload[member.start:member.end]); got != tc.span {
-					t.Errorf("span selects %q, want %q", got, tc.span)
-				}
+			if got := string(member.raw); got != tc.span {
+				t.Errorf("raw = %q, want %q", got, tc.span)
 			}
-			if value, unique := member.uniqueString(payload); value != tc.value || unique != tc.unique {
+			if got := string(payload[member.start:member.end]); got != tc.span {
+				t.Errorf("span selects %q, want %q", got, tc.span)
+			}
+			if value, unique := member.uniqueString(); value != tc.value || unique != tc.unique {
 				t.Errorf("uniqueString = (%q, %v), want (%q, %v)", value, unique, tc.value, tc.unique)
 			}
 		})
@@ -74,16 +72,16 @@ func TestScanTopLevelMembersGathersEachNameIndependently(t *testing.T) {
 	if !scanTopLevelMembers(payload, &model, &eventType, &absent) {
 		t.Fatal("scan declined one well-formed JSON object")
 	}
-	if value, unique := model.uniqueString(payload); value != "A" || !unique {
+	if value, unique := model.uniqueString(); value != "A" || !unique {
 		t.Errorf("model = (%q, %v), want the unique string A", value, unique)
 	}
 	if got := string(payload[eventType.start:eventType.end]); eventType.occurrences != 2 || got != `"b"` {
 		t.Errorf("type = %d occurrences ending at %q, want 2 ending at \"b\"", eventType.occurrences, got)
 	}
-	if _, unique := eventType.uniqueString(payload); unique {
+	if _, unique := eventType.uniqueString(); unique {
 		t.Error("duplicate type decoded as unique")
 	}
-	if _, unique := absent.uniqueString(payload); absent.occurrences != 0 || unique {
+	if _, unique := absent.uniqueString(); absent.occurrences != 0 || unique {
 		t.Errorf("absent member = %+v, want no evidence", absent)
 	}
 }
@@ -106,7 +104,7 @@ func TestScanTopLevelMembersYieldsNoEvidenceUnlessPayloadIsOneObject(t *testing.
 		{name: "invalid UTF-8 in the member", payload: "{\"model\":\"A\xff\"}"},
 		{name: "invalid UTF-8 elsewhere", payload: "{\"model\":\"A\",\"input\":\"\xff\"}"},
 		// Go's JSON decoders stop at 10,000 levels of nesting.
-		{name: "nesting beyond the decoder's depth limit", payload: `{"model":"A","x":` + strings.Repeat("[", 20000) + strings.Repeat("]", 20000) + `}`},
+		{name: "nesting beyond the decoder's depth limit", payload: `{"model":"A","x":` + nestedArrays(20000) + `}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			payload := []byte(tc.payload)
@@ -115,7 +113,7 @@ func TestScanTopLevelMembersYieldsNoEvidenceUnlessPayloadIsOneObject(t *testing.
 				t.Fatal("scan accepted a payload that is not exactly one JSON object")
 			}
 			// A caller that ignored the verdict must still find nothing to act on.
-			if value, unique := member.uniqueString(payload); member.occurrences != 0 || unique {
+			if value, unique := member.uniqueString(); member.occurrences != 0 || member.raw != nil || unique {
 				t.Errorf("declined payload left evidence: %+v decoding to (%q, %v)", member, value, unique)
 			}
 		})

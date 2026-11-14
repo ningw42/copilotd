@@ -8,8 +8,8 @@ import (
 )
 
 // topLevelMember is the evidence one scan gathers about one member name of a
-// payload's top-level JSON object: how often the name occurred and the exact
-// byte span of its last raw value. Set name before scanning.
+// payload's top-level JSON object: how often the name occurred, and its last
+// value exactly as written. Set name before scanning.
 //
 // Evidence describes only the bytes that were scanned. Each Shim scans the
 // payload it is handed and keeps the result to itself: an earlier layer may
@@ -17,19 +17,21 @@ import (
 type topLevelMember struct {
 	name        string
 	occurrences int
-	start, end  int
+	// raw is the last occurrence's value, aliasing the scanned payload at
+	// [start, end).
+	raw        []byte
+	start, end int
 }
 
 // uniqueString returns the member's value only when it occurred exactly once,
 // is a JSON string, and decodes losslessly. AppendUnquote rejects every other
 // value kind as well as lone surrogate escapes, which would otherwise decode
-// to a replacement character the sender never wrote. payload must be the
-// scanned payload.
-func (m *topLevelMember) uniqueString(payload []byte) (string, bool) {
+// to a replacement character the sender never wrote.
+func (m *topLevelMember) uniqueString() (string, bool) {
 	if m.occurrences != 1 {
 		return "", false
 	}
-	decoded, err := jsontext.AppendUnquote(nil, payload[m.start:m.end])
+	decoded, err := jsontext.AppendUnquote(nil, m.raw)
 	if err != nil {
 		return "", false
 	}
@@ -39,7 +41,9 @@ func (m *topLevelMember) uniqueString(payload []byte) (string, bool) {
 // scanTopLevelMembers walks exactly one JSON object followed only by
 // whitespace, gathering evidence for each requested member by its decoded,
 // case-sensitive name. Unrelated values are validated but never decoded or
-// re-encoded, and unrelated duplicate names are allowed.
+// re-encoded, and unrelated duplicate names are allowed. A name written with a
+// lone surrogate escape decodes to a replacement character, so it is a
+// different name from any requested one that lacks that character.
 //
 // It reports false, leaving every member without evidence, for any other
 // payload. A payload that is not valid UTF-8 is malformed JSON text.
@@ -48,11 +52,13 @@ func scanTopLevelMembers(payload []byte, members ...*topLevelMember) bool {
 		return true
 	}
 	for _, member := range members {
-		member.occurrences, member.start, member.end = 0, 0, 0
+		*member = topLevelMember{name: member.name}
 	}
 	return false
 }
 
+// walkTopLevelMembers is the traversal behind scanTopLevelMembers. On false it
+// may leave evidence from the members it passed before giving up.
 func walkTopLevelMembers(payload []byte, members []*topLevelMember) bool {
 	if !utf8.Valid(payload) {
 		return false
@@ -80,6 +86,7 @@ func walkTopLevelMembers(payload []byte, members []*topLevelMember) bool {
 				member.occurrences++
 				member.end = int(decoder.InputOffset())
 				member.start = member.end - len(value)
+				member.raw = payload[member.start:member.end]
 			}
 		}
 	}

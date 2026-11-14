@@ -33,11 +33,11 @@ func (r *turnRecorder) observeRequest(body []byte) {
 // model. Anything else has unknown attribution rather than a guessed or
 // replacement-derived model name.
 func requestedModelFrom(body []byte) *string {
-	member := topLevelMember{name: "model"}
-	if !scanTopLevelMembers(body, &member) {
+	modelMember := topLevelMember{name: "model"}
+	if !scanTopLevelMembers(body, &modelMember) {
 		return nil
 	}
-	model, ok := member.uniqueString(body)
+	model, ok := modelMember.uniqueString()
 	if !ok {
 		return nil
 	}
