@@ -1,11 +1,8 @@
 package shim
 
 import (
-	"bytes"
 	"context"
 	"encoding/json/jsontext"
-	"io"
-	"unicode/utf8"
 
 	"github.com/ningw42/copilotd/internal/endpoint"
 )
@@ -67,105 +64,29 @@ func (o *modelOverride) rewrite(payload []byte, requireResponseCreate bool) []by
 	if len(o.rules) == 0 {
 		return payload
 	}
-	members, ok := scanModelOverrideMembers(payload)
-	if !ok {
+	model := topLevelMember{name: "model"}
+	eventType := topLevelMember{name: "type"}
+	if !scanTopLevelMembers(payload, &model, &eventType) {
 		return payload
 	}
 	if requireResponseCreate {
-		eventType, ok := members.eventType.decode(payload)
-		if !ok || eventType != responseCreateEvent {
+		event, ok := eventType.uniqueString(payload)
+		if !ok || event != responseCreateEvent {
 			return payload
 		}
 	}
-	model, ok := members.model.decode(payload)
+	source, ok := model.uniqueString(payload)
 	if !ok {
 		return payload
 	}
-	target, mapped := o.rules[model]
-	if !mapped || target == model {
+	target, mapped := o.rules[source]
+	if !mapped || target == source {
 		// A self-mapping keeps the client's exact spelling of the model.
 		return payload
 	}
-	span := members.model
 	rewritten := make([]byte, 0, len(payload))
-	rewritten = append(rewritten, payload[:span.start]...)
+	rewritten = append(rewritten, payload[:model.start]...)
 	// Configuration accepts only valid UTF-8 IDs, so quoting cannot fail.
 	rewritten, _ = jsontext.AppendQuote(rewritten, target)
-	return append(rewritten, payload[span.end:]...)
-}
-
-// modelOverrideMember records how often one top-level member name occurred
-// and the exact byte span of its last raw value.
-type modelOverrideMember struct {
-	occurrences int
-	start, end  int
-}
-
-// decode returns the member's string value only when it occurs exactly once,
-// is a JSON string, and decodes losslessly. AppendUnquote rejects every other
-// value kind as well as lone surrogate escapes.
-func (m modelOverrideMember) decode(payload []byte) (string, bool) {
-	if m.occurrences != 1 {
-		return "", false
-	}
-	decoded, err := jsontext.AppendUnquote(nil, payload[m.start:m.end])
-	if err != nil {
-		return "", false
-	}
-	return string(decoded), true
-}
-
-type modelOverrideMembers struct {
-	model, eventType modelOverrideMember
-}
-
-// scanModelOverrideMembers walks exactly one JSON object followed only by
-// whitespace, recording the top-level model and type members by their decoded
-// names. Unrelated values are validated but never decoded or re-encoded, and
-// unrelated duplicate names are allowed. A payload that is not valid UTF-8 is
-// malformed JSON text.
-func scanModelOverrideMembers(payload []byte) (modelOverrideMembers, bool) {
-	var members modelOverrideMembers
-	if !utf8.Valid(payload) {
-		return members, false
-	}
-	// Strings in unrelated members may carry lone surrogate escapes, which are
-	// grammatical JSON; the selected members are decoded strictly above.
-	decoder := jsontext.NewDecoder(bytes.NewReader(payload),
-		jsontext.AllowDuplicateNames(true), jsontext.AllowInvalidUTF8(true))
-	if token, err := decoder.ReadToken(); err != nil || token.Kind() != '{' {
-		return members, false
-	}
-	for decoder.PeekKind() != '}' {
-		name, err := decoder.ReadToken()
-		if err != nil {
-			return members, false
-		}
-		// A Token is voided by the next read, so resolve its name first.
-		var member *modelOverrideMember
-		switch name.String() {
-		case "model":
-			member = &members.model
-		case "type":
-			member = &members.eventType
-		}
-		value, err := decoder.ReadValue()
-		if err != nil {
-			return members, false
-		}
-		if member != nil {
-			member.occurrences++
-			member.end = int(decoder.InputOffset())
-			member.start = member.end - len(value)
-		}
-	}
-	if token, err := decoder.ReadToken(); err != nil || token.Kind() != '}' {
-		return members, false
-	}
-	// The decoder accepts a stream of values; anything but end of input after
-	// the object, including a second value, is trailing content.
-	if _, err := decoder.ReadToken(); err != io.EOF {
-		return members, false
-	}
-	return members, true
+	return append(rewritten, payload[model.end:]...)
 }

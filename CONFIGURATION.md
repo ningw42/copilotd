@@ -589,7 +589,8 @@ Strings are not trimmed, case-folded, normalized, or resolved through Catalogs,
 Codex aliases, or metadata sources. An explicit `""` is stored as an empty string,
 not SQL `NULL`. Missing, null, wrong-typed, malformed/non-object requests
 (including invalid UTF-8), and ambiguous duplicate top-level `model` members yield
-`NULL`; nested or differently
+`NULL`, as does a `model` string that cannot be decoded losslessly, such as one
+with a lone surrogate escape; nested or differently
 cased keys are not sources. Unknown attribution does not reject the request,
 backfill a required response field, or prevent an otherwise-eligible row. The
 meter observes once and retains only the optional model string, never the prompt

@@ -1,12 +1,8 @@
 package shim
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
-	"io"
 	"time"
-	"unicode/utf8"
 
 	"github.com/ningw42/copilotd/internal/logging"
 	"github.com/ningw42/copilotd/internal/usage"
@@ -33,43 +29,19 @@ func (r *turnRecorder) observeRequest(body []byte) {
 	r.requestedModel = requestedModelFrom(body)
 }
 
+// requestedModelFrom returns the request's unique, losslessly decoded top-level
+// model. Anything else has unknown attribution rather than a guessed or
+// replacement-derived model name.
 func requestedModelFrom(body []byte) *string {
-	// encoding/json replaces malformed UTF-8 in strings. Such a request has
-	// unknown attribution, not a replacement-derived model name.
-	if !utf8.Valid(body) {
+	member := topLevelMember{name: "model"}
+	if !scanTopLevelMembers(body, &member) {
 		return nil
 	}
-	decoder := json.NewDecoder(bytes.NewReader(body))
-	if token, err := decoder.Token(); err != nil || token != json.Delim('{') {
+	model, ok := member.uniqueString(body)
+	if !ok {
 		return nil
 	}
-	var model *string
-	seen := false
-	for decoder.More() {
-		key, err := decoder.Token()
-		if err != nil {
-			return nil
-		}
-		// Decode one value without interpreting unrelated fields or retaining
-		// a request object. Token iteration preserves duplicate top-level keys.
-		var value json.RawMessage
-		if err := decoder.Decode(&value); err != nil {
-			return nil
-		}
-		if key == "model" {
-			if seen || json.Unmarshal(value, &model) != nil {
-				return nil
-			}
-			seen = true
-		}
-	}
-	if token, err := decoder.Token(); err != nil || token != json.Delim('}') {
-		return nil
-	}
-	if _, err := decoder.Token(); err != io.EOF {
-		return nil
-	}
-	return model
+	return &model
 }
 
 func (r *turnRecorder) record(turn usage.Turn) {
