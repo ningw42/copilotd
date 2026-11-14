@@ -119,3 +119,39 @@ func TestScanTopLevelMembersYieldsNoEvidenceUnlessPayloadIsOneObject(t *testing.
 		})
 	}
 }
+
+func TestScanTopLevelMembersDependsOnlyOnTheCurrentPayload(t *testing.T) {
+	for _, tc := range []struct {
+		name, payload string
+		accepted      bool
+		occurrences   int
+		span          string
+		start, end    int
+		value         string
+		unique        bool
+	}{
+		{name: "present then absent", payload: `{}`, accepted: true},
+		{name: "present then present", payload: `{"x":1,"model":"B"}`, accepted: true, occurrences: 1, span: `"B"`, start: 15, end: 18, value: "B", unique: true},
+		{name: "present then declined", payload: `{"model":"B"} x`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			member := topLevelMember{name: "model"}
+			if !scanTopLevelMembers([]byte(`{"model":"A"}`), &member) {
+				t.Fatal("scan declined one well-formed JSON object")
+			}
+			if accepted := scanTopLevelMembers([]byte(tc.payload), &member); accepted != tc.accepted {
+				t.Fatalf("second scan = %v, want %v", accepted, tc.accepted)
+			}
+			if member.name != "model" {
+				t.Errorf("name = %q, want the requested name kept", member.name)
+			}
+			if member.occurrences != tc.occurrences || string(member.raw) != tc.span || member.start != tc.start || member.end != tc.end {
+				t.Errorf("evidence = %d occurrences, raw %q at [%d, %d); want %d, %q at [%d, %d)",
+					member.occurrences, member.raw, member.start, member.end, tc.occurrences, tc.span, tc.start, tc.end)
+			}
+			if value, unique := member.uniqueString(); value != tc.value || unique != tc.unique {
+				t.Errorf("uniqueString = (%q, %v), want (%q, %v)", value, unique, tc.value, tc.unique)
+			}
+		})
+	}
+}

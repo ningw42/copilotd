@@ -47,18 +47,27 @@ func (m *topLevelMember) uniqueString() (string, bool) {
 //
 // It reports false, leaving every member without evidence, for any other
 // payload. A payload that is not valid UTF-8 is malformed JSON text.
+//
+// Every scan starts from no evidence and keeps only the requested names, so
+// the result depends on this payload alone even when a member is reused.
 func scanTopLevelMembers(payload []byte, members ...*topLevelMember) bool {
+	clearTopLevelEvidence(members)
 	if walkTopLevelMembers(payload, members) {
 		return true
 	}
-	for _, member := range members {
-		*member = topLevelMember{name: member.name}
-	}
+	clearTopLevelEvidence(members)
 	return false
 }
 
-// walkTopLevelMembers is the traversal behind scanTopLevelMembers. On false it
-// may leave evidence from the members it passed before giving up.
+func clearTopLevelEvidence(members []*topLevelMember) {
+	for _, member := range members {
+		*member = topLevelMember{name: member.name}
+	}
+}
+
+// walkTopLevelMembers is the traversal behind scanTopLevelMembers. It adds to
+// whatever evidence the members hold, and on false it may leave evidence from
+// the members it passed before giving up.
 func walkTopLevelMembers(payload []byte, members []*topLevelMember) bool {
 	if !utf8.Valid(payload) {
 		return false
